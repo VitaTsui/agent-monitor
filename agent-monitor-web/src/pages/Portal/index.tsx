@@ -4,6 +4,9 @@ import { Input } from "@hsu-react/ui";
 import { Badge, Popover, Tooltip } from "antd";
 import { platformIcon } from "./_utils/platform";
 import { useNativeBack } from "./_hooks/useNativeBack";
+import { useApkUpdateCheck } from "./_hooks/useApkUpdateCheck";
+import { claimPairDevice } from "@/services/apis/portal";
+import { message as antdMessage } from "antd";
 import {
   CodeOutlined,
   ControlOutlined,
@@ -45,6 +48,8 @@ const Portal: React.FC = observer(() => {
     keyword,
     setKeyword,
     init,
+    refresh,
+    loadDevices,
     stopPolling,
     select,
     splitOpen,
@@ -103,6 +108,38 @@ const Portal: React.FC = observer(() => {
       stopPolling();
     };
   }, [init, stopPolling]);
+
+  // 移动端更新推送：原生壳内检测 APK 新版本（浏览器里空转）
+  useApkUpdateCheck();
+
+  // 设备配对认领：客户端窗口带 ?pair=码 打开本页，登录后自动把那台电脑
+  // 绑定到当前账号（绑定即信任），页面随即出现该设备 —— 用户零手工配置。
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("pair");
+    if (!code) return;
+    // 无论成败都摘掉参数，避免刷新重复认领
+    const clean = () => {
+      params.delete("pair");
+      const q = params.toString();
+      window.history.replaceState(null, "", window.location.pathname + (q ? `?${q}` : ""));
+    };
+    claimPairDevice(code)
+      .then((res) => {
+        if (res.code === 0) {
+          antdMessage.success(
+            `已绑定本机「${res.data?.hostname ?? ""}」到你的账号，终端会话马上出现`
+          );
+          refresh();
+          loadDevices();
+        } else {
+          antdMessage.warning(res.msg || "配对码无效或已过期，请重启客户端重试");
+        }
+      })
+      .catch(() => antdMessage.error("绑定失败，请检查网络后重启客户端重试"))
+      .finally(clean);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 原生壳（Android）的返回键：优先关掉当前浮层，都没有才交还系统语义。
   // 不接管的话按返回会直接退出整个 App。浏览器里此钩子空转。

@@ -157,7 +157,17 @@ fn main() -> Result<()> {
     };
     let state = AppState::new(config, SessionScanner::new(projects_dir), reg);
 
-    let hub_url = std::env::var("AM_HUB_URL").ok();
+    // 已配对过的设备：加载持久化的每设备上报令牌（agent 模式凭它上报，无需全局令牌）
+    if let Ok(t) = std::fs::read_to_string(state.config.data_dir.join("device-token")) {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            *state.device_token.blocking_write() = Some(t);
+        }
+    }
+
+    let hub_url = std::env::var("AM_HUB_URL").ok().filter(|s| !s.trim().is_empty())
+        // 单文件分发的客户端开箱即用：无任何配置时连编译期内置的默认 hub
+        .or_else(|| option_env!("AM_DEFAULT_HUB_URL").map(str::to_string));
     let is_agent = hub_url.is_some();
 
     // 服务在后台线程的 tokio runtime 中运行
@@ -184,6 +194,47 @@ fn main() -> Result<()> {
     } else {
         format!("http://localhost:{port}")
     };
+
+    // agent 模式且未绑定：窗口创建前先领一个配对码（快速尝试，失败不阻塞——
+    // 服务线程会持续重试，托盘也会给出指引）。这样首窗即可带 ?pair= 引导绑定。
+    #[cfg(feature = "desktop")]
+    if is_agent
+        && state.device_token.blocking_read().is_none()
+        && std::env::var("AM_AGENT_TOKEN").ok().filter(|s| !s.is_empty()).is_none()
+    {
+        if let Some(hub) = &hub_url {
+            let hub = hub.trim_end_matches('/').to_string();
+            let st = state.clone();
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+            if let Ok(rt) = rt {
+                rt.block_on(async {
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(3))
+                        .build();
+                    if let Ok(client) = client {
+                        let body = serde_json::json!({
+                            "machineId": st.config.machine_id,
+                            "hostname": st.config.hostname,
+                            "platform": st.config.platform,
+                        });
+                        if let Ok(resp) =
+                            client.post(format!("{hub}/monitor/pair/start")).json(&body).send().await
+                        {
+                            if let Ok(v) = resp.json::<serde_json::Value>().await {
+                                if let (Some(code), Some(pt)) = (
+                                    v.pointer("/data/code").and_then(serde_json::Value::as_str),
+                                    v.pointer("/data/pairToken").and_then(serde_json::Value::as_str),
+                                ) {
+                                    *st.pair_info.write().await =
+                                        Some((code.to_string(), pt.to_string()));
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    }
 
     // 主线程：Tauri 桌面窗口 + 托盘（AM_HEADLESS=1 关闭，用于服务器/纯 agent）
     let headless = std::env::var("AM_HEADLESS").map(|v| v == "1").unwrap_or(false)

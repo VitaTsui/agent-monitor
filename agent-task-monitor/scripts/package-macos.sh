@@ -23,8 +23,8 @@ EXE_NAME="agent-monitor"
 HUB_URL="${AM_HUB_URL:-https://monitor.vita-llm.com}"
 OUT="target/release/bundle/$APP_NAME.app"
 
-echo "▸ cargo build --release --features desktop"
-cargo build --release --features desktop
+echo "▸ cargo build --release --features desktop（内置默认 hub: ${HUB_URL}）"
+AM_DEFAULT_HUB_URL="${HUB_URL}" cargo build --release --features desktop
 
 rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
@@ -36,13 +36,13 @@ else
   echo "  ! 缺 icons/icon.icns，图标会退回系统默认"
 fi
 
-# 客户端配置：程序按 <可执行文件>/../Resources/config.txt 查找（见 main.rs）
+# 客户端配置（可选覆盖）：正常使用零配置 —— hub 地址已编译内置，
+# 首次打开在窗口里登录账号即自动绑定本机。此文件仅供高级覆盖。
 cat > "$OUT/Contents/Resources/config.txt" <<CONF
-# 终端任务监控 · 客户端配置
-# 把 AM_USER 改成你在网站上的登录用户名，保存即可。
-AM_USER=admin
-AM_HUB_URL=$HUB_URL
-AM_AGENT_TOKEN=${AM_AGENT_TOKEN:-请向管理员索取上报令牌}
+# 终端任务监控 · 可选配置（正常使用无需修改任何内容）
+# 在客户端窗口里登录账号即可完成绑定并开始同步。
+# 高级覆盖示例：
+#   AM_HUB_URL=https://your-own-hub.example.com   # 自建 hub 时指向自己的服务
 CONF
 
 cat > "$OUT/Contents/Info.plist" <<PLIST
@@ -55,8 +55,8 @@ cat > "$OUT/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleExecutable</key><string>$EXE_NAME</string>
   <key>CFBundleIconFile</key><string>icon.icns</string>
-  <key>CFBundleVersion</key><string>0.1.0</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleVersion</key><string>0.2.0</string>
+  <key>CFBundleShortVersionString</key><string>0.2.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <!-- 不设 LSUIElement：这是正常桌面应用（Dock 有图标、可 Cmd-Tab）。
@@ -68,4 +68,4 @@ cat > "$OUT/Contents/Info.plist" <<PLIST
 PLIST
 
 echo "✓ 打包完成: $OUT"
-echo "  分发前把 config.txt 的 AM_AGENT_TOKEN 换成 hub 上的真实令牌（~/.agent-monitor/agent-token）"
+echo "  零配置分发：用户安装后在窗口里登录账号即自动绑定本机"

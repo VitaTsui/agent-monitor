@@ -1,10 +1,4 @@
-# 终端任务监控 · 客户端配置模板
-# 复制为同目录的 config.txt，填入真实值。真实 config.txt 含上报令牌，不入库。
-#
-# AM_USER：改成你在网站上的登录用户名（必须是已存在的账号，否则 hub 会拒绝上报，
-#          托盘会显示「账号不存在」而非静默失败）。
-AM_USER=admin
-AM_HUB_URL=https://monitor.vita-llm.com
-# AM_AGENT_TOKEN：向管理员索取（即 hub 的 ~/.agent-monitor/agent-token
-#                 或 deploy/env 里的 AM_AGENT_TOKEN），客户端与 hub 必须一致。
-AM_AGENT_TOKEN=<向管理员索取上报令牌>
+# 终端任务监控 · 可选配置（正常使用无需修改任何内容）
+# 在客户端窗口里登录账号即可完成绑定并开始同步。
+# 高级覆盖示例：
+#   AM_HUB_URL=https://your-own-hub.example.com   # 自建 hub 时指向自己的服务

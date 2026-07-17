@@ -180,3 +180,21 @@ export const uploadPortalFile = async (id: string, dir: string, file: File) => {
     form
   );
 };
+
+/** 最新版本信息（更新推送用；desktop = hub 版本，android 来自打包 manifest） */
+export interface VersionInfo {
+  desktop: string;
+  android: string | null;
+}
+
+export const getVersionInfo = () => {
+  return get<VersionInfo>("/monitor/version");
+};
+
+/** 设备配对认领：把客户端展示的配对码绑定到当前登录账号（绑定即信任） */
+export const claimPairDevice = (code: string) => {
+  return post<{ machineId: string; hostname: string; platform: string }>(
+    "/monitor/pair/claim",
+    { code }
+  );
+};

@@ -34,6 +34,15 @@ fn hash_password(password: &str, salt: &str) -> String {
     format!("sha256${salt}${hex}")
 }
 
+/// 32 位随机令牌（设备上报令牌用）
+fn random_token32() -> String {
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect()
+}
+
 fn random_salt() -> String {
     rand::thread_rng()
         .sample_iter(&Alphanumeric)
@@ -74,6 +83,10 @@ pub struct DeviceMeta {
     pub owner: Option<String>,
     /// 是否信任（未信任的设备不允许监控其会话）
     pub trusted: bool,
+    /// 每设备上报令牌：配对绑定时签发，客户端持有后凭它上报。
+    /// 有它就不需要管理员发放全局令牌 —— 注册 + 安装即可用。
+    #[serde(default)]
+    pub device_token: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -252,6 +265,30 @@ impl Registry {
         self.users.clone()
     }
 
+    /// 配对认领：把设备绑定到用户名下并签发每设备令牌（覆盖旧令牌）。
+    /// 返回签发的令牌。设备可被重新配对（换账号），但信任状态重置。
+    pub fn bind_device(&mut self, machine_id: &str, owner: &str) -> String {
+        let token = random_token32();
+        let entry = self.devices.entry(machine_id.to_string()).or_default();
+        entry.owner = Some(owner.to_string());
+        // 绑定即信任：用户是在那台电脑的客户端里亲自登录的，这是对「监控本机」
+        // 最直接的授权 —— 登录完成，页面/移动端立刻能看到该设备的终端会话。
+        // 设备管理里的「撤销信任」保留，用于事后关停某台设备的监控。
+        entry.trusted = true;
+        entry.device_token = Some(token.clone());
+        self.save();
+        token
+    }
+
+    /// 校验设备上报令牌（常量时间比较）
+    pub fn verify_device_token(&self, machine_id: &str, token: &str) -> bool {
+        self.devices
+            .get(machine_id)
+            .and_then(|d| d.device_token.as_deref())
+            .map(|t| crate::state::token_eq(t, token))
+            .unwrap_or(false)
+    }
+
     /// 用户是否存在（agent 上报时校验 AM_USER 用）
     pub fn user_exists(&self, username: &str) -> bool {
         self.users.iter().any(|u| u.username == username)
@@ -376,6 +413,7 @@ impl Registry {
             DeviceMeta {
                 owner: claim_owner.map(str::to_string),
                 trusted: auto_trust,
+                device_token: None,
             }
         });
         if entry.owner.is_none() {
