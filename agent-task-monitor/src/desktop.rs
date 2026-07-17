@@ -14,6 +14,71 @@ pub struct DesktopConfig {
     pub is_agent: bool,
 }
 
+// ---------- 关闭行为（退出 or 最小化到托盘）持久化 ----------
+
+/// 关闭窗口时的行为。持久化在数据目录，托盘菜单里可切换。
+#[derive(Clone, Copy, PartialEq)]
+enum CloseBehavior {
+    /// 缩小到系统托盘，程序留在后台继续运行
+    Tray,
+    /// 直接退出整个应用
+    Quit,
+}
+
+fn close_pref_path(state: &SharedState) -> std::path::PathBuf {
+    state.config.data_dir.join("close-behavior")
+}
+
+/// 读取关闭行为；未设置过时默认「最小化到托盘」（后台继续运行，最安全）。
+fn read_close_behavior(state: &SharedState) -> CloseBehavior {
+    match std::fs::read_to_string(close_pref_path(state)) {
+        Ok(s) if s.trim() == "quit" => CloseBehavior::Quit,
+        _ => CloseBehavior::Tray,
+    }
+}
+
+fn write_close_behavior(state: &SharedState, b: CloseBehavior) {
+    let v = match b {
+        CloseBehavior::Tray => "tray",
+        CloseBehavior::Quit => "quit",
+    };
+    // 写失败不能静默：菜单勾选态是 muda 自翻的（视觉已变），实际行为却由本文件
+    // 决定（每次关闭都重读）。吞掉错误的话，用户会看到勾选 3 秒后「自己弹回去」
+    // 且关闭行为与勾选不符，完全无从排查。
+    if let Err(e) = std::fs::write(close_pref_path(state), v) {
+        tracing::warn!("关闭行为设置写入失败（勾选将不生效）: {e}");
+    }
+}
+
+/// 窗口显示时：作为一般应用（macOS 显示 Dock 图标）。
+#[cfg(target_os = "macos")]
+fn set_app_visible_in_dock<R: tauri::Runtime>(app: &tauri::AppHandle<R>, visible: bool) {
+    // Regular = 正常应用（Dock 有图标、可 Cmd-Tab）；Accessory = 只驻留菜单栏托盘、不占 Dock。
+    // 「最小化到托盘」时切到 Accessory，让它从 Dock 消失、只留托盘；显示窗口时切回 Regular。
+    let policy = if visible {
+        tauri::ActivationPolicy::Regular
+    } else {
+        tauri::ActivationPolicy::Accessory
+    };
+    let _ = app.set_activation_policy(policy);
+}
+#[cfg(not(target_os = "macos"))]
+fn set_app_visible_in_dock<R: tauri::Runtime>(_app: &tauri::AppHandle<R>, _visible: bool) {}
+
+/// 把主窗口最小化到托盘：隐藏窗口 + macOS 退出 Dock（程序仍在后台跑）。
+fn minimize_to_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(w) = app.get_webview_window("main") {
+        // macOS 原生全屏的窗口直接 hide 通常不生效，还会留下一个空 Space；
+        // 而策略随后切到 Accessory（Dock 无图标、Cmd-Tab 不可见），窗口就卡在
+        // 全屏里很难救回。先退出全屏再隐藏。
+        if w.is_fullscreen().unwrap_or(false) {
+            let _ = w.set_fullscreen(false);
+        }
+        let _ = w.hide();
+    }
+    set_app_visible_in_dock(app, false);
+}
+
 /// 运行 Tauri 桌面应用（阻塞，不返回）。
 pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
     let portal_url = format!("{}/portal", cfg.web_base);
@@ -25,32 +90,48 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
         .setup(move |app| {
             let handle = app.handle().clone();
 
-            // macOS：设为 Accessory —— 只驻留菜单栏托盘，不在 Dock 显示。
-            // （LSUIElement 会被 Tauri 创建窗口时覆盖，必须代码里显式设置）
+            // 作为一般桌面应用运行：macOS 显示 Dock 图标（Regular）。
+            // agent 模式启动即后台，初始就用 Accessory —— 若先 Regular 再切，
+            // set_activation_policy 走事件循环代理，Dock 图标会闪现一下才消失。
             #[cfg(target_os = "macos")]
-            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            let _ = app.set_activation_policy(if is_agent {
+                tauri::ActivationPolicy::Accessory
+            } else {
+                tauri::ActivationPolicy::Regular
+            });
 
-            // 主窗口：加载前台（ToDesk 式设备/终端管理）
+            // 主窗口：加载完整前台页面（设备树 / 会话 / 对话 / 设置 / git diff 等全部功能）。
+            // agent 模式直接以隐藏态创建 —— 先可见再 hide 会闪一下窗口。
             let url: tauri::Url = portal_url.parse().expect("非法前台地址");
             let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-                .title("终端任务监控 · 设备与终端")
+                .title("终端任务监控")
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(960.0, 640.0)
+                .visible(!is_agent)
                 .build()?;
 
-            // 关闭窗口 = 隐藏到托盘（不退出），保持后台上报；退出走托盘「退出」菜单
-            let win_close = win.clone();
+            // 点右上角关闭按钮：按用户设置的关闭行为处理。
+            // - 最小化到托盘（默认）：隐藏窗口，程序留后台继续运行；
+            // - 直接退出：关掉整个应用。
+            // 用户可在托盘菜单「关闭时最小化到托盘」里切换。
+            let close_handle = app.handle().clone();
+            let close_state = state_setup.clone();
             win.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = win_close.hide();
+                    match read_close_behavior(&close_state) {
+                        CloseBehavior::Tray => {
+                            api.prevent_close();
+                            minimize_to_tray(&close_handle);
+                        }
+                        CloseBehavior::Quit => {
+                            close_handle.exit(0);
+                        }
+                    }
                 }
             });
 
-            // agent 模式：启动即隐藏窗口，纯后台上报 + 托盘常驻（点托盘图标再打开窗口）
-            if is_agent {
-                let _ = win.hide();
-            }
+            // agent 模式：窗口已以隐藏态创建、策略已是 Accessory（见上），
+            // 即「启动即最小化到托盘」，纯后台上报，点托盘图标再打开窗口。
 
             // 托盘菜单
             let menu = build_tray_menu(&handle, &state_setup, is_agent)?;
@@ -72,6 +153,14 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                         "show" => show_main(app),
                         "browser" => open_external(&format!("{web_base_menu}/portal")),
                         "autostart" => set_autostart(!autostart_enabled()),
+                        "close_to_tray" => {
+                            // 切换关闭行为并落盘；下次点菜单会重建反映新勾选态
+                            let next = match read_close_behavior(&state_evt) {
+                                CloseBehavior::Tray => CloseBehavior::Quit,
+                                CloseBehavior::Quit => CloseBehavior::Tray,
+                            };
+                            write_close_behavior(&state_evt, next);
+                        }
                         "quit" => app.exit(0),
                         other => {
                             // 监控范围勾选项：id=excl::<tty>
@@ -121,8 +210,10 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                         .load(std::sync::atomic::Ordering::Relaxed);
                     // 状态变化才重建菜单，避免高频刷新。
                     // hub_err 必须进签名：否则上报被拒时状态行不会刷新出错误原因。
+                    // close_to_tray 勾选态也进签名：托盘里切换后菜单要跟着刷新。
+                    let close_tray = read_close_behavior(&state_bg) == CloseBehavior::Tray;
                     let sig = format!(
-                        "{:?}|{:?}|{connected}|{dev_trusted}|{hub_err:?}|{}",
+                        "{:?}|{:?}|{connected}|{dev_trusted}|{hub_err:?}|{}|{close_tray}",
                         terminals,
                         excluded,
                         autostart_enabled()
@@ -175,6 +266,15 @@ fn build_tray_menu<R: tauri::Runtime>(
     let show = MenuItem::with_id(manager, "show", "显示窗口", true, None::<&str>)?;
     let browser = MenuItem::with_id(manager, "browser", "在浏览器打开", true, None::<&str>)?;
     let scope = build_scope_submenu(manager, state)?;
+    // 关闭窗口的行为：勾选=最小化到托盘（后台继续跑），不勾=直接退出
+    let close_to_tray = CheckMenuItem::with_id(
+        manager,
+        "close_to_tray",
+        "关闭时最小化到托盘",
+        true,
+        read_close_behavior(state) == CloseBehavior::Tray,
+        None::<&str>,
+    )?;
     let autostart = CheckMenuItem::with_id(
         manager,
         "autostart",
@@ -214,6 +314,7 @@ fn build_tray_menu<R: tauri::Runtime>(
     menu.append(&show)?;
     menu.append(&browser)?;
     menu.append(&sep()?)?;
+    menu.append(&close_to_tray)?;
     menu.append(&autostart)?;
     menu.append(&sep()?)?;
     menu.append(&scope)?;
@@ -401,6 +502,8 @@ fn set_autostart(enable: bool) {
 }
 
 fn show_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    // 从托盘重新打开：恢复 Dock 图标（macOS），再显示并聚焦窗口
+    set_app_visible_in_dock(app, true);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();

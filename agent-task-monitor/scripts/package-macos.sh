@@ -59,9 +59,9 @@ cat > "$OUT/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
-  <!-- 只驻留菜单栏、不占 Dock。注意 Tauri 建窗口时会覆盖它，
-       代码里还显式设了 ActivationPolicy::Accessory，两处都需要。 -->
-  <key>LSUIElement</key><true/>
+  <!-- 不设 LSUIElement：这是正常桌面应用（Dock 有图标、可 Cmd-Tab）。
+       「最小化到托盘 / agent 后台模式」由运行时 ActivationPolicy::Accessory 切换，
+       plist 写死 UIElement 会把正常模式也压成无 Dock 图标。 -->
   <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>
