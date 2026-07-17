@@ -1,10 +1,14 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import { Chat, Input, Modal } from "@hsu-react/ui";
 import { Tooltip, message } from "antd";
-import { WarningOutlined } from "@ant-design/icons";
+import { PaperClipOutlined, WarningOutlined } from "@ant-design/icons";
 
-import { SlashCommand, getPortalSlashCommands } from "@/services/apis/portal";
+import {
+  SlashCommand,
+  getPortalSlashCommands,
+  uploadPortalFile,
+} from "@/services/apis/portal";
 import { CONFIRM_WORD, DangerHit, checkDanger } from "../../_utils/dangerCheck";
 import styles from "./index.module.scss";
 
@@ -12,6 +16,10 @@ interface ComposerProps {
   taskId: string;
   disabled?: boolean;
   onSend: (text: string) => void;
+  /** 会话所在设备（上传文件的目标） */
+  machineId?: string;
+  /** 会话工作目录（上传落点；回填的相对路径以此为基准） */
+  cwd?: string;
 }
 
 /**
@@ -20,18 +28,67 @@ interface ComposerProps {
  * - 命中危险模式（类 Claude Code bypass 权限等）时走两步确认。
  */
 const Composer: React.FC<ComposerProps> = (props) => {
-  const { taskId, disabled, onSend } = props;
+  const { taskId, disabled, onSend, machineId, cwd } = props;
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   const [cmdsOpen, setCmdsOpen] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  /**
+   * 把文本追加进 Chat.Input 的输入框。
+   * Chat.Input 没有受控 value，这里用原生 setter + input 事件驱动其内部
+   * 受控 textarea 更新（React 对 textarea 的标准程序化注入方式）。
+   */
+  const appendToInput = (text: string) => {
+    const ta = rootRef.current?.querySelector("textarea");
+    if (!ta) return;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )?.set;
+    if (!setter) return;
+    const next = ta.value ? `${ta.value} ${text}` : text;
+    setter.call(ta, next);
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    ta.focus();
+  };
+
+  /** 上传文件到会话所在设备的工作目录，成功后把相对路径填入输入框 */
+  const onPickFile = (file: File) => {
+    if (!machineId || !cwd) {
+      message.warning("该会话缺少设备或目录信息，无法传文件");
+      return;
+    }
+    setUploading(true);
+    uploadPortalFile(machineId, cwd, file)
+      .then((res) => {
+        if (res.code === 0) {
+          message.success(res.data?.result ?? "已上传");
+          // 文件写入会话工作目录，相对路径即 ./文件名
+          appendToInput(`./${file.name}`);
+        } else {
+          message.error(res.msg ?? "上传失败");
+        }
+      })
+      .catch(() => message.error("上传失败，请检查网络"))
+      .finally(() => setUploading(false));
+  };
 
   // 会话切换时拉取该模型的可用命令（只读、不影响任务）
   useEffect(() => {
     if (!taskId) return;
+    // 竞态门闩：快速切换会话时，先发的请求可能后返回，
+    // 不拦截的话旧会话的命令列表会盖掉新会话的。
+    let alive = true;
     getPortalSlashCommands(taskId)
       .then((res) => {
-        if (res.code === 0) setCommands(res.data?.list ?? []);
+        if (alive && res.code === 0) setCommands(res.data?.list ?? []);
       })
       .catch(() => {});
+    return () => {
+      alive = false;
+    };
   }, [taskId]);
 
   // 危险输入多重确认：第 1 步警告说明，第 2 步输入确认词
@@ -79,12 +136,23 @@ const Composer: React.FC<ComposerProps> = (props) => {
   const shownCommands = cmdsOpen ? commands : commands.slice(0, 6);
 
   return (
-    <div className={styles.Composer}>
+    <div className={styles.Composer} ref={rootRef}>
       {commands.length > 0 && !disabled && (
         <div className={styles.commands}>
           {shownCommands.map((c) => (
             <Tooltip key={c.name} title={c.desc}>
-              <span className={styles.cmdChip} onClick={() => guardedSend(c.name)}>
+              <span
+                className={styles.cmdChip}
+                role="button"
+                tabIndex={0}
+                onClick={() => guardedSend(c.name)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    guardedSend(c.name);
+                  }
+                }}
+              >
                 {c.name}
               </span>
             </Tooltip>
@@ -92,7 +160,15 @@ const Composer: React.FC<ComposerProps> = (props) => {
           {commands.length > 6 && (
             <span
               className={styles.cmdMore}
+              role="button"
+              tabIndex={0}
               onClick={() => setCmdsOpen(!cmdsOpen)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setCmdsOpen(!cmdsOpen);
+                }
+              }}
             >
               {cmdsOpen ? "收起" : `+${commands.length - 6}`}
             </span>
@@ -108,6 +184,31 @@ const Composer: React.FC<ComposerProps> = (props) => {
         }
         onSend={guardedSend}
         uploadEnabled={false}
+        buttonGroup={
+          machineId && cwd && !disabled
+            ? [
+                {
+                  title: "传文件到会话目录（完成后自动填入路径）",
+                  icon: <PaperClipOutlined />,
+                  type: "text",
+                  loading: uploading,
+                  onClick: () => fileRef.current?.click(),
+                },
+              ]
+            : undefined
+        }
+      />
+      {/* 隐藏的文件选择器（由工具栏回形针按钮触发） */}
+      <input
+        ref={fileRef}
+        type="file"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) onPickFile(f);
+          // 允许连续选同一个文件
+          e.target.value = "";
+        }}
       />
 
       {/* 危险输入多重确认（类 Claude Code bypass 权限等需特别管理） */}

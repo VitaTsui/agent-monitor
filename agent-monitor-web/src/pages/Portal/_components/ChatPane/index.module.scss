@@ -1,7 +1,7 @@
-$cream: #faf9f5;
-$border: rgba(61, 57, 41, 0.09);
-$text: #3d3929;
-$muted: #87867f;
+$cream: #f4fafb;
+$border: rgba(36, 61, 66, 0.09);
+$text: #243d42;
+$muted: #7c9096;
 
 .ChatPane {
   display: flex;
@@ -10,6 +10,9 @@ $muted: #87867f;
   min-height: 0;
   background: $cream;
   overflow: hidden;
+  // 状态面板悬浮在本格内部而非整页：多个会话并排时，
+  // 各格的面板才会各自待在自己格子右侧，不会叠在一起。
+  position: relative;
 
   // 居中内容列（Claude 式窄栏）
   .chatColumn {
@@ -25,7 +28,7 @@ $muted: #87867f;
     gap: 10px;
     padding: 10px 18px;
     border-bottom: 1px solid $border;
-    background: rgba(250, 249, 245, 0.9);
+    background: rgba(244, 250, 251, 0.9);
     backdrop-filter: blur(6px);
 
     .headInfo {
@@ -54,8 +57,8 @@ $muted: #87867f;
           border-radius: 999px;
           font-size: 11px;
           line-height: 18px;
-          background: rgba(201, 100, 66, 0.08);
-          color: #a4552f;
+          background: rgba(15, 155, 173, 0.08);
+          color: #0a6b79;
           font-family: "SF Mono", Menlo, Consolas, monospace;
         }
 
@@ -64,7 +67,7 @@ $muted: #87867f;
           border-radius: 999px;
           font-size: 11px;
           line-height: 18px;
-          background: rgba(61, 57, 41, 0.07);
+          background: rgba(36, 61, 66, 0.07);
           color: $muted;
 
           &.running {
@@ -112,7 +115,7 @@ $muted: #87867f;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    color: rgba(61, 57, 41, 0.35);
+    color: rgba(36, 61, 66, 0.35);
     gap: 6px;
     font-size: 12px;
 
@@ -121,7 +124,10 @@ $muted: #87867f;
     }
   }
 
+  // 底部内边距让开手势条 / Home Indicator：原生壳里窗口延伸到系统栏下，
+  // 不加的话输入框会被手势条压住。浏览器里 env() 为 0，等价于原来的 14px。
   .composerWrap {
-    padding: 6px 18px 14px;
+    padding: 6px calc(18px + env(safe-area-inset-right))
+      calc(14px + env(safe-area-inset-bottom)) calc(18px + env(safe-area-inset-left));
   }
 }

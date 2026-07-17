@@ -6,8 +6,3 @@ export interface ListRes<T> {
     total: number;
   };
 }
-
-export interface FileRes {
-  filename: string;
-  data: ArrayBuffer;
-}

@@ -2,8 +2,9 @@ import React, { useEffect, useState } from "react";
 
 import { Input } from "@hsu-react/ui";
 import { Badge, Popover, Tooltip } from "antd";
+import { platformIcon } from "./_utils/platform";
+import { useNativeBack } from "./_hooks/useNativeBack";
 import {
-  CheckOutlined,
   CodeOutlined,
   ControlOutlined,
   DownOutlined,
@@ -11,7 +12,6 @@ import {
   LogoutOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
-  RightOutlined,
   SafetyOutlined,
   SearchOutlined,
   SettingOutlined,
@@ -25,12 +25,6 @@ import ChatPane from "./_components/ChatPane";
 import SettingsModal from "./_components/SettingsModal";
 import type { SettingsTab } from "./_components/SettingsModal";
 import styles from "./index.module.scss";
-
-const PLATFORM_ICON: Record<string, string> = {
-  macos: "",
-  windows: "🪟",
-  linux: "🐧",
-};
 
 const STATUS_LABEL: Record<string, string> = {
   running: "执行中",
@@ -50,8 +44,6 @@ const Portal: React.FC = observer(() => {
     openTasks,
     keyword,
     setKeyword,
-    isCollapsed,
-    toggleCollapse,
     init,
     stopPolling,
     select,
@@ -61,6 +53,43 @@ const Portal: React.FC = observer(() => {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("account");
   const [siderFolded, setSiderFolded] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  // 移动端：侧栏抽屉开合
+  const [mobileNav, setMobileNav] = useState(false);
+
+  // 移动端强制展开侧栏内容：桌面折叠态下缩窄窗口时，
+  // CSS 会把抽屉撑到 84vw，但折叠态 JSX 不渲染内容 → 空白抽屉，这里在 JS 层纠正
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 760px)");
+    const sync = () => {
+      if (mq.matches) {
+        setSiderFolded(false);
+      }
+    };
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, []);
+
+  // 移动端选中会话后自动收起抽屉
+  const selectSession = (id: string) => {
+    select(id);
+    setMobileNav(false);
+  };
+
+  // 抽屉打开时：锁背景滚动 + Esc 关闭
+  useEffect(() => {
+    if (!mobileNav) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMobileNav(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prev;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [mobileNav]);
 
   // 前台需登录：无 token 跳登录并带回跳地址
   useEffect(() => {
@@ -74,6 +103,24 @@ const Portal: React.FC = observer(() => {
       stopPolling();
     };
   }, [init, stopPolling]);
+
+  // 原生壳（Android）的返回键：优先关掉当前浮层，都没有才交还系统语义。
+  // 不接管的话按返回会直接退出整个 App。浏览器里此钩子空转。
+  useNativeBack(() => {
+    if (mobileNav) {
+      setMobileNav(false);
+      return true;
+    }
+    if (settingsOpen) {
+      setSettingsOpen(false);
+      return true;
+    }
+    if (userMenuOpen) {
+      setUserMenuOpen(false);
+      return true;
+    }
+    return false;
+  });
 
   if (!getAccessToken()) {
     return null;
@@ -103,13 +150,7 @@ const Portal: React.FC = observer(() => {
       <div className={styles.userMenuEmail}>{user.username}</div>
       <div className={styles.userMenuAccount}>
         <span className={styles.userMenuAvatar}>{nickname.slice(0, 1) || "U"}</span>
-        <span className={styles.userMenuAccText}>
-          <span className={styles.userMenuName}>{nickname}</span>
-          <span className={styles.userMenuSub}>
-            {user.isSuper ? "超级管理员" : "普通用户"}
-          </span>
-        </span>
-        <CheckOutlined className={styles.userMenuCheck} />
+        <span className={styles.userMenuName}>{nickname}</span>
       </div>
       <div className={styles.userMenuDivider} />
       <div className={styles.userMenuItem} onClick={() => openSettings("account")}>
@@ -149,7 +190,44 @@ const Portal: React.FC = observer(() => {
 
   return (
     <div className={styles.Portal}>
-      <aside className={`${styles.sider} ${siderFolded ? styles.folded : ""}`}>
+      {/* 移动端顶部栏（仅窄屏显示） */}
+      <div className={styles.mobileBar}>
+        <span
+          className={styles.mobileMenuBtn}
+          role="button"
+          tabIndex={0}
+          aria-label="打开会话列表"
+          onClick={() => setMobileNav(true)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              setMobileNav(true);
+            }
+          }}
+        >
+          <MenuUnfoldOutlined />
+        </span>
+        <span className={styles.mobileTitle}>
+          {openTasks[0]?.title ||
+            openTasks[0]?.prompt ||
+            openTasks[0]?.projectName ||
+            "终端任务监控"}
+        </span>
+      </div>
+
+      {/* 移动端抽屉遮罩 */}
+      {mobileNav && (
+        <div
+          className={styles.mobileBackdrop}
+          onClick={() => setMobileNav(false)}
+        />
+      )}
+
+      <aside
+        className={`${styles.sider} ${siderFolded ? styles.folded : ""} ${
+          mobileNav ? styles.mobileOpen : ""
+        }`}
+      >
         <div className={styles.siderHeader}>
           <div className={styles.brand}>
             <span className={styles.logo}>
@@ -160,7 +238,17 @@ const Portal: React.FC = observer(() => {
           <Tooltip title={siderFolded ? "展开侧栏" : "收起侧栏"} placement="right">
             <span
               className={styles.foldBtn}
+              role="button"
+              tabIndex={0}
+              aria-label={siderFolded ? "展开侧栏" : "收起侧栏"}
+              aria-expanded={!siderFolded}
               onClick={() => setSiderFolded(!siderFolded)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setSiderFolded(!siderFolded);
+                }
+              }}
             >
               {siderFolded ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
             </span>
@@ -193,12 +281,21 @@ const Portal: React.FC = observer(() => {
                       className={`${styles.deviceTab} ${
                         d.machineId === selectedMachineId ? styles.active : ""
                       }`}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={d.machineId === selectedMachineId}
                       onClick={() => selectMachine(d.machineId)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          selectMachine(d.machineId);
+                        }
+                      }}
                       title={`${d.hostname} · ${d.platformDsr}`}
                     >
                       <LaptopOutlined />
                       <span className={styles.deviceTabName}>
-                        {PLATFORM_ICON[d.platform] ?? ""} {d.hostname}
+                        {platformIcon(d.platform)} {d.hostname}
                       </span>
                       <span className={styles.deviceTabStat}>
                         {d.count} 会话
@@ -222,26 +319,29 @@ const Portal: React.FC = observer(() => {
                   </div>
                 ) : (
                   selectedGroups.map((g) => {
-                    const gKey = `${selectedMachineId}-${g.key}`;
-                    const gCollapsed = isCollapsed(gKey);
                     return (
                       <div key={g.key} className={styles.termGroup}>
-                        <div
-                          className={styles.termTitle}
-                          onClick={() => toggleCollapse(gKey)}
-                        >
-                          {gCollapsed ? <RightOutlined /> : <DownOutlined />}
+                        {/* 分组标签：会话直接铺开，不做展开收起 */}
+                        <div className={styles.termTitle}>
                           <span>{g.title}</span>
                           <span className={styles.termCount}>{g.tasks.length}</span>
                         </div>
-                        {!gCollapsed &&
-                          g.tasks.map((t) => (
+                        {g.tasks.map((t) => (
                             <div
                               key={t.id}
                               className={`${styles.session} ${
                                 openIds.includes(t.id ?? "") ? styles.active : ""
                               }`}
-                              onClick={() => select(t.id ?? "")}
+                              role="button"
+                              tabIndex={0}
+                              aria-current={openIds.includes(t.id ?? "")}
+                              onClick={() => selectSession(t.id ?? "")}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  selectSession(t.id ?? "");
+                                }
+                              }}
                             >
                               <span
                                 className={`${styles.dot} ${
@@ -288,7 +388,22 @@ const Portal: React.FC = observer(() => {
           arrow={false}
           overlayClassName={styles.userMenuOverlay}
         >
-          <div className={styles.userRow} title="账户与设置">
+          {/* Popover 的 click 触发挂在本元素注入的 onClick 上，键盘路径合成一次
+              click 即可复用；不加 role/tabIndex 的话，设置/设备管理/安全防护/
+              后台管理/退出登录全部无法用键盘抵达（它们没有别的入口）。 */}
+          <div
+            className={styles.userRow}
+            title="账户与设置"
+            role="button"
+            tabIndex={0}
+            aria-label="账户与设置"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.currentTarget.click();
+              }
+            }}
+          >
             <span className={styles.userAvatar}>{nickname.slice(0, 1) || "U"}</span>
             {!siderFolded && (
               <>

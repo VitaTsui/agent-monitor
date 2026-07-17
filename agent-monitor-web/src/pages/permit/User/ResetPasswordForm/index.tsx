@@ -74,7 +74,9 @@ const ResetPasswordForm: React.FC<ResetPasswordFormProps> = ({
           form &&
           form.getFieldValue("confirmPassword")
         ) {
-          form.validateFields(["confirmPassword"]);
+          // 两次密码不一致时必然 reject（这正是此处联动校验的目的），
+          // 错误已由 antd 渲染到表单项上，不吞掉会变成未捕获 rejection。
+          form.validateFields(["confirmPassword"]).catch(() => void 0);
         }
       }}
     />

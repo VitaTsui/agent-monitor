@@ -1,10 +1,10 @@
-$text: #3d3929;
-$muted: #87867f;
-$user-bubble: #f0eee6;
-$term-bg: #1f1e1b;
-$term-text: #edece3;
-$term-dim: #918f84;
-$term-accent: #d97757;
+$text: #243d42;
+$muted: #7c9096;
+$user-bubble: #e2eff1;
+$term-bg: #102a30;
+$term-text: #ddedef;
+$term-dim: #84979c;
+$term-accent: #3cc4d6;
 $term-green: #67a579;
 $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
@@ -36,11 +36,12 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       line-height: 1.65;
       white-space: pre-wrap;
       word-break: break-word;
+      overflow-wrap: anywhere;
     }
 
     .userTime {
       font-size: 10px;
-      color: rgba(61, 57, 41, 0.35);
+      color: rgba(36, 61, 66, 0.35);
       padding-right: 4px;
     }
   }
@@ -120,7 +121,46 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       color: $term-text;
       white-space: pre-wrap;
       word-break: break-word;
+      overflow-wrap: anywhere;
       min-width: 0;
+    }
+  }
+
+  // plan 模式的待批准方案：终端里独立成框，比工具流水更显眼
+  .planCard {
+    border: 1px solid rgba(60, 196, 214, 0.35);
+    border-radius: 8px;
+    margin: 2px 0 6px;
+    overflow: hidden;
+
+    .planHead {
+      padding: 5px 10px;
+      background: rgba(60, 196, 214, 0.12);
+      color: $term-accent;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .planBody {
+      padding: 8px 10px;
+      color: $term-text;
+      min-width: 0;
+      // 方案正文是 markdown，交给组件渲染；这里只压掉它的默认外边距，
+      // 避免在终端卡里撑出多余留白。
+      p,
+      ul,
+      ol,
+      pre {
+        margin: 0 0 6px;
+      }
+
+      :last-child {
+        margin-bottom: 0;
+      }
+
+      code {
+        font-family: $mono;
+      }
     }
   }
 
@@ -138,6 +178,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       color: $term-text;
       white-space: pre-wrap;
       word-break: break-word;
+      overflow-wrap: anywhere;
       min-width: 0;
     }
   }
@@ -164,6 +205,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
         color: $term-dim;
         white-space: pre-wrap;
         word-break: break-word;
+      overflow-wrap: anywhere;
       }
 
       .expandBtn {

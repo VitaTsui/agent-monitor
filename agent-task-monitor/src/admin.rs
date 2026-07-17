@@ -73,7 +73,13 @@ pub async fn login(State(state): State<SharedState>, Json(req): Json<LoginReq>) 
             Ok(p) => p,
             Err(_) => return err(400, "密码解密失败"),
         };
-    // 3. 校验（走用户注册表）
+    // 3. 爆破节流：该账号连续失败越多，本次应答越慢
+    let delay = state.login_throttle.read().await.delay_for(&username);
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+
+    // 4. 校验（走用户注册表）
     let (user, is_super) = {
         let reg = state.registry.read().await;
         match reg.authenticate(&username, &password) {
@@ -81,11 +87,19 @@ pub async fn login(State(state): State<SharedState>, Json(req): Json<LoginReq>) 
                 let is_super = reg.is_super_user(&u.username);
                 (u, is_super)
             }
-            None => return err(400, "用户名或密码错误"),
+            None => {
+                state.login_throttle.write().await.record_fail(&username);
+                return err(400, "用户名或密码错误");
+            }
         }
     };
+    state.login_throttle.write().await.record_success(&username);
     let token = uuid::Uuid::new_v4().to_string();
-    state.tokens.write().await.insert(token.clone(), user.username.clone());
+    state
+        .tokens
+        .write()
+        .await
+        .insert(token.clone(), crate::state::Session::new(user.username.clone()));
     let nickname = if user.display.is_empty() {
         user.username.clone()
     } else {
@@ -133,7 +147,11 @@ pub async fn register(State(state): State<SharedState>, Json(req): Json<Register
         Err(e) => return err(400, &e),
     };
     let token = uuid::Uuid::new_v4().to_string();
-    state.tokens.write().await.insert(token.clone(), user.username.clone());
+    state
+        .tokens
+        .write()
+        .await
+        .insert(token.clone(), crate::state::Session::new(user.username.clone()));
     ok(json!({
         "token": token,
         "userInfo": { "id": user.id, "username": user.username, "nickname": user.display, "isSuper": false }
@@ -148,10 +166,20 @@ pub async fn logout(State(state): State<SharedState>, headers: axum::http::Heade
     ok(json!(true))
 }
 
-/// 从 Authorization 头解析出用户名（无效返回 None）
+/// 从 Authorization 头解析出用户名（无效或已过期返回 None）
 pub async fn auth_user(state: &SharedState, headers: &axum::http::HeaderMap) -> Option<String> {
     let token = headers.get("authorization").and_then(|v| v.to_str().ok())?;
-    state.tokens.read().await.get(token).cloned()
+    // 快路径只拿读锁；命中过期项时再拿写锁把它摘掉，顺带清理其它过期会话。
+    let hit = state.tokens.read().await.get(token).cloned();
+    match hit {
+        Some(s) if !s.expired() => Some(s.username),
+        Some(_) => {
+            let mut map = state.tokens.write().await;
+            map.retain(|_, s| !s.expired());
+            None
+        }
+        None => None,
+    }
 }
 
 /// 后管门卫：登录 + 超级管理员 + 部署令牌（X-Admin-Token）三重校验。
@@ -170,7 +198,7 @@ pub async fn admin_gate(
         .get("x-admin-token")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if token != state.config.admin_token {
+    if !crate::state::token_eq(token, &state.config.admin_token) {
         // 失败延迟，减缓对任意 /sys/* 接口的令牌爆破
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         return Err(err(4031, "后管访问令牌无效"));
@@ -195,7 +223,7 @@ pub async fn verify_admin_token(
     if !state.registry.read().await.is_super_user(&username) {
         return err(403, "后管仅限管理员使用");
     }
-    if req.token != state.config.admin_token {
+    if !crate::state::token_eq(&req.token, &state.config.admin_token) {
         // 失败延迟，减缓暴力尝试
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         tracing::warn!("后管令牌校验失败（用户: {username}）");
@@ -288,9 +316,10 @@ pub async fn user_page(
     let page_size = parsed.pointer("/p/s").and_then(Value::as_u64).unwrap_or(20).clamp(1, 200) as usize;
     let total = users.len();
 
+    // 饱和运算：页码无上界，(n-1)*s 溢出会回绕（release）或 panic（debug）
     let items: Vec<Value> = users
         .into_iter()
-        .skip((page_num - 1) * page_size)
+        .skip(page_num.saturating_sub(1).saturating_mul(page_size))
         .take(page_size)
         .map(|u| {
             let is_super = reg.is_super_user(&u.username);
@@ -417,7 +446,8 @@ pub async fn user_del(
     // 删除用户时同步失效其登录态
     match state.registry.write().await.delete_user(&username) {
         Ok(_) => {
-            state.tokens.write().await.retain(|_, u| u != &username);
+            // 用户已删除：踢掉其所有在线会话
+            state.tokens.write().await.retain(|_, s| s.username != username);
             ok(json!(true))
         }
         Err(e) => err(400, &e),

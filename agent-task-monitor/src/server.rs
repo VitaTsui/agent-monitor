@@ -15,7 +15,11 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::services::ServeDir;
+
+/// agent 上报的请求体上限（32MB）。仍保留上限：该接口虽有令牌校验，
+/// 但不设限等于给任何持令牌方一个无界内存分配入口。
+const REPORT_BODY_LIMIT: usize = 32 * 1024 * 1024;
 
 pub fn router(state: SharedState) -> Router {
     let mut router = Router::new()
@@ -28,6 +32,12 @@ pub fn router(state: SharedState) -> Router {
         .route("/auth/access/logout", get(admin::logout))
         .route("/sys/menu/getMenuATopATopMenu", get(admin::menus))
         .route("/sys/menu/getStringPermissions", get(admin::permissions))
+        // ---- 第三方登录（Google / Apple，按环境变量启用）----
+        .route("/auth/access/oauth/providers", get(crate::oauth::oauth_providers))
+        .route("/auth/access/oauth/:provider/url", get(crate::oauth::oauth_url))
+        .route("/auth/access/oauth/:provider/login", post(crate::oauth::oauth_login))
+        // Apple form_post 回调（POST）→ 转跳前端登录页
+        .route("/auth/access/oauth/apple/callback", post(crate::oauth::apple_callback))
         // ---- 后管（admin token 锁 + 仅用户管理）----
         .route("/sys/admin/verify", post(admin::verify_admin_token))
         .route("/sys/user/page", get(admin::user_page))
@@ -40,6 +50,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/tasks/page", get(page_tasks))
         .route("/monitor/tasks/detail/:id", get(task_detail))
         .route("/monitor/tasks/:id/messages", get(task_messages))
+        .route("/monitor/tasks/:id/git-diff", get(task_git_diff))
         .route("/monitor/tasks/:id/slash-commands", get(task_slash_commands))
         .route("/monitor/tasks/:id/control", post(control_task))
         .route("/monitor/tasks/:id/input", post(input_task))
@@ -54,7 +65,12 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/devices/:id", axum::routing::delete(delete_device))
         .route("/monitor/devices/:id/upload", post(upload_file))
         // ---- agent → hub 上报 ----
-        .route("/monitor/report", post(report))
+        // 单独放宽体积上限：axum 默认 2MB，一台机器会话多、消息长时很容易顶到，
+        // 一旦 413 该设备就再也同步不上来了。
+        .route(
+            "/monitor/report",
+            post(report).layer(axum::extract::DefaultBodyLimit::max(REPORT_BODY_LIMIT)),
+        )
         .with_state(state);
 
     // CORS：默认同源（开发经 webpack 代理、生产由 hub 自托管前端，均无需跨域）。
@@ -68,11 +84,28 @@ pub fn router(state: SharedState) -> Router {
         );
     }
 
-    // 静态托管前端构建产物（存在时），SPA 路由回退 index.html
+    // 静态托管前端构建产物（存在时）：先按真实文件命中，未命中的路径
+    // （SPA 前端路由，如 /portal、/admin）回退到 index.html 且以 200 返回。
+    // 注意：ServeDir 的 not_found_service 会沿用 404 状态，导致深链/刷新报 404，
+    // 这里改用显式 fallback handler 保证返回 200。
     if let Some(dist) = web_dist_dir() {
         tracing::info!("托管前端静态资源: {}", dist.display());
-        let index = dist.join("index.html");
-        router = router.fallback_service(ServeDir::new(&dist).not_found_service(ServeFile::new(index)));
+        let index = std::sync::Arc::new(dist.join("index.html"));
+        let spa_index = index.clone();
+        let spa_fallback = axum::routing::get(move || {
+            let index = spa_index.clone();
+            async move {
+                match tokio::fs::read(index.as_ref()).await {
+                    Ok(bytes) => (
+                        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                        bytes,
+                    )
+                        .into_response(),
+                    Err(_) => (axum::http::StatusCode::NOT_FOUND, "index.html 缺失").into_response(),
+                }
+            }
+        });
+        router = router.fallback_service(ServeDir::new(&dist).fallback(spa_fallback));
     }
     router
 }
@@ -214,9 +247,11 @@ async fn page_tasks(
         .clamp(1, 200) as usize;
 
     let total = filtered.len();
+    // 页码由请求方给定且无上界，(n-1)*s 直接算会溢出（release 下回绕成任意
+    // skip 返回错误页，debug 下直接 panic）。饱和运算下超大页码只会得到空列表。
     let items: Vec<_> = filtered
         .into_iter()
-        .skip((page_num - 1) * page_size)
+        .skip(page_num.saturating_sub(1).saturating_mul(page_size))
         .take(page_size)
         .collect();
     ok(json!({
@@ -350,8 +385,12 @@ async fn task_messages(
     };
 
     if machine_id == state.config.machine_id {
-        let scanner = state.scanner.lock().await;
-        match scanner.messages(&id, limit) {
+        // messages() 会 read_dir 全部项目目录、read_tail 最大 8MB 并逐行 serde 解析，
+        // 全是同步阻塞调用。前端每个聊天面板都在轮询这个接口，直接跑会占住 async
+        // worker；且它握着 scan_loop 每 1.5s 就要用的 scanner 锁，会连带拖慢所有 WS 推送。
+        // 与 local_scan 保持一致，用 block_in_place 把同线程其它任务挪走。
+        let mut scanner = state.scanner.lock().await;
+        match tokio::task::block_in_place(|| scanner.messages(&id, limit)) {
             Ok(list) => ok(json!({ "list": list })),
             Err(_) => ok(json!({ "list": [] })),
         }
@@ -363,6 +402,54 @@ async fn task_messages(
             .cloned()
             .unwrap_or_default();
         ok(json!({ "list": list }))
+    }
+}
+
+/// GET /monitor/tasks/:id/git-diff —— 会话项目目录的 git 改动概览（原文件 vs 修改后）。
+/// 本机会话直接计算；远程会话下发请求给 agent，返回缓存结果（首次可能 pending，前端轮询）。
+async fn task_git_diff(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let task = {
+        let tasks = state.tasks_for(&user).await;
+        tasks.into_iter().find(|t| t.id == id)
+    };
+    let Some(task) = task else {
+        return err(404, "任务不存在");
+    };
+    let cwd = task.process.as_ref().map(|p| p.cwd.clone()).unwrap_or_default();
+
+    if task.machine_id == state.config.machine_id {
+        // 本机：git 是阻塞式子进程调用，放到阻塞线程池，避免卡住 async 运行时
+        let overview = tokio::task::spawn_blocking(move || crate::gitdiff::git_overview(&cwd))
+            .await
+            .unwrap_or_default();
+        return ok(json!({ "overview": overview, "pending": false }));
+    }
+
+    // 远程：读缓存；同时下发一个请求让 agent 刷新（去重：同 task 已在队列则不重复入队）
+    let mut machines = state.machines.write().await;
+    let Some(entry) = machines.get_mut(&task.machine_id) else {
+        return err(404, "任务所属机器已离线");
+    };
+    if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
+        return err(500, "任务所属机器已离线");
+    }
+    let cached = entry.git_cache.get(&id).cloned();
+    if !entry.pending_git.iter().any(|q| q.task_id == id) {
+        entry.pending_git.push_back(crate::model::GitQuery {
+            task_id: id.clone(),
+            cwd,
+        });
+    }
+    match cached {
+        Some(overview) => ok(json!({ "overview": overview, "pending": false })),
+        None => ok(json!({ "overview": null, "pending": true })),
     }
 }
 
@@ -430,6 +517,9 @@ async fn control_task(
         match crate::process::control(pid, req.action) {
             Ok(label) => {
                 {
+                    // 加锁顺序必须与 enforce_quota 一致（auto_paused → paused），
+                    // 反过来拿会与扫描循环死锁。
+                    let mut auto = state.auto_paused.write().await;
                     let mut paused = state.paused.write().await;
                     match req.action {
                         crate::model::ControlAction::Pause => {
@@ -437,6 +527,12 @@ async fn control_task(
                         }
                         _ => {
                             paused.remove(&pid);
+                            // 超额自动暂停的标记也必须一并清除。留着的话
+                            // enforce_quota 的 `!auto.contains(pid)` 恒为 false，
+                            // 该进程再也不会被重新暂停（额度管控彻底失效），
+                            // 界面却仍被强制显示成「已暂停(超额)」。
+                            // 清除后若确实仍超额，下一轮扫描会重新暂停 —— 这才是诚实的结果。
+                            auto.remove(&pid);
                         }
                     }
                 }
@@ -510,12 +606,19 @@ async fn input_task(
         let Some(pid) = pid else {
             return err(400, "该任务没有存活进程，无法发布");
         };
-        match crate::process::send_input(pid, &text) {
-            Ok(label) => {
+        // osascript 会遍历 Terminal/iTerm 全部窗口标签页，耗时以秒计且可能挂起，
+        // 必须放到阻塞线程池，不能占住 async worker（同 task_git_diff 的处理）。
+        let text_for_send = text.clone();
+        let res =
+            tokio::task::spawn_blocking(move || crate::process::send_input(pid, &text_for_send))
+                .await;
+        match res {
+            Ok(Ok(label)) => {
                 tracing::info!("向任务 {id} (pid={pid}) 注入输入: {}", truncate_log(&text));
                 ok(json!({ "pid": pid, "result": label }))
             }
-            Err(e) => err(500, &e.to_string()),
+            Ok(Err(e)) => err(500, &e.to_string()),
+            Err(e) => err(500, &format!("发送输入的阻塞任务异常: {e}")),
         }
     } else {
         let mut machines = state.machines.write().await;
@@ -652,8 +755,14 @@ async fn upload_file(
         .unwrap_or_else(|| "file.bin".into());
 
     if id == state.config.machine_id {
-        // 本机直接写入
-        let target_dir = std::path::PathBuf::from(&dir);
+        // 本机直接写入。目录必须落在允许范围内（详见 safe_upload_dir）。
+        // 远程设备不在这里校验：safe_upload_dir 是拿 hub 自己的 upload_root 去比的，
+        // 对目标机毫无意义（hub 是 Linux、agent 是 Mac 时，/Users/xxx 这种目标机上
+        // 完全合法的路径会被 hub 拒掉）。目标机才是权威，agent 侧会用自己的 root 复验。
+        let target_dir = match crate::state::safe_upload_dir(&dir) {
+            Ok(d) => d,
+            Err(e) => return err(400, &e),
+        };
         if let Err(e) = std::fs::create_dir_all(&target_dir) {
             return err(500, &format!("创建目录失败: {e}"));
         }
@@ -690,7 +799,10 @@ async fn get_quota(State(state): State<SharedState>, headers: HeaderMap) -> Json
     };
     let limit = state.registry.read().await.quota_limit();
     let tasks = state.tasks_for(&user).await;
-    let used: u64 = tasks.iter().map(|t| t.used_tokens_5h).sum();
+    // 口径必须与 enforce_quota 一致：额度是「按会话」判定的（某个会话用量达到
+    // 上限就暂停该会话），所以这里报「用量最高的那个会话」，而不是所有会话求和。
+    // 求和会让展示与实际暂停行为对不上：合计早已超上限却一个都没停，或反之。
+    let used: u64 = tasks.iter().map(|t| t.used_tokens_5h).max().unwrap_or(0);
     ok(json!({ "limit": limit, "used": used }))
 }
 
@@ -755,11 +867,24 @@ async fn report(
         .get("x-agent-token")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if token != state.config.agent_token {
+    if !crate::state::token_eq(token, &state.config.agent_token) {
         return err(401, "agent 上报令牌无效（AM_AGENT_TOKEN 需与 hub 一致）");
     }
     if payload.machine_id == state.config.machine_id {
         return err(400, "machineId 与 hub 本机冲突，请为 agent 指定 AM_MACHINE_ID");
+    }
+    // AM_USER 填了就必须是真实存在的账号。
+    // 不校验的话，拼错一个字母就会登记成一台「谁都看不到、也无法信任」的孤儿设备：
+    // owned_by 是严格相等，devices_for 也没有超管兜底，用户却只会看到托盘上
+    // 一句「已连接 · 待信任」，然后在网页上永远找不到这台机器。
+    // 这里直接拒绝，agent 会把原因显示到托盘上（见 agent::describe_reject）。
+    if let Some(owner) = payload.owner.as_deref().filter(|o| !o.is_empty()) {
+        if !state.registry.read().await.user_exists(owner) {
+            return err(
+                400,
+                &format!("AM_USER 指定的账号「{owner}」不存在，请核对客户端配置"),
+            );
+        }
     }
     // 登记设备（首次见到 → pending，等 owner 在设备管理里信任）
     state
@@ -781,6 +906,8 @@ async fn report(
             pending: VecDeque::new(),
             pending_files: VecDeque::new(),
             messages: HashMap::new(),
+            pending_git: VecDeque::new(),
+            git_cache: HashMap::new(),
         });
     entry.hostname = payload.hostname;
     entry.platform = payload.platform;
@@ -793,11 +920,22 @@ async fn report(
         }
     }
     entry.tasks = tasks;
+    // 缓存 agent 回传的 git 对比结果
+    for r in payload.git_results {
+        entry.git_cache.insert(r.task_id, r.overview);
+    }
+    // 清掉已消失会话的缓存：这两张表按会话 ID 累积，不清理的话
+    // hub 长期运行会随「历史会话总数」无限增长（而非「当前会话数」）。
+    let alive: std::collections::HashSet<&str> =
+        entry.tasks.iter().map(|t| t.id.as_str()).collect();
+    entry.messages.retain(|k, _| alive.contains(k.as_str()));
+    entry.git_cache.retain(|k, _| alive.contains(k.as_str()));
     let commands: Vec<ControlCmd> = entry.pending.drain(..).collect();
     let files: Vec<crate::model::FileTransfer> = entry.pending_files.drain(..).collect();
+    let git_queries: Vec<crate::model::GitQuery> = entry.pending_git.drain(..).collect();
     // 告知 agent 是否已被信任：未信任时 agent 不应再上报任何会话数据
     let trusted = state.registry.read().await.device_meta(&payload.machine_id).trusted;
-    ok(json!({ "commands": commands, "files": files, "trusted": trusted }))
+    ok(json!({ "commands": commands, "files": files, "gitQueries": git_queries, "trusted": trusted }))
 }
 
 #[derive(Deserialize)]
@@ -811,14 +949,22 @@ async fn ws_handler(
     State(state): State<SharedState>,
     Query(q): Query<WsQuery>,
 ) -> impl IntoResponse {
+    // 同 auth_user：过期会话一律当未登录
     let user = match &q.token {
-        Some(t) => state.tokens.read().await.get(t).cloned(),
+        Some(t) => state
+            .tokens
+            .read()
+            .await
+            .get(t)
+            .filter(|s| !s.expired())
+            .map(|s| s.username.clone()),
         None => None,
     };
-    ws.on_upgrade(move |socket| ws_loop(socket, state, user))
+    let token = q.token.clone().unwrap_or_default();
+    ws.on_upgrade(move |socket| ws_loop(socket, state, user, token))
 }
 
-async fn ws_loop(socket: WebSocket, state: SharedState, user: Option<String>) {
+async fn ws_loop(socket: WebSocket, state: SharedState, user: Option<String>, token: String) {
     let (mut tx, mut rx) = socket.split();
     let Some(user) = user else {
         let _ = tx
@@ -841,12 +987,30 @@ async fn ws_loop(socket: WebSocket, state: SharedState, user: Option<String>) {
     if tx.send(Message::Text(snapshot(&state, &user).await)).await.is_err() {
         return;
     }
+    // 登录态是否仍然有效。握手时校验过一次是不够的：这条流会持续推送该用户的
+    // 全部会话快照（含 prompt 与 cwd），若不复验，退出登录 / 会话过期 / 管理员
+    // 删号都切不断它 —— 被窃取的 token 一旦升级成 WS 就是永久且不可撤销的读权限。
+    async fn still_valid(state: &SharedState, token: &str, user: &str) -> bool {
+        match state.tokens.read().await.get(token) {
+            Some(s) => !s.expired() && s.username == user,
+            None => false,
+        }
+    }
+
     let mut sub = state.tx.subscribe();
     loop {
         tokio::select! {
             msg = sub.recv() => {
                 match msg {
                     Ok(_tick) => {
+                        if !still_valid(&state, &token, &user).await {
+                            let _ = tx
+                                .send(Message::Text(
+                                    json!({ "type": "error", "msg": "登录态已失效" }).to_string(),
+                                ))
+                                .await;
+                            break;
+                        }
                         if tx.send(Message::Text(snapshot(&state, &user).await)).await.is_err() {
                             break;
                         }

@@ -11,6 +11,17 @@ use std::path::PathBuf;
 
 pub const SUPER_USER: &str = "admin";
 
+/// 是否邮箱形态（用于隔离「口令账号」与「第三方账号」的命名空间）
+pub fn looks_like_email(s: &str) -> bool {
+    match s.split_once('@') {
+        Some((local, domain)) => {
+            !local.is_empty() && domain.contains('.') && !domain.starts_with('.')
+                && !domain.ends_with('.')
+        }
+        None => false,
+    }
+}
+
 /// 口令加盐哈希（迭代 SHA-256），存储格式 `sha256$<salt>$<hex>`
 fn hash_password(password: &str, salt: &str) -> String {
     let mut acc = format!("{salt}{password}").into_bytes();
@@ -50,6 +61,10 @@ pub struct User {
     pub password: String,
     #[serde(default)]
     pub display: String,
+    /// 第三方账号来源（google/apple）。为空表示本地口令账号。
+    /// 用于隔离两类账号：口令账号不可被 OAuth 顶掉，反之亦然。
+    #[serde(default)]
+    pub oauth_provider: Option<String>,
 }
 
 /// 每台设备的元数据（key = machine_id）
@@ -87,7 +102,22 @@ impl Registry {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("registry.json");
         let mut reg = if let Ok(txt) = std::fs::read_to_string(&path) {
-            let p: Persisted = serde_json::from_str(&txt).unwrap_or_default();
+            // 解析失败绝不能 unwrap_or_default()：那会把注册表当成空的，
+            // 紧接着 seed 逻辑又会 save() 覆盖原文件——一次解析失败＝所有用户永久丢失。
+            // 这里选择带着原文件退出，让人工介入。
+            let p: Persisted = match serde_json::from_str(&txt) {
+                Ok(p) => p,
+                Err(e) => {
+                    let backup = dir.join("registry.json.corrupt");
+                    let _ = std::fs::copy(&path, &backup);
+                    panic!(
+                        "注册表 {} 解析失败: {e}\n已备份为 {}。\n\
+                         为避免覆盖丢失全部用户，服务拒绝启动。请修复或删除该文件后重启。",
+                        path.display(),
+                        backup.display()
+                    );
+                }
+            };
             let super_user = if p.super_user.is_empty() {
                 SUPER_USER.to_string()
             } else {
@@ -109,6 +139,7 @@ impl Registry {
                 username: seed_user.to_string(),
                 password: hash_password(seed_pass, &random_salt()),
                 display: "超级管理员".into(),
+                oauth_provider: None,
             });
             reg.save();
         }
@@ -133,8 +164,28 @@ impl Registry {
             quota_limit: self.quota_limit,
             super_user: self.super_user.clone(),
         };
-        if let Ok(txt) = serde_json::to_string_pretty(&p) {
-            let _ = std::fs::write(self.dir.join("registry.json"), txt);
+        let Ok(txt) = serde_json::to_string_pretty(&p) else {
+            tracing::error!("注册表序列化失败，本次未落盘");
+            return;
+        };
+        // 原子写：先写同目录临时文件再 rename。
+        // 直接 write 会就地截断，进程在写一半时挂掉/磁盘写满，
+        // 留下的就是半截 JSON —— 下次启动解析失败。
+        let path = self.dir.join("registry.json");
+        let tmp = self.dir.join("registry.json.tmp");
+        if let Err(e) = std::fs::write(&tmp, &txt) {
+            tracing::error!("注册表写入临时文件失败: {e}");
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // 内含口令哈希，仅属主可读
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            tracing::error!("注册表落盘失败: {e}");
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 
@@ -156,6 +207,15 @@ impl Registry {
         if username.chars().any(char::is_whitespace) {
             return Err("用户名不能包含空白字符".into());
         }
+        if username.chars().count() > 64 {
+            return Err("用户名过长（最多 64 字符）".into());
+        }
+        // 防「账号预劫持」：第三方登录以邮箱作为用户名，若允许自助注册邮箱形态的
+        // 用户名，攻击者可抢注 victim@x.com，受害者用 Google/Apple 登录时会直接
+        // 落进攻击者已知口令的账号里。故口令注册一律不接受邮箱形态用户名。
+        if looks_like_email(username) {
+            return Err("用户名不能是邮箱格式（邮箱账号请使用第三方登录）".into());
+        }
         if self.users.iter().any(|u| u.username == username) {
             return Err("用户名已存在".into());
         }
@@ -173,6 +233,7 @@ impl Registry {
             username: username.to_string(),
             password: hash_password(password, &random_salt()),
             display: if display.is_empty() { username.to_string() } else { display.to_string() },
+            oauth_provider: None,
         };
         self.users.push(user.clone());
         self.save();
@@ -186,13 +247,14 @@ impl Registry {
             .cloned()
     }
 
-    pub fn user(&self, username: &str) -> Option<User> {
-        self.users.iter().find(|u| u.username == username).cloned()
-    }
-
     /// 全部用户（后管用户管理用）
     pub fn list_users(&self) -> Vec<User> {
         self.users.clone()
+    }
+
+    /// 用户是否存在（agent 上报时校验 AM_USER 用）
+    pub fn user_exists(&self, username: &str) -> bool {
+        self.users.iter().any(|u| u.username == username)
     }
 
     /// 删除用户（超级管理员不可删）；其名下设备释放归属并撤销信任
@@ -230,6 +292,47 @@ impl Registry {
         }
     }
 
+    /// 第三方登录：按用户名（邮箱）找用户，不存在则创建（随机口令占位）。
+    /// 命中的若是本地口令账号（非本渠道创建），拒绝——防账号预劫持。
+    pub fn find_or_create_oauth(
+        &mut self,
+        username: &str,
+        display: &str,
+        provider: &str,
+    ) -> Result<User, String> {
+        if let Some(u) = self.users.iter().find(|u| u.username == username) {
+            return match u.oauth_provider.as_deref() {
+                // 同渠道的既有第三方账号：正常登录
+                Some(p) if p == provider => Ok(u.clone()),
+                // 该邮箱是本地口令账号或别的渠道创建：不可被本渠道顶掉
+                _ => Err("该邮箱已被一个已有账号占用，无法用此方式登录".into()),
+            };
+        }
+        let id = (self
+            .users
+            .iter()
+            .filter_map(|u| u.id.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1)
+            .to_string();
+        let user = User {
+            id,
+            username: username.to_string(),
+            // 第三方账号本地无密码，放一段随机哈希占位（无法用于口令登录）
+            password: hash_password(&random_salt(), &random_salt()),
+            display: if display.trim().is_empty() {
+                username.to_string()
+            } else {
+                display.trim().to_string()
+            },
+            oauth_provider: Some(provider.to_string()),
+        };
+        self.users.push(user.clone());
+        self.save();
+        Ok(user)
+    }
+
     /// 修改昵称
     pub fn update_display(&mut self, username: &str, display: &str) -> Result<(), String> {
         match self.users.iter_mut().find(|u| u.username == username) {
@@ -258,45 +361,41 @@ impl Registry {
         username == self.super_user
     }
 
-    /// 兼容旧调用：静态判断仅用于无 Registry 上下文处（默认超管名）
-    pub fn is_super(username: &str) -> bool {
-        username == SUPER_USER
-    }
-
     pub fn device_meta(&self, machine_id: &str) -> DeviceMeta {
         self.devices.get(machine_id).cloned().unwrap_or_default()
     }
 
     /// 首次见到设备时登记；已存在则仅在其尚无 owner 时补认领者
     pub fn ensure_device(&mut self, machine_id: &str, claim_owner: Option<&str>, auto_trust: bool) {
-        let entry = self.devices.entry(machine_id.to_string()).or_insert_with(|| DeviceMeta {
-            owner: claim_owner.map(str::to_string),
-            trusted: auto_trust,
+        // 该函数在每次 agent 上报（1.5s 一次）时都会被调用，绝大多数情况下
+        // 什么都没变。只有真的改了才落盘，否则等于把整个注册表按 1.5s × 设备数
+        // 的频率反复重写。
+        let mut dirty = false;
+        let entry = self.devices.entry(machine_id.to_string()).or_insert_with(|| {
+            dirty = true;
+            DeviceMeta {
+                owner: claim_owner.map(str::to_string),
+                trusted: auto_trust,
+            }
         });
         if entry.owner.is_none() {
             if let Some(o) = claim_owner {
                 entry.owner = Some(o.to_string());
+                dirty = true;
             }
         }
-        if auto_trust {
+        if auto_trust && !entry.trusted {
             entry.trusted = true;
+            dirty = true;
         }
-        self.save();
+        if dirty {
+            self.save();
+        }
     }
 
     pub fn set_trust(&mut self, machine_id: &str, trusted: bool) -> bool {
         if let Some(d) = self.devices.get_mut(machine_id) {
             d.trusted = trusted;
-            self.save();
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn set_owner(&mut self, machine_id: &str, owner: &str) -> bool {
-        if let Some(d) = self.devices.get_mut(machine_id) {
-            d.owner = Some(owner.to_string());
             self.save();
             true
         } else {
@@ -322,5 +421,27 @@ impl Registry {
     /// 该设备是否归属指定用户（用于设备管理列表，含未信任的 pending）
     pub fn owned_by(&self, machine_id: &str, username: &str) -> bool {
         self.device_meta(machine_id).owner.as_deref() == Some(username)
+    }
+}
+
+#[cfg(test)]
+mod user_exists_tests {
+    use super::*;
+
+    fn reg() -> Registry {
+        let dir = std::env::temp_dir().join(format!("am-ue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Registry::load(dir, "admin", "admin123")
+    }
+
+    /// agent 上报时用它校验 AM_USER：拼错一个字母就该被拒，
+    /// 而不是登记成谁都看不见的孤儿设备
+    #[test]
+    fn distinguishes_existing_from_typo() {
+        let r = reg();
+        assert!(r.user_exists("admin"));
+        assert!(!r.user_exists("admln"), "拼错的用户名不该被当成存在");
+        assert!(!r.user_exists(""), "空用户名不存在");
+        assert!(!r.user_exists("Admin"), "用户名区分大小写（owned_by 也是严格相等）");
     }
 }

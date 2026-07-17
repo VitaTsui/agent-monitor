@@ -1,12 +1,15 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import { Button } from "@hsu-react/ui";
 import { Popconfirm, Spin, Tooltip } from "antd";
+import { platformIcon } from "../../_utils/platform";
 import {
+  BranchesOutlined,
   CloseOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
   StopOutlined,
+  SyncOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
@@ -15,6 +18,8 @@ import { PortalTaskData } from "@/services/apis/portal";
 import PortalStore from "../../PortalStore";
 import Composer from "../Composer";
 import TerminalFeed from "../TerminalFeed";
+import SessionPanels from "../SessionPanels";
+import GitDiffModal from "../GitDiffModal";
 import styles from "./index.module.scss";
 
 interface ChatPaneProps {
@@ -22,12 +27,6 @@ interface ChatPaneProps {
   /** 是否显示关闭按钮（多格时） */
   closable?: boolean;
 }
-
-const PLATFORM_ICON: Record<string, string> = {
-  macos: "",
-  windows: "🪟",
-  linux: "🐧",
-};
 
 /** token 数量缩写：1.2k / 3.4M */
 const fmtTokens = (n: number) => {
@@ -38,14 +37,26 @@ const fmtTokens = (n: number) => {
 
 const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   const { task, closable } = props;
-  const { messagesOf, isLoadingMessages, control, closePane, sendInput } =
-    PortalStore;
+  const {
+    messagesOf,
+    isLoadingMessages,
+    control,
+    closePane,
+    sendInput,
+    syncMessages,
+  } = PortalStore;
   const chatRef = useRef<HTMLDivElement>(null);
   const stickBottomRef = useRef(true);
+  const [gitOpen, setGitOpen] = useState(false);
 
   const id = task.id ?? "";
   const messages = messagesOf(id);
   const loading = isLoadingMessages(id);
+  // 清单与后台任务已抽到下方的状态面板，不参与对话流渲染
+  const feedMessages = React.useMemo(
+    () => messages.filter((m) => m.role !== "todos" && m.role !== "bgtasks"),
+    [messages],
+  );
 
   useEffect(() => {
     const el = chatRef.current;
@@ -75,7 +86,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
           <div className={styles.headMeta}>
             <span>{task.projectName}</span>
             <span>
-              {PLATFORM_ICON[task.platform ?? ""] ?? ""} {task.hostname}
+              {platformIcon(task.platform)} {task.hostname}
             </span>
             <span>{task.ideDsr}</span>
             {task.pid ? <span>PID {task.pid}</span> : null}
@@ -100,6 +111,22 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
           </div>
         </div>
         <div className={styles.headActions}>
+          <Tooltip title="重新同步该终端的对话内容">
+            <Button
+              size="small"
+              type="text"
+              icon={<SyncOutlined spin={loading} />}
+              onClick={() => syncMessages(id)}
+            />
+          </Tooltip>
+          <Tooltip title="查看代码改动（git diff）">
+            <Button
+              size="small"
+              type="text"
+              icon={<BranchesOutlined />}
+              onClick={() => setGitOpen(true)}
+            />
+          </Tooltip>
           <Tooltip title={paused ? "恢复" : "暂停"}>
             <Button
               size="small"
@@ -150,7 +177,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
 
       <div className={styles.chat} ref={chatRef} onScroll={onChatScroll}>
         <Spin spinning={loading}>
-          {!loading && messages.length === 0 ? (
+          {!loading && feedMessages.length === 0 ? (
             <div className={styles.chatEmpty}>
               <div className={styles.big}>💬</div>
               <div>该会话暂无可展示的对话内容</div>
@@ -158,7 +185,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
           ) : (
             <div className={styles.chatColumn}>
               <TerminalFeed
-                messages={messages}
+                messages={feedMessages}
                 running={task.status === "running"}
               />
             </div>
@@ -166,15 +193,27 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
         </Spin>
       </div>
 
+      {/* 清单与后台任务是「当前状态」而非时序事件：悬浮在本格右侧、可收起 */}
+      <SessionPanels messages={messages} />
+
       <div className={styles.composerWrap}>
         <div className={styles.chatColumn}>
           <Composer
             taskId={id}
             disabled={!controllable}
+            machineId={task.machineId}
+            cwd={task.process?.cwd}
             onSend={(text) => sendInput(id, text)}
           />
         </div>
       </div>
+
+      <GitDiffModal
+        open={gitOpen}
+        taskId={id}
+        title={task.projectName}
+        onClose={() => setGitOpen(false)}
+      />
     </div>
   );
 });

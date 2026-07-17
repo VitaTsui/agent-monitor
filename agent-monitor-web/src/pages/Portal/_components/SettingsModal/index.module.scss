@@ -1,9 +1,9 @@
-$oat: #f2f0e9;
-$border: rgba(61, 57, 41, 0.09);
-$text: #3d3929;
-$muted: #87867f;
-$accent: #c96442;
-$hover: rgba(61, 57, 41, 0.06);
+$oat: #e6f1f3;
+$border: rgba(36, 61, 66, 0.09);
+$text: #243d42;
+$muted: #7c9096;
+$accent: #0f9bad;
+$hover: rgba(36, 61, 66, 0.06);
 
 .SettingsModal {
   :global(.ant-modal-content) {
@@ -12,48 +12,90 @@ $hover: rgba(61, 57, 41, 0.06);
     border-radius: 16px;
   }
 
-  .layout {
-    display: flex;
-    height: 520px;
+  // antd 给 .ant-modal-body 留了默认的左右内边距，会在弹窗最外侧留出两道空隙，
+  // 左侧导航的底色够不到左边缘、右侧内容也够不到右边缘。这里的 layout 要自己
+  // 铺满整个弹窗，故清零。
+  :global(.ant-modal-body) {
+    padding: 0;
   }
 
-  // 左侧分类导航（Claude 设置弹窗式）
+  .layout {
+    display: flex;
+    height: 640px;
+    max-height: calc(100vh - 120px);
+    position: relative;
+  }
+
+  // 右上角关闭按钮（弹窗无标题栏，需要显式的关闭入口）
+  .closeBtn {
+    position: absolute;
+    top: 12px;
+    right: 14px;
+    z-index: 2;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    cursor: pointer;
+    color: $muted;
+    font-size: 14px;
+
+    &:hover {
+      background: $hover;
+      color: $text;
+    }
+  }
+
+  // 左侧分类导航（对齐 claude.ai 设置弹窗）
+  // claude 的选中态是一层低调的填充，不是浮起来的白色卡片；
+  // 标题用 15px 半粗，与对话页侧栏的层级保持一致。
   .nav {
-    width: 180px;
-    min-width: 180px;
+    width: 200px;
+    min-width: 200px;
     background: $oat;
     border-right: 1px solid $border;
-    padding: 16px 10px;
+    padding: 18px 8px;
 
     .navTitle {
-      font-size: 13px;
+      font-size: 15px;
       font-weight: 600;
-      color: $muted;
-      padding: 6px 10px 12px;
+      color: $text;
+      padding: 4px 10px 14px;
     }
 
     .navItem {
       display: flex;
       align-items: center;
       gap: 10px;
-      padding: 9px 10px;
+      padding: 8px 10px;
       border-radius: 8px;
       cursor: pointer;
       font-size: 14px;
       color: $text;
       margin-bottom: 2px;
 
+      :global(.anticon) {
+        font-size: 16px;
+        color: $muted;
+      }
+
       &:hover {
         background: $hover;
       }
 
       &.active {
-        background: #fff;
+        background: rgba(36, 61, 66, 0.09);
         font-weight: 500;
-        box-shadow: 0 1px 3px rgba(61, 57, 41, 0.08);
+
+        :global(.anticon) {
+          color: $text;
+        }
       }
 
-      span {
+      // .anticon 也是 span，必须排除，否则图标被 flex:1 拉宽、与文字隔开一大截
+      span:not(:global(.anticon)) {
         flex: 1;
       }
     }
@@ -77,20 +119,25 @@ $hover: rgba(61, 57, 41, 0.06);
     }
   }
 
-  // 账户
+  // 账户：全宽信息卡，避免右侧大片留白。
+  // 用中性描边而非彩色描边 —— claude 的设置卡片不靠主色抢注意力。
   .account {
     display: flex;
     align-items: center;
     gap: 14px;
     margin-bottom: 22px;
+    padding: 16px 18px;
+    border: 1px solid $border;
+    border-radius: 12px;
 
     .avatar {
-      width: 52px;
-      height: 52px;
+      width: 48px;
+      height: 48px;
+      min-width: 48px;
       border-radius: 50%;
       background: $accent;
       color: #fff;
-      font-size: 22px;
+      font-size: 20px;
       font-weight: 600;
       display: flex;
       align-items: center;
@@ -98,14 +145,14 @@ $hover: rgba(61, 57, 41, 0.06);
     }
 
     .accName {
-      font-size: 16px;
+      font-size: 15px;
       font-weight: 600;
       color: $text;
     }
 
     .accMeta {
       margin-top: 3px;
-      font-size: 12px;
+      font-size: 12.5px;
       color: $muted;
     }
   }
@@ -113,15 +160,15 @@ $hover: rgba(61, 57, 41, 0.06);
   // 设备管理
   .hint {
     font-size: 12px;
-    color: rgba(61, 57, 41, 0.6);
-    background: rgba(201, 100, 66, 0.06);
+    color: rgba(36, 61, 66, 0.6);
+    background: rgba(15, 155, 173, 0.06);
     border-radius: 10px;
     padding: 10px 12px;
     line-height: 1.6;
     margin-bottom: 16px;
 
     code {
-      background: rgba(61, 57, 41, 0.07);
+      background: rgba(36, 61, 66, 0.07);
       border-radius: 4px;
       padding: 0 4px;
       font-size: 11px;
@@ -134,7 +181,7 @@ $hover: rgba(61, 57, 41, 0.06);
     .sectionTitle {
       font-size: 13px;
       font-weight: 600;
-      color: rgba(61, 57, 41, 0.6);
+      color: rgba(36, 61, 66, 0.6);
       margin-bottom: 8px;
     }
   }
@@ -220,7 +267,7 @@ $hover: rgba(61, 57, 41, 0.06);
 
     .quotaLabel {
       font-size: 13px;
-      color: rgba(61, 57, 41, 0.7);
+      color: rgba(36, 61, 66, 0.7);
       min-width: 110px;
     }
   }
@@ -231,7 +278,13 @@ $hover: rgba(61, 57, 41, 0.06);
   }
 
   .quotaInput {
-    width: 200px;
+    // 拉满剩余宽度，别在行尾留大片空白
+    flex: 1;
+  }
+
+  // 用量百分比进度条
+  .quotaProgress {
+    margin: 6px 0 8px;
   }
 }
 
@@ -245,7 +298,7 @@ $hover: rgba(61, 57, 41, 0.06);
 
     .guardLabel {
       font-size: 13px;
-      color: rgba(61, 57, 41, 0.75);
+      color: rgba(36, 61, 66, 0.75);
     }
   }
 
@@ -273,8 +326,8 @@ $hover: rgba(61, 57, 41, 0.06);
     border-color: $accent !important;
 
     &:hover:not(:disabled) {
-      background: #b3552f !important;
-      border-color: #b3552f !important;
+      background: #0c7f8f !important;
+      border-color: #0c7f8f !important;
     }
   }
 
@@ -284,11 +337,11 @@ $hover: rgba(61, 57, 41, 0.06);
 
   // hsu-ui TextArea 包裹层的深色边框调淡
   :global([class*="textarea--"]) {
-    border-color: rgba(61, 57, 41, 0.18) !important;
+    border-color: rgba(36, 61, 66, 0.18) !important;
     border-radius: 10px;
 
     &:focus-within {
-      border-color: rgba(201, 100, 66, 0.5) !important;
+      border-color: rgba(15, 155, 173, 0.5) !important;
     }
   }
 }

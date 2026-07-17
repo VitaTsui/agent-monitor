@@ -151,9 +151,6 @@ pub struct ControlReq {
     pub action: ControlAction,
     /// 可选：明确指定 pid（同目录多进程时消歧）
     pub pid: Option<u32>,
-    /// action=Input 时要注入的文本
-    #[serde(default)]
-    pub text: Option<String>,
 }
 
 /// 一台被监控的电脑
@@ -192,6 +189,51 @@ pub struct ReportPayload {
     #[serde(default)]
     pub owner: Option<String>,
     pub tasks: Vec<Task>,
+    /// 上一轮 hub 请求的 git 对比结果（回传）
+    #[serde(default)]
+    pub git_results: Vec<GitResult>,
+}
+
+/// 一个改动文件（git status --porcelain 解析）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFile {
+    /// 两位状态码，如 " M"、"??"、"A "
+    pub status: String,
+    pub path: String,
+}
+
+/// 某会话项目目录的 git 概览（改动文件 + 统一 diff）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GitOverview {
+    pub is_repo: bool,
+    pub branch: String,
+    pub files: Vec<GitFile>,
+    /// 相对上次提交的统一 diff 文本（含暂存与未暂存改动）
+    pub diff: String,
+    /// 未跟踪文件列表（不在 diff 里，单列）
+    pub untracked: Vec<String>,
+    /// 计算出错时的提示（如非 git 项目）
+    #[serde(default)]
+    pub error: String,
+}
+
+/// agent → hub：git 对比结果（对应某 task）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitResult {
+    pub task_id: String,
+    pub overview: GitOverview,
+}
+
+/// hub → agent：请求对某 task 的项目目录做 git 对比
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitQuery {
+    pub task_id: String,
+    /// 会话项目目录（agent 本机路径）
+    pub cwd: String,
 }
 
 /// hub → agent 的待执行控制命令
@@ -223,20 +265,6 @@ pub fn platform_dsr(platform: &str) -> String {
         "linux" => "Linux".into(),
         other => other.into(),
     }
-}
-
-/// 监控端自身状态
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentStatus {
-    pub hostname: String,
-    pub platform: String,
-    pub version: String,
-    pub started_at: String,
-    pub projects_dir: String,
-    pub session_count: usize,
-    pub running_count: usize,
-    pub process_count: usize,
 }
 
 impl TaskStatus {

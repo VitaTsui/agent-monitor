@@ -1,0 +1,27 @@
+[Unit]
+Description=Agent Task Monitor (hub)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 专用低权限用户运行（安装脚本会创建）
+User=agentmon
+Group=agentmon
+WorkingDirectory=/opt/agent-monitor
+# 环境变量集中在 /opt/agent-monitor/env（含密钥，权限 600）
+EnvironmentFile=/opt/agent-monitor/env
+ExecStart=/opt/agent-monitor/agent-task-monitor
+Restart=always
+RestartSec=3
+
+# 加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/agent-monitor/data
+# 服务只对内监听 8383，由 Caddy 反代对外；防火墙另行封锁 8383 公网入站
+
+[Install]
+WantedBy=multi-user.target

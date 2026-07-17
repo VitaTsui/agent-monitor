@@ -22,17 +22,24 @@ class PwdChangeFormStore extends FormModalStore<PwdChangeData> {
     data: PwdChangeData,
     fn?: (res: ResType) => void
   ) => {
-    editPwdChange(data).then((res) => {
-      if (res.code === 0) {
-        fn?.(res);
+    editPwdChange(data)
+      .then((res) => {
+        if (res.code === 0) {
+          fn?.(res);
 
-        notification.success({
-          message: "修改成功，请重新登录",
+          notification.success({
+            message: "修改成功，请重新登录",
+          });
+        } else {
+          this._message(res);
+        }
+      })
+      // 不接住的话网络异常会让弹窗静默卡住：既不报错也不关闭
+      .catch(() => {
+        notification.error({
+          message: "修改密码失败，请检查网络后重试",
         });
-      } else {
-        this._message(res);
-      }
-    });
+      });
   };
 }
 

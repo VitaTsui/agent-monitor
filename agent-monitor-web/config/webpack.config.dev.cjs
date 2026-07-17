@@ -19,6 +19,8 @@ Object.keys(envConfig).map((key) => {
         target: _api_proxy[key]?.target,
         pathRewrite: _api_proxy[key]?.pathRewrite,
         changeOrigin: true,
+        // 放行 WebSocket 升级请求；对纯 HTTP 的代理没有副作用
+        ws: true,
       };
 
       if (_api_proxy[key]?.ReqHeader) {

@@ -203,6 +203,11 @@ fn agent_kind(name: &str, cmd: &[String]) -> Option<&'static str> {
 
 /// 对指定 pid 执行控制动作。返回动作的中文描述。
 pub fn control(pid: u32, action: ControlAction) -> Result<&'static str> {
+    // 安全下界：pid=0 会把信号发给整个进程组；pid>i32::MAX 转成 i32 会变负数，
+    // kill(-1, SIGKILL) 将杀光当前用户的所有进程。这里一律拒绝。
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(anyhow!("非法 pid: {pid}"));
+    }
     #[cfg(unix)]
     {
         let sig = match action {
@@ -254,6 +259,9 @@ pub fn control(pid: u32, action: ControlAction) -> Result<&'static str> {
 /// macOS: 先按 tty 匹配 Terminal/iTerm2 会话用 AppleScript 写入（无需 root）；
 ///        失败再回退 TIOCSTI。其它 Unix: 直接 TIOCSTI。
 pub fn send_input(pid: u32, text: &str) -> Result<&'static str> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(anyhow!("非法 pid: {pid}"));
+    }
     #[cfg(unix)]
     {
         let tty = tty_of(pid).ok_or_else(|| anyhow!("无法定位进程 {pid} 的终端设备"))?;
@@ -300,8 +308,15 @@ fn inject_tiocsti(tty: &str, text: &str) -> Result<&'static str> {
 /// macOS：按 tty 匹配 Terminal.app / iTerm2 的会话并写入文本（等价于键入并回车）
 #[cfg(target_os = "macos")]
 fn applescript_write(tty: &str, text: &str) -> Result<&'static str> {
-    // 转义 AppleScript 字符串字面量
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    // 转义 AppleScript 字符串字面量。
+    // 换行必须一起转：AppleScript 的字符串字面量不能跨行，文本里一个裸换行
+    // 就会把字面量提前闭合，后面的内容被当成脚本解析（＝任意 AppleScript 注入）。
+    let esc = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    };
     let tty_e = esc(tty);
     let text_e = esc(text);
 

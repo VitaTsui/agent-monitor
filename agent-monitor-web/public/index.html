@@ -2,13 +2,20 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      viewport-fit=cover 是安全区适配的前提：不加它，WebView 会把
+      env(safe-area-inset-*) 全部给 0，CSS 侧再怎么写也补不出刘海/手势条的留白。
+      （Android 15 起窗口强制延伸到系统栏下，移动端外壳尤其需要。）
+    -->
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no"
+      content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
     <meta name="description" content="" />
     <!-- 引入路径必须为 /to/file/path -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="icon" href="/favicon.ico" type="image/x-icon" />
+    <meta name="theme-color" content="#0f9bad" />
     <script src="/config.js"></script>
     <script>
       // 运行时动态设置标题
