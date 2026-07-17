@@ -45,7 +45,13 @@ const CODEX_BUILTIN: &[(&str, &str)] = &[
 /// 汇总某会话可用命令：provider 内置 + 项目 .claude/commands + 用户 ~/.claude/commands
 pub fn collect(provider: &str, project_cwd: &str) -> Vec<SlashCommand> {
     let mut out: Vec<SlashCommand> = Vec::new();
-    let builtin = if provider == "codex" { CODEX_BUILTIN } else { CLAUDE_BUILTIN };
+    // 只对已知命令体系的 provider 给内置命令；其它（gemini/aider/进程级任务）
+    // 返回空 —— 前端没有命令 chips 可点，避免把 Claude 的命令错发给别的代理。
+    let builtin = match provider {
+        "claude" => CLAUDE_BUILTIN,
+        "codex" => CODEX_BUILTIN,
+        _ => return out,
+    };
     for (name, desc) in builtin {
         out.push(SlashCommand {
             name: name.to_string(),

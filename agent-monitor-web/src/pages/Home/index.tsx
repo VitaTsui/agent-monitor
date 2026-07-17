@@ -3,6 +3,7 @@ import React from "react";
 import { Button } from "@hsu-react/ui";
 import { useNavigate } from "react-router-dom";
 import {
+  AndroidFilled,
   AppleFilled,
   CloudServerOutlined,
   CodeOutlined,
@@ -23,7 +24,7 @@ const FEATURES = [
   {
     icon: <EyeOutlined />,
     title: "实时会话监控",
-    desc: "解析 Claude Code 会话文件，实时呈现当前提示词、正在调用的工具与执行时间线，像 Claude Code 终端一样直观。",
+    desc: "解析 Claude Code / Codex 会话，WebSocket 实时推送提示词、工具调用、任务清单与后台任务；其余代理进程级接管，同样可控。",
   },
   {
     icon: <ControlOutlined />,
@@ -48,15 +49,23 @@ const FEATURES = [
   {
     icon: <DesktopOutlined />,
     title: "桌面 & 移动端",
-    desc: "Mac / Windows 桌面客户端托盘常驻、开机自启；移动端网页随时随地查看与控制。",
+    desc: "Mac / Windows 桌面应用内嵌完整前台，关闭可缩到托盘后台同步、开机自启；Android 应用随时随地查看与控制。",
   },
 ];
 
 const STEPS = [
   { n: "1", t: "服务端部署", d: "在一台服务器上运行 hub，自动聚合各机数据、托管网页界面。" },
-  { n: "2", t: "客户端接入", d: "每台电脑运行客户端，把本机 Claude Code 会话安全上报到 hub。" },
+  { n: "2", t: "客户端接入", d: "每台电脑安装客户端并登录账号，本机自动绑定、安全上报会话。" },
   { n: "3", t: "网页监控", d: "登录网页前台，实时查看、控制、发布任务；信任设备后即可见其会话。" },
 ];
+
+/** 客户端安装包直链（hub /downloads 托管；开发经 /api 代理） */
+const DL_BASE = `${process.env.API_BASE ?? ""}/downloads`;
+const DOWNLOADS = {
+  mac: `${DL_BASE}/${encodeURIComponent("终端任务监控.dmg")}`,
+  win: `${DL_BASE}/${encodeURIComponent("终端任务监控.exe")}`,
+  android: `${DL_BASE}/${encodeURIComponent("终端任务监控.apk")}`,
+};
 
 const Home: React.FC = () => {
   const navigate = useNavigate();
@@ -87,7 +96,7 @@ const Home: React.FC = () => {
       <section className={styles.hero}>
         <div className={styles.heroText}>
           <div className={styles.badge}>
-            <ThunderboltFilled /> 面向 Claude Code 的终端代理监控
+            <ThunderboltFilled /> 面向所有 AI 编码代理的终端监控
           </div>
           <h1 className={styles.title}>
             盯住每一台电脑上
@@ -95,9 +104,9 @@ const Home: React.FC = () => {
             正在跑的 <span className={styles.accent}>AI 编码代理</span>
           </h1>
           <p className={styles.subtitle}>
-            一处网页，实时监控多台 Mac / Windows / Linux
-            终端里正在执行的 Claude Code 任务，随时暂停、中断、注入新指令。
-            纯实时、不落存储，按设备归属严格隔离。
+            一处网页，实时监控多台 Mac / Windows / Linux 终端里正在执行的
+            Claude Code、Codex、Gemini CLI 等 AI 编码代理任务，随时暂停、中断、
+            注入新指令。纯实时、不落存储，按设备归属严格隔离。
           </p>
           <div className={styles.heroActions}>
             <Button className={styles.primaryBtn} type="primary" onClick={enter}>
@@ -159,23 +168,37 @@ const Home: React.FC = () => {
       {/* 下载客户端 */}
       <section id="clients" className={styles.clients}>
         <div className={styles.sectionHead}>
-          <h2>桌面客户端</h2>
-          <p>托盘常驻、后台运行、开机自启，把本机会话安全上报。</p>
+          <h2>客户端</h2>
+          <p>
+            桌面端是正常应用程序：打开即完整前台，关闭可选缩小到系统托盘——
+            后台持续同步本机会话，也可开机自启。
+          </p>
         </div>
         <div className={styles.clientCards}>
-          <div className={styles.clientCard}>
+          <a className={styles.clientCard} href={DOWNLOADS.mac} download>
             <AppleFilled className={styles.clientIcon} />
             <div className={styles.clientName}>macOS</div>
-            <div className={styles.clientDesc}>通用版（Apple 芯片 / Intel），菜单栏托盘常驻</div>
-          </div>
-          <div className={styles.clientCard}>
+            <div className={styles.clientDesc}>
+              通用版（Apple 芯片 / Intel），完整前台 + 托盘后台同步
+            </div>
+            <span className={styles.clientDl}>下载 .dmg</span>
+          </a>
+          <a className={styles.clientCard} href={DOWNLOADS.win} download>
             <WindowsFilled className={styles.clientIcon} />
             <div className={styles.clientName}>Windows</div>
-            <div className={styles.clientDesc}>系统托盘常驻，一键安装脚本</div>
-          </div>
+            <div className={styles.clientDesc}>单文件程序，双击即用，完整前台 + 托盘后台同步</div>
+            <span className={styles.clientDl}>下载 .exe</span>
+          </a>
+          <a className={styles.clientCard} href={DOWNLOADS.android} download>
+            <AndroidFilled className={styles.clientIcon} />
+            <div className={styles.clientName}>Android</div>
+            <div className={styles.clientDesc}>移动端应用，前台功能随时随地可用</div>
+            <span className={styles.clientDl}>下载 .apk</span>
+          </a>
         </div>
         <div className={styles.clientHint}>
-          客户端安装包由管理员分发；接入后到前台「设备管理」信任本机即可。
+          安装后在客户端里登录你的账号，本机即自动绑定并建立链接——
+          网页、移动端与其他客户端上立刻可见这台电脑的终端会话（设备管理里可随时断开）。
         </div>
       </section>
 

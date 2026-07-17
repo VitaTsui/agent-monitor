@@ -1,6 +1,6 @@
 [package]
 name = "agent-task-monitor"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "跨平台监控 Cursor/VSCode/终端中 AI 编码代理（Claude Code、Codex 等）正在执行的任务，并提供 HTTP/WebSocket 管理接口"
 license = "MIT"

@@ -10,6 +10,8 @@ interface TerminalFeedProps {
   messages: PortalMessage[];
   /** 会话是否执行中（末尾显示工作指示） */
   running?: boolean;
+  /** 终端卡标题：来源代理名（Claude Code / Codex / Gemini CLI …） */
+  providerDsr?: string;
 }
 
 /** 一轮对话：一条用户消息 + 其后的助手/工具活动 */
@@ -51,7 +53,7 @@ const fmtTime = (ts?: string) => (ts ? dayjs(ts).format("MM-DD HH:mm") : "");
 const RESULT_CLAMP_LINES = 4;
 
 const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
-  const { messages, running } = props;
+  const { messages, running, providerDsr } = props;
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   const turns = toTurns(messages);
@@ -161,7 +163,7 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                     <i />
                     <i />
                   </span>
-                  <span className={styles.termTitle}>Claude Code</span>
+                  <span className={styles.termTitle}>{providerDsr || "终端"}</span>
                   <span className={styles.termTime}>
                     {fmtTime(
                       turn.items[turn.items.length - 1]?.timestamp ??

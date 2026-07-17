@@ -81,7 +81,20 @@ fn minimize_to_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 
 /// 运行 Tauri 桌面应用（阻塞，不返回）。
 pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
-    let portal_url = format!("{}/portal", cfg.web_base);
+    // 未绑定账号的 agent：窗口地址带 ?pair=配对码 —— 用户在窗口里登录后，
+    // 网页会自动把本机绑定到该账号（无需任何手工令牌）。
+    let pair_q = tauri::async_runtime::block_on(async {
+        if state.device_token.read().await.is_some() {
+            None
+        } else {
+            state.pair_info.read().await.as_ref().map(|(c, _)| c.clone())
+        }
+    });
+    let portal_url = match &pair_q {
+        Some(code) => format!("{}/portal?pair={code}", cfg.web_base),
+        None => format!("{}/portal", cfg.web_base),
+    };
+    let need_onboard = pair_q.is_some();
     let web_base = cfg.web_base.clone();
     let is_agent = cfg.is_agent;
     let state_setup = state.clone();
@@ -94,7 +107,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             // agent 模式启动即后台，初始就用 Accessory —— 若先 Regular 再切，
             // set_activation_policy 走事件循环代理，Dock 图标会闪现一下才消失。
             #[cfg(target_os = "macos")]
-            let _ = app.set_activation_policy(if is_agent {
+            let _ = app.set_activation_policy(if is_agent && !need_onboard {
                 tauri::ActivationPolicy::Accessory
             } else {
                 tauri::ActivationPolicy::Regular
@@ -107,7 +120,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                 .title("终端任务监控")
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(960.0, 640.0)
-                .visible(!is_agent)
+                .visible(!is_agent || need_onboard)
                 .build()?;
 
             // 点右上角关闭按钮：按用户设置的关闭行为处理。
@@ -150,8 +163,24 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                 .on_menu_event(move |app, event| {
                     let id = event.id.as_ref();
                     match id {
-                        "show" => show_main(app),
+                        "show" => {
+                            let pair = tauri::async_runtime::block_on(async {
+                                if state_evt.device_token.read().await.is_some() {
+                                    None
+                                } else {
+                                    state_evt
+                                        .pair_info
+                                        .read()
+                                        .await
+                                        .as_ref()
+                                        .map(|(c, _)| format!("{web_base_menu}/portal?pair={c}"))
+                                }
+                            });
+                            show_main_with_pair(app, pair);
+                        }
                         "browser" => open_external(&format!("{web_base_menu}/portal")),
+                        // 更新推送入口：打开官网「客户端」下载区
+                        "update" => open_external(&format!("{web_base_menu}/#clients")),
                         "autostart" => set_autostart(!autostart_enabled()),
                         "close_to_tray" => {
                             // 切换关闭行为并落盘；下次点菜单会重建反映新勾选态
@@ -196,11 +225,12 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                 let mut last_sig = String::new();
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(3));
-                    let (terminals, excluded, hub_err) = tauri::async_runtime::block_on(async {
+                    let (terminals, excluded, hub_err, upd) = tauri::async_runtime::block_on(async {
                         let t = state_bg.terminals.read().await.clone();
                         let e = state_bg.excludes.read().await.list();
                         let err = state_bg.hub_error.read().await.clone();
-                        (t, e, err)
+                        let u = state_bg.hub_latest_version.read().await.clone();
+                        (t, e, err, u)
                     });
                     let connected = state_bg
                         .hub_connected
@@ -213,7 +243,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                     // close_to_tray 勾选态也进签名：托盘里切换后菜单要跟着刷新。
                     let close_tray = read_close_behavior(&state_bg) == CloseBehavior::Tray;
                     let sig = format!(
-                        "{:?}|{:?}|{connected}|{dev_trusted}|{hub_err:?}|{}|{close_tray}",
+                        "{:?}|{:?}|{connected}|{dev_trusted}|{hub_err:?}|{upd:?}|{}|{close_tray}",
                         terminals,
                         excluded,
                         autostart_enabled()
@@ -286,6 +316,20 @@ fn build_tray_menu<R: tauri::Runtime>(
     let quit = MenuItem::with_id(manager, "quit", "退出", true, None::<&str>)?;
 
     let menu = Menu::new(manager)?;
+    // 更新推送：hub 端有更新版本时置顶提示，点击去官网下载区
+    if let Some(v) =
+        tauri::async_runtime::block_on(async { state.hub_latest_version.read().await.clone() })
+    {
+        let upd = MenuItem::with_id(
+            manager,
+            "update",
+            format!("⬆ 新版本 v{v} 可用 · 点击下载"),
+            true,
+            None::<&str>,
+        )?;
+        menu.append(&upd)?;
+        menu.append(&sep()?)?;
+    }
     // agent 模式顶部显示一行连接状态（禁用项，仅展示）
     if is_agent {
         let connected = state
@@ -502,6 +546,17 @@ fn set_autostart(enable: bool) {
 }
 
 fn show_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    show_main_with_pair(app, None)
+}
+
+/// 打开主窗口；未绑定且有配对码时，先把窗口导航到带 ?pair= 的地址再显示，
+/// 保证用户任何时候从托盘打开都能走通「登录即绑定」。
+fn show_main_with_pair<R: tauri::Runtime>(app: &tauri::AppHandle<R>, pair_url: Option<String>) {
+    if let (Some(url), Some(w)) = (pair_url, app.get_webview_window("main")) {
+        if let Ok(u) = url.parse() {
+            let _ = w.navigate(u);
+        }
+    }
     // 从托盘重新打开：恢复 Dock 图标（macOS），再显示并聚焦窗口
     set_app_visible_in_dock(app, true);
     if let Some(w) = app.get_webview_window("main") {

@@ -282,6 +282,9 @@ pub fn provider_dsr(provider: &str) -> String {
     match provider {
         "claude" => "Claude Code".into(),
         "codex" => "Codex".into(),
+        "gemini" => "Gemini CLI".into(),
+        "aider" => "Aider".into(),
+        "opencode" => "OpenCode".into(),
         other => other.into(),
     }
 }

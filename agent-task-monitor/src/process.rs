@@ -176,7 +176,15 @@ fn name_via_ps(_pid: u32) -> Option<String> {
 
 /// 判断进程属于哪种 AI 编码代理；未来在此扩展新代理（如 gemini 等）
 fn agent_kind(name: &str, cmd: &[String]) -> Option<&'static str> {
-    for (agent, needle) in [("claude", "claude"), ("codex", "codex")] {
+    // 支持的 AI 编码代理：进程名/命令行命中即识别为对应 provider。
+    // 即便某 provider 没有会话解析器，也会以「进程任务」出现并可控制（信号是通用的）。
+    for (agent, needle) in [
+        ("claude", "claude"),
+        ("codex", "codex"),
+        ("gemini", "gemini"),
+        ("aider", "aider"),
+        ("opencode", "opencode"),
+    ] {
         if name == needle {
             return Some(agent);
         }

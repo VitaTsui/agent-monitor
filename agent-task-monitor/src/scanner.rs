@@ -2,7 +2,7 @@ use crate::model::{MessageBrief, ProcessInfo, Task, TaskStatus};
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -11,6 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// 单个会话 jsonl 解析出的摘要（缓存单元）
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
+    /// 会话来源代理：claude / codex …（决定消息解析器与进程配对）
+    pub provider: String,
     pub session_id: String,
     /// 项目目录编码名（~/.claude/projects 下的目录名），配对进程用
     pub project_key: String,
@@ -52,6 +54,8 @@ struct HeadInfo {
 /// Claude Code 会话来源：扫描 ~/.claude/projects 下的 jsonl，带增量缓存。\n/// 未来的 Codex 会话来源可平行实现一个 Scanner 并在聚合处合并。
 pub struct SessionScanner {
     projects_dir: PathBuf,
+    /// Codex CLI 会话根目录（~/.codex/sessions），不存在则跳过
+    codex_dir: PathBuf,
     cache: HashMap<PathBuf, CacheEntry>,
     /// 每个会话的「当前状态」重放进度（任务清单 / 后台任务）
     state_cache: HashMap<PathBuf, SessionState>,
@@ -80,8 +84,12 @@ const HEAD_BYTES: usize = 256 * 1024;
 
 impl SessionScanner {
     pub fn new(projects_dir: PathBuf) -> Self {
+        let codex_dir = dirs::home_dir()
+            .map(|h| h.join(".codex/sessions"))
+            .unwrap_or_else(|| PathBuf::from("/nonexistent"));
         Self {
             projects_dir,
+            codex_dir,
             cache: HashMap::new(),
             state_cache: HashMap::new(),
         }
@@ -124,8 +132,164 @@ impl SessionScanner {
                 }
             }
         }
+        // Codex CLI 会话（~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl）
+        self.scan_codex_into(&mut out, now_ms);
         out.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
         out
+    }
+
+    /// 递归收集 Codex 会话摘要（7 天窗口，带同一套 mtime/size 缓存）
+    fn scan_codex_into(&mut self, out: &mut Vec<SessionSummary>, now_ms: u64) {
+        fn walk(dir: &Path, files: &mut Vec<PathBuf>, depth: usize) {
+            if depth > 4 {
+                return;
+            }
+            let Ok(rd) = fs::read_dir(dir) else { return };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, files, depth + 1);
+                } else if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
+                    files.push(p);
+                }
+            }
+        }
+        if !self.codex_dir.is_dir() {
+            return;
+        }
+        let mut files = Vec::new();
+        walk(&self.codex_dir.clone(), &mut files, 0);
+        for path in files {
+            let Ok(meta) = fs::metadata(&path) else { continue };
+            let mtime_ms = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            if now_ms.saturating_sub(mtime_ms) > HISTORY_WINDOW_MS {
+                continue;
+            }
+            if let Some(sum) = self.summarize_codex(&path, meta.len(), mtime_ms) {
+                out.push(sum);
+            }
+        }
+    }
+
+    /// Codex 会话摘要：head 取 session_meta（cwd/开始时间/会话号）与首条真实用户消息，
+    /// tail 取最近动作与回合状态。缓存策略与 Claude 相同（size+mtime 命中即复用）。
+    fn summarize_codex(&mut self, path: &Path, size: u64, mtime_ms: u64) -> Option<SessionSummary> {
+        if let Some(hit) = self.cache.get(path) {
+            if hit.size == size && hit.mtime_ms == mtime_ms {
+                return Some(hit.summary.clone());
+            }
+        }
+        let head_txt = {
+            let mut f = fs::File::open(path).ok()?;
+            let mut buf = vec![0u8; HEAD_BYTES];
+            let n = f.read(&mut buf).ok()?;
+            buf.truncate(n);
+            String::from_utf8_lossy(&buf).to_string()
+        };
+        let mut session_id = None;
+        let mut cwd = String::new();
+        let mut started_at = None;
+        let mut prompt = String::new();
+        for line in head_txt.lines() {
+            let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+            match v.get("type").and_then(Value::as_str) {
+                Some("session_meta") => {
+                    let p = v.get("payload");
+                    session_id = p
+                        .and_then(|p| p.get("session_id").or_else(|| p.get("id")))
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                    if let Some(c) = p.and_then(|p| p.get("cwd")).and_then(Value::as_str) {
+                        cwd = c.to_string();
+                    }
+                    started_at = p
+                        .and_then(|p| p.get("timestamp"))
+                        .and_then(Value::as_str)
+                        .map(String::from)
+                        .or_else(|| v.get("timestamp").and_then(Value::as_str).map(String::from));
+                }
+                Some("response_item") if prompt.is_empty() => {
+                    if let Some(t) = codex_user_text(&v) {
+                        prompt = t;
+                    }
+                }
+                _ => {}
+            }
+            if session_id.is_some() && !prompt.is_empty() {
+                break;
+            }
+        }
+        // 文件名兜底取会话号：rollout-…-<uuid>.jsonl
+        let session_id = session_id.or_else(|| {
+            path.file_stem()?.to_str()?.rsplitn(6, '-').next().map(String::from)
+        })?;
+
+        // 尾部：最近动作 + 回合是否结束（最后一条有效项是否助手文本）
+        let tail = read_tail(path, TAIL_BYTES).ok()?;
+        let mut last_action = String::new();
+        let mut turn_ended = false;
+        let mut last_active = None;
+        for line in tail.lines() {
+            let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+            if let Some(ts) = v.get("timestamp").and_then(Value::as_str) {
+                last_active = Some(ts.to_string());
+            }
+            if v.get("type").and_then(Value::as_str) != Some("response_item") {
+                continue;
+            }
+            let p = v.get("payload");
+            match p.and_then(|p| p.get("type")).and_then(Value::as_str) {
+                Some("message") => {
+                    let role = p.and_then(|p| p.get("role")).and_then(Value::as_str);
+                    if role == Some("assistant") {
+                        turn_ended = true;
+                    } else if role == Some("user") && codex_user_text(&v).is_some() {
+                        turn_ended = false;
+                    }
+                }
+                Some("function_call") | Some("custom_tool_call") => {
+                    if let Some(n) = p.and_then(|p| p.get("name")).and_then(Value::as_str) {
+                        last_action = n.to_string();
+                    }
+                    turn_ended = false;
+                }
+                _ => {}
+            }
+        }
+
+        let summary = SessionSummary {
+            provider: "codex".into(),
+            session_id,
+            project_key: encode_path(&cwd),
+            cwd,
+            title: prompt.clone(),
+            prompt,
+            last_action,
+            turn_ended,
+            started_at,
+            last_active_at: last_active,
+            version: None,
+            git_branch: None,
+            mtime_ms,
+            line_count: 0,
+            used_tokens_5h: 0,
+        };
+        self.cache.insert(
+            path.to_path_buf(),
+            CacheEntry {
+                size,
+                mtime_ms,
+                line_count: 0,
+                summary: summary.clone(),
+                head: HeadInfo::default(),
+            },
+        );
+        Some(summary)
     }
 
     /// 带缓存的摘要解析：文件未变直接复用；变了只增量数行数 + 重新解析尾部
@@ -197,15 +361,22 @@ impl SessionScanner {
     /// 末尾附带两条「当前状态」快照：任务清单（todos）与后台任务（bgtasks）。
     pub fn messages(&mut self, session_id: &str, limit: usize) -> Result<Vec<MessageBrief>> {
         let path = self.find_session_file(session_id)?;
+        let is_codex = path.starts_with(&self.codex_dir);
 
         // 对话流：只读尾部 8MB，足够渲染最近对话
         let tail = read_tail(&path, 8 * 1024 * 1024)?;
         let mut msgs = Vec::new();
         for line in tail.lines() {
             let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-            if let Some(m) = entry_to_brief(&v) {
+            let brief = if is_codex { codex_entry_to_brief(&v) } else { entry_to_brief(&v) };
+            if let Some(m) = brief {
                 msgs.push(m);
             }
+        }
+        if is_codex {
+            // Codex 没有任务清单/后台任务语义，直接裁剪返回
+            let skip = msgs.len().saturating_sub(limit);
+            return Ok(msgs.into_iter().skip(skip).collect());
         }
         let skip = msgs.len().saturating_sub(limit);
         let mut out: Vec<MessageBrief> = msgs.into_iter().skip(skip).collect();
@@ -264,11 +435,39 @@ impl SessionScanner {
         if !session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             anyhow::bail!("非法会话 ID");
         }
-        let projects = fs::read_dir(&self.projects_dir)?;
-        for project in projects.flatten() {
-            let candidate = project.path().join(format!("{session_id}.jsonl"));
-            if candidate.is_file() {
-                return Ok(candidate);
+        if let Ok(projects) = fs::read_dir(&self.projects_dir) {
+            for project in projects.flatten() {
+                let candidate = project.path().join(format!("{session_id}.jsonl"));
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+        // Codex：rollout-<时间>-<会话号>.jsonl，按文件名后缀匹配
+        fn find_codex(dir: &Path, session_id: &str, depth: usize) -> Option<PathBuf> {
+            if depth > 4 {
+                return None;
+            }
+            for e in fs::read_dir(dir).ok()?.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    if let Some(hit) = find_codex(&p, session_id, depth + 1) {
+                        return Some(hit);
+                    }
+                } else if p
+                    .file_stem()
+                    .and_then(|x| x.to_str())
+                    .map(|n| n.ends_with(session_id))
+                    .unwrap_or(false)
+                {
+                    return Some(p);
+                }
+            }
+            None
+        }
+        if self.codex_dir.is_dir() {
+            if let Some(p) = find_codex(&self.codex_dir, session_id, 0) {
+                return Ok(p);
             }
         }
         anyhow::bail!("会话 {session_id} 不存在")
@@ -283,20 +482,25 @@ pub fn build_tasks(
 ) -> Vec<Task> {
     // 按 cwd 分组进程（已按启动时间升序）
     // 进程按「编码后的 cwd」分组，与会话的项目目录名对齐（会话内 cwd 会漂移，目录名不会）
-    let mut proc_by_key: HashMap<String, Vec<&ProcessInfo>> = HashMap::new();
+    // 按 (provider, cwd-key) 分组：各 provider 的会话只与同类进程配对
+    let mut proc_by_key: HashMap<(String, String), Vec<&ProcessInfo>> = HashMap::new();
     for p in processes {
-        if p.agent == "claude" {
-            proc_by_key.entry(encode_path(&p.cwd)).or_default().push(p);
-        }
+        proc_by_key
+            .entry((p.agent.clone(), encode_path(&p.cwd)))
+            .or_default()
+            .push(p);
     }
 
-    // 同一项目下的活跃会话，按最后活动时间与进程配对（排序见下方）
-    let mut sess_by_key: HashMap<&str, Vec<&SessionSummary>> = HashMap::new();
+    // 同一 (provider, 项目) 下的活跃会话，按最后活动时间与进程配对（排序见下方）
+    let mut sess_by_key: HashMap<(String, String), Vec<&SessionSummary>> = HashMap::new();
     // 只有「近期活跃」的会话才参与进程配对（老会话大概率已结束）
     let now = now_ms();
     for s in sessions {
         if now.saturating_sub(s.mtime_ms) < 6 * 3600 * 1000 {
-            sess_by_key.entry(s.project_key.as_str()).or_default().push(s);
+            sess_by_key
+                .entry((s.provider.clone(), s.project_key.clone()))
+                .or_default()
+                .push(s);
         }
     }
     // 按「最后活动时间」倒序：真正还在跑的排前面。
@@ -311,13 +515,15 @@ pub fn build_tasks(
     }
 
     let mut pid_of_session: HashMap<&str, &ProcessInfo> = HashMap::new();
+    let mut paired_pids: HashSet<u32> = HashSet::new();
     for (key, procs) in &proc_by_key {
-        if let Some(sess) = sess_by_key.get(key.as_str()) {
+        if let Some(sess) = sess_by_key.get(key) {
             // 一个项目下最多只有「进程数」个会话是活的，取最近活动的那几个；
             // 最新的进程配最近活动的会话。zip 到较短的一方为止，
             // 多出来的老会话拿不到进程，自然落到 Finished。
             for (p, s) in procs.iter().rev().zip(sess.iter()) {
                 pid_of_session.insert(s.session_id.as_str(), p);
+                paired_pids.insert(p.pid);
             }
         }
     }
@@ -348,8 +554,8 @@ pub fn build_tasks(
             hostname: String::new(),
             platform: String::new(),
             platform_dsr: String::new(),
-            provider: "claude".into(),
-            provider_dsr: crate::model::provider_dsr("claude"),
+            provider: s.provider.clone(),
+            provider_dsr: crate::model::provider_dsr(&s.provider),
             title: if s.title.is_empty() { s.prompt.clone() } else { s.title.clone() },
             used_tokens_5h: s.used_tokens_5h,
             token_limit: 0,
@@ -420,6 +626,52 @@ pub fn build_tasks(
                 recent_messages: Vec::new(),
             });
         }
+    }
+
+    // 没配到任何会话文件的代理进程（Gemini/Aider 等暂无解析器的，或刚启动
+    // 尚未落盘的 Claude/Codex）：以「进程任务」出现 —— 标题给 provider + 目录，
+    // 状态与控制（暂停/恢复/中断/终止走信号）完全可用，只是没有对话流。
+    let now2 = now_ms();
+    for p in processes {
+        if paired_pids.contains(&p.pid) {
+            continue;
+        }
+        let dir_name = p.cwd.rsplit(['/', '\\']).next().unwrap_or("").to_string();
+        let status = if manual_paused(p.pid) || crate::process::is_stopped(p.pid) {
+            TaskStatus::Paused
+        } else {
+            TaskStatus::Running
+        };
+        let status_dsr = status.dsr().to_string();
+        tasks.push(Task {
+            id: format!("proc-{}", p.pid),
+            machine_id: String::new(),
+            hostname: String::new(),
+            platform: String::new(),
+            platform_dsr: String::new(),
+            provider: p.agent.clone(),
+            provider_dsr: crate::model::provider_dsr(&p.agent),
+            project: p.cwd.clone(),
+            project_name: dir_name.clone(),
+            title: format!("{} · {}", crate::model::provider_dsr(&p.agent), dir_name),
+            used_tokens_5h: 0,
+            token_limit: 0,
+            auto_paused: false,
+            status_dsr,
+            ide_dsr: p.ide_name.clone(),
+            pid: Some(p.pid),
+            prompt: String::new(),
+            last_action: String::new(),
+            status,
+            started_at: None,
+            last_active_at: None,
+            mtime_ms: now2,
+            line_count: 0,
+            version: None,
+            git_branch: None,
+            process: Some(p.clone()),
+            recent_messages: Vec::new(),
+        });
     }
 
     tasks.sort_by(|a, b| {
@@ -550,6 +802,7 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
     }
 
     Some(SessionSummary {
+        provider: "claude".into(),
         session_id: session_id.to_string(),
         project_key,
         cwd: if canonical_cwd.is_empty() { cwd } else { canonical_cwd },
@@ -627,6 +880,92 @@ fn content_has_tool_result(content: Option<&Value>) -> bool {
 }
 
 /// 把一条 jsonl 记录转成对话消息（不可展示的返回 None）
+/// Codex response_item 里的真实用户输入（滤掉 <permissions>/<recommended_plugins> 等注入块）
+fn codex_user_text(v: &Value) -> Option<String> {
+    let p = v.get("payload")?;
+    if p.get("type").and_then(Value::as_str) != Some("message")
+        || p.get("role").and_then(Value::as_str) != Some("user")
+    {
+        return None;
+    }
+    let mut buf = String::new();
+    for item in p.get("content")?.as_array()? {
+        if item.get("type").and_then(Value::as_str) == Some("input_text") {
+            if let Some(t) = item.get("text").and_then(Value::as_str) {
+                if !buf.is_empty() {
+                    buf.push('\n');
+                }
+                buf.push_str(t);
+            }
+        }
+    }
+    let t = buf.trim();
+    if t.is_empty() || t.starts_with('<') {
+        return None;
+    }
+    Some(truncate(t, 500))
+}
+
+/// 把一行 Codex 会话记录转为简要消息（与 Claude 的 entry_to_brief 对应）。
+/// 覆盖：用户/助手消息、function_call / custom_tool_call（工具行）及其输出（结果行）。
+fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
+    if v.get("type").and_then(Value::as_str) != Some("response_item") {
+        return None;
+    }
+    let ts = v.get("timestamp").and_then(Value::as_str).unwrap_or("").to_string();
+    let p = v.get("payload")?;
+    match p.get("type").and_then(Value::as_str)? {
+        "message" => match p.get("role").and_then(Value::as_str)? {
+            "user" => codex_user_text(v).map(|t| MessageBrief {
+                role: "user".into(),
+                content: t,
+                timestamp: ts,
+            }),
+            "assistant" => {
+                let mut buf = String::new();
+                for item in p.get("content")?.as_array()? {
+                    if item.get("type").and_then(Value::as_str) == Some("output_text") {
+                        if let Some(t) = item.get("text").and_then(Value::as_str) {
+                            buf.push_str(t);
+                        }
+                    }
+                }
+                let t = buf.trim();
+                (!t.is_empty()).then(|| MessageBrief {
+                    role: "assistant".into(),
+                    content: truncate(t, 2000),
+                    timestamp: ts,
+                })
+            }
+            _ => None, // developer 等注入角色不进对话流
+        },
+        "function_call" | "custom_tool_call" => {
+            let name = p.get("name").and_then(Value::as_str).unwrap_or("?");
+            // arguments 是 JSON 字符串，截一段作为提示即可
+            let args = p
+                .get("arguments")
+                .or_else(|| p.get("input"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let content = if args.is_empty() {
+                name.to_string()
+            } else {
+                format!("{name}: {}", truncate(args, 120))
+            };
+            Some(MessageBrief { role: "tool".into(), content, timestamp: ts })
+        }
+        "function_call_output" | "custom_tool_call_output" => {
+            let out = p.get("output").and_then(Value::as_str).unwrap_or("");
+            (!out.trim().is_empty()).then(|| MessageBrief {
+                role: "tool_result".into(),
+                content: truncate(out.trim(), 400),
+                timestamp: ts,
+            })
+        }
+        _ => None,
+    }
+}
+
 fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
     let ts = v.get("timestamp").and_then(Value::as_str).unwrap_or("").to_string();
     let ty = v.get("type").and_then(Value::as_str)?;
@@ -1515,6 +1854,7 @@ mod pairing_tests {
 
     fn sess(id: &str, started: &str, mtime_ms: u64) -> SessionSummary {
         SessionSummary {
+            provider: "claude".into(),
             session_id: id.into(),
             project_key: "-proj".into(),
             cwd: "/proj".into(),
@@ -1637,5 +1977,119 @@ mod user_text_tests {
         let m = entry_to_brief(&user_entry("把服务启动，然后打开前台")).expect("真实用户消息必须保留");
         assert_eq!(m.role, "user");
         assert_eq!(m.content, "把服务启动，然后打开前台");
+    }
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::*;
+
+    fn line(payload: Value) -> Value {
+        serde_json::json!({
+            "timestamp": "2026-07-17T07:23:17.458Z",
+            "type": "response_item",
+            "payload": payload
+        })
+    }
+
+    /// 用户消息：真实输入进流；<permissions> 等注入块滤掉（与真实文件格式一致）
+    #[test]
+    fn user_text_filters_injected_blocks() {
+        let real = line(serde_json::json!({
+            "type": "message", "role": "user",
+            "content": [{ "type": "input_text", "text": "帮我修这个 bug" }]
+        }));
+        let m = codex_entry_to_brief(&real).expect("真实输入应进流");
+        assert_eq!(m.role, "user");
+        assert_eq!(m.content, "帮我修这个 bug");
+
+        let injected = line(serde_json::json!({
+            "type": "message", "role": "user",
+            "content": [{ "type": "input_text", "text": "<permissions instructions>\nFilesystem..." }]
+        }));
+        assert!(codex_entry_to_brief(&injected).is_none(), "注入块不该冒充用户消息");
+
+        let dev = line(serde_json::json!({
+            "type": "message", "role": "developer",
+            "content": [{ "type": "input_text", "text": "system prompt" }]
+        }));
+        assert!(codex_entry_to_brief(&dev).is_none(), "developer 角色不进流");
+    }
+
+    #[test]
+    fn assistant_and_tools_map_to_feed_roles() {
+        let a = line(serde_json::json!({
+            "type": "message", "role": "assistant",
+            "content": [{ "type": "output_text", "text": "改好了" }]
+        }));
+        assert_eq!(codex_entry_to_brief(&a).unwrap().role, "assistant");
+
+        let f = line(serde_json::json!({
+            "type": "function_call", "name": "spawn_agent",
+            "arguments": "{\"task\":\"x\"}"
+        }));
+        let m = codex_entry_to_brief(&f).unwrap();
+        assert_eq!(m.role, "tool");
+        assert!(m.content.starts_with("spawn_agent"));
+
+        let o = line(serde_json::json!({
+            "type": "custom_tool_call_output", "output": "done"
+        }));
+        assert_eq!(codex_entry_to_brief(&o).unwrap().role, "tool_result");
+
+        let r = line(serde_json::json!({ "type": "reasoning", "summary": [] }));
+        assert!(codex_entry_to_brief(&r).is_none(), "思考过程不进流");
+    }
+
+    /// 多 provider 配对：codex 会话配 codex 进程；claude 会话不会被 codex 进程抢走；
+    /// 没有会话解析器的代理（gemini）以进程任务出现且可控。
+    #[test]
+    fn multi_provider_pairing_and_process_tasks() {
+        let now = now_ms();
+        let mk = |provider: &str, id: &str, key: &str| SessionSummary {
+            provider: provider.into(),
+            session_id: id.into(),
+            project_key: key.into(),
+            cwd: format!("/w/{key}"),
+            title: id.into(),
+            prompt: String::new(),
+            last_action: String::new(),
+            turn_ended: true,
+            started_at: None,
+            last_active_at: None,
+            version: None,
+            git_branch: None,
+            mtime_ms: now - 5_000,
+            line_count: 1,
+            used_tokens_5h: 0,
+        };
+        let proc = |agent: &str, pid: u32, key: &str| ProcessInfo {
+            pid,
+            agent: agent.into(),
+            tty: format!("/dev/ttys{pid}"),
+            cwd: format!("/w/{key}"),
+            ide: crate::model::IdeKind::Terminal,
+            ide_name: "Terminal".into(),
+            start_time: 1000,
+            cpu_usage: 0.0,
+            memory: 0,
+            command: agent.into(),
+        };
+        let sessions = vec![mk("claude", "c1", "-w-app"), mk("codex", "x1", "-w-app")];
+        let procs = vec![proc("claude", 11, "app"), proc("codex", 22, "app"), proc("gemini", 33, "app")];
+
+        let tasks = build_tasks(&sessions, &procs, &|_| false);
+        let by = |id: &str| tasks.iter().find(|t| t.id == id).unwrap();
+
+        assert_eq!(by("c1").pid, Some(11), "claude 会话配 claude 进程");
+        assert_eq!(by("c1").provider, "claude");
+        assert_eq!(by("x1").pid, Some(22), "codex 会话配 codex 进程");
+        assert_eq!(by("x1").provider, "codex");
+
+        let g = by("proc-33");
+        assert_eq!(g.provider, "gemini", "无解析器代理以进程任务出现");
+        assert_eq!(g.pid, Some(33), "pid 在 → 暂停/中断等信号控制可用");
+        assert_eq!(g.provider_dsr, "Gemini CLI");
+        assert!(g.title.contains("app"), "标题带目录名");
     }
 }
