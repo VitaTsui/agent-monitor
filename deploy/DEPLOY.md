@@ -1,8 +1,14 @@
 # agent-monitor 部署指南（monitor.vita-llm.com）
 
 服务器 `***REMOVED***`（Ubuntu 24.04），域名 `monitor.vita-llm.com`。
-本目录已含**开箱即用**的全部产物：交叉编译好的 Linux 二进制、生产密钥、前端构建、
-Caddy/systemd 配置、一键安装脚本。
+本目录含 Caddy/systemd 配置、一键安装脚本，以及部署所需的交叉编译二进制、
+生产密钥、前端构建。
+
+> ⚠️ 二进制、前端产物（`agent-task-monitor`、`web/`）与全部密钥（`env`、
+> `rsa_private.pem`、各令牌 `.txt`）**不入版本库**（见 `.gitignore`）——它们只存在于
+> 本地工作副本，从本地 rsync 到服务器即可。若从全新 clone 起步：二进制用
+> `cargo zigbuild --release --target x86_64-unknown-linux-musl --no-default-features`
+> 重新交叉编译，前端 `yarn build`，`env` 从 `env.example` 复制后填入真实密钥。
 
 ## 步骤 0 · 先配 DNS（务必先做）
 

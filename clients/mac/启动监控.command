@@ -7,7 +7,8 @@ cd "$(dirname "$0")"
 AM_USER="admin"
 
 export AM_HUB_URL="https://monitor.vita-llm.com"
-export AM_AGENT_TOKEN="***REMOVED***"
+# ↓↓↓ 向管理员索取上报令牌，填在下面（与 hub 的 AM_AGENT_TOKEN 一致）↓↓↓
+export AM_AGENT_TOKEN="<向管理员索取上报令牌>"
 export AM_USER
 
 echo "正在连接 https://monitor.vita-llm.com （用户: $AM_USER）..."
