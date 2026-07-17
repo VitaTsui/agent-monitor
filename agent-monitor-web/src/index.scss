@@ -1,0 +1,130 @@
+* {
+  padding: 0;
+  margin: 0;
+  box-sizing: border-box;
+
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+
+  &::before,
+  &::after {
+    box-sizing: border-box;
+  }
+}
+
+// ===== 现代化滚动条：圆角滑块 + 上下 / 左右 单箭头按钮，hover 加深 =====
+// 中性灰配色，明暗主题下都清晰可见
+::-webkit-scrollbar {
+  width: 14px;
+  height: 14px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(90, 90, 90, 0.7);
+  border: 3px solid transparent;
+  border-radius: 8px;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(64, 64, 64, 0.85);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:active {
+  background: rgba(90, 90, 90, 0.9);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+// 箭头按钮：仅两端单箭头，隐藏双箭头端。
+// 布局尺寸（display/height/width）必须写在 :single-button 基础级——
+// Chrome 布局按钮占位只认基础级样式，写在 :vertical:decrement 等绘制变体上不参与布局（按钮不渲染）
+::-webkit-scrollbar-button:single-button {
+  display: block;
+  height: 15px;
+  width: 15px;
+  background-color: transparent;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 12px 12px;
+  border-radius: 8px;
+}
+::-webkit-scrollbar-button:single-button:hover {
+  background-color: rgba(0, 0, 0, 0.1);
+}
+::-webkit-scrollbar-button:single-button:vertical:decrement {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 7.5 L6 4 L9 7.5' fill='none' stroke='%23606060' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+::-webkit-scrollbar-button:single-button:vertical:increment {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5 L6 8 L9 4.5' fill='none' stroke='%23606060' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+::-webkit-scrollbar-button:single-button:horizontal:decrement {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M7.5 3 L4 6 L7.5 9' fill='none' stroke='%23606060' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+::-webkit-scrollbar-button:single-button:horizontal:increment {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M4.5 3 L8 6 L4.5 9' fill='none' stroke='%23606060' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+::-webkit-scrollbar-button:double-button {
+  display: none;
+}
+
+html,
+body,
+#root {
+  width: 100vw;
+  height: 100vh;
+
+  overflow: hidden;
+}
+
+// 极窄窗口布局保护：窗口小于最小支持宽度时不向内挤碎布局，改为横向滚动
+body {
+  overflow-x: auto;
+}
+
+#root {
+  min-width: 960px;
+}
+
+[class^="ka-"] {
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-family: PingFangSC-Regular, PingFang SC;
+}
+
+canvas {
+  display: block;
+}
+
+hr {
+  border: none;
+
+  background: rgba(230, 235, 233, 1);
+}
+
+ul,
+ol {
+  list-style: none;
+}
+
+@font-face {
+  font-family: "HuXiaoBo";
+  src: url("./assets/fonts/HuXiaoBoNanShenTi-2.otf") format("opentype");
+}
+
+@font-face {
+  font-family: "DINAlternate";
+  src: url("./assets/fonts/DINAlternateBold.ttf") format("opentype");
+}
+

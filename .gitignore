@@ -1,0 +1,21 @@
+# 依赖与构建产物
+node_modules
+dist
+target
+
+# 本地调试/测试产物
+tmp
+playwright
+.playwright-mcp
+
+# 运行时生成的密钥，勿入库
+agent-task-monitor/keys/
+
+# Claude 本地配置（保留项目级 skills）
+**/.claude/*
+!**/.claude/skills/
+
+# 杂项
+.DS_Store
+*.log
+*.tar.gz

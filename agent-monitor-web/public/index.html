@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <meta name="description" content="" />
+    <!-- 引入路径必须为 /to/file/path -->
+    <link rel="icon" href="/favicon.ico" type="image/x-icon" />
+    <script src="/config.js"></script>
+    <script>
+      // 运行时动态设置标题
+      if (window.Config) {
+        if (window.Config.title) {
+          document.title = window.Config.title;
+        }
+        if (window.Config.description) {
+          document
+            .querySelector("meta[name='description']")
+            .setAttribute("content", window.Config.description);
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

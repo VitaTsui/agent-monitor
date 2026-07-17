@@ -1,0 +1,139 @@
+.NavTabBar {
+  padding: 6px 8px 0px;
+
+  // 现代化：保留白色条带，激活页签为水青浅底胶囊
+  background: var(--cf-surface);
+
+  border-bottom: 1px solid var(--cf-border);
+
+  .ant-tabs-nav {
+    height: 36px;
+    margin-bottom: 0px;
+
+    &::before {
+      border-bottom: none;
+    }
+
+    // 卡片式页签无需底部墨条
+    .ant-tabs-ink-bar {
+      display: none;
+    }
+
+    .ant-tabs-nav-list {
+      .ant-tabs-tab {
+        position: relative;
+
+        padding: 0px;
+        margin: 0px;
+
+        border-radius: 8px;
+
+        transition: background 0.2s;
+
+        & + .ant-tabs-tab {
+          margin-left: 4px;
+        }
+
+        .ant-tabs-tab-btn {
+          color: var(--cf-text-2);
+
+          > .tabLabel {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            column-gap: 5px;
+
+            width: 100%;
+            height: 100%;
+            padding: 6px 16px;
+          }
+
+          > .tabLabel.legacyClosableTabLabel {
+            padding-right: 36px;
+          }
+        }
+
+        &:hover {
+          background: var(--cf-border-weak);
+        }
+
+        &.ant-tabs-tab-active {
+          background: var(--cf-subtle);
+
+          .ant-tabs-tab-btn {
+            color: var(--primary-color);
+            font-weight: 500;
+          }
+        }
+
+        .ant-tabs-tab-remove {
+          position: absolute;
+          right: 16px;
+          top: 50%;
+          transform: translateY(-50%);
+        }
+
+        &:has(.ant-tabs-tab-remove) {
+          .ant-tabs-tab-btn {
+            > .tabLabel {
+              padding-right: 36px;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  .ant-tabs-nav-operations {
+    > button {
+      cursor: pointer;
+    }
+  }
+}
+
+.popover {
+  .ant-popover-content {
+    .ant-popover-inner {
+      padding: 0px;
+
+      .part {
+        display: flex;
+        flex-direction: column;
+
+        padding: 6px 0px;
+
+        border-bottom: 1px solid var(--cf-border-weak);
+
+        .ant-btn {
+          justify-content: flex-start;
+
+          border-radius: 0px;
+        }
+      }
+    }
+  }
+}
+
+.dragOverlay {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  cursor: pointer;
+  opacity: 0.9;
+
+  height: 34px;
+  padding: 6px 16px;
+
+  background: var(--cf-surface);
+  border-radius: 6px 6px 0 0;
+  border: 1px solid var(--cf-border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+
+  .tabLabel {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    column-gap: 5px;
+  }
+}

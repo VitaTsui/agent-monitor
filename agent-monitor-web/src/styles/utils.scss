@@ -1,0 +1,81 @@
+/* =========================================================
+ * utils.scss
+ * Design: 1366 x 768
+ * Rule:   x/width -> vw, y/height -> vh
+ * Mode:   function (return calc(...) via vw() / vh() / vw2() / vh2() ... )
+ *
+ * Usage:
+ *   .banner {
+ *     background-size: 100% vh(239);
+ *   }
+ *
+ *   .box {
+ *     width: vw(600);
+ *     height: vh(300);
+ *   }
+ * ========================================================= */
+
+$design-w: 1366;
+$design-h: 768;
+
+/* -------------------------
+ * vw (width/x-axis)
+ * ------------------------- */
+@function vw($px) {
+  @return calc(#{$px} / #{$design-w} * 100vw);
+}
+
+@function vw2($a, $b) {
+  @return calc(#{$a} / #{$design-w} * 100vw) calc(#{$b} / #{$design-w} * 100vw);
+}
+
+@function vw3($a, $b, $c) {
+  @return calc(#{$a} / #{$design-w} * 100vw) calc(#{$b} / #{$design-w} * 100vw)
+    calc(#{$c} / #{$design-w} * 100vw);
+}
+
+@function vw4($t, $r, $b, $l) {
+  @return calc(#{$t} / #{$design-w} * 100vw) calc(#{$r} / #{$design-w} * 100vw)
+    calc(#{$b} / #{$design-w} * 100vw) calc(#{$l} / #{$design-w} * 100vw);
+}
+
+/* -------------------------
+ * vh (height/y-axis)
+ * ------------------------- */
+@function vh($px) {
+  @return calc(#{$px} / #{$design-h} * 100vh);
+}
+
+@function vh2($a, $b) {
+  @return calc(#{$a} / #{$design-h} * 100vh) calc(#{$b} / #{$design-h} * 100vh);
+}
+
+@function vh3($a, $b, $c) {
+  @return calc(#{$a} / #{$design-h} * 100vh) calc(#{$b} / #{$design-h} * 100vh)
+    calc(#{$c} / #{$design-h} * 100vh);
+}
+
+@function vh4($t, $r, $b, $l) {
+  @return calc(#{$t} / #{$design-h} * 100vh) calc(#{$r} / #{$design-h} * 100vh)
+    calc(#{$b} / #{$design-h} * 100vh) calc(#{$l} / #{$design-h} * 100vh);
+}
+
+/* =========================================================
+ * Examples (delete if you want)
+ * ========================================================= */
+/*
+.banner {
+  background-size: 100% vh(239);
+}
+
+.card {
+  padding: vw4(24, 32, 24, 32);
+  border-radius: vh(16);
+}
+
+.modal {
+  width: vw(600);
+  height: vh(400);
+  transform: translateY(vh(50));
+}
+*/
