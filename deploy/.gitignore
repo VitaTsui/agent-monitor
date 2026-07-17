@@ -1,0 +1,19 @@
+# deploy/ 只版本化「怎么部署」的手写配置（Caddyfile / install.sh /
+# systemd unit / 文档 / env 模板），产物与密钥一律不入库。
+
+# 构建产物：交叉编译的二进制 + 前端 build 输出，随发布重新生成
+agent-task-monitor
+web/
+
+# 密钥与凭据：绝不入库（含真实密码/令牌/私钥的 env、RSA 私钥、各类令牌、
+# 明文口令、凭据清单、env 备份）。入库的是脱敏的 env.example 模板。
+env
+rsa_private.pem
+rsa_pub_b64.txt
+crypto_key.txt
+admin_password.txt
+admin_token.txt
+agent_token.txt
+CREDENTIALS.txt
+*.pem
+*.bak

@@ -1,7 +1,3 @@
-import {
-  FetchEventSourceInit,
-  fetchEventSource,
-} from "@microsoft/fetch-event-source";
 import axios, {
   AxiosHeaders,
   AxiosResponse,
@@ -490,70 +486,3 @@ export const put = async <T = undefined>(
   return response<T>(res);
 };
 
-/**
- * 流式请求
- */
-interface streamRequestOptions<T = Record<string, unknown>>
-  extends FetchEventSourceInit {
-  data: T;
-  permissionCode?: boolean;
-}
-export function streamRequest<T>(
-  url: string,
-  options: streamRequestOptions<T>
-) {
-  const { onopen, onmessage, onclose, onerror, data } = options;
-  const _options = { ...options, body: JSON.stringify(data) };
-  const token = getToken();
-
-  _options.headers = {
-    ..._options.headers,
-    "Content-Type": "application/json",
-    Authorization: token,
-  };
-
-  // CSRF 防护：为同源请求添加 CSRF token 和自定义 header
-  if (isSameOrigin(url)) {
-    const csrfToken = getCsrfToken();
-    if (csrfToken) {
-      _options.headers = {
-        ..._options.headers,
-        "X-CSRF-TOKEN": csrfToken,
-        "X-XSRF-TOKEN": csrfToken,
-      };
-    }
-
-    _options.headers = {
-      ..._options.headers,
-      "X-Requested-With": "XMLHttpRequest",
-    };
-  }
-
-  if (options.permissionCode) {
-    _options.headers = {
-      ...(_options.headers || {}),
-      permissionCode: "industry-chain-graph",
-    };
-  }
-
-  const controller = new AbortController();
-  fetchEventSource(url, {
-    ..._options,
-    method: "POST",
-    signal: controller.signal,
-    onopen,
-    onmessage,
-    onclose() {
-      controller.abort();
-      onclose && onclose();
-    },
-    onerror(err) {
-      controller.abort();
-      onerror && onerror(err);
-      throw new Error(err);
-    },
-    openWhenHidden: true,
-  });
-
-  return controller;
-}

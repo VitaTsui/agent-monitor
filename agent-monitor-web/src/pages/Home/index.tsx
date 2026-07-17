@@ -1,0 +1,203 @@
+import React from "react";
+
+import { Button } from "@hsu-react/ui";
+import { useNavigate } from "react-router-dom";
+import {
+  AppleFilled,
+  CloudServerOutlined,
+  CodeOutlined,
+  ControlOutlined,
+  DesktopOutlined,
+  EyeOutlined,
+  LockOutlined,
+  SafetyCertificateOutlined,
+  ThunderboltFilled,
+  WindowsFilled,
+} from "@ant-design/icons";
+
+import { getAccessToken } from "@/utils/auth";
+import MockPortal from "./_components/MockPortal";
+import styles from "./index.module.scss";
+
+const FEATURES = [
+  {
+    icon: <EyeOutlined />,
+    title: "实时会话监控",
+    desc: "解析 Claude Code 会话文件，实时呈现当前提示词、正在调用的工具与执行时间线，像 Claude Code 终端一样直观。",
+  },
+  {
+    icon: <ControlOutlined />,
+    title: "远程控制与发布",
+    desc: "暂停 / 恢复 / 中断 / 终止正在运行的代理任务，或直接向会话注入一行输入发布新任务——就在网页上。",
+  },
+  {
+    icon: <CloudServerOutlined />,
+    title: "多机聚合",
+    desc: "Mac / Windows / Linux 多台电脑的会话统一聚合到一处，按设备与终端类型分组，一屏总览全部代理动态。",
+  },
+  {
+    icon: <LockOutlined />,
+    title: "隐私隔离",
+    desc: "只能看到自己名下、且已信任的设备；会话内容纯实时读取、我方不落存储，超级管理员也看不到别人的会话。",
+  },
+  {
+    icon: <SafetyCertificateOutlined />,
+    title: "安全加固",
+    desc: "口令 RSA+AES 加密传输、加盐哈希存储，后管部署令牌双重锁，危险指令发布需多重确认。",
+  },
+  {
+    icon: <DesktopOutlined />,
+    title: "桌面 & 移动端",
+    desc: "Mac / Windows 桌面客户端托盘常驻、开机自启；移动端网页随时随地查看与控制。",
+  },
+];
+
+const STEPS = [
+  { n: "1", t: "服务端部署", d: "在一台服务器上运行 hub，自动聚合各机数据、托管网页界面。" },
+  { n: "2", t: "客户端接入", d: "每台电脑运行客户端，把本机 Claude Code 会话安全上报到 hub。" },
+  { n: "3", t: "网页监控", d: "登录网页前台，实时查看、控制、发布任务；信任设备后即可见其会话。" },
+];
+
+const Home: React.FC = () => {
+  const navigate = useNavigate();
+  const loggedIn = !!getAccessToken();
+  const enter = () => navigate(loggedIn ? "/portal" : "/login?redirect=%2Fportal");
+
+  return (
+    <div className={styles.Home}>
+      {/* 顶部导航 */}
+      <header className={styles.nav}>
+        <div className={styles.navInner}>
+          <div className={styles.brand}>
+            <span className={styles.logo}><CodeOutlined /></span>
+            <span className={styles.brandName}>终端任务监控</span>
+          </div>
+          <nav className={styles.navLinks}>
+            <a href="#features">特性</a>
+            <a href="#how">工作原理</a>
+            <a href="#clients">下载</a>
+          </nav>
+          <Button className={styles.navCta} type="primary" onClick={enter}>
+            {loggedIn ? "进入前台" : "登录"}
+          </Button>
+        </div>
+      </header>
+
+      {/* Hero */}
+      <section className={styles.hero}>
+        <div className={styles.heroText}>
+          <div className={styles.badge}>
+            <ThunderboltFilled /> 面向 Claude Code 的终端代理监控
+          </div>
+          <h1 className={styles.title}>
+            盯住每一台电脑上
+            <br />
+            正在跑的 <span className={styles.accent}>AI 编码代理</span>
+          </h1>
+          <p className={styles.subtitle}>
+            一处网页，实时监控多台 Mac / Windows / Linux
+            终端里正在执行的 Claude Code 任务，随时暂停、中断、注入新指令。
+            纯实时、不落存储，按设备归属严格隔离。
+          </p>
+          <div className={styles.heroActions}>
+            <Button className={styles.primaryBtn} type="primary" onClick={enter}>
+              {loggedIn ? "进入前台" : "免费开始"}
+            </Button>
+            <a className={styles.ghostBtn} href="#clients">
+              下载客户端
+            </a>
+          </div>
+          <div className={styles.heroMeta}>
+            <span>无需信用卡</span>
+            <span>·</span>
+            <span>支持自助注册</span>
+            <span>·</span>
+            <span>Google / Apple 登录</span>
+          </div>
+        </div>
+        <div className={styles.heroPreview}>
+          {/* 产品预览：全部为 mock 演示数据 */}
+          <MockPortal />
+          <div className={styles.previewNote}>产品界面预览 · 演示数据</div>
+        </div>
+      </section>
+
+      {/* 特性 */}
+      <section id="features" className={styles.features}>
+        <div className={styles.sectionHead}>
+          <h2>为「看住 AI 代理」而生</h2>
+          <p>从会话解析到远程控制，一套完整的终端代理监控能力。</p>
+        </div>
+        <div className={styles.featureGrid}>
+          {FEATURES.map((f) => (
+            <div key={f.title} className={styles.featureCard}>
+              <span className={styles.featureIcon}>{f.icon}</span>
+              <div className={styles.featureTitle}>{f.title}</div>
+              <div className={styles.featureDesc}>{f.desc}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* 工作原理 */}
+      <section id="how" className={styles.how}>
+        <div className={styles.sectionHead}>
+          <h2>三步接入</h2>
+          <p>服务端 + 客户端 + 网页，十分钟跑起来。</p>
+        </div>
+        <div className={styles.steps}>
+          {STEPS.map((s) => (
+            <div key={s.n} className={styles.step}>
+              <span className={styles.stepNum}>{s.n}</span>
+              <div className={styles.stepTitle}>{s.t}</div>
+              <div className={styles.stepDesc}>{s.d}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* 下载客户端 */}
+      <section id="clients" className={styles.clients}>
+        <div className={styles.sectionHead}>
+          <h2>桌面客户端</h2>
+          <p>托盘常驻、后台运行、开机自启，把本机会话安全上报。</p>
+        </div>
+        <div className={styles.clientCards}>
+          <div className={styles.clientCard}>
+            <AppleFilled className={styles.clientIcon} />
+            <div className={styles.clientName}>macOS</div>
+            <div className={styles.clientDesc}>通用版（Apple 芯片 / Intel），菜单栏托盘常驻</div>
+          </div>
+          <div className={styles.clientCard}>
+            <WindowsFilled className={styles.clientIcon} />
+            <div className={styles.clientName}>Windows</div>
+            <div className={styles.clientDesc}>系统托盘常驻，一键安装脚本</div>
+          </div>
+        </div>
+        <div className={styles.clientHint}>
+          客户端安装包由管理员分发；接入后到前台「设备管理」信任本机即可。
+        </div>
+      </section>
+
+      {/* CTA */}
+      <section className={styles.cta}>
+        <h2>现在就看住你的 AI 代理</h2>
+        <Button className={styles.primaryBtn} type="primary" onClick={enter}>
+          {loggedIn ? "进入前台" : "登录 / 注册"}
+        </Button>
+      </section>
+
+      <footer className={styles.footer}>
+        <div className={styles.footBrand}>
+          <span className={styles.logo}><CodeOutlined /></span>
+          <span>终端任务监控</span>
+        </div>
+        <div className={styles.footNote}>
+          终端 AI 代理任务监控平台 · 纯实时不落存储 · © {new Date().getFullYear()}
+        </div>
+      </footer>
+    </div>
+  );
+};
+
+export default Home;

@@ -1,5 +1,6 @@
 use crate::model::{MessageBrief, ProcessInfo, Task, TaskStatus};
 use anyhow::Result;
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -11,7 +12,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
     pub session_id: String,
-    pub path: PathBuf,
     /// 项目目录编码名（~/.claude/projects 下的目录名），配对进程用
     pub project_key: String,
     pub cwd: String,
@@ -53,6 +53,22 @@ struct HeadInfo {
 pub struct SessionScanner {
     projects_dir: PathBuf,
     cache: HashMap<PathBuf, CacheEntry>,
+    /// 每个会话的「当前状态」重放进度（任务清单 / 后台任务）
+    state_cache: HashMap<PathBuf, SessionState>,
+}
+
+/// 任务清单与后台任务的重放状态。
+///
+/// 这两者必须从会话开头重放才能成形（TaskCreate 决定任务号、run_in_background
+/// 决定哪些是后台任务），只读尾部窗口是拼不出来的 —— 长会话动辄几十 MB，
+/// 早期的 TaskCreate 全在窗口之外，清单会永远是空的。
+/// 会话文件是 append-only，故这里记住已消费的偏移，每次只解析新增字节。
+#[derive(Default)]
+struct SessionState {
+    /// 已消费到的字节偏移（总是停在某个换行之后）
+    offset: u64,
+    todos: TodoTracker,
+    bg: BgTracker,
 }
 
 /// 会话列表最多回溯的时长（毫秒）：7 天
@@ -64,7 +80,11 @@ const HEAD_BYTES: usize = 256 * 1024;
 
 impl SessionScanner {
     pub fn new(projects_dir: PathBuf) -> Self {
-        Self { projects_dir, cache: HashMap::new() }
+        Self {
+            projects_dir,
+            cache: HashMap::new(),
+            state_cache: HashMap::new(),
+        }
     }
 
     pub fn projects_dir(&self) -> &Path {
@@ -173,10 +193,12 @@ impl SessionScanner {
         Some(summary)
     }
 
-    /// 解析一个会话的对话消息（供前台对话流展示），返回最后 limit 条
-    pub fn messages(&self, session_id: &str, limit: usize) -> Result<Vec<MessageBrief>> {
+    /// 解析一个会话的对话消息（供前台对话流展示），返回最后 limit 条。
+    /// 末尾附带两条「当前状态」快照：任务清单（todos）与后台任务（bgtasks）。
+    pub fn messages(&mut self, session_id: &str, limit: usize) -> Result<Vec<MessageBrief>> {
         let path = self.find_session_file(session_id)?;
-        // 大文件只读尾部 8MB，足够渲染最近对话
+
+        // 对话流：只读尾部 8MB，足够渲染最近对话
         let tail = read_tail(&path, 8 * 1024 * 1024)?;
         let mut msgs = Vec::new();
         for line in tail.lines() {
@@ -186,7 +208,55 @@ impl SessionScanner {
             }
         }
         let skip = msgs.len().saturating_sub(limit);
-        Ok(msgs.into_iter().skip(skip).collect())
+        let mut out: Vec<MessageBrief> = msgs.into_iter().skip(skip).collect();
+
+        // 状态快照：从会话开头增量重放得来，不受上面 limit 窗口影响，
+        // 一律追加在末尾（前端会把它们摘出去单独渲染，位置无所谓）。
+        let ts = out.last().map(|m| m.timestamp.clone()).unwrap_or_default();
+        let (todos, bgtasks) = self.replay_state(&path)?;
+        if let Some(m) = todos {
+            out.push(MessageBrief { role: "todos".into(), content: m, timestamp: ts.clone() });
+        }
+        if let Some(m) = bgtasks {
+            out.push(MessageBrief { role: "bgtasks".into(), content: m, timestamp: ts });
+        }
+        Ok(out)
+    }
+
+    /// 增量重放任务清单与后台任务，返回两者的 JSON 快照。
+    /// 只解析上次之后新增的字节；文件被截断/轮转时从头重来。
+    fn replay_state(&mut self, path: &Path) -> Result<(Option<String>, Option<String>)> {
+        let size = fs::metadata(path)?.len();
+        let st = self.state_cache.entry(path.to_path_buf()).or_default();
+        // 文件变小 = 被截断或换了内容，之前的重放结果作废
+        if size < st.offset {
+            *st = SessionState::default();
+        }
+        if size > st.offset {
+            let mut f = fs::File::open(path)?;
+            f.seek(SeekFrom::Start(st.offset))?;
+            let mut buf = Vec::with_capacity((size - st.offset) as usize);
+            f.read_to_end(&mut buf)?;
+            // 只消费到最后一个换行为止：末尾那行可能正被写入，只有半截
+            let end = match buf.iter().rposition(|b| *b == b'\n') {
+                Some(p) => p + 1,
+                None => 0,
+            };
+            let text = String::from_utf8_lossy(&buf[..end]);
+            for line in text.lines() {
+                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                st.todos.observe(&v);
+                st.bg.observe(&v);
+            }
+            st.offset += end as u64;
+        }
+        // 强制产出当前态（dirty 只用于增量期间的去重，这里要的是全量快照）
+        st.todos.dirty = true;
+        st.bg.dirty = true;
+        Ok((
+            st.todos.take_snapshot("").map(|m| m.content),
+            st.bg.take_snapshot("").map(|m| m.content),
+        ))
     }
 
     fn find_session_file(&self, session_id: &str) -> Result<PathBuf> {
@@ -220,7 +290,7 @@ pub fn build_tasks(
         }
     }
 
-    // 同一项目下：活跃会话按开始时间升序，与进程按启动时间升序一一配对
+    // 同一项目下的活跃会话，按最后活动时间与进程配对（排序见下方）
     let mut sess_by_key: HashMap<&str, Vec<&SessionSummary>> = HashMap::new();
     // 只有「近期活跃」的会话才参与进程配对（老会话大概率已结束）
     let now = now_ms();
@@ -229,17 +299,24 @@ pub fn build_tasks(
             sess_by_key.entry(s.project_key.as_str()).or_default().push(s);
         }
     }
+    // 按「最后活动时间」倒序：真正还在跑的排前面。
+    //
+    // 这里绝不能按 started_at 排：会话的起始时间是文件里第一条记录的时间，
+    // 而 `claude --resume` 起来的会话可能是几周前开的 —— 它此刻活得好好的，
+    // 起始时间却比一个刚开没多久、但早就没人管的会话还老。按起始时间挑，
+    // 活着的长会话会被死会话挤掉：配不到进程 → 判为 Finished → 从列表里消失，
+    // 而那个死会话反倒顶着 pid 一直显示「等待输入」，内容永远不更新。
     for list in sess_by_key.values_mut() {
-        list.sort_by(|a, b| {
-            a.started_at.cmp(&b.started_at) // ISO8601 字符串可直接比
-        });
+        list.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
     }
 
     let mut pid_of_session: HashMap<&str, &ProcessInfo> = HashMap::new();
     for (key, procs) in &proc_by_key {
         if let Some(sess) = sess_by_key.get(key.as_str()) {
-            // 倒序配对：最新的会话配最新的进程（resume 场景下老会话文件已停更）
-            for (p, s) in procs.iter().rev().zip(sess.iter().rev()) {
+            // 一个项目下最多只有「进程数」个会话是活的，取最近活动的那几个；
+            // 最新的进程配最近活动的会话。zip 到较短的一方为止，
+            // 多出来的老会话拿不到进程，自然落到 Finished。
+            for (p, s) in procs.iter().rev().zip(sess.iter()) {
                 pid_of_session.insert(s.session_id.as_str(), p);
             }
         }
@@ -474,7 +551,6 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
 
     Some(SessionSummary {
         session_id: session_id.to_string(),
-        path: path.to_path_buf(),
         project_key,
         cwd: if canonical_cwd.is_empty() { cwd } else { canonical_cwd },
         title: String::new(),
@@ -519,10 +595,14 @@ fn user_text(content: Option<&Value>) -> Option<String> {
         _ => return None,
     };
     let trimmed = text.trim();
+    // 这些都是 Claude Code 注入的系统内容，只是恰好被记成 type=user。
+    // 不滤掉的话会在对话流里冒充「用户发的话」——后台任务跑完的回执
+    // <task-notification> 尤其常见，用户会看到自己「发」了一段 XML。
     if trimmed.is_empty()
         || trimmed.starts_with("<local-command")
         || trimmed.starts_with("<command-name>")
         || trimmed.starts_with("<system-reminder>")
+        || trimmed.starts_with("<task-notification>")
         || trimmed.starts_with("Caveat:")
         || trimmed.starts_with("[Request interrupted")
     {
@@ -588,6 +668,7 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
             let items = v.pointer("/message/content")?.as_array()?;
             let mut text_buf = String::new();
             let mut tools = Vec::new();
+            let mut plan: Option<&str> = None;
             for item in items {
                 match item.get("type").and_then(Value::as_str) {
                     Some("text") => {
@@ -597,6 +678,16 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     }
                     Some("tool_use") => {
                         let name = item.get("name").and_then(Value::as_str).unwrap_or("?");
+                        // plan 模式给出的待批准方案：正文在 input.plan，
+                        // 走 tool_input_hint 的话它不认 plan 字段，整份方案会被丢掉，
+                        // 只剩一行光秃秃的 "ExitPlanMode"。
+                        if name == "ExitPlanMode" {
+                            plan = item
+                                .get("input")
+                                .and_then(|i| i.get("plan"))
+                                .and_then(Value::as_str);
+                            continue;
+                        }
                         let hint = tool_input_hint(item.get("input"));
                         tools.push(if hint.is_empty() {
                             name.to_string()
@@ -606,6 +697,14 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     }
                     _ => {}
                 }
+            }
+            // 方案是本条记录里最要紧的内容，优先于同条的工具流水
+            if let Some(p) = plan.filter(|p| !p.trim().is_empty()) {
+                return Some(MessageBrief {
+                    role: "plan".into(),
+                    content: truncate(p.trim(), 4000),
+                    timestamp: ts,
+                });
             }
             if !text_buf.trim().is_empty() {
                 Some(MessageBrief {
@@ -648,6 +747,272 @@ fn tool_input_hint(input: Option<&Value>) -> String {
         }
     }
     String::new()
+}
+
+/// 待办清单里的一项
+#[derive(Debug, Clone, Serialize)]
+struct TodoItem {
+    id: String,
+    subject: String,
+    status: String,
+}
+
+/// 后台运行的任务（run_in_background 的命令 / 异步子代理）
+#[derive(Debug, Clone, Serialize)]
+struct BgTask {
+    id: String,
+    label: String,
+    /// running | completed | failed | killed | stopped
+    status: String,
+}
+
+/// 追踪会话里「在后台跑着」的任务。
+///
+/// 同样是跨记录的状态：
+/// - 启动：tool_use 带 run_in_background=true，任务号要等 tool_result 里的
+///   "…with ID: xxx"（子代理则是 "agentId: xxx"）才拿得到；
+/// - 结束：后续某条 user 记录里的 <task-notification> 带 <task-id> 与 <status>。
+#[derive(Default)]
+struct BgTracker {
+    /// tool_use_id -> 展示名（等 tool_result 回填任务号）
+    pending: HashMap<String, String>,
+    items: Vec<BgTask>,
+    dirty: bool,
+}
+
+impl BgTracker {
+    fn observe(&mut self, v: &Value) {
+        // 完成通知不止一种落法：子代理/后台命令跑完时是一条 queue-operation，
+        // 通知文本直接挂在顶层 content（字符串）上，不在 /message/content 里。
+        // 只看 /message/content 的话，任务只进不出，永远停在「运行中」。
+        if let Some(s) = v.get("content").and_then(Value::as_str) {
+            self.on_notification(s);
+        }
+        // 挂在消息体上的：内容可能是纯字符串，也可能是分块数组
+        if let Some(c) = v.pointer("/message/content") {
+            match c {
+                Value::String(s) => self.on_notification(s),
+                Value::Array(items) => {
+                    for item in items {
+                        match item.get("type").and_then(Value::as_str) {
+                            Some("tool_use") => self.on_tool_use(item),
+                            Some("tool_result") => self.on_tool_result(item),
+                            Some("text") => {
+                                if let Some(t) = item.get("text").and_then(Value::as_str) {
+                                    self.on_notification(t);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn on_tool_use(&mut self, item: &Value) {
+        let input = item.get("input");
+        let is_bg = input
+            .and_then(|i| i.get("run_in_background"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !is_bg {
+            return;
+        }
+        let Some(use_id) = item.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let name = item.get("name").and_then(Value::as_str).unwrap_or("任务");
+        // description 最贴近人看的说明，没有再退回工具名
+        let label = input
+            .and_then(|i| i.get("description"))
+            .and_then(Value::as_str)
+            .map(|s| truncate(s, 80))
+            .unwrap_or_else(|| name.to_string());
+        self.pending.insert(use_id.to_string(), label);
+    }
+
+    fn on_tool_result(&mut self, item: &Value) {
+        let Some(use_id) = item.get("tool_use_id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(label) = self.pending.remove(use_id) else {
+            return;
+        };
+        let text = tool_result_text(item);
+        let Some(id) = parse_bg_id(&text) else { return };
+        self.items.push(BgTask { id, label, status: "running".into() });
+        self.dirty = true;
+    }
+
+    /// 解析 <task-notification>：一条通知可能带多个 task-id，共用一个 status
+    fn on_notification(&mut self, text: &str) {
+        if !text.contains("<task-notification>") {
+            return;
+        }
+        let Some(status) = tag_value(text, "status") else { return };
+        let mut rest = text;
+        while let Some(id) = tag_value(rest, "task-id") {
+            // "__orphan_summary__:*" 是内部扫描标记，不是真任务
+            if !id.starts_with("__") {
+                if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
+                    if t.status != status {
+                        t.status = status.clone();
+                        self.dirty = true;
+                    }
+                }
+            }
+            let Some(pos) = rest.find("</task-id>") else { break };
+            rest = &rest[pos + "</task-id>".len()..];
+        }
+    }
+
+    fn take_snapshot(&mut self, ts: &str) -> Option<MessageBrief> {
+        if !self.dirty || self.items.is_empty() {
+            return None;
+        }
+        self.dirty = false;
+        Some(MessageBrief {
+            role: "bgtasks".into(),
+            content: serde_json::to_string(&self.items).ok()?,
+            timestamp: ts.to_string(),
+        })
+    }
+}
+
+/// 取出 <tag>值</tag> 里的值
+fn tag_value(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let s = text.find(&open)? + open.len();
+    let e = text[s..].find(&close)? + s;
+    Some(text[s..e].trim().to_string())
+}
+
+/// 从后台任务的 tool_result 文本里取任务号：
+/// 命令是 "…background with ID: xxx"，子代理是 "agentId: xxx"
+fn parse_bg_id(text: &str) -> Option<String> {
+    for marker in ["with ID: ", "agentId: "] {
+        if let Some(p) = text.find(marker) {
+            let rest = &text[p + marker.len()..];
+            let id: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .collect();
+            if !id.is_empty() {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+/// 重放 TaskCreate / TaskUpdate，还原终端里那份「任务清单」。
+///
+/// 清单是跨多条记录累积出来的状态，没法在 entry_to_brief 里按行无状态解析：
+/// - TaskCreate 的 tool_use 只带 subject，任务号要等它的 tool_result
+///   （"Task #N created successfully: ..."）才拿得到，故需按 tool_use_id 暂存；
+/// - TaskUpdate 只带 taskId 与新状态，必须落到已有的那一项上。
+#[derive(Default)]
+struct TodoTracker {
+    /// tool_use_id -> subject（等待对应 tool_result 回填任务号）
+    pending: HashMap<String, String>,
+    items: Vec<TodoItem>,
+    dirty: bool,
+}
+
+impl TodoTracker {
+    fn observe(&mut self, v: &Value) {
+        let Some(items) = v.pointer("/message/content").and_then(Value::as_array) else {
+            return;
+        };
+        for item in items {
+            match item.get("type").and_then(Value::as_str) {
+                Some("tool_use") => self.on_tool_use(item),
+                Some("tool_result") => self.on_tool_result(item),
+                _ => {}
+            }
+        }
+    }
+
+    fn on_tool_use(&mut self, item: &Value) {
+        let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+        let input = item.get("input");
+        match name {
+            "TaskCreate" => {
+                let (Some(id), Some(subject)) = (
+                    item.get("id").and_then(Value::as_str),
+                    input.and_then(|i| i.get("subject")).and_then(Value::as_str),
+                ) else {
+                    return;
+                };
+                self.pending.insert(id.to_string(), subject.to_string());
+            }
+            "TaskUpdate" => {
+                let Some(input) = input else { return };
+                let Some(task_id) = input.get("taskId").and_then(Value::as_str) else {
+                    return;
+                };
+                let status = input.get("status").and_then(Value::as_str);
+                let subject = input.get("subject").and_then(Value::as_str);
+                // status=deleted 表示该任务被移除，清单里也不该再留着
+                if status == Some("deleted") {
+                    let before = self.items.len();
+                    self.items.retain(|t| t.id != task_id);
+                    self.dirty |= self.items.len() != before;
+                    return;
+                }
+                if let Some(t) = self.items.iter_mut().find(|t| t.id == task_id) {
+                    if let Some(s) = status {
+                        t.status = s.to_string();
+                    }
+                    if let Some(s) = subject {
+                        t.subject = s.to_string();
+                    }
+                    self.dirty = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_tool_result(&mut self, item: &Value) {
+        let Some(use_id) = item.get("tool_use_id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(subject) = self.pending.remove(use_id) else {
+            return;
+        };
+        // "Task #12 created successfully: xxx" —— 取出任务号
+        let text = tool_result_text(item);
+        let Some(id) = text
+            .split_once('#')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+        else {
+            return;
+        };
+        self.items.push(TodoItem {
+            id: id.to_string(),
+            subject,
+            status: "pending".into(),
+        });
+        self.dirty = true;
+    }
+
+    /// 有变化时产出一份当前清单快照（JSON，交前端渲染成勾选列表）
+    fn take_snapshot(&mut self, ts: &str) -> Option<MessageBrief> {
+        if !self.dirty || self.items.is_empty() {
+            return None;
+        }
+        self.dirty = false;
+        Some(MessageBrief {
+            role: "todos".into(),
+            content: serde_json::to_string(&self.items).ok()?,
+            timestamp: ts.to_string(),
+        })
+    }
 }
 
 /// 解析文件头部：初始 cwd、第一条真实用户提示词、会话开始时间
@@ -764,4 +1129,513 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+
+#[cfg(test)]
+mod todo_tests {
+    use super::*;
+
+    fn assistant_tool(id: &str, name: &str, input: Value) -> Value {
+        serde_json::json!({
+            "type": "assistant",
+            "timestamp": "2026-07-17T10:00:00Z",
+            "message": { "content": [
+                { "type": "tool_use", "id": id, "name": name, "input": input }
+            ]}
+        })
+    }
+
+    fn tool_result(use_id: &str, text: &str) -> Value {
+        serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-07-17T10:00:01Z",
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": use_id, "content": text }
+            ]}
+        })
+    }
+
+    /// 任务号来自 tool_result，不在 TaskCreate 的入参里 —— 必须等结果回来才成形
+    #[test]
+    fn task_id_comes_from_tool_result() {
+        let mut t = TodoTracker::default();
+        t.observe(&assistant_tool("u1", "TaskCreate", serde_json::json!({ "subject": "甲" })));
+        // 只有 tool_use 时还拿不到任务号，清单应为空
+        assert!(t.items.is_empty());
+        assert!(t.take_snapshot("ts").is_none());
+
+        t.observe(&tool_result("u1", "Task #7 created successfully: 甲"));
+        assert_eq!(t.items.len(), 1);
+        assert_eq!(t.items[0].id, "7");
+        assert_eq!(t.items[0].status, "pending");
+        assert!(t.take_snapshot("ts").is_some());
+        // 快照取走后不再重复产出
+        assert!(t.take_snapshot("ts").is_none());
+    }
+
+    #[test]
+    fn update_changes_status_and_delete_removes() {
+        let mut t = TodoTracker::default();
+        t.observe(&assistant_tool("u1", "TaskCreate", serde_json::json!({ "subject": "甲" })));
+        t.observe(&tool_result("u1", "Task #1 created successfully: 甲"));
+        t.observe(&assistant_tool("u2", "TaskCreate", serde_json::json!({ "subject": "乙" })));
+        t.observe(&tool_result("u2", "Task #2 created successfully: 乙"));
+        let _ = t.take_snapshot("ts");
+
+        t.observe(&assistant_tool(
+            "u3",
+            "TaskUpdate",
+            serde_json::json!({ "taskId": "2", "status": "completed" }),
+        ));
+        assert_eq!(t.items.iter().find(|i| i.id == "2").unwrap().status, "completed");
+        assert!(t.take_snapshot("ts").is_some());
+
+        t.observe(&assistant_tool(
+            "u4",
+            "TaskUpdate",
+            serde_json::json!({ "taskId": "1", "status": "deleted" }),
+        ));
+        assert_eq!(t.items.len(), 1);
+        assert_eq!(t.items[0].id, "2");
+    }
+
+    /// 更新一个不存在的任务号不应产生脏快照（否则前端会收到无意义的重复清单）
+    #[test]
+    fn update_unknown_task_is_ignored() {
+        let mut t = TodoTracker::default();
+        t.observe(&assistant_tool(
+            "u1",
+            "TaskUpdate",
+            serde_json::json!({ "taskId": "99", "status": "completed" }),
+        ));
+        assert!(t.items.is_empty());
+        assert!(t.take_snapshot("ts").is_none());
+    }
+
+    /// plan 模式的方案正文要完整取出，而不是只剩工具名
+    #[test]
+    fn exit_plan_mode_yields_plan_role() {
+        let v = assistant_tool(
+            "u1",
+            "ExitPlanMode",
+            serde_json::json!({ "plan": "1. 改 A\n2. 改 B" }),
+        );
+        let m = entry_to_brief(&v).expect("应产出一条消息");
+        assert_eq!(m.role, "plan");
+        assert_eq!(m.content, "1. 改 A\n2. 改 B");
+    }
+}
+
+#[cfg(test)]
+mod bg_tests {
+    use super::*;
+
+    fn bg_use(id: &str, name: &str, desc: &str) -> Value {
+        serde_json::json!({
+            "type": "assistant",
+            "timestamp": "2026-07-17T10:00:00Z",
+            "message": { "content": [
+                { "type": "tool_use", "id": id, "name": name,
+                  "input": { "command": "yarn start", "description": desc, "run_in_background": true } }
+            ]}
+        })
+    }
+
+    fn result(use_id: &str, text: &str) -> Value {
+        serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-07-17T10:00:01Z",
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": use_id, "content": text }
+            ]}
+        })
+    }
+
+    fn notification(text: &str) -> Value {
+        serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-07-17T10:00:02Z",
+            "message": { "content": text }
+        })
+    }
+
+    #[test]
+    fn tracks_background_command_until_notification() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "启动前端 dev server"));
+        assert!(t.items.is_empty(), "拿到任务号前不该成形");
+
+        t.observe(&result("u1", "Command running in background with ID: bhb69r9ff. Output..."));
+        assert_eq!(t.items.len(), 1);
+        assert_eq!(t.items[0].id, "bhb69r9ff");
+        assert_eq!(t.items[0].label, "启动前端 dev server");
+        assert_eq!(t.items[0].status, "running");
+
+        t.observe(&notification(
+            "<task-notification>\n<task-id>bhb69r9ff</task-id>\n<status>completed</status>\n</task-notification>",
+        ));
+        assert_eq!(t.items[0].status, "completed");
+    }
+
+    /// 异步子代理的任务号来自 agentId，不是 "with ID:"
+    #[test]
+    fn tracks_background_agent_by_agent_id() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Agent", "审查后端"));
+        t.observe(&result("u1", "Async agent launched successfully.\nagentId: a21278fd478be0810 (internal)"));
+        assert_eq!(t.items.len(), 1);
+        assert_eq!(t.items[0].id, "a21278fd478be0810");
+    }
+
+    /// 一条通知可带多个 task-id 共用一个 status；__orphan_summary__ 是内部标记要跳过
+    #[test]
+    fn notification_with_multiple_ids_skips_internal_markers() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "甲"));
+        t.observe(&result("u1", "Command running in background with ID: b5eauqs4i."));
+        t.observe(&bg_use("u2", "Bash", "乙"));
+        t.observe(&result("u2", "Command running in background with ID: bmojunb33."));
+        let _ = t.take_snapshot("ts");
+
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b5eauqs4i</task-id>\n<task-id>bmojunb33</task-id>\n<task-id>__orphan_summary__:shell</task-id>\n<status>stopped</status>\n</task-notification>",
+        ));
+        assert!(t.items.iter().all(|i| i.status == "stopped"));
+        assert_eq!(t.items.len(), 2, "内部标记不该混进清单");
+    }
+
+    /// 非后台的普通命令不该被收进来
+    #[test]
+    fn foreground_command_is_ignored() {
+        let mut t = BgTracker::default();
+        let v = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [
+                { "type": "tool_use", "id": "u1", "name": "Bash",
+                  "input": { "command": "ls", "description": "列目录" } }
+            ]}
+        });
+        t.observe(&v);
+        t.observe(&result("u1", "Command running in background with ID: zzz."));
+        assert!(t.items.is_empty());
+    }
+
+    /// take_snapshot 反映的始终是当前状态，且取走后不重复产出
+    #[test]
+    fn snapshot_reflects_current_state_once() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "甲"));
+        t.observe(&result("u1", "Command running in background with ID: b1."));
+
+        let first = t.take_snapshot("ts").expect("首次应有快照");
+        assert!(first.content.contains("running"));
+        assert!(t.take_snapshot("ts").is_none(), "无变化不该重复产出");
+
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>",
+        ));
+        let second = t.take_snapshot("ts").expect("状态变了该有新快照");
+        assert!(second.content.contains("completed"));
+        assert!(!second.content.contains("\"running\""), "应是原地更新而非追加一条");
+    }
+}
+
+#[cfg(test)]
+mod bg_notification_path_tests {
+    use super::*;
+
+    /// 完成通知也可能是一条 queue-operation、文本挂在顶层 content 上。
+    /// 漏掉这条路径的话后台任务只进不出，永远停在「运行中」。
+    #[test]
+    fn picks_up_notification_from_top_level_content() {
+        let mut t = BgTracker::default();
+        t.observe(&serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [
+                { "type": "tool_use", "id": "u1", "name": "Agent",
+                  "input": { "prompt": "审查", "description": "审查 Rust 后端", "run_in_background": true } }
+            ]}
+        }));
+        t.observe(&serde_json::json!({
+            "type": "user",
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "u1",
+                  "content": "Async agent launched successfully.\nagentId: a21278fd478be0810" }
+            ]}
+        }));
+        assert_eq!(t.items[0].status, "running");
+
+        // queue-operation：通知在顶层 content，message 整个不存在
+        t.observe(&serde_json::json!({
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": "<task-notification>\n<task-id>a21278fd478be0810</task-id>\n<status>completed</status>\n</task-notification>"
+        }));
+        assert_eq!(t.items[0].status, "completed", "顶层 content 的通知必须被接住");
+    }
+}
+
+#[cfg(test)]
+mod replay_state_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn line(v: Value) -> String {
+        format!("{}\n", serde_json::to_string(&v).unwrap())
+    }
+
+    fn create(id: &str, subject: &str) -> String {
+        line(serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [
+                { "type": "tool_use", "id": id, "name": "TaskCreate",
+                  "input": { "subject": subject } }
+            ]}
+        }))
+    }
+
+    fn created(use_id: &str, n: u32, subject: &str) -> String {
+        line(serde_json::json!({
+            "type": "user",
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": use_id,
+                  "content": format!("Task #{n} created successfully: {subject}") }
+            ]}
+        }))
+    }
+
+    fn chatter(n: usize) -> String {
+        // 每行塞一段填充，确保总量能越过 8MB 的尾部窗口
+        let pad = "填充".repeat(60);
+        (0..n)
+            .map(|i| {
+                line(serde_json::json!({
+                    "type": "assistant",
+                    "timestamp": "2026-07-17T10:00:00Z",
+                    "message": { "content": [{ "type": "text", "text": format!("闲聊 {i} {pad}") }] }
+                }))
+            })
+            .collect()
+    }
+
+    /// 清单必须从会话开头重放：TaskCreate 常常远在尾部窗口之外
+    /// （真实会话可达数十 MB，早期的 TaskCreate 一条都读不到）。
+    #[test]
+    fn replays_todos_created_far_before_the_tail_window() {
+        let dir = std::env::temp_dir().join(format!("am-replay-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("s.jsonl");
+        let mut f = fs::File::create(&path).unwrap();
+        // 开头建任务，随后堆入远超尾部窗口的内容
+        f.write_all(create("u1", "甲").as_bytes()).unwrap();
+        f.write_all(created("u1", 1, "甲").as_bytes()).unwrap();
+        f.write_all(chatter(60_000).as_bytes()).unwrap();
+        f.flush().unwrap();
+        assert!(
+            fs::metadata(&path).unwrap().len() > 8 * 1024 * 1024,
+            "样本需大于尾部窗口才有意义"
+        );
+
+        let mut sc = SessionScanner::new(dir.clone());
+        let (todos, _) = sc.replay_state(&path).unwrap();
+        let todos = todos.expect("尾部窗口读不到的 TaskCreate 也必须被重放到");
+        assert!(todos.contains("\"id\":\"1\""));
+        assert!(todos.contains("甲"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 增量重放：文件追加后只解析新增字节，且状态在多次调用间累积
+    #[test]
+    fn replay_is_incremental_and_accumulates() {
+        let dir = std::env::temp_dir().join(format!("am-inc-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("s.jsonl");
+        fs::write(&path, create("u1", "甲") + &created("u1", 1, "甲")).unwrap();
+
+        let mut sc = SessionScanner::new(dir.clone());
+        let (todos, _) = sc.replay_state(&path).unwrap();
+        assert!(todos.unwrap().contains("甲"));
+        let after_first = sc.state_cache.get(&path).unwrap().offset;
+        assert!(after_first > 0);
+
+        // 追加第二个任务，只该解析新增部分
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all((create("u2", "乙") + &created("u2", 2, "乙")).as_bytes()).unwrap();
+        f.flush().unwrap();
+
+        let (todos, _) = sc.replay_state(&path).unwrap();
+        let todos = todos.unwrap();
+        assert!(todos.contains("甲"), "旧状态应保留");
+        assert!(todos.contains("乙"), "新增应被解析");
+        assert!(sc.state_cache.get(&path).unwrap().offset > after_first);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 半截的末行不能消费，否则下次续读会从行中间开始，整行永久丢失
+    #[test]
+    fn partial_trailing_line_is_not_consumed() {
+        let dir = std::env::temp_dir().join(format!("am-partial-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("s.jsonl");
+        // 完整两行 + 半行（模拟正在写入）
+        let half = create("u2", "乙");
+        let half = &half[..half.len() / 2];
+        fs::write(&path, create("u1", "甲") + &created("u1", 1, "甲") + half).unwrap();
+
+        let mut sc = SessionScanner::new(dir.clone());
+        let (todos, _) = sc.replay_state(&path).unwrap();
+        assert!(todos.unwrap().contains("甲"));
+        let off = sc.state_cache.get(&path).unwrap().offset;
+
+        // 补全那半行
+        let rest = create("u2", "乙");
+        let rest = &rest[rest.len() / 2..];
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(rest.as_bytes()).unwrap();
+        f.write_all(created("u2", 2, "乙").as_bytes()).unwrap();
+        f.flush().unwrap();
+
+        let (todos, _) = sc.replay_state(&path).unwrap();
+        assert!(
+            todos.unwrap().contains("乙"),
+            "补全后该行必须被完整解析（偏移没有停在行中间）"
+        );
+        assert!(sc.state_cache.get(&path).unwrap().offset > off);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod pairing_tests {
+    use super::*;
+
+    fn sess(id: &str, started: &str, mtime_ms: u64) -> SessionSummary {
+        SessionSummary {
+            session_id: id.into(),
+            project_key: "-proj".into(),
+            cwd: "/proj".into(),
+            title: id.into(),
+            prompt: String::new(),
+            last_action: String::new(),
+            turn_ended: true,
+            started_at: Some(started.into()),
+            last_active_at: None,
+            version: None,
+            git_branch: None,
+            mtime_ms,
+            line_count: 1,
+            used_tokens_5h: 0,
+        }
+    }
+
+    fn proc(pid: u32, start_time: u64) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            agent: "claude".into(),
+            tty: format!("/dev/ttys00{pid}"),
+            cwd: "/proj".into(),
+            ide: crate::model::IdeKind::Terminal,
+            ide_name: "Terminal".into(),
+            start_time,
+            cpu_usage: 0.0,
+            memory: 0,
+            command: "claude".into(),
+        }
+    }
+
+    /// 真实踩到的坑：`claude --resume` 起来的长会话，起始时间是几周前，
+    /// 但此刻正在被写入；另一个会话起始更晚却早就没人管了。
+    /// 按起始时间配对会让活着的那个配不到进程 → 判为 Finished → 从列表消失，
+    /// 死的那个反倒顶着 pid 常驻显示「等待输入」。必须按最后活动时间配。
+    #[test]
+    fn alive_resumed_session_wins_over_recently_started_dead_one() {
+        let now = now_ms();
+        // 活着：起始很老（resume），但刚刚还在写
+        let alive = sess("alive", "2026-06-26T02:29:18Z", now - 60_000);
+        // 已死：起始更晚，但 4 小时没动静了
+        let dead = sess("dead", "2026-07-16T16:16:19Z", now - 4 * 3600 * 1000);
+        let sessions = vec![alive, dead];
+        // 只有一个进程 → 只能有一个会话是活的
+        let procs = vec![proc(3191, 1000)];
+
+        let tasks = build_tasks(&sessions, &procs, &|_| false);
+        let by_id = |id: &str| tasks.iter().find(|t| t.id == id).unwrap().clone();
+
+        assert_eq!(by_id("alive").pid, Some(3191), "正在写入的会话必须拿到进程");
+        assert_eq!(by_id("dead").pid, None, "四小时没动静的会话不该顶着进程");
+        assert_eq!(
+            by_id("dead").status,
+            TaskStatus::Finished,
+            "配不到进程即已结束（列表会过滤掉）"
+        );
+    }
+
+    /// 多进程时：最新的进程配最近活动的会话，多余的老会话落到 Finished
+    #[test]
+    fn pairs_most_recent_sessions_with_processes() {
+        let now = now_ms();
+        let sessions = vec![
+            sess("newest", "2026-07-01T00:00:00Z", now - 10_000),
+            sess("middle", "2026-07-02T00:00:00Z", now - 20_000),
+            sess("stale", "2026-07-03T00:00:00Z", now - 3 * 3600 * 1000),
+        ];
+        let procs = vec![proc(100, 1000), proc(200, 2000)];
+
+        let tasks = build_tasks(&sessions, &procs, &|_| false);
+        let pid = |id: &str| tasks.iter().find(|t| t.id == id).unwrap().pid;
+
+        // 两个进程 → 最近活动的两个会话拿到 pid
+        assert_eq!(pid("newest"), Some(200), "最新进程配最近活动的会话");
+        assert_eq!(pid("middle"), Some(100));
+        assert_eq!(pid("stale"), None, "起始最晚但最久没活动的，不该拿到进程");
+    }
+}
+
+#[cfg(test)]
+mod user_text_tests {
+    use super::*;
+
+    fn user_entry(text: &str) -> Value {
+        serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-07-17T10:00:00Z",
+            "message": { "content": text }
+        })
+    }
+
+    /// 后台任务跑完时 Claude Code 会往会话里塞一条 type=user 的回执。
+    /// 不滤掉的话，用户会在对话流里看到自己「发」了一段 XML。
+    #[test]
+    fn task_notification_is_not_a_user_message() {
+        let v = user_entry(
+            "<task-notification>\n<task-id>abc123</task-id>\n<status>completed</status>\n<summary>Background command \"Start dev server\" completed</summary>\n</task-notification>",
+        );
+        assert!(entry_to_brief(&v).is_none(), "系统回执不该冒充用户消息");
+    }
+
+    /// 其余系统注入块同样不该出现在对话流里
+    #[test]
+    fn other_injected_blocks_are_filtered() {
+        for t in [
+            "<system-reminder>别忘了 X</system-reminder>",
+            "<local-command-stdout>输出</local-command-stdout>",
+            "<command-name>/goal</command-name>",
+            "Caveat: The messages below were generated…",
+            "[Request interrupted by user]",
+        ] {
+            assert!(entry_to_brief(&user_entry(t)).is_none(), "应被滤掉: {t}");
+        }
+    }
+
+    /// 别误伤真正的用户消息
+    #[test]
+    fn real_user_message_survives() {
+        let m = entry_to_brief(&user_entry("把服务启动，然后打开前台")).expect("真实用户消息必须保留");
+        assert_eq!(m.role, "user");
+        assert_eq!(m.content, "把服务启动，然后打开前台");
+    }
 }

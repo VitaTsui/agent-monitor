@@ -1,5 +1,6 @@
 import AdminGate from "@/components/AdminGate";
 import App from "@/App";
+import Home from "@/pages/Home";
 import Login from "@/pages/Login";
 import Portal from "@/pages/Portal";
 import { ReactNode } from "react";
@@ -108,10 +109,11 @@ const Router: RouteType[] = [
     },
   },
   {
-    // 根路径默认进入前台（后管仅管理员经令牌解锁后使用）
+    // 根路径：产品官网首页（公开，无需登录）
     path: "/",
-    element: <Navigate to="/portal" replace />,
+    element: <Home />,
     meta: {
+      title: "终端任务监控",
       noAuth: true,
       noTabsView: true,
     },

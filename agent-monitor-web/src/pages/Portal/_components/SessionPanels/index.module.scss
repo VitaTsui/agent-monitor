@@ -1,0 +1,194 @@
+$text: #243d42;
+$muted: #7c9096;
+$border: rgba(36, 61, 66, 0.09);
+$accent: #0f9bad;
+$hover: rgba(36, 61, 66, 0.06);
+$mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+// 悬浮在本格右侧的状态浮层：任务清单与后台任务两块独立堆叠、各自可收起。
+// 定位锚点是各自的 ChatPane（其 position: relative），
+// 这样多个会话并排时每格各带各的，不会叠在一起。
+.SessionPanels {
+  position: absolute;
+  // 头部高 62px，再留 6px 间距，避免贴着（甚至压住）头部
+  top: 68px;
+  right: 12px;
+  z-index: 5;
+  width: 250px;
+  // 窄格（多会话并排）时不许把内容压死
+  max-width: calc(100% - 24px);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  // 容器本身不拦截点击，只有面板实体拦
+  pointer-events: none;
+
+  > * {
+    pointer-events: auto;
+  }
+
+  // 窄屏：两块默认都是收起的胶囊，让它们并排一行，别各占一行
+  @media (max-width: 760px) {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+}
+
+%floating {
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(6px);
+  border: 1px solid $border;
+  box-shadow: 0 4px 20px rgba(36, 61, 66, 0.12);
+}
+
+.dock {
+  @extend %floating;
+  width: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  overflow: hidden;
+
+  .dockHead {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 6px 7px 12px;
+    border-bottom: 1px solid $border;
+
+    .dockTitle {
+      flex: 1;
+      font-size: 12px;
+      font-weight: 600;
+      color: $text;
+    }
+
+    .dockCount {
+      font-size: 11px;
+      color: $accent;
+    }
+
+    .closeBtn {
+      width: 20px;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 5px;
+      cursor: pointer;
+      color: $muted;
+      font-size: 10px;
+
+      &:hover {
+        background: $hover;
+        color: $text;
+      }
+    }
+  }
+
+  // 两块等高且不宜太高：这是悬浮在对话上方的浮层，占高了就挡内容。
+  // 固定高度（而非 max-height）保证两块一致，内容多了自己滚。
+  .dockBody {
+    height: 132px;
+    overflow-y: auto;
+    padding: 8px 12px;
+  }
+}
+
+// 收起态：一枚小胶囊，仍一眼可见进度 / 执行中数量
+.pill {
+  @extend %floating;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 11.5px;
+  color: $muted;
+  user-select: none;
+
+  &:hover {
+    color: $text;
+  }
+}
+
+.todoItem {
+  display: flex;
+  gap: 7px;
+  line-height: 1.75;
+  font-size: 12px;
+
+  .todoBox {
+    flex: none;
+    color: $muted;
+    font-family: $mono;
+  }
+
+  .todoText {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: $text;
+  }
+
+  // 已完成的条目不再展示，故无 .completed 样式
+
+  &.in_progress {
+    .todoBox,
+    .todoText {
+      color: $accent;
+      font-weight: 500;
+    }
+  }
+}
+
+.bgItem {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  line-height: 1.9;
+  font-size: 12px;
+
+  .bgDot {
+    width: 6px;
+    height: 6px;
+    min-width: 6px;
+    border-radius: 50%;
+    background: $muted;
+
+    &.running {
+      background: $accent;
+      // 执行中用呼吸态与等待中区分开
+      animation: bgPulse 1.6s ease-in-out infinite;
+    }
+  }
+
+  .bgText {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: $text;
+  }
+
+  .bgStatus {
+    flex: none;
+    font-size: 10.5px;
+    color: $muted;
+  }
+}
+
+@keyframes bgPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}

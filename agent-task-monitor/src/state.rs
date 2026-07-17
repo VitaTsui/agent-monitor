@@ -10,8 +10,6 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 
 pub struct Config {
     pub port: u16,
-    pub username: String,
-    pub password: String,
     /// 与前端 .env CRYPTO_KEY 一致的共享 AES 密钥
     pub crypto_key: String,
     pub private_key: RsaPrivateKey,
@@ -82,10 +80,146 @@ pub struct MachineEntry {
     pub pending_files: VecDeque<crate::model::FileTransfer>,
     /// 会话 ID → 最近消息（agent 上报时缓存，供前端查看远程会话）
     pub messages: HashMap<String, Vec<MessageBrief>>,
+    /// 待下发给该 agent 的 git 对比请求
+    pub pending_git: VecDeque<crate::model::GitQuery>,
+    /// 会话 ID → 最近一次 git 对比结果（agent 回传后缓存）
+    pub git_cache: HashMap<String, crate::model::GitOverview>,
 }
 
 /// 机器离线判定阈值
 pub const OFFLINE_AFTER_SECS: u64 = 10;
+
+/// 文件下发允许写入的根目录：AM_UPLOAD_ROOT，默认用户主目录。
+/// 常量时间比较令牌。
+/// `==` 会先比长度再逐字节短路返回，把「猜对了多少前缀」和长度以耗时形式泄露出去；
+/// 各调用点的失败延迟是在比较**之后**才 sleep，掩盖不了这一点。
+pub fn token_eq(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    // 长度不等时与等长输入走同样的比较开销，避免长度成为旁路
+    if a.len() != b.len() {
+        // 仍做一次等长比较再丢弃结果，防止长度检查本身被计时区分
+        let _ = a.as_bytes().ct_eq(a.as_bytes());
+        return false;
+    }
+    a.as_bytes().ct_eq(b.as_bytes()).into()
+}
+
+pub fn upload_root() -> std::path::PathBuf {
+    std::env::var("AM_UPLOAD_ROOT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+}
+
+/// 校验文件下发的目标目录，返回可安全写入的绝对路径。
+///
+/// 不做限制的话，任何能向设备传文件的人都可以挑 `/root/.ssh`、`/etc/cron.d`
+/// 之类的目录写文件（文件名虽已过滤穿越，但目录本身就足够拿下机器）。
+/// 因此目标目录必须落在 `upload_root()` 之内。
+pub fn safe_upload_dir(dir: &str) -> Result<std::path::PathBuf, String> {
+    let dir = dir.trim();
+    if dir.is_empty() {
+        return Err("缺少目标目录".into());
+    }
+    let root = upload_root();
+    let candidate = std::path::Path::new(dir);
+    let joined = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root.join(candidate)
+    };
+    // 逐段归一化：不用 canonicalize（目标目录可能尚未创建），
+    // 手工消掉 `.` 与 `..`，避免 root/../../etc 这类绕过。
+    let mut out = std::path::PathBuf::new();
+    for c in joined.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    return Err("目标目录非法".into());
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if !out.starts_with(&root) {
+        return Err(format!("目标目录超出允许范围（仅允许 {} 之内）", root.display()));
+    }
+    Ok(out)
+}
+
+/// 登录态有效期：7 天。到期强制重新登录。
+/// （没有有效期的话 token 表只增不减，且泄露的 token 会永久有效。）
+pub const SESSION_TTL_SECS: u64 = 7 * 24 * 3600;
+
+/// 口令爆破节流：按账号累计连续失败次数，失败后延迟应答。
+/// 不按 IP：服务跑在 Caddy 反代后，对端 IP 恒为反代，而 X-Forwarded-For 可伪造。
+#[derive(Default)]
+pub struct LoginThrottle {
+    /// 用户名 → (连续失败次数, 最近一次失败时刻)
+    fails: HashMap<String, (u32, Instant)>,
+}
+
+/// 连续失败记录的遗忘时间
+const THROTTLE_WINDOW_SECS: u64 = 900;
+/// 单次失败最长延迟
+const THROTTLE_MAX_DELAY_MS: u64 = 3_000;
+/// 节流表容量上限（防被随机用户名刷爆）
+const THROTTLE_MAX_ENTRIES: usize = 10_000;
+
+impl LoginThrottle {
+    /// 本次尝试前应等待的时长（按已累计的连续失败次数指数退避）
+    pub fn delay_for(&self, username: &str) -> std::time::Duration {
+        match self.fails.get(username) {
+            Some((n, at)) if at.elapsed().as_secs() < THROTTLE_WINDOW_SECS && *n > 0 => {
+                let ms = 100u64.saturating_mul(1u64 << (*n).min(6));
+                std::time::Duration::from_millis(ms.min(THROTTLE_MAX_DELAY_MS))
+            }
+            _ => std::time::Duration::ZERO,
+        }
+    }
+
+    pub fn record_fail(&mut self, username: &str) {
+        self.fails.retain(|_, (_, at)| at.elapsed().as_secs() < THROTTLE_WINDOW_SECS);
+        if self.fails.len() >= THROTTLE_MAX_ENTRIES && !self.fails.contains_key(username) {
+            // 满了就先丢最久没失败过的，保证新条目总能记上
+            if let Some(k) = self
+                .fails
+                .iter()
+                .max_by_key(|(_, (_, at))| at.elapsed())
+                .map(|(k, _)| k.clone())
+            {
+                self.fails.remove(&k);
+            }
+        }
+        let e = self.fails.entry(username.to_string()).or_insert((0, Instant::now()));
+        e.0 = e.0.saturating_add(1);
+        e.1 = Instant::now();
+    }
+
+    pub fn record_success(&mut self, username: &str) {
+        self.fails.remove(username);
+    }
+}
+
+/// 一次登录签发的会话
+#[derive(Clone)]
+pub struct Session {
+    pub username: String,
+    pub issued_at: Instant,
+}
+
+impl Session {
+    pub fn new(username: String) -> Self {
+        Self { username, issued_at: Instant::now() }
+    }
+
+    pub fn expired(&self) -> bool {
+        self.issued_at.elapsed().as_secs() >= SESSION_TTL_SECS
+    }
+}
 
 pub struct AppState {
     pub config: Config,
@@ -97,8 +231,8 @@ pub struct AppState {
     pub paused: RwLock<HashSet<u32>>,
     /// 因超额被自动暂停的本机 pid（额度重置后自动恢复）
     pub auto_paused: RwLock<HashSet<u32>>,
-    /// 已签发的登录 token → 用户名
-    pub tokens: RwLock<HashMap<String, String>>,
+    /// 已签发的登录 token → 会话（用户名 + 签发时刻）
+    pub tokens: RwLock<HashMap<String, Session>>,
     /// 用户 + 设备信任注册表（持久化）
     pub registry: RwLock<Registry>,
     /// 本机被排除监控的终端集合
@@ -108,6 +242,19 @@ pub struct AppState {
     /// 任务快照变更信号（每次扫描自增，WS 收到后按各自用户重新拉取）
     pub tx: broadcast::Sender<u64>,
     pub started_at: chrono::DateTime<chrono::Local>,
+    /// agent 模式：是否已连上 hub（供托盘显示连接状态）
+    pub hub_connected: std::sync::atomic::AtomicBool,
+    /// agent 模式：本设备是否已被信任（供托盘显示）
+    pub hub_trusted: std::sync::atomic::AtomicBool,
+    /// agent 模式：最近一次上报被 hub 拒绝的原因（供托盘显示）。
+    /// 只标「未连接」是不够的：令牌不对 / 用户名不存在 / machineId 冲突
+    /// 与「网线拔了」在界面上长得一模一样，而桌面版是 GUI，用户看不到日志，
+    /// 只会看到永远的「连接中…」。
+    pub hub_error: RwLock<Option<String>>,
+    /// 已签发的 OAuth state → 签发时刻（防 CSRF：回调必须带回服务端发过的 state，一次性消费）
+    pub oauth_states: RwLock<HashMap<String, Instant>>,
+    /// 口令登录节流（防爆破）
+    pub login_throttle: RwLock<LoginThrottle>,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -129,6 +276,11 @@ impl AppState {
             terminals: RwLock::new(Vec::new()),
             tx,
             started_at: chrono::Local::now(),
+            hub_connected: std::sync::atomic::AtomicBool::new(false),
+            hub_trusted: std::sync::atomic::AtomicBool::new(false),
+            hub_error: RwLock::new(None),
+            oauth_states: RwLock::new(HashMap::new()),
+            login_throttle: RwLock::new(LoginThrottle::default()),
         })
     }
 
@@ -163,11 +315,6 @@ impl AppState {
             rank(a).cmp(&rank(b)).then(b.mtime_ms.cmp(&a.mtime_ms))
         });
         out
-    }
-
-    /// 该用户能否监控某任务所属机器（信任 + 归属）
-    pub async fn can_view_machine(&self, machine_id: &str, username: &str) -> bool {
-        self.registry.read().await.can_view(machine_id, username)
     }
 
     /// 设备管理列表：该用户名下的全部设备（含未信任的 pending）
@@ -243,12 +390,21 @@ pub async fn scan_loop(state: SharedState) {
                     pending: VecDeque::new(),
                     pending_files: VecDeque::new(),
                     messages: HashMap::new(),
+                    pending_git: VecDeque::new(),
+                    git_cache: HashMap::new(),
                 });
             entry.tasks = tasks;
             entry.last_report = Instant::now();
         }
 
         tick = tick.wrapping_add(1);
+
+        // 过期会话清扫（约每 10 分钟）。鉴权路径只在「有人拿着过期 token 来访问」
+        // 时才顺带清扫，用户关掉页面不再回来的会话会永久滞留，故这里主动回收。
+        if tick % 400 == 0 {
+            state.tokens.write().await.retain(|_, s| !s.expired());
+        }
+
         let _ = state.tx.send(tick);
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     }
@@ -258,7 +414,7 @@ pub async fn scan_loop(state: SharedState) {
 pub async fn enforce_quota(state: &SharedState, tasks: &mut [Task]) {
     let limit = state.registry.read().await.quota_limit();
     let mut auto = state.auto_paused.write().await;
-    let paused = state.paused.read().await;
+    let mut paused = state.paused.write().await;
 
     for t in tasks.iter_mut() {
         t.token_limit = limit;
@@ -291,16 +447,25 @@ pub async fn enforce_quota(state: &SharedState, tasks: &mut [Task]) {
             t.status_dsr = "已暂停(超额)".into();
         }
     }
-    // 清理已消失进程的自动暂停标记
+    // 清理已消失进程的暂停标记。
+    // 手动暂停集合同样必须清理：pid 会被系统复用，残留的死 pid 会让复用到该
+    // pid 的新会话被误判为「已手动暂停」，从而跳过额度管控并在界面上显示错误状态。
+    // （被 SIGSTOP 的进程在 ps 中仍可见，故存活判定不会误删真正暂停中的条目。）
     let alive: HashSet<u32> = tasks.iter().filter_map(|t| t.pid).collect();
     auto.retain(|pid| alive.contains(pid));
+    paused.retain(|pid| alive.contains(pid));
 }
 
 /// 扫描本机，产出带机器信息的任务快照。被排除的终端在此彻底剔除。
 pub async fn local_scan(state: &SharedState) -> Vec<Task> {
+    // procs.scan()/scanner.scan() 会起 `ps` 子进程、读会话文件，都是同步阻塞调用。
+    // 直接在 async 上下文里跑会占住一个 worker 线程（每 1.5s 一次），
+    // 期间该线程上的其它任务（HTTP 请求、WS 推送）全部排队。
+    // block_in_place 会把同线程的其它任务挪走，代价最小。（多线程 runtime 才可用，
+    // 见 main.rs：服务跑在 Runtime::new() 建的多线程 runtime 上。）
     let mut processes = {
         let mut procs = state.procs.lock().await;
-        procs.scan()
+        tokio::task::block_in_place(|| procs.scan())
     };
     // 记录本机全部探测到的终端（含被排除的），供托盘「监控范围」勾选
     {
@@ -320,7 +485,7 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
     }
     let sessions = {
         let mut scanner = state.scanner.lock().await;
-        scanner.scan()
+        tokio::task::block_in_place(|| scanner.scan())
     };
     let paused = state.paused.read().await.clone();
     let mut tasks =
@@ -342,4 +507,62 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         &state.config.platform,
     );
     tasks
+}
+
+#[cfg(test)]
+mod upload_dir_tests {
+    use super::safe_upload_dir;
+
+    /// AM_UPLOAD_ROOT 是进程级全局状态，而 cargo test 默认多线程并行跑：
+    /// 不串行化的话，几个用例会互相踩对方的 set/remove —— 谁先 remove，
+    /// 别人的 safe_upload_dir 就读到 fallback 的家目录，随机挂。
+    static ROOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_root<T>(root: &str, f: impl FnOnce() -> T) -> T {
+        // 用例断言失败会 panic，锁可能被投毒，这里不关心锁内数据，直接取回
+        let _guard = ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("AM_UPLOAD_ROOT", root);
+        let r = f();
+        std::env::remove_var("AM_UPLOAD_ROOT");
+        r
+    }
+
+    #[test]
+    fn accepts_paths_inside_root() {
+        with_root("/tmp/amroot", || {
+            assert_eq!(
+                safe_upload_dir("/tmp/amroot/a/b").unwrap(),
+                std::path::PathBuf::from("/tmp/amroot/a/b")
+            );
+            // 相对路径按 root 解析
+            assert_eq!(
+                safe_upload_dir("a/b").unwrap(),
+                std::path::PathBuf::from("/tmp/amroot/a/b")
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_paths_outside_root() {
+        with_root("/tmp/amroot", || {
+            assert!(safe_upload_dir("/root/.ssh").is_err());
+            assert!(safe_upload_dir("/etc/cron.d").is_err());
+            // 穿越回上层
+            assert!(safe_upload_dir("/tmp/amroot/../../etc").is_err());
+            assert!(safe_upload_dir("../../etc").is_err());
+            // 前缀相同但不是子目录
+            assert!(safe_upload_dir("/tmp/amroot-evil").is_err());
+            assert!(safe_upload_dir("").is_err());
+        });
+    }
+
+    #[test]
+    fn normalizes_dot_segments_inside_root() {
+        with_root("/tmp/amroot", || {
+            assert_eq!(
+                safe_upload_dir("/tmp/amroot/a/../b").unwrap(),
+                std::path::PathBuf::from("/tmp/amroot/b")
+            );
+        });
+    }
 }
