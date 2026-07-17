@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo } from "react";
 import { ConfigProvider, theme as antdTheme } from "antd";
+import { lightTokens, darkTokens } from "@hsu-react/ui";
 import { observer } from "mobx-react-lite";
 import classNames from "classnames";
 import styles from "./index.module.scss";
@@ -9,39 +10,13 @@ interface ThemeProps {
   children?: React.ReactNode;
 }
 
-// CF 调色板：以 CSS 变量下发，亮/暗两套，内容区样式统一引用
-const PALETTE = {
-  light: {
-    canvas: "#f6f7f9", // 页面画布
-    surface: "#ffffff", // 卡片/面板底
-    subtle: "#fafbfc", // 表头/次级底
-    border: "#e6e8eb", // 描边
-    borderWeak: "#eceef1", // 更轻描边
-    headerBg: "#ffffff", // 顶栏底
-    text: "rgba(0, 0, 0, 0.88)",
-    text2: "rgba(0, 0, 0, 0.45)",
-    text3: "rgba(0, 0, 0, 0.35)",
-    rowHover: "#f6f7f9",
-  },
-  dark: {
-    canvas: "#131314",
-    surface: "#1c1c1e",
-    subtle: "#232325",
-    border: "rgba(255, 255, 255, 0.12)",
-    borderWeak: "rgba(255, 255, 255, 0.08)",
-    headerBg: "#1c1c1e",
-    text: "rgba(255, 255, 255, 0.85)",
-    text2: "rgba(255, 255, 255, 0.45)",
-    text3: "rgba(255, 255, 255, 0.35)",
-    rowHover: "rgba(255, 255, 255, 0.04)",
-  },
-};
-
 const Theme: React.FC<ThemeProps> = observer((props) => {
   const { children } = props;
   const { isDark, primaryColor } = ThemeStore;
 
-  const p = isDark ? PALETTE.dark : PALETTE.light;
+  // 设计 token 单一事实源在 @hsu-react/ui（CSS 变量版由 es/styles/tokens.scss 提供，
+  // 随 html[data-theme] 自动切换；这里的 TS 常量仅供 antd themeConfig 消费）
+  const p = isDark ? darkTokens : lightTokens;
 
   // 暗色下把水青调暗去刺眼（亮色保持品牌色）
   const accent = isDark ? "#1C9C9C" : primaryColor;
@@ -63,22 +38,24 @@ const Theme: React.FC<ThemeProps> = observer((props) => {
   const headerBg = p.headerBg;
   const siderBg = p.surface;
 
-  // CF 调色板挂到 <html>，保证 body 级 Portal（Modal/Drawer/下拉）也能解析这些变量
+  // 外观切换：置 html[data-theme]，token CSS 变量（tokens.scss）随之整套切换；
+  // 仅主色仍运行时下发（用户可在外观设置里改）。
+  // 旧版本曾把 --cf-* 逐个挂 html inline，这里清掉避免残留覆盖 stylesheet 值。
   useEffect(() => {
     const root = document.documentElement;
-    const vars: Record<string, string> = {
-      "--primary-color": accent,
-      "--cf-canvas": p.canvas,
-      "--cf-surface": p.surface,
-      "--cf-subtle": p.subtle,
-      "--cf-border": p.border,
-      "--cf-border-weak": p.borderWeak,
-      "--cf-text": p.text,
-      "--cf-text-2": p.text2,
-      "--cf-text-3": p.text3,
-    };
-    Object.entries(vars).forEach(([k, v]) => root.style.setProperty(k, v));
-  }, [accent, p]);
+    root.dataset.theme = isDark ? "dark" : "light";
+    root.style.setProperty("--primary-color", accent);
+    [
+      "--cf-canvas",
+      "--cf-surface",
+      "--cf-subtle",
+      "--cf-border",
+      "--cf-border-weak",
+      "--cf-text",
+      "--cf-text-2",
+      "--cf-text-3",
+    ].forEach((k) => root.style.removeProperty(k));
+  }, [accent, isDark]);
 
   const themeConfig = useMemo(
     () => ({
