@@ -6,7 +6,9 @@ mod admin;
 mod agent;
 mod commands;
 mod crypto;
+mod gitdiff;
 mod model;
+mod oauth;
 mod process;
 mod registry;
 mod scanner;
@@ -32,6 +34,10 @@ fn main() -> Result<()> {
             std::env::var("RUST_LOG").unwrap_or_else(|_| "agent_task_monitor=info,info".into()),
         )
         .init();
+
+    // GUI 从 Finder/开机自启启动时没有 shell 环境变量，
+    // 这里从配置文件补齐（env 优先，配置文件兜底），使 .app / .exe 免启动器即可运行。
+    load_config_file();
 
     let port: u16 = std::env::var("AM_PORT")
         .ok()
@@ -80,9 +86,10 @@ fn main() -> Result<()> {
         });
     let _ = std::fs::create_dir_all(&data_dir);
 
-    // machine_id：AM_MACHINE_ID > 数据目录持久化（首次由 hostname 派生）
+    // machine_id：AM_MACHINE_ID > 数据目录持久化（首次生成后不再变）
     let machine_id = std::env::var("AM_MACHINE_ID").unwrap_or_else(|_| {
-        persisted_value(&data_dir.join("machine-id"), || sanitize_id(&raw_hostname))
+        // machine_id 不是秘密，无需区分是否新生成
+        persisted_value(&data_dir.join("machine-id"), || new_machine_id(&raw_hostname)).0
     });
 
     let mut reg = registry::Registry::load(data_dir.clone(), &username, &password);
@@ -90,30 +97,55 @@ fn main() -> Result<()> {
     reg.ensure_device(&machine_id, Some(&username), true);
 
     // 后管访问令牌：部署（首次启动）时生成并持久化，可用 AM_ADMIN_TOKEN 覆盖
-    let admin_token = std::env::var("AM_ADMIN_TOKEN")
+    let admin_token = match std::env::var("AM_ADMIN_TOKEN")
         .ok()
         .filter(|t| !t.trim().is_empty())
-        .unwrap_or_else(|| persisted_value(&data_dir.join("admin-token"), random_token));
-    tracing::info!(
-        "后管访问令牌（X-Admin-Token）: {admin_token}（持久化于 {}/admin-token）",
-        data_dir.display()
-    );
+    {
+        Some(t) => t,
+        None => {
+            let (t, fresh) = persisted_value(&data_dir.join("admin-token"), random_token);
+            if fresh {
+                // 只在首次部署生成时打印一次；后续启动只提示存放位置。
+                tracing::info!(
+                    "已生成后管访问令牌（X-Admin-Token）: {t}\n请立即保存，此令牌只打印这一次。（持久化于 {}/admin-token）",
+                    data_dir.display()
+                );
+            } else {
+                tracing::info!(
+                    "后管访问令牌已就绪（读取自 {}/admin-token）",
+                    data_dir.display()
+                );
+            }
+            t
+        }
+    };
 
     // agent 上报令牌：hub 与 agent 共享，防伪造上报/窃取命令队列。
     // hub 侧首启生成；agent 模式必须通过 AM_AGENT_TOKEN 提供与 hub 相同的值。
-    let agent_token = std::env::var("AM_AGENT_TOKEN")
+    let agent_token = match std::env::var("AM_AGENT_TOKEN")
         .ok()
         .filter(|t| !t.trim().is_empty())
-        .unwrap_or_else(|| persisted_value(&data_dir.join("agent-token"), random_token));
-    tracing::info!(
-        "agent 上报令牌（X-Agent-Token）: {agent_token}（持久化于 {}/agent-token，远程 agent 需以 AM_AGENT_TOKEN 配置相同值）",
-        data_dir.display()
-    );
+    {
+        Some(t) => t,
+        None => {
+            let (t, fresh) = persisted_value(&data_dir.join("agent-token"), random_token);
+            if fresh {
+                tracing::info!(
+                    "已生成 agent 上报令牌（X-Agent-Token）: {t}\n请立即保存，此令牌只打印这一次；远程 agent 需以 AM_AGENT_TOKEN 配置相同值。（持久化于 {}/agent-token）",
+                    data_dir.display()
+                );
+            } else {
+                tracing::info!(
+                    "agent 上报令牌已就绪（读取自 {}/agent-token）",
+                    data_dir.display()
+                );
+            }
+            t
+        }
+    };
 
     let config = Config {
         port,
-        username,
-        password,
         crypto_key,
         private_key,
         machine_id,
@@ -240,11 +272,74 @@ fn device_name() -> Option<String> {
     }
 }
 
+/// 从配置文件补齐缺失的 AM_* 环境变量（env 已设的优先，不覆盖）。
+/// 查找顺序：AM_CONFIG 指定 > 可执行文件同级 config.txt > macOS .app 的
+/// Contents/Resources/config.txt > ~/.agent-monitor/config.txt。
+/// 文件格式：每行 `KEY=VALUE`，# 开头为注释。
+fn load_config_file() {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(p) = std::env::var("AM_CONFIG") {
+        candidates.push(p.into());
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("config.txt"));
+            // macOS .app：MacOS/ 同级找不到时去 ../Resources/
+            candidates.push(dir.join("../Resources/config.txt"));
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".agent-monitor").join("config.txt"));
+    }
+
+    let Some(text) = candidates
+        .into_iter()
+        .find_map(|p| std::fs::read_to_string(&p).ok())
+    else {
+        return;
+    };
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, val)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let val = val.trim().trim_matches('"');
+        // env 已存在的不覆盖（命令行/systemd 显式设置优先）
+        if !key.is_empty() && std::env::var_os(key).is_none() {
+            std::env::set_var(key, val);
+        }
+    }
+}
+
 fn sanitize_id(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
         .collect::<String>()
         .to_lowercase()
+}
+
+/// 首次生成本机的 machine_id：可读的主机名 + 随机后缀。
+///
+/// 不能只用主机名：sanitize 会把非 ASCII 全换成 '-'，中文机器名（"小明的MacBook"）
+/// 会被压成一串横线；macOS 的 LocalHostName 本就常是 `MacBook-Pro`，DHCP 下还可能
+/// 都叫 `bogon`。两台机器撞到同一个 id 时，hub 以 machine_id 为 key 存机器，
+/// 后者会覆盖前者的会话快照，而设备归属只在 owner 为空时认领 —— 结果就是
+/// 别人的会话挂到你名下，还能被你暂停 / 注入输入。加随机后缀即可根治。
+/// （生成后写入数据目录，之后不再变；已有安装读到旧值，不受影响。）
+fn new_machine_id(hostname: &str) -> String {
+    let base = sanitize_id(hostname);
+    let base = base.trim_matches('-');
+    let suffix = &uuid::Uuid::new_v4().simple().to_string()[..8];
+    if base.is_empty() {
+        format!("host-{suffix}")
+    } else {
+        format!("{base}-{suffix}")
+    }
 }
 
 /// 生成 32 位随机令牌
@@ -258,11 +353,15 @@ fn random_token() -> String {
 }
 
 /// 读取持久化值；不存在则用 init 生成并写入（unix 下文件权限 0600）
-fn persisted_value(path: &std::path::Path, init: impl FnOnce() -> String) -> String {
+/// 读取持久化的秘密值；不存在则生成。
+/// 返回 (值, 是否本次新生成) —— 调用方据此决定是否打日志：
+/// 秘密只在首次生成时打印一次，之后每次启动都打会把它长期留在
+/// journald/日志文件里，任何能读日志的人都能拿到后管访问权。
+fn persisted_value(path: &std::path::Path, init: impl FnOnce() -> String) -> (String, bool) {
     if let Ok(t) = std::fs::read_to_string(path) {
         let t = t.trim().to_string();
         if !t.is_empty() {
-            return t;
+            return (t, false);
         }
     }
     let value = init();
@@ -272,5 +371,5 @@ fn persisted_value(path: &std::path::Path, init: impl FnOnce() -> String) -> Str
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
-    value
+    (value, true)
 }

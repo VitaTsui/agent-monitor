@@ -62,3 +62,32 @@ export const dingtalkLogin = async (data: {
 }) => {
   return await post<LoginResData>("/auth/access/dingtalk", data);
 };
+
+// ---------- 第三方 OAuth（Google / Apple） ----------
+
+export type OAuthProvider = "google" | "apple";
+export type OAuthUrlRes = { enabled: boolean; url: string };
+
+// 一次性取各第三方渠道开关（首屏只打一个请求）
+export type OAuthProvidersRes = Record<OAuthProvider, boolean>;
+export const getOAuthProviders = async () => {
+  return await get<OAuthProvidersRes>("/auth/access/oauth/providers", {
+    skipAuthRedirect: true,
+  });
+};
+
+// 取第三方登录授权地址（enabled=false 表示后端未配置该渠道）
+export const getOAuthUrl = async (provider: OAuthProvider, state: string) => {
+  return await get<OAuthUrlRes>(`/auth/access/oauth/${provider}/url`, {
+    params: { state },
+    skipAuthRedirect: true,
+  });
+};
+
+// 第三方回调授权码换登录态（不存在则自动注册）
+export const oauthLogin = async (
+  provider: OAuthProvider,
+  data: { code: string; state?: string },
+) => {
+  return await post<LoginResData>(`/auth/access/oauth/${provider}/login`, data);
+};

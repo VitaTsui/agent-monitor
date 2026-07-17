@@ -1,277 +1,183 @@
+$cream: #f4fafb;
+$text: #243d42;
+$muted: #7c9096;
+$accent: #0f9bad;
+$border: rgba(36, 61, 66, 0.12);
+
 .login {
-  display: flex;
-
-  width: 100%;
-  height: 100%;
   min-height: 100vh;
-  overflow: hidden;
-
-  background: #faf9f5;
-}
-
-// 左侧品牌展示区
-.brand {
-  position: relative;
-  flex: 1.1;
-
   display: flex;
   align-items: center;
   justify-content: center;
-  overflow: hidden;
+  padding: 24px;
+  background:
+    radial-gradient(1200px 600px at 15% -10%, rgba(15, 155, 173, 0.1), transparent 60%),
+    radial-gradient(900px 500px at 110% 110%, rgba(15, 155, 173, 0.08), transparent 55%),
+    $cream;
+}
 
-  background: linear-gradient(150deg, #9c4a28 0%, #c96442 55%, #d97757 100%);
+// 居中单卡片（现代认证页排版）
+.card {
+  width: 100%;
+  max-width: 400px;
+  background: #fff;
+  border: 1px solid rgba(36, 61, 66, 0.08);
+  border-radius: 20px;
+  box-shadow: 0 24px 60px -24px rgba(36, 61, 66, 0.28);
+  padding: 36px 34px 30px;
+}
 
-  // 柔光装饰
-  &::before,
-  &::after {
-    content: "";
-    position: absolute;
+.brand {
+  text-align: center;
+  margin-bottom: 22px;
 
-    border-radius: 50%;
-
-    background: rgba(255, 255, 255, 0.12);
-
-    filter: blur(2px);
-  }
-
-  &::before {
-    top: -120px;
-    right: -80px;
-
-    width: 360px;
-    height: 360px;
-  }
-
-  &::after {
-    bottom: -140px;
-    left: -100px;
-
-    width: 420px;
-    height: 420px;
-
-    background: rgba(255, 255, 255, 0.08);
-  }
-
-  .brandInner {
-    position: relative;
-    z-index: 1;
-
-    display: flex;
-    flex-direction: column;
-    row-gap: 20px;
-
-    max-width: 460px;
-    padding: 0 48px;
-
+  .logo {
+    width: 56px;
+    height: 56px;
+    margin: 0 auto 14px;
+    border-radius: 16px;
+    background: linear-gradient(135deg, $accent, #3cc4d6);
     color: #fff;
-  }
-
-  .brandLogo {
+    font-size: 26px;
+    font-weight: 700;
     display: flex;
     align-items: center;
     justify-content: center;
+    box-shadow: 0 8px 20px -8px rgba(15, 155, 173, 0.6);
+  }
 
-    width: 72px;
-    height: 72px;
-
-    font-size: 34px;
+  .brandName {
+    font-size: 22px;
     font-weight: 700;
-
-    background: rgba(255, 255, 255, 0.18);
-    backdrop-filter: blur(8px);
-
-    border-radius: 20px;
+    color: $text;
   }
 
-  .brandTitle {
-    font-size: 40px;
-    font-weight: 700;
-    line-height: 1.2;
-  }
-
-  .brandSlogan {
-    font-size: 17px;
-    line-height: 1.8;
-
-    color: rgba(255, 255, 255, 0.85);
-  }
-}
-
-// 右侧表单区
-.panel {
-  flex: 1;
-
-  display: flex;
-  align-items: center;
-  justify-content: center;
-
-  padding: 40px;
-}
-
-.card {
-  display: flex;
-  flex-direction: column;
-
-  width: 100%;
-  max-width: 400px;
-  padding: 40px 36px;
-
-  background: #fff;
-
-  border-radius: 20px;
-  box-shadow: 0 18px 50px -12px rgba(201, 100, 66, 0.25);
-}
-
-.cardHead {
-  margin-bottom: 24px;
-
-  .cardTitle {
-    font-size: 28px;
-    font-weight: 700;
-
-    color: #3d3929;
-  }
-
-  .cardSub {
+  .brandSub {
     margin-top: 6px;
-
-    font-size: 14px;
-
-    color: #8a94a6;
+    font-size: 12.5px;
+    color: $muted;
+    line-height: 1.6;
   }
 }
 
 .tabs {
-  margin-bottom: 24px;
+  margin-bottom: 20px;
 
-  // 消除 hover 时的白色闪动：稳定 item hover 背景
-  :global(.ant-segmented-item) {
-    transition: color 0.2s;
+  :global(.ant-segmented-item-selected) {
+    color: $accent;
+    font-weight: 600;
   }
   :global(.ant-segmented-item:hover:not(.ant-segmented-item-selected)) {
-    background: transparent !important;
-    color: #c96442;
+    color: $accent;
   }
 }
 
 .form {
   display: flex;
   flex-direction: column;
-  row-gap: 18px;
-
-  width: 100%;
+  row-gap: 14px;
 
   .formitem {
     margin-bottom: 0;
 
     .input {
-      font-size: 15px;
+      font-size: 14px;
+      border-radius: 12px;
 
-      border-radius: 10px;
-
-      .ant-input-prefix {
-        padding: 0 10px 0 2px;
-
-        font-size: 18px;
-
-        color: #9aa4b5;
+      :global(.ant-input-prefix) {
+        padding-right: 8px;
+        font-size: 16px;
+        color: rgba(36, 61, 66, 0.4);
       }
     }
   }
 
   .captcha {
-    height: 32px;
-
+    height: 30px;
     border-radius: 6px;
-
     cursor: pointer;
   }
 }
 
 .button {
   width: 100%;
-  height: 50px;
-  margin-top: 28px;
-
-  font-size: 16px;
+  height: 46px;
+  margin-top: 20px;
+  font-size: 15px;
   font-weight: 600;
   letter-spacing: 2px;
-
-  background: linear-gradient(135deg, #c96442 0%, #b3552f 100%);
-
   border: none;
   border-radius: 12px;
-  box-shadow: 0 10px 22px -8px rgba(201, 100, 66, 0.55);
+  background: linear-gradient(135deg, $accent 0%, #0c7f8f 100%);
+  box-shadow: 0 10px 22px -10px rgba(15, 155, 173, 0.7);
 
-  // antd 默认 hover 会用 background-color 覆盖渐变导致白闪，这里强制保持渐变
   &:hover,
   &:focus,
   &:active {
-    background: linear-gradient(135deg, #c96442 0%, #b3552f 100%) !important;
+    background: linear-gradient(135deg, $accent 0%, #0c7f8f 100%) !important;
     color: #fff !important;
-    opacity: 0.94;
+    opacity: 0.95;
+  }
+}
+
+.orDivider {
+  margin: 22px 0 16px !important;
+  color: $muted !important;
+  font-size: 12px !important;
+  border-color: $border !important;
+
+  :global(.ant-divider-inner-text) {
+    padding: 0 12px;
+  }
+}
+
+// 第三方登录按钮（hsu-ui Button，禁用态由组件负责）
+.socials {
+  display: flex;
+  gap: 10px;
+
+  .socialBtn {
+    flex: 1;
+    height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-size: 14px;
+    color: $text;
+    background: #fff;
+    border: 1px solid $border;
+    border-radius: 12px;
+    box-shadow: none;
+
+    :global(.anticon) {
+      font-size: 17px;
+    }
+
+    &:hover:not(:disabled) {
+      border-color: rgba(15, 155, 173, 0.5) !important;
+      background: rgba(15, 155, 173, 0.04) !important;
+      color: $text !important;
+    }
+
+    &:disabled {
+      color: rgba(36, 61, 66, 0.35);
+      background: #fff;
+      border-color: $border;
+    }
   }
 }
 
 .switchTip {
   margin-top: 20px;
-
-  font-size: 14px;
+  font-size: 13.5px;
   text-align: center;
-
-  color: #8a94a6;
+  color: $muted;
 
   a {
     margin-left: 4px;
-
-    color: #c96442;
+    color: $accent;
     font-weight: 600;
-
     cursor: pointer;
-  }
-}
-
-.otherDivider {
-  margin: 24px 0 16px;
-
-  color: #9aa4b5 !important;
-  font-size: 13px !important;
-}
-
-.otherLogin {
-  display: flex;
-  justify-content: center;
-}
-
-.dingtalkBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-
-  width: 38px;
-  height: 38px;
-  padding: 0;
-
-  font-size: 18px;
-  color: #fff;
-
-  background: #1296db;
-
-  border: none;
-  border-radius: 50%;
-
-  cursor: pointer;
-
-  transition: opacity 0.2s;
-
-  &:hover {
-    opacity: 0.88;
-  }
-}
-
-// 窄屏：隐藏品牌区，仅留表单
-@media (max-width: 860px) {
-  .brand {
-    display: none;
   }
 }

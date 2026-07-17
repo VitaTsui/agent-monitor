@@ -113,28 +113,8 @@ async function encrypt(word: string, key?: string): Promise<string> {
   return encryptAesJs(word, key);
 }
 
-// 加密dataForm
-async function enf(dataForm: Record<string, string>, sf: string, st: string) {
-  const dataForm1: Record<string, string> = {
-    ...dataForm,
-    sf: sf,
-    st: st,
-  };
-  const sfs = sf.split(",");
-  for (const itm of sfs) {
-    dataForm1[itm] = await encrypt(dataForm1[itm]);
-  }
-  return dataForm1;
-}
-
-async function enfAll(dataForm: Record<string, string>) {
-  return encrypt(JSON.stringify(dataForm));
-}
-
 export default {
   decrypt,
   encrypt,
-  enf,
-  enfAll,
   encodeRSA,
 };

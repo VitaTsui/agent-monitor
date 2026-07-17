@@ -69,8 +69,14 @@ export function loadGuardConfig(): DangerGuardConfig {
   return { enabled: true, customPatterns: [] };
 }
 
-export function saveGuardConfig(config: DangerGuardConfig) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+/** 返回是否保存成功（隐私模式/存储配额满时 setItem 会抛异常） */
+export function saveGuardConfig(config: DangerGuardConfig): boolean {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface DangerHit {

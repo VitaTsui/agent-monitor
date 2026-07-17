@@ -10,6 +10,10 @@ import {
   logout,
   getDingtalkUrl,
   dingtalkLogin,
+  getOAuthUrl,
+  getOAuthProviders,
+  oauthLogin,
+  OAuthProvider,
 } from "@/services/apis/login";
 import crypto from "@/utils/crypto";
 import { getUUID } from "@/utils";
@@ -48,6 +52,22 @@ class LoginStore {
     }
   };
 
+  /**
+   * 确保会话密钥已就绪。页面加载时的 getCryptoKey 若因网络抖动失败，
+   * _cryptoKey 会一直是空串——不补救的话，登录会带着空密钥走进加密流程，
+   * 抛出的会是一段跟「网络」毫无关系的加密错误，用户完全无从排查。
+   */
+  private ensureCryptoKey = async () => {
+    if (!this._cryptoKey) {
+      await this.getCryptoKey().catch(() => void 0);
+    }
+    if (!this._cryptoKey) {
+      notification.error({ message: "安全连接未就绪，请检查网络后重试" });
+      return false;
+    }
+    return true;
+  };
+
   // 检查是否需要登录验证码
   public checkIsNeedLoginCaptcha = async () => {
     try {
@@ -67,6 +87,9 @@ class LoginStore {
     data: Omit<LoginData, "cryptoKey" | "codeKey">,
     fn?: () => void,
   ) => {
+    if (!(await this.ensureCryptoKey())) {
+      return;
+    }
     const key = await crypto.decrypt(this._cryptoKey);
     const username = await crypto.encodeRSA(
       await crypto.encrypt(data.username, key),
@@ -112,6 +135,9 @@ class LoginStore {
     >,
     fn?: () => void,
   ) => {
+    if (!(await this.ensureCryptoKey())) {
+      return;
+    }
     const key = await crypto.decrypt(this._cryptoKey);
     const username = await crypto.encodeRSA(
       await crypto.encrypt(data.username, key),
@@ -194,6 +220,61 @@ class LoginStore {
     }
   };
 
+  // ---------- 第三方 OAuth（Google / Apple） ----------
+
+  // 一次性探测各渠道开关（首屏只打一个请求）
+  public checkOAuthProviders = async (): Promise<
+    Record<OAuthProvider, boolean>
+  > => {
+    try {
+      const res = await getOAuthProviders();
+      if (res.code === 0 && res.data) {
+        return { google: !!res.data.google, apple: !!res.data.apple };
+      }
+    } catch {
+      // 探测失败按未配置处理
+    }
+    return { google: false, apple: false };
+  };
+
+  // 跳转到第三方授权页；未配置返回 false，由页面提示
+  public gotoOAuth = async (
+    provider: OAuthProvider,
+    state: string,
+  ): Promise<boolean> => {
+    const res = await getOAuthUrl(provider, state);
+    if (res.code === 0 && res.data?.enabled && res.data.url) {
+      window.location.href = res.data.url;
+      return true;
+    }
+    return false;
+  };
+
+  // 第三方回调授权码换登录态（后端不存在则自动注册）
+  public oauthLogin = async (
+    provider: OAuthProvider,
+    code: string,
+    state: string | undefined,
+    fn?: () => void,
+  ) => {
+    const res = await oauthLogin(provider, { code, state });
+    if (res.code === 0) {
+      const data = res.data;
+      setToken(data.token);
+      setUserInfo(data.userInfo);
+      Cookies.set("tenant-id", "0");
+
+      await RouterService.getMenuList(true);
+      await RouterService.getPermissions(true);
+
+      fn?.();
+    } else {
+      notification.error({
+        message: res?.msg ?? "第三方登录失败",
+      });
+    }
+  };
+
   public getCaptchaImg = () => {
     this._codeKey = getUUID();
     this._captchaImg = `${dev ? (apiBase ?? "/api") : ""}/auth/kaptcha/generate/${
@@ -203,15 +284,24 @@ class LoginStore {
   };
 
   public logout = (fn?: () => void) => {
-    logout().then((res) => {
-      if (res.code === 0) {
-        fn?.();
-      } else {
-        notification.error({
-          message: res.msg,
+    logout()
+      .then((res) => {
+        if (res.code === 0) {
+          fn?.();
+        } else {
+          notification.error({
+            message: res.msg,
+          });
+        }
+      })
+      // 网络异常时也必须走 fn（清 cookie + 跳登录页）：服务端登录态最终会过期，
+      // 把用户困在「点了退出却毫无反应」的页面上更糟。改密码后的强制重登也走这条路。
+      .catch(() => {
+        notification.warning({
+          message: "退出登录请求失败，已在本地清除登录状态",
         });
-      }
-    });
+        fn?.();
+      });
   };
 }
 

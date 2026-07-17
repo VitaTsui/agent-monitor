@@ -1,0 +1,194 @@
+$cream: #f4fafb;
+$oat: #e6f1f3;
+$text: #243d42;
+$muted: #7c9096;
+$accent: #0f9bad;
+$term-bg: #102a30;
+$mono: "SF Mono", Menlo, Consolas, monospace;
+
+.MockPortal {
+  display: flex;
+  height: 420px;
+  background: $cream;
+  border-radius: 12px;
+  overflow: hidden;
+  font-size: 12px;
+  color: $text;
+  user-select: none;
+
+  .sider {
+    width: 190px;
+    min-width: 190px;
+    background: $oat;
+    border-right: 1px solid rgba(36, 61, 66, 0.08);
+    padding: 12px 10px;
+    display: flex;
+    flex-direction: column;
+
+    .siderTop {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-bottom: 10px;
+
+      .logo {
+        width: 22px;
+        height: 22px;
+        border-radius: 6px;
+        background: $accent;
+        color: #fff;
+        font-size: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .name { font-weight: 600; font-size: 12px; }
+    }
+
+    .search {
+      background: rgba(36, 61, 66, 0.05);
+      border-radius: 8px;
+      padding: 6px 9px;
+      color: rgba(36, 61, 66, 0.4);
+      font-size: 11px;
+      margin-bottom: 10px;
+    }
+
+    .label {
+      font-size: 10px;
+      font-weight: 600;
+      color: $muted;
+      padding: 8px 4px 4px;
+    }
+
+    .device {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 6px 8px;
+      border-radius: 7px;
+      font-size: 11px;
+
+      &.active { background: rgba(36, 61, 66, 0.08); }
+      .stat { font-size: 10px; color: $muted; }
+    }
+
+    .sess {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 6px 8px;
+      border-radius: 7px;
+
+      .dot {
+        width: 6px; height: 6px; min-width: 6px;
+        border-radius: 50%;
+        &.running { background: #38b26a; box-shadow: 0 0 0 3px rgba(56,178,106,.16); }
+        &.idle { background: #f2b234; }
+      }
+      .sessName {
+        font-size: 11px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        max-width: 130px;
+      }
+      .sessSub { font-size: 10px; color: $muted; }
+    }
+
+    .user {
+      margin-top: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 6px;
+      .avatar {
+        width: 24px; height: 24px; border-radius: 50%;
+        background: $accent; color: #fff;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 11px;
+      }
+      .uname { font-size: 11px; font-weight: 500; }
+      .uplan { font-size: 10px; color: $muted; }
+    }
+  }
+
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+
+    .header {
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(36, 61, 66, 0.08);
+      .htitle { font-size: 12px; font-weight: 600; }
+      .hmeta { font-size: 10px; color: $muted; margin-top: 2px; }
+    }
+
+    .chat {
+      flex: 1;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      overflow: hidden;
+
+      .userBubble {
+        align-self: flex-end;
+        background: #e2eff1;
+        border-radius: 12px 12px 4px 12px;
+        padding: 7px 11px;
+        font-size: 11px;
+        max-width: 80%;
+      }
+
+      .terminal {
+        background: $term-bg;
+        border-radius: 10px;
+        overflow: hidden;
+
+        .termHead {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          padding: 6px 10px;
+          background: rgba(255,255,255,.04);
+          i {
+            width: 8px; height: 8px; border-radius: 50%;
+            &:nth-child(1){ background:#f56c6c; }
+            &:nth-child(2){ background:#f2b234; }
+            &:nth-child(3){ background:#38b26a; }
+          }
+          span { font-family: $mono; font-size: 10px; color: #84979c; margin-left: 4px; }
+        }
+        .termBody {
+          padding: 10px 12px;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          font-family: $mono;
+          font-size: 11px;
+          line-height: 1.5;
+        }
+        .aLine, .tLine { display: flex; gap: 7px; }
+        .aLine { color: #ddedef; .aDot { color: #67a579; } }
+        .tLine { color: #ddedef; .tDot { color: #3cc4d6; } }
+        .rLine { color: #84979c; padding-left: 14px; }
+        .working {
+          display: flex; align-items: center; gap: 6px; color: #3cc4d6;
+          .star { display: inline-block; animation: spin 1.6s linear infinite; }
+        }
+      }
+    }
+
+    .composer {
+      margin: 0 14px 14px;
+      border: 1px solid rgba(36, 61, 66, 0.15);
+      border-radius: 12px;
+      padding: 9px 12px;
+      color: rgba(36, 61, 66, 0.35);
+      font-size: 11px;
+    }
+  }
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }

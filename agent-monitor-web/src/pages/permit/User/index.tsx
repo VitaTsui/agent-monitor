@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { observer } from "mobx-react-lite";
 import { PlusOutlined } from "@ant-design/icons";
-import { Tag } from "antd";
+import { Tag, message } from "antd";
 
 import {
   ChakraButtonProps,
@@ -169,7 +169,9 @@ const User: React.FC = observer(() => {
           setResetPwd(false);
         }}
         onOk={(username, password, callback) => {
-          resetUserPwd(username, password, callback);
+          resetUserPwd(username, password, callback).catch(() =>
+            message.error("重置密码失败，请检查网络"),
+          );
         }}
       />
     </>

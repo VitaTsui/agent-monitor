@@ -1,0 +1,27 @@
+# Caddy 反向代理：自动为 monitor.vita-llm.com 申请 / 续期 Let's Encrypt 证书。
+# 将本域名的全部 HTTPS 流量转发到本机 hub（127.0.0.1:8383），并放行 WebSocket。
+monitor.vita-llm.com {
+	encode zstd gzip
+
+	# WebSocket 实时任务快照（/monitor/ws）——反代默认已支持 Upgrade，这里显式声明更稳
+	@ws {
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+	reverse_proxy @ws 127.0.0.1:8383
+
+	# 其余全部请求（页面 + /api 契约 + 文件上传）
+	reverse_proxy 127.0.0.1:8383 {
+		# 大文件上传（前台「传文件到设备」）不设过短超时
+		flush_interval -1
+	}
+
+	# 基础安全响应头
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}

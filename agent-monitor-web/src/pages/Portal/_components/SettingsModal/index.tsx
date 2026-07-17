@@ -1,8 +1,11 @@
 import React, { useEffect, useState } from "react";
 
 import { Button, Input, Modal, Switch, Upload } from "@hsu-react/ui";
-import { Badge, Empty, Popconfirm, Tag, message } from "antd";
+// Progress：hsu-ui 无对应组件，按规范用 antd 兜底
+import { Badge, Empty, Popconfirm, Progress, Tag, message } from "antd";
 import {
+  CloseOutlined,
+  CodeOutlined,
   DashboardOutlined,
   InfoCircleOutlined,
   LaptopOutlined,
@@ -78,13 +81,16 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
   }, [open]);
 
   const saveGuard = (enabled: boolean, patterns: string) => {
-    saveGuardConfig({
+    const saved = saveGuardConfig({
       enabled,
       customPatterns: patterns
         .split("\n")
         .map((s) => s.trim())
         .filter(Boolean),
     });
+    if (!saved) {
+      message.error("防护配置保存失败（浏览器存储不可用）");
+    }
   };
 
   const doUpload = () => {
@@ -104,18 +110,21 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
           message.error(res.msg ?? "传输失败");
         }
       })
+      .catch(() => message.error("传输失败，请检查网络"))
       .finally(() => setUploading(false));
   };
 
   useEffect(() => {
     if (open) {
       loadDevices();
-      getPortalQuota().then((res) => {
-        if (res.code === 0) {
-          setQuotaLimit(res.data?.limit ?? 0);
-          setQuotaUsed(res.data?.used ?? 0);
-        }
-      });
+      getPortalQuota()
+        .then((res) => {
+          if (res.code === 0) {
+            setQuotaLimit(res.data?.limit ?? 0);
+            setQuotaUsed(res.data?.used ?? 0);
+          }
+        })
+        .catch(() => void 0);
     }
   }, [open, loadDevices]);
 
@@ -126,6 +135,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
         if (res.code === 0) message.success("已保存额度上限");
         else message.error(res.msg ?? "保存失败");
       })
+      .catch(() => message.error("保存失败，请检查网络"))
       .finally(() => setSavingQuota(false));
   };
 
@@ -212,24 +222,50 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
       open={open}
       onCancel={onClose}
       footer={null}
-      width={760}
+      width={920}
       title={null}
       closable={false}
     >
       <div className={styles.layout}>
+        <span
+          className={styles.closeBtn}
+          role="button"
+          tabIndex={0}
+          aria-label="关闭设置"
+          onClick={onClose}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              onClose?.();
+            }
+          }}
+        >
+          <CloseOutlined />
+        </span>
         <aside className={styles.nav}>
           <div className={styles.navTitle}>设置</div>
-          {navItems.map((n) => (
-            <div
-              key={n.key}
-              className={`${styles.navItem} ${tab === n.key ? styles.active : ""}`}
-              onClick={() => setTab(n.key)}
-            >
-              {n.icon}
-              <span>{n.label}</span>
-              {n.badge ? <Badge count={n.badge} size="small" /> : null}
-            </div>
-          ))}
+          <div className={styles.navList} role="tablist" aria-label="设置分类">
+            {navItems.map((n) => (
+              <div
+                key={n.key}
+                className={`${styles.navItem} ${tab === n.key ? styles.active : ""}`}
+                role="tab"
+                tabIndex={0}
+                aria-selected={tab === n.key}
+                onClick={() => setTab(n.key)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setTab(n.key);
+                  }
+                }}
+              >
+                {n.icon}
+                <span>{n.label}</span>
+                {n.badge ? <Badge count={n.badge} size="small" /> : null}
+              </div>
+            ))}
+          </div>
         </aside>
 
         <section className={styles.content}>
@@ -310,15 +346,34 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                   <span className={styles.quotaReadonly}>仅管理员可修改</span>
                 )}
               </div>
-              <div className={styles.quotaUsed}>
-                当前可见会话合计用量：{quotaUsed.toLocaleString()} tokens
-                {quotaLimit > 0
-                  ? ` · 上限 ${quotaLimit.toLocaleString()}（${Math.min(
+              {quotaLimit > 0 ? (
+                <>
+                  <Progress
+                    className={styles.quotaProgress}
+                    percent={Math.min(
                       100,
                       Math.round((quotaUsed / quotaLimit) * 100)
-                    )}%）`
-                  : " · 未设上限"}
-              </div>
+                    )}
+                    // 80% 起警示、满额红色，与「达到上限自动暂停」的语义对齐
+                    strokeColor={
+                      quotaUsed >= quotaLimit
+                        ? "#f56c6c"
+                        : quotaUsed / quotaLimit >= 0.8
+                          ? "#f2b234"
+                          : "#0f9bad"
+                    }
+                  />
+                  <div className={styles.quotaUsed}>
+                    已用 {Math.min(100, Math.round((quotaUsed / quotaLimit) * 100))}%
+                    （最高会话 {quotaUsed.toLocaleString()} / 上限{" "}
+                    {quotaLimit.toLocaleString()} tokens）
+                  </div>
+                </>
+              ) : (
+                <div className={styles.quotaUsed}>
+                  未设上限 · 当前用量最高的会话 {quotaUsed.toLocaleString()} tokens
+                </div>
+              )}
             </div>
           )}
 
@@ -380,7 +435,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
             <div className={styles.pane}>
               <div className={styles.paneTitle}>关于</div>
               <div className={styles.about}>
-                <div className={styles.aboutLogo}>终</div>
+                <div className={styles.aboutLogo}><CodeOutlined /></div>
                 <div className={styles.aboutName}>终端任务监控</div>
                 <div className={styles.aboutDesc}>
                   监控多台电脑终端里 AI 编码代理（Claude Code、Codex 等）正在执行的任务，

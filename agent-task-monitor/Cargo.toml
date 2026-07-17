@@ -29,6 +29,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 # 桌面外壳（Tauri v2）：原生窗口 + 托盘。无界面/服务器构建用 --no-default-features 关闭。
 tauri = { version = "2", optional = true, features = ["tray-icon"] }
+subtle = "2.6"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

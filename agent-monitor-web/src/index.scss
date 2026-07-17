@@ -82,13 +82,16 @@ body,
   overflow: hidden;
 }
 
-// 极窄窗口布局保护：窗口小于最小支持宽度时不向内挤碎布局，改为横向滚动
-body {
-  overflow-x: auto;
-}
+// 极窄窗口布局保护：后管等桌面布局窗口过窄时横向滚动而非挤碎；
+// 移动端（<=760px）改为自适应，前台 Portal / 官网 / 登录页已做响应式。
+@media (min-width: 761px) {
+  body {
+    overflow-x: auto;
+  }
 
-#root {
-  min-width: 960px;
+  #root {
+    min-width: 960px;
+  }
 }
 
 [class^="ka-"] {

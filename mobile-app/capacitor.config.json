@@ -1,0 +1,11 @@
+{
+  "appId": "com.vitahsu.agentmonitor",
+  "appName": "终端任务监控",
+  "webDir": "www",
+  "server": {
+    "url": "https://monitor.vita-llm.com/portal",
+    "cleartext": false
+  },
+  "ios": { "contentInset": "always" },
+  "android": { "backgroundColor": "#f4fafb" }
+}
