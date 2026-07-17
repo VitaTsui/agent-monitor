@@ -22,7 +22,11 @@ use tower_http::services::ServeDir;
 const REPORT_BODY_LIMIT: usize = 32 * 1024 * 1024;
 
 pub fn router(state: SharedState) -> Router {
+    // downloads 目录解析要用 data_dir，router 组装尾部 state 已被 with_state 消费
+    let state_dl = state.clone();
     let mut router = Router::new()
+        // ---- 版本（供客户端/移动端更新检测）----
+        .route("/monitor/version", get(version_info))
         // ---- vita-admin 契约 ----
         .route("/auth/access/getCryptoKey", get(admin::get_crypto_key))
         .route("/auth/access/isNeedLoginCaptcha", get(admin::is_need_captcha))
@@ -64,6 +68,10 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/devices/:id/untrust", post(untrust_device))
         .route("/monitor/devices/:id", axum::routing::delete(delete_device))
         .route("/monitor/devices/:id/upload", post(upload_file))
+        // ---- 设备配对（注册+安装即可用，无需管理员发令牌）----
+        .route("/monitor/pair/start", post(pair_start))
+        .route("/monitor/pair/claim", post(pair_claim))
+        .route("/monitor/pair/status", get(pair_status))
         // ---- agent → hub 上报 ----
         // 单独放宽体积上限：axum 默认 2MB，一台机器会话多、消息长时很容易顶到，
         // 一旦 413 该设备就再也同步不上来了。
@@ -82,6 +90,18 @@ pub fn router(state: SharedState) -> Router {
                 .allow_methods(Any)
                 .allow_headers(Any),
         );
+    }
+
+    // 客户端安装包下载（官网「客户端」区直链）。
+    // 目录：AM_DOWNLOADS_DIR > 数据目录/downloads；不存在则不挂载（官网点击 404）。
+    // 包内 config.txt 的上报令牌是占位符（公开可下载，真实令牌由管理员单发），
+    // 故无需鉴权。
+    let downloads_dir = std::env::var("AM_DOWNLOADS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| state_dl.config.data_dir.join("downloads"));
+    if downloads_dir.is_dir() {
+        tracing::info!("托管客户端下载: {}", downloads_dir.display());
+        router = router.nest_service("/downloads", ServeDir::new(&downloads_dir));
     }
 
     // 静态托管前端构建产物（存在时）：先按真实文件命中，未命中的路径
@@ -108,6 +128,124 @@ pub fn router(state: SharedState) -> Router {
         router = router.fallback_service(ServeDir::new(&dist).fallback(spa_fallback));
     }
     router
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairStartReq {
+    machine_id: String,
+    hostname: String,
+    platform: String,
+}
+
+/// POST /monitor/pair/start —— 客户端领配对码（公开）。
+/// 返回 code（给用户/网页认领用）与 pairToken（客户端轮询凭证）。
+async fn pair_start(State(state): State<SharedState>, Json(req): Json<PairStartReq>) -> Json<Value> {
+    if req.machine_id.trim().is_empty() {
+        return err(400, "缺少 machineId");
+    }
+    let mut map = state.pair_codes.write().await;
+    map.retain(|_, e| !e.expired());
+    // 容量兜底：防被刷爆内存
+    if map.len() >= 5000 {
+        return err(429, "配对请求过多，请稍后再试");
+    }
+    // 8 位大写码，避开易混淆字符
+    const ALPHA: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let code: String = (0..8).map(|_| ALPHA[rng.gen_range(0..ALPHA.len())] as char).collect();
+    let pair_token = uuid::Uuid::new_v4().simple().to_string();
+    map.insert(
+        code.clone(),
+        crate::state::PairEntry {
+            machine_id: req.machine_id.trim().to_string(),
+            hostname: req.hostname,
+            platform: req.platform,
+            pair_token: pair_token.clone(),
+            created: Instant::now(),
+            device_token: None,
+        },
+    );
+    ok(json!({ "code": code, "pairToken": pair_token }))
+}
+
+#[derive(Deserialize)]
+struct PairClaimReq {
+    code: String,
+}
+
+/// POST /monitor/pair/claim —— 已登录用户认领设备：绑定到自己名下并签发设备令牌。
+async fn pair_claim(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<PairClaimReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let code = req.code.trim().to_uppercase();
+    let mut map = state.pair_codes.write().await;
+    let Some(entry) = map.get_mut(&code) else {
+        return err(404, "配对码不存在或已过期，请在客户端重新发起");
+    };
+    if entry.expired() {
+        map.remove(&code);
+        return err(404, "配对码已过期，请在客户端重新发起");
+    }
+    if entry.device_token.is_some() {
+        return err(400, "该配对码已被认领");
+    }
+    let token = state.registry.write().await.bind_device(&entry.machine_id, &user);
+    entry.device_token = Some(token);
+    tracing::info!("设备配对成功: {} → 用户 {user}", entry.machine_id);
+    ok(json!({ "machineId": entry.machine_id, "hostname": entry.hostname, "platform": entry.platform }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairStatusQuery {
+    code: String,
+    pair_token: String,
+}
+
+/// GET /monitor/pair/status —— 客户端轮询：认领完成即领走设备令牌（一次性）。
+async fn pair_status(
+    State(state): State<SharedState>,
+    Query(q): Query<PairStatusQuery>,
+) -> Json<Value> {
+    let mut map = state.pair_codes.write().await;
+    let code = q.code.trim().to_uppercase();
+    let Some(entry) = map.get(&code) else {
+        return ok(json!({ "claimed": false, "expired": true }));
+    };
+    // pairToken 不匹配按不存在处理：防他人凭 code 轮询窃取设备令牌
+    if !crate::state::token_eq(&entry.pair_token, &q.pair_token) {
+        return ok(json!({ "claimed": false, "expired": true }));
+    }
+    if entry.expired() {
+        map.remove(&code);
+        return ok(json!({ "claimed": false, "expired": true }));
+    }
+    if let Some(token) = entry.device_token.clone() {
+        map.remove(&code); // 一次性：令牌交付即销毁配对条目
+        return ok(json!({ "claimed": true, "deviceToken": token }));
+    }
+    ok(json!({ "claimed": false, "expired": false }))
+}
+
+/// GET /monitor/version —— 最新版本信息（客户端/移动端更新检测用，公开）。
+/// desktop = hub 自身版本（同一代码库）；android 读 downloads/manifest.json（打包时写入）。
+async fn version_info(State(state): State<SharedState>) -> Json<Value> {
+    let downloads_dir = std::env::var("AM_DOWNLOADS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| state.config.data_dir.join("downloads"));
+    let android = tokio::fs::read_to_string(downloads_dir.join("manifest.json"))
+        .await
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|m| m.pointer("/android/version").and_then(Value::as_str).map(String::from));
+    ok(json!({ "desktop": env!("CARGO_PKG_VERSION"), "android": android }))
 }
 
 /// 前端构建产物目录：AM_WEB_DIST > 可执行文件旁的 web/ > ../agent-monitor-web/dist
@@ -863,12 +1001,26 @@ async fn report(
 ) -> Json<Value> {
     // 上报鉴权：agent 必须持有与 hub 相同的 X-Agent-Token，
     // 否则任何能连到端口的人都能伪造设备快照 / 窃取命令队列与待传文件
-    let token = headers
+    // 鉴权（两通道）：
+    // 1) 每设备令牌（x-device-token）——配对绑定时签发，普通用户唯一路径；
+    // 2) 全局 agent 令牌（x-agent-token）——内部部署/兼容旧客户端。
+    let device_token = headers
+        .get("x-device-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let global_token = headers
         .get("x-agent-token")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !crate::state::token_eq(token, &state.config.agent_token) {
-        return err(401, "agent 上报令牌无效（AM_AGENT_TOKEN 需与 hub 一致）");
+    let dev_ok = !device_token.is_empty()
+        && state
+            .registry
+            .read()
+            .await
+            .verify_device_token(&payload.machine_id, device_token);
+    let global_ok = crate::state::token_eq(global_token, &state.config.agent_token);
+    if !dev_ok && !global_ok {
+        return err(401, "设备未绑定账号：打开客户端窗口登录一次即可自动绑定");
     }
     if payload.machine_id == state.config.machine_id {
         return err(400, "machineId 与 hub 本机冲突，请为 agent 指定 AM_MACHINE_ID");
@@ -878,7 +1030,8 @@ async fn report(
     // owned_by 是严格相等，devices_for 也没有超管兜底，用户却只会看到托盘上
     // 一句「已连接 · 待信任」，然后在网页上永远找不到这台机器。
     // 这里直接拒绝，agent 会把原因显示到托盘上（见 agent::describe_reject）。
-    if let Some(owner) = payload.owner.as_deref().filter(|o| !o.is_empty()) {
+    let claim_owner = if dev_ok { None } else { payload.owner.as_deref() };
+    if let Some(owner) = claim_owner.filter(|o| !o.is_empty()) {
         if !state.registry.read().await.user_exists(owner) {
             return err(
                 400,
@@ -891,7 +1044,7 @@ async fn report(
         .registry
         .write()
         .await
-        .ensure_device(&payload.machine_id, payload.owner.as_deref(), false);
+        .ensure_device(&payload.machine_id, claim_owner, false);
 
     let mut machines = state.machines.write().await;
     let entry = machines
@@ -935,7 +1088,15 @@ async fn report(
     let git_queries: Vec<crate::model::GitQuery> = entry.pending_git.drain(..).collect();
     // 告知 agent 是否已被信任：未信任时 agent 不应再上报任何会话数据
     let trusted = state.registry.read().await.device_meta(&payload.machine_id).trusted;
-    ok(json!({ "commands": commands, "files": files, "gitQueries": git_queries, "trusted": trusted }))
+    // hubVersion：hub 与桌面客户端同一代码库，hub 的版本即最新客户端版本，
+    // agent 用它做更新提示（托盘「新版本可用」）
+    ok(json!({
+        "commands": commands,
+        "files": files,
+        "gitQueries": git_queries,
+        "trusted": trusted,
+        "hubVersion": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 #[derive(Deserialize)]

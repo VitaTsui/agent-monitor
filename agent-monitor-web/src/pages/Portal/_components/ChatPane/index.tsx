@@ -187,6 +187,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
               <TerminalFeed
                 messages={feedMessages}
                 running={task.status === "running"}
+                providerDsr={task.providerDsr}
               />
             </div>
           )}

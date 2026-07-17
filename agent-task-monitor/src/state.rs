@@ -204,6 +204,26 @@ impl LoginThrottle {
     }
 }
 
+/// 设备配对条目：客户端 pair/start 创建，网页 pair/claim 绑定，客户端 pair/status 领走
+#[derive(Clone)]
+pub struct PairEntry {
+    pub machine_id: String,
+    pub hostname: String,
+    pub platform: String,
+    /// 客户端持有的轮询凭证（防他人凭 code 轮询窃取设备令牌）
+    pub pair_token: String,
+    pub created: Instant,
+    /// 认领后写入：待客户端领取的每设备上报令牌
+    pub device_token: Option<String>,
+}
+
+impl PairEntry {
+    /// 配对码有效期：10 分钟（够用户完成登录/注册）
+    pub fn expired(&self) -> bool {
+        self.created.elapsed().as_secs() > 600
+    }
+}
+
 /// 一次登录签发的会话
 #[derive(Clone)]
 pub struct Session {
@@ -246,6 +266,14 @@ pub struct AppState {
     pub hub_connected: std::sync::atomic::AtomicBool,
     /// agent 模式：本设备是否已被信任（供托盘显示）
     pub hub_trusted: std::sync::atomic::AtomicBool,
+    /// agent 模式：hub 端可用的新版本号（比本机新时为 Some，托盘显示更新提示）
+    pub hub_latest_version: RwLock<Option<String>>,
+    /// 设备配对：code → 配对条目（客户端领码、用户网页认领、客户端轮询取令牌）
+    pub pair_codes: RwLock<HashMap<String, PairEntry>>,
+    /// agent 模式：本机的每设备上报令牌（配对绑定后持久化于 data_dir/device-token）
+    pub device_token: RwLock<Option<String>>,
+    /// agent 模式：进行中的配对 (code, pair_token)，窗口用 code 拼 ?pair= 参数
+    pub pair_info: RwLock<Option<(String, String)>>,
     /// agent 模式：最近一次上报被 hub 拒绝的原因（供托盘显示）。
     /// 只标「未连接」是不够的：令牌不对 / 用户名不存在 / machineId 冲突
     /// 与「网线拔了」在界面上长得一模一样，而桌面版是 GUI，用户看不到日志，
@@ -278,6 +306,10 @@ impl AppState {
             started_at: chrono::Local::now(),
             hub_connected: std::sync::atomic::AtomicBool::new(false),
             hub_trusted: std::sync::atomic::AtomicBool::new(false),
+            hub_latest_version: RwLock::new(None),
+            pair_codes: RwLock::new(HashMap::new()),
+            device_token: RwLock::new(None),
+            pair_info: RwLock::new(None),
             hub_error: RwLock::new(None),
             oauth_states: RwLock::new(HashMap::new()),
             login_throttle: RwLock::new(LoginThrottle::default()),

@@ -13,6 +13,9 @@ struct MsgCache {
 pub async fn report_loop(state: SharedState, hub_url: String) {
     let hub = hub_url.trim_end_matches('/').to_string();
     let owner = std::env::var("AM_USER").ok().filter(|s| !s.is_empty());
+    // 全局令牌仅在显式配置时使用（内部部署/兼容旧客户端）；
+    // 普通用户走「配对绑定 → 每设备令牌」，无需任何预置密钥。
+    let legacy_token = std::env::var("AM_AGENT_TOKEN").ok().filter(|s| !s.is_empty());
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
@@ -25,6 +28,53 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     let mut pending_git_results: Vec<crate::model::GitResult> = Vec::new();
 
     loop {
+        // 配对阶段：还没有设备令牌（也没配全局令牌）时，不上报，只轮询配对状态。
+        // 用户在客户端窗口里登录后，网页会自动认领，这里领到令牌即转入正常上报。
+        let has_device_token = state.device_token.read().await.is_some();
+        if !has_device_token && legacy_token.is_none() {
+            if let Some((code, pair_token)) = state.pair_info.read().await.clone() {
+                match client
+                    .get(format!("{hub}/monitor/pair/status"))
+                    .query(&[("code", code.as_str()), ("pairToken", pair_token.as_str())])
+                    .send()
+                    .await
+                {
+                    Ok(resp) => {
+                        if let Ok(body) = resp.json::<Value>().await {
+                            if body.pointer("/data/claimed").and_then(Value::as_bool) == Some(true) {
+                                if let Some(t) =
+                                    body.pointer("/data/deviceToken").and_then(Value::as_str)
+                                {
+                                    persist_device_token(&state, t).await;
+                                    tracing::info!("设备已绑定账号，开始上报");
+                                    *state.hub_error.write().await = None;
+                                    continue;
+                                }
+                            }
+                            // 配对码过期：重新领一个，窗口下次打开会用新码
+                            if body.pointer("/data/expired").and_then(Value::as_bool) == Some(true) {
+                                start_pairing(&state, &client, &hub).await;
+                            }
+                        }
+                        state
+                            .hub_connected
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(_) => {
+                        state
+                            .hub_connected
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            } else {
+                start_pairing(&state, &client, &hub).await;
+            }
+            *state.hub_error.write().await =
+                Some("未绑定账号：打开客户端窗口登录一次即可自动绑定".into());
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            continue;
+        }
+
         // 始终本地扫描（仅用于本机托盘展示终端列表）；但未信任前不外发任何会话
         let mut scanned = crate::state::local_scan(&state).await;
         // 本轮本机真实存在的会话 pid：hub 下发的命令只允许作用于这些 pid
@@ -47,12 +97,13 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             git_results: std::mem::take(&mut pending_git_results),
         };
 
-        match client
-            .post(format!("{hub}/monitor/report"))
-            .header("x-agent-token", &state.config.agent_token)
-            .json(&payload)
-            .send()
-            .await
+        let mut req = client.post(format!("{hub}/monitor/report"));
+        if let Some(t) = state.device_token.read().await.as_deref() {
+            req = req.header("x-device-token", t);
+        } else if let Some(t) = &legacy_token {
+            req = req.header("x-agent-token", t);
+        }
+        match req.json(&payload).send().await
         {
             Ok(resp) if !resp.status().is_success() => {
                 // 收到响应 ≠ 上报成功：413（负载过大）、401（令牌不对）等
@@ -68,6 +119,11 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                 // 记下人话原因给托盘显示：这类失败是配置错了，重试一万次也不会好，
                 // 必须让用户看见，而不是和断网一样显示「连接中…」。
                 *state.hub_error.write().await = Some(describe_reject(code.as_u16(), &body));
+                // 设备令牌失效（设备被删除/换绑）：清掉本地令牌，回到配对流程重新绑定
+                if code.as_u16() == 401 && legacy_token.is_none() {
+                    *state.device_token.write().await = None;
+                    let _ = std::fs::remove_file(state.config.data_dir.join("device-token"));
+                }
             }
             Ok(resp) => {
                 if !hub_ok {
@@ -82,6 +138,18 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                     *state.hub_error.write().await = None;
                 }
                 if let Ok(body) = resp.json::<Value>().await {
+                    // 更新推送：hub 版本比本机新 → 记录，托盘显示「新版本可用」
+                    if let Some(hv) = body.pointer("/data/hubVersion").and_then(Value::as_str) {
+                        let newer = version_newer(hv, env!("CARGO_PKG_VERSION"));
+                        let mut slot = state.hub_latest_version.write().await;
+                        let next = newer.then(|| hv.to_string());
+                        if *slot != next {
+                            if let Some(v) = &next {
+                                tracing::info!("检测到新版本可用: v{v}（当前 v{}）", env!("CARGO_PKG_VERSION"));
+                            }
+                            *slot = next;
+                        }
+                    }
                     let now_trusted = body
                         .pointer("/data/trusted")
                         .and_then(Value::as_bool)
@@ -145,6 +213,56 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
 
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     }
+}
+
+/// 发起配对：向 hub 领配对码，存进 state（窗口用 code 拼 ?pair= 参数）
+async fn start_pairing(state: &SharedState, client: &reqwest::Client, hub: &str) {
+    let body = serde_json::json!({
+        "machineId": state.config.machine_id,
+        "hostname": state.config.hostname,
+        "platform": state.config.platform,
+    });
+    if let Ok(resp) = client.post(format!("{hub}/monitor/pair/start")).json(&body).send().await {
+        if let Ok(v) = resp.json::<Value>().await {
+            if let (Some(code), Some(pt)) = (
+                v.pointer("/data/code").and_then(Value::as_str),
+                v.pointer("/data/pairToken").and_then(Value::as_str),
+            ) {
+                tracing::info!("已领取配对码 {code}，等待网页端认领");
+                *state.pair_info.write().await = Some((code.to_string(), pt.to_string()));
+            }
+        }
+    }
+}
+
+/// 持久化设备令牌（拿到后写盘，下次启动直接上报无需重新配对）
+async fn persist_device_token(state: &SharedState, token: &str) {
+    *state.device_token.write().await = Some(token.to_string());
+    let path = state.config.data_dir.join("device-token");
+    if let Err(e) = std::fs::write(&path, token) {
+        tracing::warn!("设备令牌写盘失败（重启后需重新配对）: {e}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
+/// a 是否比 b 更新（按点分数字逐段比较；解析不了的段按 0）。
+/// 客户端与 hub 版本都出自 Cargo semver，够用且不引依赖。
+fn version_newer(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
+        s.split('.').map(|p| p.trim().parse().unwrap_or(0)).collect()
+    };
+    let (va, vb) = (parse(a), parse(b));
+    for i in 0..va.len().max(vb.len()) {
+        let (x, y) = (va.get(i).copied().unwrap_or(0), vb.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x > y;
+        }
+    }
+    false
 }
 
 /// 把 hub 的拒绝翻译成用户能据以行动的一句话。
@@ -318,5 +436,22 @@ mod reject_tests {
     fn server_errors_are_transient_wording() {
         let m = describe_reject(503, "");
         assert!(m.contains("稍后重试"), "5xx 属于可自愈，措辞应区别于配置错误: {m}");
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    /// 更新推送的判定核心：只有 hub 严格更新才提示
+    #[test]
+    fn newer_detection() {
+        assert!(version_newer("0.2.0", "0.1.0"));
+        assert!(version_newer("0.1.10", "0.1.9"), "逐段数字比较，不是字符串比较");
+        assert!(version_newer("1.0.0", "0.9.9"));
+        assert!(!version_newer("0.1.0", "0.1.0"), "相同版本不提示");
+        assert!(!version_newer("0.1.0", "0.2.0"), "hub 更旧不提示");
+        assert!(version_newer("0.1.0.1", "0.1.0"), "段数不同按 0 补齐");
+        assert!(!version_newer("abc", "0.1.0"), "解析不了按 0，不误报");
     }
 }
