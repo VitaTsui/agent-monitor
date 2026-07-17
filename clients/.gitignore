@@ -1,11 +1,8 @@
 # 客户端产物（约 76MB）不入库：它们是 cargo 构建的输出，随版本重新打包即可。
 # 二进制入库会让仓库随每次发版膨胀，且 diff 无意义。
 # 手写的安装/卸载脚本与说明文档要版本化。
-agent-task-monitor
-agent-task-monitor.exe
 终端任务监控.exe
 终端任务监控.app/
-Agent Task Monitor.app/
 
 # config.txt 含真实 AM_AGENT_TOKEN（与 deploy/env 同一密钥），不入库；
 # 版本化脱敏的 config.txt.example 模板。
