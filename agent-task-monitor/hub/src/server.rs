@@ -32,6 +32,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/auth/access/isNeedLoginCaptcha", get(admin::is_need_captcha))
         .route("/auth/access/dingtalk/url", get(admin::dingtalk_url))
         .route("/auth/access/login", post(admin::login))
+        // 客户端静默续登：设备令牌换登录会话（设备已绑定账号 = 该机即该用户）
+        .route("/monitor/client/session", post(client_session))
         .route("/auth/access/register", post(admin::register))
         .route("/auth/access/logout", get(admin::logout))
         .route("/sys/menu/getMenuATopATopMenu", get(admin::menus))
@@ -998,6 +1000,58 @@ async fn report(
         "trusted": trusted,
         "quotaLimit": quota_limit,
         "hubVersion": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientSessionReq {
+    machine_id: String,
+    device_token: String,
+}
+
+/// POST /monitor/client/session —— 桌面客户端静默续登。
+/// 设备令牌是绑定时签发、持久化在客户端本机的长期凭证；持有它即等于
+/// 「这台已绑定的机器」，据此给归属用户签发一个网页会话 —— 客户端登录
+/// 一次后，之后会话过期/服务重启都由客户端自动换新，用户无感知。
+async fn client_session(
+    State(state): State<SharedState>,
+    Json(req): Json<ClientSessionReq>,
+) -> Json<Value> {
+    let (is_super, user) = {
+        let reg = state.registry.read().await;
+        if !reg.verify_device_token(&req.machine_id, &req.device_token) {
+            return err(401, "设备未绑定或令牌无效，请重新登录绑定");
+        }
+        let Some(owner) = reg.device_meta(&req.machine_id).owner else {
+            return err(401, "设备无归属账号，请重新登录绑定");
+        };
+        let Some(user) = reg.user_by_name(&owner).cloned() else {
+            return err(401, "归属账号已不存在，请重新登录");
+        };
+        (reg.is_super_user(&owner), user)
+    };
+    let token = uuid::Uuid::new_v4().to_string();
+    state
+        .tokens
+        .write()
+        .await
+        .insert(token.clone(), crate::state::Session::new(user.username.clone()));
+    state.sessions_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+    let nickname = if user.display.is_empty() {
+        user.username.clone()
+    } else {
+        user.display.clone()
+    };
+    tracing::info!("客户端静默续登: {}（machine={}）", user.username, req.machine_id);
+    ok(json!({
+        "token": token,
+        "userInfo": {
+            "id": user.id,
+            "username": user.username,
+            "nickname": nickname,
+            "isSuper": is_super,
+        }
     }))
 }
 

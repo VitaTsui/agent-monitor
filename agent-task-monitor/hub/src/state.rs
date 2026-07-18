@@ -59,9 +59,21 @@ pub fn token_eq(a: &str, b: &str) -> bool {
     a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
-/// 登录态有效期：7 天。到期强制重新登录。
-/// （没有有效期的话 token 表只增不减，且泄露的 token 会永久有效。）
-pub const SESSION_TTL_SECS: u64 = 7 * 24 * 3600;
+/// 登录态有效期：30 天**滑动**窗口 —— 只要期间有任何活动就自动顺延，
+/// 体验对齐 Claude / ChatGPT：常用用户永不掉线，闲置一个月才需重登。
+/// （仍要有期限：泄露的 token 不能永久有效，token 表也不能只增不减。）
+pub const SESSION_TTL_SECS: u64 = 30 * 24 * 3600;
+
+/// 活动续期节流：距上次续期超过 1 小时才写一次 last_seen，
+/// 避免每个请求都抢 tokens 写锁 / 反复触发落盘。
+pub const SESSION_TOUCH_SECS: u64 = 3600;
+
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// 口令爆破节流：按账号累计连续失败次数，失败后延迟应答。
 /// 不按 IP：服务跑在 Caddy 反代后，对端 IP 恒为反代，而 X-Forwarded-For 可伪造。
@@ -133,21 +145,57 @@ impl PairEntry {
     }
 }
 
-/// 一次登录签发的会话
-#[derive(Clone)]
+/// 一次登录签发的会话。
+/// 用墙钟（unix 秒）而非 Instant：会话要持久化到磁盘，服务重启后
+/// 网页/移动端/客户端全都不掉线。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Session {
     pub username: String,
-    pub issued_at: Instant,
+    /// 最近活动时间（unix 秒），滑动过期的基准
+    pub last_seen: u64,
 }
 
 impl Session {
     pub fn new(username: String) -> Self {
-        Self { username, issued_at: Instant::now() }
+        Self { username, last_seen: now_secs() }
     }
 
     pub fn expired(&self) -> bool {
-        self.issued_at.elapsed().as_secs() >= SESSION_TTL_SECS
+        now_secs().saturating_sub(self.last_seen) >= SESSION_TTL_SECS
     }
+
+    /// 活动续期（滑动窗口顺延）
+    pub fn touch(&mut self) {
+        self.last_seen = now_secs();
+    }
+}
+
+/// 从数据目录加载持久化会话（过期的直接丢弃）
+pub fn load_sessions(data_dir: &std::path::Path) -> HashMap<String, Session> {
+    let Ok(txt) = std::fs::read_to_string(data_dir.join("sessions.json")) else {
+        return HashMap::new();
+    };
+    let map: HashMap<String, Session> = serde_json::from_str(&txt).unwrap_or_default();
+    map.into_iter().filter(|(_, s)| !s.expired()).collect()
+}
+
+/// 会话落盘（原子写 + 仅属主可读：token 等同登录凭证）
+pub async fn save_sessions(state: &SharedState) {
+    let snapshot = state.tokens.read().await.clone();
+    let Ok(txt) = serde_json::to_string(&snapshot) else {
+        return;
+    };
+    let path = state.config.data_dir.join("sessions.json");
+    let tmp = state.config.data_dir.join("sessions.json.tmp");
+    if std::fs::write(&tmp, &txt).is_err() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    let _ = std::fs::rename(&tmp, &path);
 }
 
 pub struct AppState {
@@ -167,6 +215,8 @@ pub struct AppState {
     /// 快照变更信号（tick 循环自增，WS 据此推送）
     pub tx: broadcast::Sender<u64>,
     pub started_at: chrono::DateTime<chrono::Local>,
+    /// 会话表有未落盘变更（tick 循环定期 flush 到 sessions.json）
+    pub sessions_dirty: std::sync::atomic::AtomicBool,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -174,16 +224,19 @@ pub type SharedState = Arc<AppState>;
 impl AppState {
     pub fn new(config: Config, registry: Registry) -> SharedState {
         let (tx, _) = broadcast::channel(64);
+        // 会话持久化：重启不掉线（网页 / 移动端 / 客户端一体生效）
+        let sessions = load_sessions(&config.data_dir);
         Arc::new(Self {
-            config,
             machines: RwLock::new(HashMap::new()),
-            tokens: RwLock::new(HashMap::new()),
+            tokens: RwLock::new(sessions),
+            config,
             registry: RwLock::new(registry),
             pair_codes: RwLock::new(HashMap::new()),
             oauth_states: RwLock::new(HashMap::new()),
             login_throttle: RwLock::new(LoginThrottle::default()),
             tx,
             started_at: chrono::Local::now(),
+            sessions_dirty: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -263,12 +316,24 @@ impl AppState {
 /// tick 循环：驱动 WS 推送节奏 + 定期清扫过期登录态/配对码。
 /// （hub 不自监控 —— 服务器不是被监控设备；机器数据全部来自上报。）
 pub async fn tick_loop(state: SharedState) {
+    use std::sync::atomic::Ordering;
     let mut tick: u64 = 0;
     loop {
         tick = tick.wrapping_add(1);
         if tick % 400 == 0 {
-            state.tokens.write().await.retain(|_, s| !s.expired());
+            {
+                let mut map = state.tokens.write().await;
+                let before = map.len();
+                map.retain(|_, s| !s.expired());
+                if map.len() != before {
+                    state.sessions_dirty.store(true, Ordering::Relaxed);
+                }
+            }
             state.pair_codes.write().await.retain(|_, e| !e.expired());
+        }
+        // 会话变更定期落盘（~60s 一次）：登录/登出/活动续期都只标脏，这里统一写
+        if tick % 40 == 0 && state.sessions_dirty.swap(false, Ordering::Relaxed) {
+            save_sessions(&state).await;
         }
         let _ = state.tx.send(tick);
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;

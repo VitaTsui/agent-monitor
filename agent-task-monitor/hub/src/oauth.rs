@@ -266,6 +266,7 @@ pub async fn oauth_login(
         .write()
         .await
         .insert(token.clone(), crate::state::Session::new(user.username.clone()));
+    state.sessions_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
     let nickname = if user.display.is_empty() {
         user.username.clone()
     } else {
