@@ -23,9 +23,10 @@ import {
 import { observer } from "mobx-react-lite";
 
 import { getAccessToken, getUserInfo, removeToken } from "@/utils/auth";
-import { clientSilentLogin, inDesktopClient } from "@/utils/clientAuth";
+import { clientSilentLogin, inDesktopClient, localMachineId } from "@/utils/clientAuth";
 import PortalStore from "./PortalStore";
 import ChatPane from "./_components/ChatPane";
+import ScrollText from "./_components/ScrollText";
 import SettingsModal from "./_components/SettingsModal";
 import type { SettingsTab } from "./_components/SettingsModal";
 import styles from "./index.module.scss";
@@ -57,6 +58,11 @@ const Portal: React.FC = observer(() => {
   } = PortalStore;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("account");
+  // 客户端窗口内标出「本机」（浏览器里为 null，不标）
+  const [localId, setLocalId] = useState<string | null>(null);
+  useEffect(() => {
+    localMachineId().then(setLocalId);
+  }, []);
   const [siderFolded, setSiderFolded] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   // 移动端：侧栏抽屉开合
@@ -343,9 +349,19 @@ const Portal: React.FC = observer(() => {
                       title={`${d.hostname} · ${d.platformDsr}`}
                     >
                       <LaptopOutlined />
-                      <span className={styles.deviceTabName}>
-                        {platformIcon(d.platform)} {d.hostname}
-                      </span>
+                      <ScrollText
+                        className={styles.deviceTabName}
+                        active={d.machineId === selectedMachineId}
+                        plain={d.hostname}
+                        text={
+                          <>
+                            {platformIcon(d.platform)} {d.hostname}
+                            {d.machineId === localId ? (
+                              <span className={styles.localTag}>本机</span>
+                            ) : null}
+                          </>
+                        }
+                      />
                       <span className={styles.deviceTabStat}>
                         {d.count} 会话
                         {d.running > 0 ? ` · ${d.running} 执行中` : ""}
@@ -398,9 +414,12 @@ const Portal: React.FC = observer(() => {
                                 }`}
                               />
                               <div className={styles.sessBody}>
-                                <div className={styles.sessName}>
-                                  {t.title || t.prompt || t.projectName || "新会话"}
-                                </div>
+                                <ScrollText
+                                  className={styles.sessName}
+                                  active={openIds.includes(t.id ?? "")}
+                                  plain={t.title || t.prompt || t.projectName || "新会话"}
+                                  text={t.title || t.prompt || t.projectName || "新会话"}
+                                />
                                 <div className={styles.sessSub}>
                                   {t.projectName} ·{" "}
                                   {STATUS_LABEL[t.status ?? ""] ?? t.statusDsr}
