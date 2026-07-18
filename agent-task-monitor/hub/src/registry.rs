@@ -332,6 +332,11 @@ impl Registry {
         self.users.iter().any(|u| u.username == username)
     }
 
+    /// 按用户名取用户（客户端静默续登等需要完整用户信息的场景）
+    pub fn user_by_name(&self, username: &str) -> Option<&User> {
+        self.users.iter().find(|u| u.username == username)
+    }
+
     /// 删除用户（超级管理员不可删）；其名下设备释放归属并撤销信任
     pub fn delete_user(&mut self, username: &str) -> Result<(), String> {
         if username == self.super_user {

@@ -163,8 +163,13 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
     let is_agent = cfg.is_agent;
     let state_setup = state.clone();
 
+    let ipc_ctx = std::sync::Arc::new(IpcCtx {
+        state: state.clone(),
+        web_base: web_base.clone(),
+    });
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![autostart_get, autostart_set])
+        .manage(ipc_ctx)
+        .invoke_handler(tauri::generate_handler![autostart_get, autostart_set, client_auth])
         .setup(move |app| {
             let handle = app.handle().clone();
 
@@ -506,6 +511,38 @@ fn reg_command(args: &[&str]) -> std::io::Result<std::process::Output> {
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
+}
+
+/// IPC 用共享上下文：客户端状态 + 允许取凭证的 hub 源
+pub struct IpcCtx {
+    pub state: SharedState,
+    /// 窗口应加载的 hub 地址（origin 校验用）
+    pub web_base: String,
+}
+
+/// 网页端 IPC：本机设备凭证（机器号 + 设备令牌），供页面静默续登 ——
+/// 客户端登录一次绑定后，之后网页会话过期由页面拿它换新会话，登录态永不失效。
+/// 仅当窗口当前加载的就是配置的 hub 源时才返回，防止窗口被导航到
+/// 其它站点后经 IPC 摸走设备令牌。
+#[tauri::command]
+fn client_auth(
+    window: tauri::WebviewWindow,
+    ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>,
+) -> Option<serde_json::Value> {
+    let cur = window.url().ok()?;
+    let allowed: tauri::Url = ctx.web_base.parse().ok()?;
+    if cur.origin() != allowed.origin() {
+        tracing::warn!("client_auth 拒绝非 hub 源: {cur}");
+        return None;
+    }
+    // try_read 而非 blocking_read：Tauri 命令可能跑在异步运行时线程上，
+    // blocking_* 在那里会 panic（配对引导曾因此崩过）。此锁竞争极短，
+    // 偶发拿不到就让页面下次重试。
+    let token = ctx.state.device_token.try_read().ok()?.clone()?;
+    Some(serde_json::json!({
+        "machineId": ctx.state.config.machine_id,
+        "deviceToken": token,
+    }))
 }
 
 /// 网页端 IPC：查询开机自启状态。
