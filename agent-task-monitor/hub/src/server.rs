@@ -934,12 +934,18 @@ async fn report(
         }
     }
     // 登记设备：新设备默认信任（信任开关是「断开链接」的手段，撤销有粘性，
-    // 不会被后续上报重新打开）
-    state
-        .registry
-        .write()
-        .await
-        .ensure_device(&payload.machine_id, claim_owner, true);
+    // 不会被后续上报重新打开）；顺带刷新展示信息（内部有变更/节流判断，
+    // 不会把注册表写穿），离线后设备管理里仍能看到这台机器
+    {
+        let mut reg = state.registry.write().await;
+        reg.ensure_device(&payload.machine_id, claim_owner, true);
+        reg.update_device_info(
+            &payload.machine_id,
+            &payload.hostname,
+            &payload.platform,
+            &payload.version,
+        );
+    }
 
     let mut machines = state.machines.write().await;
     let entry = machines

@@ -91,6 +91,17 @@ pub struct DeviceMeta {
     /// 有它就不需要管理员发放全局令牌 —— 注册 + 安装即可用。
     #[serde(default)]
     pub device_token: Option<String>,
+    /// 以下为展示信息（随上报刷新并持久化）：设备离线或 hub 重启后，
+    /// 设备管理列表仍能显示这台机器，而不是从列表里凭空消失。
+    #[serde(default)]
+    pub hostname: String,
+    #[serde(default)]
+    pub platform: String,
+    #[serde(default)]
+    pub version: String,
+    /// 最后一次上报（unix 秒，粗粒度节流写入）
+    #[serde(default)]
+    pub last_seen: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -337,6 +348,44 @@ impl Registry {
         self.users.iter().find(|u| u.username == username)
     }
 
+    /// 该用户名下全部设备（含离线；设备管理列表用）
+    pub fn devices_of(&self, username: &str) -> Vec<(String, DeviceMeta)> {
+        self.devices
+            .iter()
+            .filter(|(_, m)| m.owner.as_deref() == Some(username))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// 随上报刷新设备展示信息。hostname/platform/version 变了才落盘；
+    /// last_seen 十分钟一档节流（它只服务于离线设备的「最后在线」展示，
+    /// 不能让每 1.5s 的上报把整个注册表写穿）。
+    pub fn update_device_info(
+        &mut self,
+        machine_id: &str,
+        hostname: &str,
+        platform: &str,
+        version: &str,
+    ) {
+        let now = crate::state::now_secs();
+        let Some(m) = self.devices.get_mut(machine_id) else {
+            return;
+        };
+        let changed = m.hostname != hostname || m.platform != platform || m.version != version;
+        if changed {
+            m.hostname = hostname.to_string();
+            m.platform = platform.to_string();
+            m.version = version.to_string();
+        }
+        let seen_stale = now.saturating_sub(m.last_seen) >= 600;
+        if seen_stale {
+            m.last_seen = now;
+        }
+        if changed || seen_stale {
+            self.save();
+        }
+    }
+
     /// 删除用户（超级管理员不可删）；其名下设备释放归属并撤销信任
     pub fn delete_user(&mut self, username: &str) -> Result<(), String> {
         if username == self.super_user {
@@ -461,6 +510,7 @@ impl Registry {
                 owner: claim_owner.map(str::to_string),
                 trusted: default_trust,
                 device_token: None,
+                ..DeviceMeta::default()
             }
         });
         if entry.owner.is_none() {
@@ -626,5 +676,31 @@ mod default_trust_tests {
         r.ensure_device("pc-2", Some("erin"), true);
         assert_eq!(r.device_meta("pc-2").owner.as_deref(), Some("erin"));
         assert!(r.device_meta("pc-2").trusted, "首次认领视同新接入，默认信任");
+    }
+}
+
+#[cfg(test)]
+mod offline_visibility_tests {
+    use super::*;
+
+    /// 设备离线（未上报）也必须出现在名下设备里，且展示信息随上报持久化
+    #[test]
+    fn offline_devices_stay_listed() {
+        let dir = std::env::temp_dir().join(format!("am-ov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut r = Registry::load(dir.clone(), "admin", "admin123");
+        r.register("hank", "pw123456", "").unwrap();
+        r.ensure_device("pc-9", Some("hank"), true);
+        r.update_device_info("pc-9", "Hank-PC", "windows", "0.2.0");
+        // 模拟 hub 重启：重新加载注册表（实时表为空的场景）
+        let r2 = Registry::load(dir, "admin", "admin123");
+        let devs = r2.devices_of("hank");
+        assert_eq!(devs.len(), 1);
+        let (id, meta) = &devs[0];
+        assert_eq!(id, "pc-9");
+        assert_eq!(meta.hostname, "Hank-PC");
+        assert_eq!(meta.platform, "windows");
+        assert!(meta.trusted);
+        assert!(meta.last_seen > 0, "last_seen 应已记录");
     }
 }
