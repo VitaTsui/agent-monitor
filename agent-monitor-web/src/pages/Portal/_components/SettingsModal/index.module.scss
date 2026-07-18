@@ -13,6 +13,12 @@ $hover: rgba(36, 61, 66, 0.06);
     margin-bottom: 4px;
   }
 
+  .connectBtn {
+    border-radius: 999px;
+    padding-inline: 14px;
+    box-shadow: 0 2px 8px rgba(15, 155, 173, 0.25);
+  }
+
   :global(.ant-modal-content) {
     padding: 0;
     overflow: hidden;
@@ -108,13 +114,18 @@ $hover: rgba(36, 61, 66, 0.06);
     }
   }
 
-  // 右侧内容
+  // 右侧内容：可滚动但不显示滚动条轨道
   .content {
     flex: 1;
     min-width: 0;
     overflow-y: auto;
     padding: 24px 26px;
     background: #fff;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar {
+      display: none;
+    }
   }
 
   .pane {

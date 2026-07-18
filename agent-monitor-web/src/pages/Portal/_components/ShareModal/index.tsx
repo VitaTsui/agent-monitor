@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from "react";
 
-import { Segmented, Tag, message } from "antd";
+import { Segmented, Tag, Tooltip, message } from "antd";
+import { CheckOutlined, CopyOutlined } from "@ant-design/icons";
 
-import { Button, Copy, Input, Modal } from "@hsu-react/ui";
+import { Button, Input, Modal } from "@hsu-react/ui";
 
 import {
   PortalDevice,
@@ -24,6 +25,27 @@ interface ShareModalProps {
  * 协助共享（主人侧）：为自己的设备生成连接码 + 密码，供其他用户接入
  * （类似远程控制软件）。临时密码 30 分钟过期；固定密码长期有效。
  */
+const CopyBtn: React.FC<{ text: string }> = ({ text }) => {
+  const [done, setDone] = useState(false);
+  const copy = () => {
+    navigator.clipboard?.writeText(text).then(
+      () => {
+        setDone(true);
+        message.success("已复制");
+        window.setTimeout(() => setDone(false), 1500);
+      },
+      () => message.error("复制失败"),
+    );
+  };
+  return (
+    <Tooltip title="复制">
+      <span className={styles.copyBtn} role="button" onClick={copy}>
+        {done ? <CheckOutlined /> : <CopyOutlined />}
+      </span>
+    </Tooltip>
+  );
+};
+
 const ShareModal: React.FC<ShareModalProps> = ({ device, onClose }) => {
   const [info, setInfo] = useState<ShareInfo | null>(null);
   const [guests, setGuests] = useState<string[]>([]);
@@ -105,7 +127,8 @@ const ShareModal: React.FC<ShareModalProps> = ({ device, onClose }) => {
       open={!!device}
       onCancel={onClose}
       footer={null}
-      width={460}
+      width={440}
+      centered
     >
       <div className={styles.ShareModal}>
         <div className={styles.hint}>
@@ -117,13 +140,13 @@ const ShareModal: React.FC<ShareModalProps> = ({ device, onClose }) => {
             <div className={styles.codeRow}>
               <span className={styles.codeLabel}>连接码</span>
               <span className={styles.codeValue}>{info.code}</span>
-              <Copy id="share-code" text={info.code} />
+              <CopyBtn text={info.code} />
             </div>
             {password ? (
               <div className={styles.codeRow}>
                 <span className={styles.codeLabel}>密码</span>
                 <span className={styles.codeValue}>{password}</span>
-                <Copy id="share-pwd" text={password} />
+                <CopyBtn text={password} />
               </div>
             ) : (
               <div className={styles.codeRow}>
