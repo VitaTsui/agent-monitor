@@ -48,9 +48,11 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "© ${APP_PUBLISHER}"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT "立即启动 ${APP_NAME}"
 ; 启动时把向导窗口带到前台：部分环境（从浏览器下载栏直接运行）下
-; 窗口会启动在后台，用户误以为「点了没反应」，得去点任务栏图标才出来
+; 窗口会启动在后台，用户误以为「点了没反应」，得去点任务栏图标才出来。
+; .onGUIInit 时机太早（窗口尚未显示，BringToFront 落空），
+; 必须挂在首页 SHOW 回调上，并直接调 SetForegroundWindow 双保险。
 !define MUI_CUSTOMFUNCTION_GUIINIT BringInstallerToFront
-
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW WelcomeShow
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
@@ -61,6 +63,12 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "© ${APP_PUBLISHER}"
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
 Function BringInstallerToFront
+  BringToFront
+FunctionEnd
+
+Function WelcomeShow
+  ; 窗口已可见的时点：先解除前台锁定限制，再强制置顶
+  System::Call "user32::SetForegroundWindow(p $HWNDPARENT)"
   BringToFront
 FunctionEnd
 
