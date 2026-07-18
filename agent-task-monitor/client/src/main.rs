@@ -3,6 +3,7 @@
 #![cfg_attr(all(windows, feature = "desktop"), windows_subsystem = "windows")]
 
 mod agent;
+mod secrets;
 mod state;
 #[cfg(feature = "desktop")]
 mod desktop;
@@ -27,13 +28,14 @@ fn main() -> Result<()> {
     let hostname = device_name().unwrap_or_else(|| raw_hostname.clone());
     let platform = std::env::consts::OS.to_string();
 
+    // 数据目录用平台规范位置（mac ~/Library/Application Support、
+    // Windows %APPDATA%），不放安装目录：安装目录随自更新整体替换，
+    // 数据放里面每次更新即丢（设备绑定要重来）；mac 往 .app 包内写文件
+    // 还会破坏签名。旧版 ~/.agent-monitor 自动整体迁移。
     let data_dir = std::env::var("AM_DATA_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .expect("无法定位用户目录")
-                .join(".agent-monitor")
-        });
+        .unwrap_or_else(|_| default_data_dir());
+    migrate_legacy_data_dir(&data_dir);
     let _ = std::fs::create_dir_all(&data_dir);
 
     // Windows GUI 子系统没有控制台：panic 会无声消失，用户只觉得「双击没反应」。
@@ -74,12 +76,10 @@ fn main() -> Result<()> {
     };
     let state = AppState::new(config);
 
-    // 已配对过的设备：加载持久化的每设备上报令牌
-    if let Ok(t) = std::fs::read_to_string(state.config.data_dir.join("device-token")) {
-        let t = t.trim().to_string();
-        if !t.is_empty() {
-            *state.device_token.blocking_write() = Some(t);
-        }
+    // 已配对过的设备：从系统安全存储加载每设备上报令牌
+    // （mac 钥匙串 / Windows DPAPI；旧版明文文件自动迁移进安全存储）
+    if let Some(t) = secrets::load(&state.config.data_dir) {
+        *state.device_token.blocking_write() = Some(t);
     }
 
     // hub 地址：AM_HUB_URL > 编译期内置默认（官网分发的安装包开箱即用）
@@ -308,4 +308,28 @@ fn persisted_value(path: &std::path::Path, init: impl FnOnce() -> String) -> Str
     let value = init();
     let _ = std::fs::write(path, &value);
     value
+}
+
+/// 平台规范数据目录：mac ~/Library/Application Support/AgentMonitor、
+/// Windows %APPDATA%\AgentMonitor、Linux ~/.local/share/AgentMonitor
+fn default_data_dir() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| dirs::home_dir().expect("无法定位用户目录"))
+        .join("AgentMonitor")
+}
+
+/// 旧版数据目录（~/.agent-monitor）整体迁移到新位置，保住设备绑定等状态
+fn migrate_legacy_data_dir(new_dir: &std::path::Path) {
+    let Some(home) = dirs::home_dir() else { return };
+    let old = home.join(".agent-monitor");
+    if !old.is_dir() || new_dir.exists() {
+        return;
+    }
+    if let Some(parent) = new_dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::rename(&old, new_dir) {
+        Ok(_) => tracing::info!("数据目录已迁移: {} → {}", old.display(), new_dir.display()),
+        Err(e) => tracing::warn!("数据目录迁移失败（继续用旧目录需设 AM_DATA_DIR）: {e}"),
+    }
 }

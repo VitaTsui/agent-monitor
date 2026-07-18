@@ -127,7 +127,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                 // 设备令牌失效（设备被删除/换绑）：清掉本地令牌，回到配对流程重新绑定
                 if code.as_u16() == 401 && legacy_token.is_none() {
                     *state.device_token.write().await = None;
-                    let _ = std::fs::remove_file(state.config.data_dir.join("device-token"));
+                    crate::secrets::clear(&state.config.data_dir);
                 }
             }
             Ok(resp) => {
@@ -250,15 +250,8 @@ async fn start_pairing(state: &SharedState, client: &reqwest::Client, hub: &str)
 /// 持久化设备令牌（拿到后写盘，下次启动直接上报无需重新配对）
 async fn persist_device_token(state: &SharedState, token: &str) {
     *state.device_token.write().await = Some(token.to_string());
-    let path = state.config.data_dir.join("device-token");
-    if let Err(e) = std::fs::write(&path, token) {
-        tracing::warn!("设备令牌写盘失败（重启后需重新配对）: {e}");
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    // 系统安全存储（mac 钥匙串 / Windows DPAPI），失败回退受限权限文件
+    crate::secrets::save(&state.config.data_dir, token);
 }
 
 /// a 是否比 b 更新（按点分数字逐段比较；解析不了的段按 0）。
