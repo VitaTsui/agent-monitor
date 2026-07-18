@@ -173,7 +173,9 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             autostart_get,
             autostart_set,
             client_auth,
-            local_machine_id
+            local_machine_id,
+            terminals_get,
+            terminal_set_excluded
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -559,6 +561,36 @@ fn client_auth(
 #[tauri::command]
 fn local_machine_id(ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>) -> String {
     ctx.state.config.machine_id.clone()
+}
+
+/// 网页端 IPC：本机探测到的终端列表（含排除状态），设置页「监控范围」用
+#[tauri::command]
+async fn terminals_get(
+    ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let terminals = ctx.state.terminals.read().await.clone();
+    let excludes = ctx.state.excludes.read().await;
+    Ok(terminals
+        .into_iter()
+        .map(|(key, name)| {
+            serde_json::json!({
+                "key": key,
+                "name": name,
+                "excluded": excludes.is_excluded(&key),
+            })
+        })
+        .collect())
+}
+
+/// 网页端 IPC：设置某终端是否排除监控（与托盘「监控范围」同一份配置）
+#[tauri::command]
+async fn terminal_set_excluded(
+    key: String,
+    excluded: bool,
+    ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>,
+) -> Result<(), String> {
+    ctx.state.excludes.write().await.set(&key, excluded);
+    Ok(())
 }
 
 /// 网页端 IPC：查询开机自启状态。
