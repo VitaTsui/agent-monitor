@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 
 import { Button, Input, Modal, Switch } from "@hsu-react/ui";
-import { Badge, Empty, Modal as AntModal, Popconfirm, Tag, message } from "antd";
+import { Badge, Empty, Modal as AntModal, Popconfirm, Progress, Tag, message } from "antd";
 import {
   CloseOutlined,
   CodeOutlined,
@@ -76,16 +76,38 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
   };
 
   // 客户端版本与更新（仅客户端窗口内）
-  const [clientVer, setClientVer] = useState<{ current: string; latest: string | null } | null>(
-    null,
-  );
+  interface UpdateProgress {
+    phase: "downloading" | "installing" | "restarting";
+    received: number;
+    total: number;
+  }
+  const [clientVer, setClientVer] = useState<{
+    current: string;
+    latest: string | null;
+    progress?: UpdateProgress | null;
+  } | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   const loadClientVersion = () => {
     tauriInvoke?.("update_status")
-      .then((v) => setClientVer(v as { current: string; latest: string | null }))
+      .then((v) =>
+        setClientVer(
+          v as { current: string; latest: string | null; progress?: UpdateProgress | null },
+        ),
+      )
       .catch(() => setClientVer(null));
   };
+  const updating = !!clientVer?.progress;
+
+  // 打开设置期间轮询版本/进度（更新中每 1.5s 刷新进度条）
+  useEffect(() => {
+    if (!open || !tauriInvoke) {
+      return;
+    }
+    const timer = window.setInterval(loadClientVersion, 1500);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const checkUpdate = () => {
     setCheckingUpdate(true);
@@ -342,23 +364,62 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                       <div className={styles.devName}>
                         客户端版本
                         {clientVer ? (
-                          <Tag color={clientVer.latest ? "warning" : "green"}>
-                            v{clientVer.current}
-                            {clientVer.latest ? ` → v${clientVer.latest} 可用` : " · 最新"}
-                          </Tag>
+                          updating ? (
+                            <Tag color="processing">
+                              {clientVer.progress?.phase === "installing"
+                                ? "正在安装…"
+                                : clientVer.progress?.phase === "restarting"
+                                  ? "即将重启…"
+                                  : "正在下载更新…"}
+                            </Tag>
+                          ) : (
+                            <Tag color={clientVer.latest ? "warning" : "green"}>
+                              v{clientVer.current}
+                              {clientVer.latest ? ` → v${clientVer.latest} 可用` : " · 最新"}
+                            </Tag>
+                          )
                         ) : null}
                       </div>
-                      <div className={styles.devMeta}>
-                        更新会自动下载安装并重启客户端
-                      </div>
+                      {updating && clientVer?.progress ? (
+                        <div className={styles.updateProgress}>
+                          {clientVer.progress.phase === "downloading" &&
+                          clientVer.progress.total > 0 ? (
+                            <>
+                              <Progress
+                                percent={Math.min(
+                                  100,
+                                  Math.round(
+                                    (clientVer.progress.received / clientVer.progress.total) * 100,
+                                  ),
+                                )}
+                                size="small"
+                                strokeColor="#0f9bad"
+                              />
+                              <span className={styles.updateProgressText}>
+                                {(clientVer.progress.received / 1024 / 1024).toFixed(1)} /{" "}
+                                {(clientVer.progress.total / 1024 / 1024).toFixed(1)} MB
+                              </span>
+                            </>
+                          ) : (
+                            <span className={styles.updateProgressText}>
+                              完成后客户端将自动重启，请稍候
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <div className={styles.devMeta}>
+                          更新会自动下载安装并重启客户端
+                        </div>
+                      )}
                     </div>
                     <Button
                       size="small"
                       className={styles.checkUpdateBtn}
-                      loading={checkingUpdate}
+                      loading={checkingUpdate || updating}
+                      disabled={updating}
                       onClick={checkUpdate}
                     >
-                      检查更新
+                      {updating ? "更新中" : "检查更新"}
                     </Button>
                   </div>
                   <div className={styles.termScope}>

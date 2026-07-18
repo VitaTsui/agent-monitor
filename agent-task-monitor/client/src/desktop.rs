@@ -637,9 +637,11 @@ async fn update_status(
     ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>,
 ) -> Result<serde_json::Value, String> {
     let latest = ctx.state.hub_latest_version.read().await.clone();
+    let progress = UPDATE_PROGRESS.lock().unwrap().clone();
     Ok(serde_json::json!({
         "current": env!("CARGO_PKG_VERSION"),
         "latest": latest,
+        "progress": progress,
     }))
 }
 
@@ -830,6 +832,29 @@ fn open_external(url: &str) {
 
 // ---------- 应用内自更新 ----------
 
+/// 更新进行中的进度（设置页「客户端版本」一栏展示）
+#[derive(Clone, serde::Serialize)]
+struct UpdateProgress {
+    /// downloading / installing / restarting
+    phase: String,
+    received: u64,
+    total: u64,
+}
+
+static UPDATE_PROGRESS: std::sync::Mutex<Option<UpdateProgress>> = std::sync::Mutex::new(None);
+
+fn set_update_progress(phase: &str, received: u64, total: u64) {
+    *UPDATE_PROGRESS.lock().unwrap() = Some(UpdateProgress {
+        phase: phase.into(),
+        received,
+        total,
+    });
+}
+
+fn clear_update_progress() {
+    *UPDATE_PROGRESS.lock().unwrap() = None;
+}
+
 /// 更新流程日志：GUI 应用没有可见 stderr，必须落盘才能排查
 /// （~/.agent-monitor/client.log）
 fn ulog(msg: &str) {
@@ -1004,6 +1029,7 @@ fn download_to_once(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
             })??;
             let Some(chunk) = chunk else { break };
             out.extend_from_slice(&chunk);
+            set_update_progress("downloading", out.len() as u64, total);
             // 每 2MB 记一次进度，网络问题可从日志直接定位
             if out.len() - last_mark >= 2 * 1024 * 1024 {
                 last_mark = out.len();
@@ -1053,6 +1079,7 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     let zip = tmp.join("update.zip");
     download_to(&format!("{hub}/downloads/agent-monitor-mac.zip"), &zip)?;
     ulog("[update] 下载完成");
+    set_update_progress("installing", 0, 0);
 
     // ditto 解包（保留签名/资源叉）
     let ok = std::process::Command::new("ditto")
@@ -1088,6 +1115,7 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
         anyhow::bail!("写入新版本失败（已回滚）");
     }
     ulog("[update] 新版本已就位，准备重启");
+    set_update_progress("restarting", 0, 0);
     let bundle_str = bundle.to_string_lossy().to_string();
     let old_str = old.to_string_lossy().to_string();
     std::process::Command::new("sh")
@@ -1107,6 +1135,7 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     let installer = tmp.join("agent-monitor-setup.exe");
     download_to(&format!("{hub}/downloads/agent-monitor-setup.exe"), &installer)?;
     ulog("[update] 安装器下载完成，静默安装");
+    set_update_progress("installing", 0, 0);
     // 全静默更新，不出安装向导：NSIS /S 静默安装（沿用上次安装目录与组件选择，
     // 安装器内部会先结束本进程再覆盖），装完从注册表定位新程序并自动重启。
     // 整个流程放在独立的 bat 里执行 —— 本进程会被安装器 taskkill，
@@ -1230,6 +1259,7 @@ pub(crate) fn spawn_update_watcher<R: tauri::Runtime>(
 fn spawn_self_update_inner<R: tauri::Runtime>(app: tauri::AppHandle<R>, hub: String, forced: bool) {
     std::thread::spawn(move || {
         ulog(&format!("[update] 开始自更新 forced={forced} hub={hub}"));
+        set_update_progress("downloading", 0, 0);
         notify_progress("正在下载更新，完成后将自动重启…");
         match do_self_update(&hub) {
             Ok(()) => {
@@ -1242,6 +1272,7 @@ fn spawn_self_update_inner<R: tauri::Runtime>(app: tauri::AppHandle<R>, hub: Str
                 std::process::exit(0);
             }
             Err(e) => {
+                clear_update_progress();
                 ulog(&format!("[update] 自更新失败: {e:#}"));
                 alert_box(
                     "终端任务监控 · 更新失败",
