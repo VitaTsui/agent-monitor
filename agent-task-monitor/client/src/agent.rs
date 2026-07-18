@@ -155,6 +155,13 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                             *slot = next;
                         }
                     }
+                    // 强制更新下限：低于它的客户端必须更新才能继续使用（desktop.rs 弹窗执行）
+                    if let Some(mv) = body.pointer("/data/minVersion").and_then(Value::as_str) {
+                        let mut slot = state.hub_min_version.write().await;
+                        if slot.as_deref() != Some(mv) {
+                            *slot = Some(mv.to_string());
+                        }
+                    }
                     // 额度上限由 hub 下发，本地扫描按它执行超额自动暂停/恢复
                     if let Some(limit) = body.pointer("/data/quotaLimit").and_then(Value::as_u64) {
                         state
@@ -262,7 +269,7 @@ async fn persist_device_token(state: &SharedState, token: &str) {
 
 /// a 是否比 b 更新（按点分数字逐段比较；解析不了的段按 0）。
 /// 客户端与 hub 版本都出自 Cargo semver，够用且不引依赖。
-fn version_newer(a: &str, b: &str) -> bool {
+pub(crate) fn version_newer(a: &str, b: &str) -> bool {
     let parse = |s: &str| -> Vec<u64> {
         s.split('.').map(|p| p.trim().parse().unwrap_or(0)).collect()
     };
