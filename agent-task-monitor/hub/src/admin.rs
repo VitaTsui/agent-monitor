@@ -261,6 +261,11 @@ pub async fn menus(State(state): State<SharedState>, headers: axum::http::Header
             "id": "1", "nm": "用户管理", "pid": null, "seq": 1, "level": 1, "children": null,
             "path": "permit/user", "url": "permit/User/index", "perm": "permit:user:list",
             "icon": "carbon:user-multiple", "status": null
+        },
+        {
+            "id": "2", "nm": "版本管理", "pid": null, "seq": 2, "level": 1, "children": null,
+            "path": "sysmgmt/version", "url": "sysmgmt/Version/index", "perm": "sysmgmt:version:list",
+            "icon": "carbon:upgrade", "status": null
         }
     ]);
     ok(json!({ "topMenuList": [], "menuList": menu_list, "topId": null, "topList": null }))
@@ -280,7 +285,9 @@ pub async fn permissions(
             "permit:user:add",
             "permit:user:upd",
             "permit:user:resetPwd",
-            "permit:user:del"
+            "permit:user:del",
+            "sysmgmt:version:list",
+            "sysmgmt:version:upd"
         ]
     }))
 }
@@ -472,4 +479,152 @@ pub async fn user_del(
         }
         Err(e) => err(400, &e),
     }
+}
+
+// ---------- 版本管理 / 更新日志（后管） ----------
+
+fn downloads_dir(state: &SharedState) -> std::path::PathBuf {
+    std::env::var("AM_DOWNLOADS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| state.config.data_dir.join("downloads"))
+}
+
+fn changelog_path(state: &SharedState) -> std::path::PathBuf {
+    state.config.data_dir.join("changelog.json")
+}
+
+fn read_changelog(state: &SharedState) -> Vec<Value> {
+    std::fs::read_to_string(changelog_path(state))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_changelog(state: &SharedState, list: &[Value]) -> Result<(), String> {
+    let txt = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
+    std::fs::write(changelog_path(state), txt).map_err(|e| e.to_string())
+}
+
+/// GET /sys/version/info —— 当前版本、强制更新下限与更新日志
+pub async fn version_admin_info(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+) -> Json<Value> {
+    if let Err(e) = admin_gate(&state, &headers).await {
+        return e;
+    }
+    let manifest = std::fs::read_to_string(downloads_dir(&state).join("manifest.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .unwrap_or(Value::Null);
+    let pick = |ptr: &str| manifest.pointer(ptr).and_then(Value::as_str).map(String::from);
+    ok(json!({
+        "desktop": env!("CARGO_PKG_VERSION"),
+        "desktopMin": pick("/desktop/minVersion"),
+        "android": pick("/android/version"),
+        "androidMin": pick("/android/minVersion"),
+        "changelog": read_changelog(&state),
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetMinReq {
+    pub desktop_min: Option<String>,
+    pub android_min: Option<String>,
+}
+
+/// POST /sys/version/minimum —— 设置强制更新下限（写 manifest.json，全端即刻生效）
+pub async fn version_set_minimum(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SetMinReq>,
+) -> Json<Value> {
+    if let Err(e) = admin_gate(&state, &headers).await {
+        return e;
+    }
+    let path = downloads_dir(&state).join("manifest.json");
+    let mut manifest: Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}));
+    if let Some(v) = req.desktop_min.as_deref().map(str::trim) {
+        manifest["desktop"]["minVersion"] = json!(v);
+    }
+    if let Some(v) = req.android_min.as_deref().map(str::trim) {
+        // 保留 android.version（APK 最新版号）不被覆盖
+        if manifest.get("android").map(|a| !a.is_object()).unwrap_or(true) {
+            manifest["android"] = json!({});
+        }
+        manifest["android"]["minVersion"] = json!(v);
+    }
+    let Ok(txt) = serde_json::to_string_pretty(&manifest) else {
+        return err(500, "序列化失败");
+    };
+    if let Err(e) = std::fs::write(&path, txt) {
+        return err(500, &format!("写入 manifest 失败: {e}"));
+    }
+    tracing::info!("后管更新强制更新下限: desktop={:?} android={:?}", req.desktop_min, req.android_min);
+    ok(json!(true))
+}
+
+#[derive(Deserialize)]
+pub struct ChangelogAddReq {
+    pub version: String,
+    #[serde(default)]
+    pub date: String,
+    pub notes: String,
+}
+
+/// POST /sys/version/changelog —— 新增一条更新日志（同版本号覆盖）
+pub async fn changelog_add(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ChangelogAddReq>,
+) -> Json<Value> {
+    if let Err(e) = admin_gate(&state, &headers).await {
+        return e;
+    }
+    let version = req.version.trim().to_string();
+    if version.is_empty() || req.notes.trim().is_empty() {
+        return err(400, "版本号与更新说明不能为空");
+    }
+    let date = if req.date.trim().is_empty() {
+        chrono::Local::now().format("%Y-%m-%d").to_string()
+    } else {
+        req.date.trim().to_string()
+    };
+    let mut list = read_changelog(&state);
+    list.retain(|e| e.pointer("/version").and_then(Value::as_str) != Some(version.as_str()));
+    list.insert(0, json!({ "version": version, "date": date, "notes": req.notes.trim() }));
+    if let Err(e) = write_changelog(&state, &list) {
+        return err(500, &format!("写入失败: {e}"));
+    }
+    ok(json!(true))
+}
+
+#[derive(Deserialize)]
+pub struct ChangelogDelReq {
+    pub version: String,
+}
+
+/// POST /sys/version/changelog/del —— 删除一条更新日志
+pub async fn changelog_del(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ChangelogDelReq>,
+) -> Json<Value> {
+    if let Err(e) = admin_gate(&state, &headers).await {
+        return e;
+    }
+    let mut list = read_changelog(&state);
+    let before = list.len();
+    list.retain(|e| e.pointer("/version").and_then(Value::as_str) != Some(req.version.trim()));
+    if list.len() == before {
+        return err(404, "该版本的日志不存在");
+    }
+    if let Err(e) = write_changelog(&state, &list) {
+        return err(500, &format!("写入失败: {e}"));
+    }
+    ok(json!(true))
 }

@@ -838,10 +838,26 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
 
 #[cfg(windows)]
 fn do_self_update(hub: &str) -> anyhow::Result<()> {
-    let installer = std::env::temp_dir().join("agent-monitor-setup.exe");
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let tmp = std::env::temp_dir();
+    let installer = tmp.join("agent-monitor-setup.exe");
     download_to(&format!("{hub}/downloads/agent-monitor-setup.exe"), &installer)?;
-    // 拉起安装向导（向导内部会 taskkill 本进程并覆盖安装）；本进程随后退出
-    std::process::Command::new(&installer).spawn()?;
+    // 全静默更新，不出安装向导：NSIS /S 静默安装（沿用上次安装目录与组件选择，
+    // 安装器内部会先结束本进程再覆盖），装完从注册表定位新程序并自动重启。
+    // 整个流程放在独立的 bat 里执行 —— 本进程会被安装器 taskkill，
+    // cmd 宿主不受影响，能等安装结束再拉起新版本。
+    let bat = tmp.join("agent-monitor-update.bat");
+    let script = format!(
+        "@echo off\r\nchcp 65001 >nul\r\n\"{}\" /S\r\nset \"DIR=\"\r\nfor /f \"skip=2 tokens=2,*\" %%a in ('reg query \"HKCU\\Software\\AgentMonitor\" /v \"InstallDir\" 2^>nul') do set \"DIR=%%b\"\r\nif not defined DIR set \"DIR=%LOCALAPPDATA%\\终端任务监控\"\r\nstart \"\" \"%DIR%\\终端任务监控.exe\"\r\ndel \"%~f0\"\r\n",
+        installer.display()
+    );
+    std::fs::write(&bat, script.as_bytes())?;
+    std::process::Command::new("cmd")
+        .arg("/C")
+        .arg(&bat)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()?;
     Ok(())
 }
 

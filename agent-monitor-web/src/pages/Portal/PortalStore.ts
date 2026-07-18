@@ -162,7 +162,9 @@ class PortalStore {
     );
     const byProject = new Map<string, TermGroup>();
     for (const t of list) {
-      const title = t.projectName || t.project || "未知项目";
+      // 组标题只显示文件夹名，不要完整路径
+      const dirName = (t.project ?? "").split(/[\\/]/).filter(Boolean).pop() ?? "";
+      const title = t.projectName || dirName || "未知项目";
       const key = `proj-${t.project || title}`;
       const group = byProject.get(key);
       if (group) {
