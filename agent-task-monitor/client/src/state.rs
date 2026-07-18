@@ -122,6 +122,8 @@ pub struct AppState {
     pub hub_trusted: std::sync::atomic::AtomicBool,
     /// hub 端新版本号（更新提示）
     pub hub_latest_version: RwLock<Option<String>>,
+    /// hub 下发的强制更新下限：本机低于它必须更新才能继续使用
+    pub hub_min_version: RwLock<Option<String>>,
     /// 每设备上报令牌（配对后持久化于 data_dir/device-token）
     pub device_token: RwLock<Option<String>>,
     /// 进行中的配对 (code, pair_token)
@@ -151,6 +153,7 @@ impl AppState {
             hub_connected: std::sync::atomic::AtomicBool::new(false),
             hub_trusted: std::sync::atomic::AtomicBool::new(false),
             hub_latest_version: RwLock::new(None),
+            hub_min_version: RwLock::new(None),
             device_token: RwLock::new(None),
             pair_info: RwLock::new(None),
             hub_error: RwLock::new(None),

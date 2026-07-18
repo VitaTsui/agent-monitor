@@ -184,7 +184,11 @@ export const uploadPortalFile = async (id: string, dir: string, file: File) => {
 /** 最新版本信息（更新推送用；desktop = hub 版本，android 来自打包 manifest） */
 export interface VersionInfo {
   desktop: string;
+  /** 桌面端强制更新下限（低于它必须更新才能继续使用） */
+  desktopMin: string | null;
   android: string | null;
+  /** 移动端强制更新下限 */
+  androidMin: string | null;
 }
 
 export const getVersionInfo = () => {
