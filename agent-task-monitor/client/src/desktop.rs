@@ -196,6 +196,8 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                 .title("终端任务监控")
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(960.0, 640.0)
+                // 首次打开居中显示（不设的话 Windows 上位置有偏移）
+                .center()
                 .visible(!is_agent || need_onboard)
                 .build()?;
 
