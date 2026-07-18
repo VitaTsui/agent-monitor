@@ -159,6 +159,9 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
     };
     // 只要未绑定就弹窗引导登录（即便离线没领到配对码——联网后 show_main 会补带码地址）
     let need_onboard = unpaired;
+    // 后台启动标记：开机自启带 --background（静默进托盘）；
+    // 用户手动打开（双击/安装完立即运行）没有该标记，直接显示窗口
+    let background_launch = std::env::args().any(|a| a == "--background");
     let web_base = cfg.web_base.clone();
     let is_agent = cfg.is_agent;
     let state_setup = state.clone();
@@ -186,7 +189,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             // agent 模式启动即后台，初始就用 Accessory —— 若先 Regular 再切，
             // set_activation_policy 走事件循环代理，Dock 图标会闪现一下才消失。
             #[cfg(target_os = "macos")]
-            let _ = app.set_activation_policy(if is_agent && !need_onboard {
+            let _ = app.set_activation_policy(if background_launch && !need_onboard {
                 tauri::ActivationPolicy::Accessory
             } else {
                 tauri::ActivationPolicy::Regular
@@ -202,7 +205,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                 .min_inner_size(960.0, 640.0)
                 // 首次打开居中显示（不设的话 Windows 上位置有偏移）
                 .center()
-                .visible(!is_agent || need_onboard)
+                .visible(!background_launch || need_onboard)
                 .build()?;
 
             // 点右上角关闭按钮：按用户设置的关闭行为处理。
@@ -363,6 +366,28 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
 
             crumb_setup("tray built");
             let _ = tray;
+            // [diag] 远程页 IPC 桥自检：把探测结果写进页面标题再读回来
+            if std::env::var("AM_IPC_DIAG").ok().as_deref() == Some("1") {
+                if let Some(dw) = app.get_webview_window("main") {
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(8));
+                        let _ = dw.eval(
+                            "location.hash='diag-'+(window.__TAURI__?'T1':'T0')+'-'+(window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke?'I1':'I0')",
+                        );
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        if let Ok(u) = dw.url() {
+                            ulog(&format!("[diag] inject: {u}"));
+                        }
+                        let _ = dw.eval(
+                            "window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke?window.__TAURI__.core.invoke('local_machine_id').then(function(v){location.hash='diag-ok-'+v}).catch(function(e){location.hash='diag-err-'+String(e).replace(/[^a-zA-Z0-9]/g,'_').slice(0,80)}):(location.hash='diag-nobridge')",
+                        );
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        if let Ok(u) = dw.url() {
+                            ulog(&format!("[diag] invoke: {u}"));
+                        }
+                    });
+                }
+            }
             // 更新监视：新版本弹确认框；低于强制下限必须更新否则退出
             spawn_update_watcher(handle.clone(), state_setup.clone(), web_base.clone());
             Ok(())
@@ -687,7 +712,7 @@ fn set_autostart(enable: bool) {
 <plist version="1.0"><dict>
   <key>Label</key><string>com.vitahsu.agentmonitor</string>
   <key>ProgramArguments</key>
-  <array><string>{}</string></array>
+  <array><string>{}</string><string>--background</string></array>
   <key>RunAtLoad</key><true/>
 </dict></plist>"#,
                 target.display()
@@ -714,7 +739,7 @@ fn set_autostart(enable: bool) {
             // 路径必须带引号写入：Run 项的值不加引号时，含空格的路径
             // （C:\Users\John Smith\…）会被 Windows 从空格处截断，开机启动失败，
             // 而 autostart_enabled 只看键存不存在 → 菜单照样打勾，静默失效。
-            let quoted = format!("\"{}\"", target.display());
+            let quoted = format!("\"{}\" --background", target.display());
             let _ = reg_command(&[
                 "add",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-local-machine-id"
+description = "Enables the local_machine_id command without any pre-configured scope."
+commands.allow = ["local_machine_id"]
+
+[[permission]]
+identifier = "deny-local-machine-id"
+description = "Denies the local_machine_id command without any pre-configured scope."
+commands.deny = ["local_machine_id"]

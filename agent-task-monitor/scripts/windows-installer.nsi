@@ -14,7 +14,7 @@ ManifestDPIAware true
 !define APP_EXE_LEGACY "终端任务监控.exe"
 !define APP_ID "AgentMonitor"
 !define APP_PUBLISHER "VitaHsu"
-!define APP_VERSION "0.3.8"
+!define APP_VERSION "0.3.9"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
 
 !ifndef EXE
@@ -67,7 +67,10 @@ Function BringInstallerToFront
 FunctionEnd
 
 Function WelcomeShow
-  ; 窗口已可见的时点：先解除前台锁定限制，再强制置顶
+  ; 窗口已可见的时点：TOPMOST 闪置顶（不受前台锁限制，强制到最上层）
+  ; 再取消 TOPMOST 并请求前台焦点
+  System::Call "user32::SetWindowPos(p $HWNDPARENT, p -1, i 0, i 0, i 0, i 0, i 3)"
+  System::Call "user32::SetWindowPos(p $HWNDPARENT, p -2, i 0, i 0, i 0, i 0, i 3)"
   System::Call "user32::SetForegroundWindow(p $HWNDPARENT)"
   BringToFront
 FunctionEnd
@@ -97,7 +100,7 @@ Section "主程序（必装）" SecMain
   ; 开机自启项若已存在，改指向新路径（旧路径的程序已被清理）
   ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}"
   StrCmp $0 "" +2
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}" '"$INSTDIR\${APP_EXE}"'
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}" '"$INSTDIR\${APP_EXE}" --background'
   ; 开始菜单
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
   CreateShortCut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
@@ -117,8 +120,8 @@ Section "桌面快捷方式" SecDesktop
 SectionEnd
 
 Section /o "开机自动启动" SecAutostart
-  ; 与客户端内「开机自启」开关同一注册表项，装完后也可随时在应用里改
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}" '"$INSTDIR\${APP_EXE}"'
+  ; 与客户端内「开机自启」开关同一注册表项；--background = 开机静默进托盘
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}" '"$INSTDIR\${APP_EXE}" --background'
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
