@@ -7,3 +7,6 @@
 # config.txt 含真实 AM_AGENT_TOKEN（与 deploy/env 同一密钥），不入库；
 # 版本化脱敏的 config.txt.example 模板。
 config.txt
+*.dmg
+*.exe
+*.apk

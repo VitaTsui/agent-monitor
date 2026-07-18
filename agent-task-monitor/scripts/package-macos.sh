@@ -9,9 +9,8 @@
 #   AM_AGENT_TOKEN=xxx bash scripts/package-macos.sh   # 直接写入真实上报令牌
 #
 # 两个容易踩空的点：
-#   - 必须带 --features desktop，否则打出来的只是个命令行服务，没有托盘也没有窗口；
-#   - 必须放 config.txt，否则读不到 AM_HUB_URL，客户端会当自己是 hub、在本机 8383
-#     起服务，而不是上报云端 —— 用户看到的现象是「装了但网页上一直没有这台设备」。
+#   - 构建目标是工作区里的 am-client 包（服务端代码在 am-hub，客户端里不含）；
+#   - AM_DEFAULT_HUB_URL 必须在编译时传入：hub 地址编译进二进制，零配置开箱即用。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -23,15 +22,15 @@ EXE_NAME="agent-monitor"
 HUB_URL="${AM_HUB_URL:-https://monitor.vita-llm.com}"
 OUT="target/release/bundle/$APP_NAME.app"
 
-echo "▸ cargo build --release --features desktop（内置默认 hub: ${HUB_URL}）"
-AM_DEFAULT_HUB_URL="${HUB_URL}" cargo build --release --features desktop
+echo "▸ cargo build -p am-client --release（内置默认 hub: ${HUB_URL}）"
+AM_DEFAULT_HUB_URL="${HUB_URL}" cargo build -p am-client --release
 
 rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
-cp target/release/agent-task-monitor "$OUT/Contents/MacOS/$EXE_NAME"
+cp target/release/agent-monitor "$OUT/Contents/MacOS/$EXE_NAME"
 
-if [[ -f icons/icon.icns ]]; then
-  cp icons/icon.icns "$OUT/Contents/Resources/icon.icns"
+if [[ -f client/icons/icon.icns ]]; then
+  cp client/icons/icon.icns "$OUT/Contents/Resources/icon.icns"
 else
   echo "  ! 缺 icons/icon.icns，图标会退回系统默认"
 fi
