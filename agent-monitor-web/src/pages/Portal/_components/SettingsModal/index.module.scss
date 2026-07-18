@@ -6,6 +6,13 @@ $accent: #0f9bad;
 $hover: rgba(36, 61, 66, 0.06);
 
 .SettingsModal {
+  .paneHead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+
   :global(.ant-modal-content) {
     padding: 0;
     overflow: hidden;

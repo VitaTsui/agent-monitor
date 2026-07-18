@@ -175,6 +175,9 @@ pub struct MachineInfo {
     pub owner: Option<String>,
     /// 是否已信任（未信任设备不监控其会话）
     pub trusted: bool,
+    /// 本设备是否是「他人通过协助码共享给我」的（非本人设备）
+    #[serde(default)]
+    pub shared: bool,
 }
 
 /// agent → hub 的快照上报

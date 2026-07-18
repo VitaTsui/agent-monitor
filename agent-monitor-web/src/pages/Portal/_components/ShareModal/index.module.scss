@@ -1,0 +1,82 @@
+.ShareModal {
+  .hint {
+    font-size: 12px;
+    color: #7c9096;
+    line-height: 1.6;
+    margin-bottom: 14px;
+  }
+
+  .codeCard,
+  .genCard {
+    padding: 14px;
+    border: 1px solid rgba(36, 61, 66, 0.1);
+    border-radius: 12px;
+    background: #f7fbfc;
+  }
+
+  .codeRow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 0;
+
+    .codeLabel {
+      flex: none;
+      width: 40px;
+      font-size: 12px;
+      color: #7c9096;
+    }
+
+    .codeValue {
+      flex: 1;
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+      color: #0f9bad;
+    }
+
+    .codeMuted {
+      flex: 1;
+      font-size: 12px;
+      color: #a6b4b8;
+    }
+  }
+
+  .codeMeta {
+    margin: 8px 0;
+  }
+
+  .actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  .tempHint {
+    margin-top: 12px;
+    font-size: 12px;
+    color: #7c9096;
+  }
+
+  .guests {
+    margin-top: 16px;
+
+    .guestsTitle {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .guestRow {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 10px;
+      border: 1px solid rgba(36, 61, 66, 0.09);
+      border-radius: 8px;
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+  }
+}
