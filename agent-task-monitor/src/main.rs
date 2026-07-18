@@ -86,6 +86,34 @@ fn main() -> Result<()> {
         });
     let _ = std::fs::create_dir_all(&data_dir);
 
+    // Windows GUI 子系统没有控制台：panic 会无声消失，用户只觉得「双击没反应」。
+    // 落崩溃日志 + 弹系统对话框；另记启动阶段面包屑，出问题能定位到哪一步。
+    #[cfg(all(windows, feature = "desktop"))]
+    {
+        let crash = data_dir.join("crash.log");
+        std::panic::set_hook(Box::new(move |info| {
+            let msg = format!("{info}");
+            let _ = std::fs::write(&crash, &msg);
+            crate::desktop::message_box("终端任务监控 · 崩溃", &format!(
+                "程序遇到错误已退出：
+{msg}
+
+日志：{}", crash.display()));
+        }));
+    }
+    let breadcrumb = {
+        let path = data_dir.join("startup.log");
+        let _ = std::fs::write(&path, "start
+");
+        move |step: &str| {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path) {
+                let _ = writeln!(f, "{step}");
+            }
+        }
+    };
+    breadcrumb("data_dir ok");
+
     // machine_id：AM_MACHINE_ID > 数据目录持久化（首次生成后不再变）
     let machine_id = std::env::var("AM_MACHINE_ID").unwrap_or_else(|_| {
         // machine_id 不是秘密，无需区分是否新生成
@@ -189,6 +217,7 @@ fn main() -> Result<()> {
         });
     });
 
+    breadcrumb("service thread spawned");
     let web_base = if let Some(hub) = &hub_url {
         hub.trim_end_matches('/').to_string()
     } else {
@@ -246,6 +275,7 @@ fn main() -> Result<()> {
         if !is_agent {
             wait_port_ready(port);
         }
+        breadcrumb("desktop::run");
         desktop::run(state.clone(), desktop::DesktopConfig { web_base, is_agent })?;
         return Ok(());
     }
