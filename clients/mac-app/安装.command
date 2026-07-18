@@ -5,6 +5,8 @@ cd "$(dirname "$0")"
 APP="终端任务监控.app"
 DEST="/Applications/$APP"
 echo "正在安装到 /Applications ..."
+# 覆盖安装前先退出运行中的旧实例，避免装完出现两个实例同时上报
+pkill -f "$APP/Contents/MacOS/agent-monitor" 2>/dev/null && sleep 1
 rm -rf "$DEST" 2>/dev/null
 cp -R "$APP" "$DEST"
 xattr -dr com.apple.quarantine "$DEST" 2>/dev/null
