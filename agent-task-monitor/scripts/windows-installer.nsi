@@ -14,7 +14,7 @@ ManifestDPIAware true
 !define APP_EXE_LEGACY "终端任务监控.exe"
 !define APP_ID "AgentMonitor"
 !define APP_PUBLISHER "VitaHsu"
-!define APP_VERSION "0.3.9"
+!define APP_VERSION "0.3.10"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
 
 !ifndef EXE
