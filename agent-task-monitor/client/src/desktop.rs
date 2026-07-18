@@ -958,6 +958,18 @@ fn alert_box(title: &str, text: &str) {
 /// 不来数据」，整体超时要干等 5 分钟且全程无反馈（实际用户日志：三次
 /// 「开始自更新」后连下载完成都没有）——停滞必须快速可见地失败。
 fn download_to(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
+    // 弱网环境（跨境链路）单次失败很常见：自动重试一次，两次都挂才报错
+    match download_to_once(url, dest) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            ulog(&format!("[update] 首次下载失败（{e}），3s 后重试一次"));
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            download_to_once(url, dest)
+        }
+    }
+}
+
+fn download_to_once(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let bytes = rt.block_on(async {
         let client = reqwest::Client::builder()
