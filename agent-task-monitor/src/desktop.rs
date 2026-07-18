@@ -81,7 +81,7 @@ fn minimize_to_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 
 /// Windows：系统消息框（GUI 子系统没有控制台，出错必须可见）
 #[cfg(windows)]
-fn message_box(title: &str, text: &str) {
+pub fn message_box(title: &str, text: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
     let wide = |x: &str| x.encode_utf16().chain([0]).collect::<Vec<u16>>();
     let (t, m) = (wide(title), wide(text));
@@ -123,11 +123,23 @@ fn ensure_webview2() -> bool {
 
 /// 运行 Tauri 桌面应用（阻塞，不返回）。
 pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
+    let crumb = std::sync::Arc::new({
+        let path = state.config.data_dir.join("startup.log");
+        move |step: &str| {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = writeln!(f, "{step}");
+            }
+        }
+    });
+    let crumb_setup = crumb.clone();
     // Windows：先确认 WebView2 存在，否则 Tauri 静默失败，用户以为程序坏了
     #[cfg(windows)]
     if !ensure_webview2() {
+        crumb("webview2 missing");
         return Ok(());
     }
+    crumb("webview2 ok");
 
     // 未绑定账号的 agent：窗口地址带 ?pair=配对码 —— 用户在窗口里登录后，
     // 网页会自动把本机绑定到该账号（无需任何手工令牌）。
@@ -165,6 +177,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                 tauri::ActivationPolicy::Regular
             });
 
+            crumb_setup("setup enter");
             // 主窗口：加载完整前台页面（设备树 / 会话 / 对话 / 设置 / git diff 等全部功能）。
             // agent 模式直接以隐藏态创建 —— 先可见再 hide 会闪一下窗口。
             let url: tauri::Url = portal_url.parse().expect("非法前台地址");
@@ -198,6 +211,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             // agent 模式：窗口已以隐藏态创建、策略已是 Accessory（见上），
             // 即「启动即最小化到托盘」，纯后台上报，点托盘图标再打开窗口。
 
+            crumb_setup("window built");
             // 托盘菜单
             let menu = build_tray_menu(&handle, &state_setup, is_agent)?;
 
@@ -330,6 +344,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                 }
             });
 
+            crumb_setup("tray built");
             let _ = tray;
             Ok(())
         })

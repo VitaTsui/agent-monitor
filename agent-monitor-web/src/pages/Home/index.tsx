@@ -197,7 +197,8 @@ const Home: React.FC = () => {
           </a>
         </div>
         <div className={styles.clientHint}>
-          macOS 首次打开：右键 App →「打开」通过 Gatekeeper（应用未上架公证）。
+          macOS：打开 dmg 后<b>双击「安装.command」</b>一键装好并启动
+          （若被拦：右键它 →「打开」）。
           安装后在客户端里登录你的账号，本机即自动绑定并建立链接——
           网页、移动端与其他客户端上立刻可见这台电脑的终端会话（设备管理里可随时断开）。
         </div>
