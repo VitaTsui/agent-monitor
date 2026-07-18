@@ -160,6 +160,22 @@ impl AppState {
 }
 
 
+/// 客户端落盘日志（与 desktop::ulog 同一文件；服务/扫描层也能写）
+pub fn client_log(msg: &str) {
+    tracing::info!("{msg}");
+    let path = std::env::var("AM_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| dirs::data_dir().unwrap_or_default().join("AgentMonitor"))
+        .join("client.log");
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let ts = chrono::Local::now().format("%m-%d %H:%M:%S");
+        let _ = writeln!(f, "[{ts}] {msg}");
+    }
+}
+
+static SCAN_TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// 终端的排除键：unix 用 tty（一个终端标签一个 tty）；
 /// Windows 拿不到 tty，退而用工作目录 —— 语义变成「排除该项目目录的终端」，
 /// 且跨进程重启稳定（此前 Windows 上终端列表永远为空，监控范围形同虚设）。
@@ -209,6 +225,41 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         let mut scanner = state.scanner.lock().await;
         tokio::task::block_in_place(|| scanner.scan())
     };
+    // 扫描诊断（前 3 轮 + 之后每 ~60s 一次）：会话扫不到时能从日志直接定位
+    // 是目录不存在、没有 jsonl、还是解析失败
+    {
+        use std::sync::atomic::Ordering;
+        let n = SCAN_TICKS.fetch_add(1, Ordering::Relaxed);
+        if n < 3 || n % 40 == 0 {
+            let scanner = state.scanner.lock().await;
+            let dir = scanner.projects_dir().to_path_buf();
+            let (mut pdirs, mut jsonl) = (0u32, 0u32);
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for e in rd.flatten() {
+                    if e.path().is_dir() {
+                        pdirs += 1;
+                        if let Ok(fs2) = std::fs::read_dir(e.path()) {
+                            jsonl += fs2
+                                .flatten()
+                                .filter(|f| {
+                                    f.path().extension().and_then(|x| x.to_str()) == Some("jsonl")
+                                })
+                                .count() as u32;
+                        }
+                    }
+                }
+            }
+            client_log(&format!(
+                "[scan] projects_dir={} exists={} 项目目录={} jsonl文件={} 解析出会话={} 代理进程={}",
+                dir.display(),
+                dir.is_dir(),
+                pdirs,
+                jsonl,
+                sessions.len(),
+                processes.len()
+            ));
+        }
+    }
     let paused = state.paused.read().await.clone();
     let mut tasks =
         am_core::scanner::build_tasks(&sessions, &processes, &|pid| paused.contains(&pid));
