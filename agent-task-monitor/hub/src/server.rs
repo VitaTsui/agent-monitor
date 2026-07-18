@@ -51,6 +51,11 @@ pub fn router(state: SharedState) -> Router {
         .route("/sys/user/upd", post(admin::user_upd))
         .route("/sys/user/resetPwd", post(admin::user_reset_pwd))
         .route("/sys/user/del", get(admin::user_del))
+        // ---- 版本管理 / 更新日志（后管）----
+        .route("/sys/version/info", get(admin::version_admin_info))
+        .route("/sys/version/minimum", post(admin::version_set_minimum))
+        .route("/sys/version/changelog", post(admin::changelog_add))
+        .route("/sys/version/changelog/del", post(admin::changelog_del))
         // ---- 任务监控 API（前台公开使用）----
         .route("/monitor/tasks", get(list_tasks))
         .route("/monitor/tasks/page", get(page_tasks))

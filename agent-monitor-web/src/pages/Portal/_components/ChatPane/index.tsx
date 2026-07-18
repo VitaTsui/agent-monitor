@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from "react";
 
 import { Button } from "@hsu-react/ui";
 import { Popconfirm, Spin, Tooltip } from "antd";
-import { platformIcon } from "../../_utils/platform";
 import {
   BranchesOutlined,
   CloseOutlined,
@@ -80,16 +79,24 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     <div className={styles.ChatPane}>
       <header className={styles.paneHeader}>
         <div className={styles.headInfo}>
+          {/* 状态放标题前；标题只显示会话标题（设备/IDE/PID 等杂项不再展示） */}
           <div className={styles.headTitle}>
-            {task.title || task.prompt || task.projectName || "会话"}
+            <span
+              className={`${styles.statusChip} ${styles[task.status ?? ""] ?? ""}`}
+            >
+              {task.statusDsr}
+            </span>
+            {task.autoPaused ? (
+              <span className={`${styles.statusChip} ${styles.paused}`}>
+                额度暂停
+              </span>
+            ) : null}
+            <span className={styles.headTitleText}>
+              {task.title || task.prompt || task.projectName || "会话"}
+            </span>
           </div>
           <div className={styles.headMeta}>
             <span>{task.projectName}</span>
-            <span>
-              {platformIcon(task.platform)} {task.hostname}
-            </span>
-            <span>{task.ideDsr}</span>
-            {task.pid ? <span>PID {task.pid}</span> : null}
             {task.usedTokens5h ? (
               <Tooltip title="近 5 小时 token 用量（输入 + 输出 + 缓存创建）">
                 <span className={styles.tokenChip}>
@@ -98,16 +105,6 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 </span>
               </Tooltip>
             ) : null}
-            {task.autoPaused ? (
-              <span className={`${styles.statusChip} ${styles.paused}`}>
-                额度暂停
-              </span>
-            ) : null}
-            <span
-              className={`${styles.statusChip} ${styles[task.status ?? ""] ?? ""}`}
-            >
-              {task.statusDsr}
-            </span>
           </div>
         </div>
         <div className={styles.headActions}>
