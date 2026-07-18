@@ -5,6 +5,7 @@ import { Badge, Popover, Tooltip } from "antd";
 import { platformIcon } from "./_utils/platform";
 import { useNativeBack } from "./_hooks/useNativeBack";
 import { useApkUpdateCheck } from "./_hooks/useApkUpdateCheck";
+import { useClientUpdateToast } from "./_hooks/useClientUpdateToast";
 import { claimPairDevice } from "@/services/apis/portal";
 import { message as antdMessage } from "antd";
 import {
@@ -129,6 +130,8 @@ const Portal: React.FC = observer(() => {
 
   // 移动端更新推送：原生壳内检测 APK 新版本（浏览器里空转）
   useApkUpdateCheck();
+  // 客户端窗口内右下角的新版本提醒（浏览器里空转）
+  useClientUpdateToast();
 
   // 设备配对认领：客户端窗口带 ?pair=码 打开本页，登录后自动把那台电脑
   // 绑定到当前账号（绑定即信任），页面随即出现该设备 —— 用户零手工配置。
