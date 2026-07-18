@@ -1,6 +1,6 @@
 //! 桌面客户端状态：本机扫描、排除、上报链路状态。
 //! 不含任何服务端（HTTP 路由/注册表/登录态）。
-use am_core::model::{Task, TaskStatus};
+use am_core::model::Task;
 use am_core::process::ProcessScanner;
 use am_core::scanner::SessionScanner;
 use std::collections::HashSet;
@@ -130,8 +130,6 @@ pub struct AppState {
     pub pair_info: RwLock<Option<(String, String)>>,
     /// 最近一次上报被拒原因（托盘显示，与断网区分）
     pub hub_error: RwLock<Option<String>>,
-    /// hub 下发的 5h token 额度上限（0=不限）；本机据此自动暂停/恢复
-    pub quota_limit: std::sync::atomic::AtomicU64,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -157,56 +155,20 @@ impl AppState {
             device_token: RwLock::new(None),
             pair_info: RwLock::new(None),
             hub_error: RwLock::new(None),
-            quota_limit: std::sync::atomic::AtomicU64::new(0),
         })
     }
 }
 
-/// 额度管控：给本机任务标注上限与用量；达到上限自动暂停，额度（5h 窗口）回落后自动恢复。
-pub async fn enforce_quota(state: &SharedState, tasks: &mut [Task]) {
-    // 额度上限由 hub 随上报响应下发（旧实现读本地注册表，远程设备永远拿不到 hub 配置）
-    let limit = state.quota_limit.load(std::sync::atomic::Ordering::Relaxed);
-    let mut auto = state.auto_paused.write().await;
-    let mut paused = state.paused.write().await;
 
-    for t in tasks.iter_mut() {
-        t.token_limit = limit;
-        let Some(pid) = t.pid else { continue };
-        // 手动暂停的不受额度逻辑干预
-        if paused.contains(&pid) {
-            continue;
-        }
-        if limit > 0 && t.used_tokens_5h >= limit {
-            // 超额 → 自动暂停
-            if !auto.contains(&pid) {
-                if am_core::process::control(pid, am_core::model::ControlAction::Pause).is_ok() {
-                    auto.insert(pid);
-                    tracing::info!(
-                        "额度超限自动暂停: {} (用量 {} ≥ 上限 {})",
-                        t.id, t.used_tokens_5h, limit
-                    );
-                }
-            }
-        } else if auto.contains(&pid) {
-            // 额度回落 → 自动恢复
-            if am_core::process::control(pid, am_core::model::ControlAction::Resume).is_ok() {
-                auto.remove(&pid);
-                tracing::info!("额度恢复自动继续: {} (用量 {} < 上限 {})", t.id, t.used_tokens_5h, limit);
-            }
-        }
-        if auto.contains(&pid) {
-            t.auto_paused = true;
-            t.status = TaskStatus::Paused;
-            t.status_dsr = "已暂停(超额)".into();
-        }
+/// 终端的排除键：unix 用 tty（一个终端标签一个 tty）；
+/// Windows 拿不到 tty，退而用工作目录 —— 语义变成「排除该项目目录的终端」，
+/// 且跨进程重启稳定（此前 Windows 上终端列表永远为空，监控范围形同虚设）。
+pub fn terminal_key(p: &am_core::model::ProcessInfo) -> String {
+    if p.tty.is_empty() {
+        format!("cwd:{}", p.cwd)
+    } else {
+        p.tty.clone()
     }
-    // 清理已消失进程的暂停标记。
-    // 手动暂停集合同样必须清理：pid 会被系统复用，残留的死 pid 会让复用到该
-    // pid 的新会话被误判为「已手动暂停」，从而跳过额度管控并在界面上显示错误状态。
-    // （被 SIGSTOP 的进程在 ps 中仍可见，故存活判定不会误删真正暂停中的条目。）
-    let alive: HashSet<u32> = tasks.iter().filter_map(|t| t.pid).collect();
-    auto.retain(|pid| alive.contains(pid));
-    paused.retain(|pid| alive.contains(pid));
 }
 
 /// 扫描本机，产出带机器信息的任务快照。被排除的终端在此彻底剔除。
@@ -220,21 +182,28 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         let mut procs = state.procs.lock().await;
         tokio::task::block_in_place(|| procs.scan())
     };
-    // 记录本机全部探测到的终端（含被排除的），供托盘「监控范围」勾选
+    // 记录本机全部探测到的终端（含被排除的），供托盘/设置里的「监控范围」勾选
     {
         let mut seen: Vec<(String, String)> = Vec::new();
         for p in &processes {
-            if !p.tty.is_empty() && !seen.iter().any(|(t, _)| t == &p.tty) {
-                let name = p.cwd.rsplit(['/', '\\']).next().unwrap_or("").to_string();
-                seen.push((p.tty.clone(), format!("{} ({})", name, p.ide_name)));
+            let key = terminal_key(p);
+            if !seen.iter().any(|(t, _)| t == &key) {
+                let name = p
+                    .cwd
+                    .split(['/', '\\'])
+                    .rev()
+                    .find(|s| !s.is_empty())
+                    .unwrap_or("")
+                    .to_string();
+                seen.push((key, format!("{} ({})", name, p.ide_name)));
             }
         }
         *state.terminals.write().await = seen;
     }
-    // 终端级排除：被排除 tty 的进程直接不参与后续（连有哪些终端都不外泄）
+    // 终端级排除：被排除终端的进程直接不参与后续（连有哪些终端都不外泄）
     {
         let excludes = state.excludes.read().await;
-        processes.retain(|p| !excludes.is_excluded(&p.tty));
+        processes.retain(|p| !excludes.is_excluded(&terminal_key(p)));
     }
     let sessions = {
         let mut scanner = state.scanner.lock().await;
@@ -259,7 +228,6 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         &state.config.hostname,
         &state.config.platform,
     );
-    enforce_quota(state, &mut tasks).await;
     tasks
 }
 

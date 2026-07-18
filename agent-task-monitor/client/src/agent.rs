@@ -162,12 +162,6 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                             *slot = Some(mv.to_string());
                         }
                     }
-                    // 额度上限由 hub 下发，本地扫描按它执行超额自动暂停/恢复
-                    if let Some(limit) = body.pointer("/data/quotaLimit").and_then(Value::as_u64) {
-                        state
-                            .quota_limit
-                            .store(limit, std::sync::atomic::Ordering::Relaxed);
-                    }
                     let now_trusted = body
                         .pointer("/data/trusted")
                         .and_then(Value::as_bool)

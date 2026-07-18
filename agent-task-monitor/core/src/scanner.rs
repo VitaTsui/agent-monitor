@@ -599,13 +599,9 @@ pub fn build_tasks(
         if crate::process::is_stopped(p.pid) && !manual_paused(p.pid) {
             continue;
         }
-        let dir_name = short_name(&p.cwd);
-        // 目录名取不到时只显示 provider，不留悬空的「 · 」
-        let title = if dir_name.is_empty() {
-            crate::model::provider_dsr(&p.agent)
-        } else {
-            format!("{} · {}", crate::model::provider_dsr(&p.agent), dir_name)
-        };
+        // 标题：会话标题拿不到（占位任务本来就没有）就只显示模型名；
+        // 项目目录名由分组/副行展示，不塞进标题
+        let title = crate::model::provider_dsr(&p.agent);
         let status = if manual_paused(p.pid) {
             TaskStatus::Paused
         } else {
@@ -2065,7 +2061,7 @@ mod codex_tests {
         assert_eq!(g.provider, "gemini", "无解析器代理以进程任务出现");
         assert_eq!(g.pid, Some(33), "pid 在 → 暂停/中断等信号控制可用");
         assert_eq!(g.provider_dsr, "Gemini CLI");
-        assert!(g.title.contains("app"), "标题带目录名");
+        assert_eq!(g.title, "Gemini CLI", "占位标题只显示模型名");
 
         // 回归：每个未配对进程必须恰好一条任务 —— 历史上 pid-/proc- 两个
         // 循环并存，同一进程会重复出现两次（用户看到 5 会话变 14 条）

@@ -1,12 +1,10 @@
 import React, { useEffect, useState } from "react";
 
 import { Button, Input, Modal, Switch } from "@hsu-react/ui";
-// Progress：hsu-ui 无对应组件，按规范用 antd 兜底
-import { Badge, Empty, Popconfirm, Progress, Tag, message } from "antd";
+import { Badge, Empty, Popconfirm, Tag, message } from "antd";
 import {
   CloseOutlined,
   CodeOutlined,
-  DashboardOutlined,
   InfoCircleOutlined,
   LaptopOutlined,
   LogoutOutlined,
@@ -15,11 +13,7 @@ import {
 } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
-import {
-  PortalDevice,
-  getPortalQuota,
-  setPortalQuota,
-} from "@/services/apis/portal";
+import { PortalDevice } from "@/services/apis/portal";
 import { getUserInfo, removeToken } from "@/utils/auth";
 import { localMachineId } from "@/utils/clientAuth";
 import PortalStore from "../../PortalStore";
@@ -30,7 +24,7 @@ import {
 } from "../../_utils/dangerCheck";
 import styles from "./index.module.scss";
 
-export type SettingsTab = "account" | "devices" | "quota" | "security" | "about";
+export type SettingsTab = "account" | "devices" | "security" | "about";
 
 interface SettingsModalProps {
   open?: boolean;
@@ -59,9 +53,6 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
       setTab(initialTab);
     }
   }, [open, initialTab]);
-  const [quotaLimit, setQuotaLimit] = useState<number>(0);
-  const [quotaUsed, setQuotaUsed] = useState<number>(0);
-  const [savingQuota, setSavingQuota] = useState(false);
   // 安全防护（危险输入多重确认）
   const [guardEnabled, setGuardEnabled] = useState(true);
   const [guardPatterns, setGuardPatterns] = useState("");
@@ -73,6 +64,22 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
   ).__TAURI__?.core?.invoke;
   // null = 尚未取到（或不在客户端内）
   const [autostart, setAutostart] = useState<boolean | null>(null);
+  // 本机监控范围（终端列表 + 排除态；仅客户端窗口内）
+  const [terminals, setTerminals] = useState<
+    { key: string; name: string; excluded: boolean }[]
+  >([]);
+
+  const loadTerminals = () => {
+    tauriInvoke?.("terminals_get")
+      .then((v) => setTerminals((v as typeof terminals) ?? []))
+      .catch(() => setTerminals([]));
+  };
+
+  const toggleTerminal = (key: string, excluded: boolean) => {
+    tauriInvoke?.("terminal_set_excluded", { key, excluded })
+      .then(() => loadTerminals())
+      .catch(() => message.error("设置失败"));
+  };
   // 客户端窗口内标出「本机」
   const [localId, setLocalId] = useState<string | null>(null);
   useEffect(() => {
@@ -84,6 +91,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
       tauriInvoke("autostart_get")
         .then((v) => setAutostart(Boolean(v)))
         .catch(() => setAutostart(null));
+      loadTerminals();
     }
     // tauriInvoke 是宿主环境常量，不会在会话中途变化
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -127,27 +135,9 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
   useEffect(() => {
     if (open) {
       loadDevices();
-      getPortalQuota()
-        .then((res) => {
-          if (res.code === 0) {
-            setQuotaLimit(res.data?.limit ?? 0);
-            setQuotaUsed(res.data?.used ?? 0);
-          }
-        })
-        .catch(() => void 0);
     }
   }, [open, loadDevices]);
 
-  const saveQuota = () => {
-    setSavingQuota(true);
-    setPortalQuota(quotaLimit)
-      .then((res) => {
-        if (res.code === 0) message.success("已保存额度上限");
-        else message.error(res.msg ?? "保存失败");
-      })
-      .catch(() => message.error("保存失败，请检查网络"))
-      .finally(() => setSavingQuota(false));
-  };
 
   const user = (getUserInfo() as {
     nickname?: string;
@@ -163,7 +153,6 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
   const navItems: { key: Tab; label: string; icon: React.ReactNode; badge?: number }[] = [
     { key: "account", label: "账户", icon: <UserOutlined /> },
     { key: "devices", label: "设备管理", icon: <LaptopOutlined />, badge: pendingCount },
-    { key: "quota", label: "额度限制", icon: <DashboardOutlined /> },
     { key: "security", label: "安全防护", icon: <SafetyOutlined /> },
     { key: "about", label: "关于", icon: <InfoCircleOutlined /> },
   ];
@@ -311,6 +300,29 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                     </div>
                     <Switch checked={autostart} onChange={toggleAutostart} />
                   </div>
+                  <div className={styles.termScope}>
+                    <div className={styles.termScopeTitle}>监控范围</div>
+                    {terminals.length === 0 ? (
+                      <div className={styles.termScopeEmpty}>
+                        暂未检测到本机终端会话
+                      </div>
+                    ) : (
+                      terminals.map((tm) => (
+                        <div key={tm.key} className={styles.termScopeRow}>
+                          <span className={styles.termScopeName} title={tm.key}>
+                            {tm.name}
+                          </span>
+                          <Switch
+                            checked={!tm.excluded}
+                            onChange={(on) => toggleTerminal(tm.key, !on)}
+                          />
+                        </div>
+                      ))
+                    )}
+                    <div className={styles.termScopeHint}>
+                      关闭开关 = 不监控该终端（对应会话不再上报）
+                    </div>
+                  </div>
                 </div>
               )}
               {pending.length > 0 && (
@@ -330,60 +342,6 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                   />
                 )}
               </div>
-            </div>
-          )}
-
-          {tab === "quota" && (
-            <div className={styles.pane}>
-              <div className={styles.paneTitle}>额度限制</div>
-              <div className={styles.hint}>
-                这是<strong>你自己的账号额度</strong>，只作用于你名下的设备。统计各会话近{" "}
-                <strong>5 小时</strong>滚动窗口的 token 用量（input + output +
-                缓存创建）。设置上限后，某会话用量达到上限会<strong>自动暂停</strong>
-                该终端任务；随着旧用量移出 5 小时窗口、用量回落到上限以下，会
-                <strong>自动恢复</strong>。设为 0 表示不限制。
-              </div>
-              <div className={styles.quotaRow}>
-                <span className={styles.quotaLabel}>5 小时 token 上限</span>
-                <Input.Number
-                  min={0}
-                  step={100000}
-                  value={String(quotaLimit)}
-                  onChange={(v) => setQuotaLimit(Number(v || 0))}
-                  wrapperClassName={styles.quotaInput}
-                />
-                <Button type="primary" loading={savingQuota} onClick={saveQuota}>
-                  保存
-                </Button>
-              </div>
-              {quotaLimit > 0 ? (
-                <>
-                  <Progress
-                    className={styles.quotaProgress}
-                    percent={Math.min(
-                      100,
-                      Math.round((quotaUsed / quotaLimit) * 100)
-                    )}
-                    // 80% 起警示、满额红色，与「达到上限自动暂停」的语义对齐
-                    strokeColor={
-                      quotaUsed >= quotaLimit
-                        ? "#f56c6c"
-                        : quotaUsed / quotaLimit >= 0.8
-                          ? "#f2b234"
-                          : "#0f9bad"
-                    }
-                  />
-                  <div className={styles.quotaUsed}>
-                    已用 {Math.min(100, Math.round((quotaUsed / quotaLimit) * 100))}%
-                    （最高会话 {quotaUsed.toLocaleString()} / 上限{" "}
-                    {quotaLimit.toLocaleString()} tokens）
-                  </div>
-                </>
-              ) : (
-                <div className={styles.quotaUsed}>
-                  未设上限 · 当前用量最高的会话 {quotaUsed.toLocaleString()} tokens
-                </div>
-              )}
             </div>
           )}
 

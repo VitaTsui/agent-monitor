@@ -67,7 +67,6 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/tasks/:id/input", post(input_task))
         .route("/monitor/machines", get(machines))
         .route("/monitor/agent", get(agent_status))
-        .route("/monitor/quota", get(get_quota).post(set_quota))
         .route("/monitor/ws", get(ws_handler))
         // ---- 设备管理（信任设备）----
         .route("/monitor/devices", get(list_devices))
@@ -859,40 +858,6 @@ async fn upload_file(
     }
 }
 
-/// GET /monitor/quota —— 查询 5h token 上限与当前用量汇总
-async fn get_quota(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
-    let Some(user) = auth_user(&state, &headers).await else {
-        return err(401, "未登录");
-    };
-    let limit = state.registry.read().await.quota_limit_of(&user);
-    let tasks = state.tasks_for(&user).await;
-    // 口径必须与 enforce_quota 一致：额度是「按会话」判定的（某个会话用量达到
-    // 上限就暂停该会话），所以这里报「用量最高的那个会话」，而不是所有会话求和。
-    // 求和会让展示与实际暂停行为对不上：合计早已超上限却一个都没停，或反之。
-    let used: u64 = tasks.iter().map(|t| t.used_tokens_5h).max().unwrap_or(0);
-    ok(json!({ "limit": limit, "used": used }))
-}
-
-#[derive(Deserialize)]
-struct SetQuotaReq {
-    limit: u64,
-}
-
-/// POST /monitor/quota { limit } —— 设置 5h token 上限（0 = 不限制）
-async fn set_quota(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-    Json(req): Json<SetQuotaReq>,
-) -> Json<Value> {
-    let Some(user) = auth_user(&state, &headers).await else {
-        return err(401, "未登录");
-    };
-    // 额度是每用户配置：只影响自己名下设备的自动暂停/恢复，用户自行设置
-    if !state.registry.write().await.set_quota_limit_for(&user, req.limit) {
-        return err(404, "账号不存在");
-    }
-    ok(json!({ "limit": req.limit }))
-}
 
 /// GET /monitor/agent —— 监控端状态（按当前用户可见范围统计）
 async fn agent_status(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
@@ -1013,23 +978,14 @@ async fn report(
     let files: Vec<am_core::model::FileTransfer> = entry.pending_files.drain(..).collect();
     let git_queries: Vec<am_core::model::GitQuery> = entry.pending_git.drain(..).collect();
     // 告知 agent 是否已被信任：未信任时 agent 不应再上报任何会话数据
-    let (trusted, quota_limit) = {
-        let reg = state.registry.read().await;
-        (
-            reg.device_meta(&payload.machine_id).trusted,
-            // 额度是设备归属者（用户）的个人配置
-            reg.quota_limit_for_device(&payload.machine_id),
-        )
-    };
+    let trusted = state.registry.read().await.device_meta(&payload.machine_id).trusted;
     // hubVersion：hub 与桌面客户端同一工作区发版，hub 的版本即最新客户端版本，
-    // agent 用它做更新提示（托盘「新版本可用」）；
-    // quotaLimit：5h token 上限随响应下发，客户端据此本地执行自动暂停/恢复
+    // agent 用它做更新提示（托盘「新版本可用」）
     ok(json!({
         "commands": commands,
         "files": files,
         "gitQueries": git_queries,
         "trusted": trusted,
-        "quotaLimit": quota_limit,
         "hubVersion": env!("CARGO_PKG_VERSION"),
         // 强制更新下限：客户端低于它必须更新才能继续使用
         "minVersion": desktop_min_version(&state).await,
