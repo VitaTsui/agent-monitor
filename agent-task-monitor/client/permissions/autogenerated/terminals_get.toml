@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-terminals-get"
+description = "Enables the terminals_get command without any pre-configured scope."
+commands.allow = ["terminals_get"]
+
+[[permission]]
+identifier = "deny-terminals-get"
+description = "Denies the terminals_get command without any pre-configured scope."
+commands.deny = ["terminals_get"]

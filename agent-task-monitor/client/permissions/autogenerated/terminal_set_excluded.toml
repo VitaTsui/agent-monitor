@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-terminal-set-excluded"
+description = "Enables the terminal_set_excluded command without any pre-configured scope."
+commands.allow = ["terminal_set_excluded"]
+
+[[permission]]
+identifier = "deny-terminal-set-excluded"
+description = "Denies the terminal_set_excluded command without any pre-configured scope."
+commands.deny = ["terminal_set_excluded"]
