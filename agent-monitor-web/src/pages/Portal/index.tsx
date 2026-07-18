@@ -421,7 +421,8 @@ const Portal: React.FC = observer(() => {
                                   text={t.title || t.prompt || t.projectName || "新会话"}
                                 />
                                 <div className={styles.sessSub}>
-                                  {t.projectName} ·{" "}
+                                  {/* 组标题已是项目名，这里给终端/IDE 来源 + 状态 */}
+                                  {t.ideDsr && t.ideDsr !== "—" ? `${t.ideDsr} · ` : ""}
                                   {STATUS_LABEL[t.status ?? ""] ?? t.statusDsr}
                                 </div>
                               </div>

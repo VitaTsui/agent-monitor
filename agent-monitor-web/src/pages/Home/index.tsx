@@ -62,7 +62,6 @@ const STEPS = [
 /** 客户端安装包直链（hub /downloads 托管；开发经 /api 代理） */
 const DL_BASE = `${process.env.API_BASE ?? ""}/downloads`;
 const DOWNLOADS = {
-  mac: `${DL_BASE}/${encodeURIComponent("终端任务监控.dmg")}`,
   win: `${DL_BASE}/${encodeURIComponent("终端任务监控.exe")}`,
   android: `${DL_BASE}/${encodeURIComponent("终端任务监控.apk")}`,
 };
@@ -175,14 +174,16 @@ const Home: React.FC = () => {
           </p>
         </div>
         <div className={styles.clientCards}>
-          <a className={styles.clientCard} href={DOWNLOADS.mac} download>
+          {/* macOS 安装包暂不提供：无签名证书，Gatekeeper 拦截体验差；
+              取得开发者证书完成公证后再上架 */}
+          <div className={`${styles.clientCard} ${styles.clientCardDisabled}`}>
             <AppleFilled className={styles.clientIcon} />
             <div className={styles.clientName}>macOS</div>
             <div className={styles.clientDesc}>
-              通用版（Apple 芯片 / Intel），完整前台 + 托盘后台同步
+              安装包准备中（待签名公证），敬请期待
             </div>
-            <span className={styles.clientDl}>下载 .dmg</span>
-          </a>
+            <span className={styles.clientDl}>即将提供</span>
+          </div>
           <a className={styles.clientCard} href={DOWNLOADS.win} download>
             <WindowsFilled className={styles.clientIcon} />
             <div className={styles.clientName}>Windows</div>
@@ -199,9 +200,8 @@ const Home: React.FC = () => {
           </a>
         </div>
         <div className={styles.clientHint}>
-          macOS：打开 dmg 后<b>双击「安装.command」</b>一键装好并启动
-          （若被拦：右键它 →「打开」）。Windows：运行安装程序，按向导选择
-          安装位置与桌面图标即可（若弹「已保护你的电脑」：更多信息 → 仍要运行）。
+          Windows：运行安装程序，按向导选择安装位置与桌面图标即可
+          （若弹「已保护你的电脑」：更多信息 → 仍要运行）。
           安装后在客户端里登录你的账号，本机即自动绑定并建立链接——
           网页、移动端与其他客户端上立刻可见这台电脑的终端会话（设备管理里可随时断开）。
         </div>
