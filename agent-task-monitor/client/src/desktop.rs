@@ -175,7 +175,9 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             client_auth,
             local_machine_id,
             terminals_get,
-            terminal_set_excluded
+            terminal_set_excluded,
+            update_status,
+            update_start
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -593,6 +595,28 @@ async fn terminal_set_excluded(
     Ok(())
 }
 
+/// 网页端 IPC：更新状态（当前版本 + 可用新版本；latest 为空即已是最新）。
+/// 版本信息由上报心跳每 1.5s 与 hub 比对，这里直接读取即等效「检查更新」。
+#[tauri::command]
+async fn update_status(
+    ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>,
+) -> Result<serde_json::Value, String> {
+    let latest = ctx.state.hub_latest_version.read().await.clone();
+    Ok(serde_json::json!({
+        "current": env!("CARGO_PKG_VERSION"),
+        "latest": latest,
+    }))
+}
+
+/// 网页端 IPC：立即执行应用内更新（设置页「检查更新 → 立即更新」）
+#[tauri::command]
+fn update_start(
+    app: tauri::AppHandle,
+    ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>,
+) {
+    spawn_self_update_inner(app, ctx.web_base.clone(), false);
+}
+
 /// 网页端 IPC：查询开机自启状态。
 /// 客户端窗口加载的是远端前台页；页面里的「开机自启」开关经这两个命令
 /// 操作本机（浏览器里打开同一页面时没有 __TAURI__，开关不渲染）。
@@ -732,6 +756,8 @@ fn show_main_with_pair<R: tauri::Runtime>(app: &tauri::AppHandle<R>, pair_url: O
     }
     // 从托盘重新打开：恢复 Dock 图标（macOS），再显示并聚焦窗口
     set_app_visible_in_dock(app, true);
+    // 非强制更新的确认弹窗只在重新打开 GUI 时出现（每个版本一次）
+    maybe_prompt_update(app);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
@@ -769,26 +795,107 @@ fn open_external(url: &str) {
 
 // ---------- 应用内自更新 ----------
 
+/// 更新流程日志：GUI 应用没有可见 stderr，必须落盘才能排查
+/// （~/.agent-monitor/client.log）
+fn ulog(msg: &str) {
+    tracing::info!("{msg}");
+    let path = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".agent-monitor")
+        .join("client.log");
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let ts = chrono::Local::now().format("%m-%d %H:%M:%S");
+        let _ = writeln!(f, "[{ts}] {msg}");
+    }
+}
+
 /// 托盘「点击更新」：后台线程执行自更新。
 /// - macOS：下载 zip → 原地替换 .app → 重启（全自动，无需用户操作）
-/// - Windows：下载安装向导并拉起（向导会先结束本进程再覆盖安装）
+/// - Windows：下载安装器静默安装并自动重启
 fn spawn_self_update<R: tauri::Runtime>(app: tauri::AppHandle<R>, hub: String) {
     spawn_self_update_inner(app, hub, false);
 }
 
-/// 更新过程的用户提示（mac 用系统通知；Windows 失败时另有对话框）
-fn notify_update(msg: &str) {
+/// 新版本系统通知（不打断使用）：mac 用系统通知，Windows 用 PowerShell 气泡
+fn notify_new_version(v: &str) {
+    ulog(&format!("[update] 通知新版本 v{v}"));
     #[cfg(target_os = "macos")]
     {
         let script = format!(
-            "display notification \"{}\" with title \"终端任务监控\"",
-            msg.replace('"', "'")
+            "display notification \"新版本 v{v} 可用，重新打开窗口或在托盘中即可更新\" with title \"终端任务监控\""
         );
         let _ = std::process::Command::new("osascript").args(["-e", &script]).output();
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     {
-        tracing::info!("更新提示: {msg}");
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // 托盘气泡：无需任何依赖/权限，右下角弹出
+        let ps = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; $n.ShowBalloonTip(8000, '终端任务监控', '新版本 v{v} 可用，打开窗口或在设置中更新', 'Info'); Start-Sleep 9; $n.Dispose()"
+        );
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = v;
+}
+
+/// 窗口（重新）显示时：有待更新版本且尚未弹过窗 → 弹确认框。
+/// 非强制更新只在这里弹，平时不打断使用。
+static UPDATE_DIALOG_SHOWN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn maybe_prompt_update<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let Some(ctx) = app.try_state::<std::sync::Arc<IpcCtx>>() else {
+        return;
+    };
+    let ctx = ctx.inner().clone();
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let latest = tauri::async_runtime::block_on(async {
+            ctx.state.hub_latest_version.read().await.clone()
+        });
+        let Some(v) = latest else { return };
+        {
+            let mut shown = UPDATE_DIALOG_SHOWN.lock().unwrap();
+            if shown.as_deref() == Some(v.as_str()) {
+                return;
+            }
+            *shown = Some(v.clone());
+        }
+        let local = env!("CARGO_PKG_VERSION");
+        let ok = confirm_box(
+            "终端任务监控 · 发现新版本",
+            &format!("新版本 v{v} 可用（当前 v{local}）。\n更新将自动完成并重启，是否立即更新？"),
+            "立即更新",
+            "稍后",
+        );
+        if ok {
+            spawn_self_update_inner(app, ctx.web_base.clone(), false);
+        }
+    });
+}
+
+/// 阻塞式提示框（更新结果必须让用户看见；通知对未签名应用常被系统吞掉）
+fn alert_box(title: &str, text: &str) {
+    #[cfg(windows)]
+    message_box(title, text);
+    #[cfg(target_os = "macos")]
+    {
+        let esc = |s: &str| s.replace('"', "'");
+        let script = format!(
+            "display dialog \"{}\" with title \"{}\" buttons {{\"好\"}} default button \"好\"",
+            esc(text),
+            esc(title)
+        );
+        let _ = std::process::Command::new("osascript").args(["-e", &script]).output();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = (title, text);
     }
 }
 
@@ -814,6 +921,22 @@ fn download_to(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 诊断入口：AM_SELF_UPDATE=1 时由 main 调用，前台跑一遍更新流程并打印结果
+pub fn self_update_probe(hub: &str) {
+    ulog(&format!("[probe] 手动触发自更新，hub={hub}"));
+    match do_self_update(hub) {
+        Ok(()) => {
+            ulog("[probe] 更新成功，退出旧实例");
+            std::process::exit(0);
+        }
+        Err(e) => {
+            ulog(&format!("[probe] 更新失败: {e:#}"));
+            eprintln!("self-update failed: {e:#}");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn do_self_update(hub: &str) -> anyhow::Result<()> {
     // 定位自身 .app：exe 位于 <bundle>.app/Contents/MacOS/ 下
@@ -824,12 +947,14 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
         .filter(|p| p.extension().map(|e| e == "app").unwrap_or(false))
         .ok_or_else(|| anyhow::anyhow!("当前不是 .app 形态，无法自更新"))?
         .to_path_buf();
+    ulog(&format!("[update] bundle={}", bundle.display()));
 
     let tmp = std::env::temp_dir().join(format!("am-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
     let zip = tmp.join("update.zip");
     download_to(&format!("{hub}/downloads/agent-monitor-mac.zip"), &zip)?;
+    ulog("[update] 下载完成");
 
     // ditto 解包（保留签名/资源叉）
     let ok = std::process::Command::new("ditto")
@@ -846,10 +971,13 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     if !new_app.join("Contents/MacOS/agent-monitor").exists() {
         anyhow::bail!("更新包内容异常");
     }
+    ulog("[update] 解包完成");
 
-    // 原地替换并重启：旧 .app 先挪到临时目录（正在运行的程序文件不能简单覆盖，
-    // rename 走 VFS 是安全的），再放新包，最后延迟 open 新实例。
-    let old = tmp.join("old.app");
+    // 原地替换：旧 .app 改名挪到同一父目录（同目录 rename 不跨卷、不受
+    // 临时目录权限影响），放入新包后延迟重启，最后清掉旧包。
+    let parent = bundle.parent().ok_or_else(|| anyhow::anyhow!("bundle 无父目录"))?;
+    let old = parent.join(".终端任务监控.old.app");
+    let _ = std::fs::remove_dir_all(&old);
     std::fs::rename(&bundle, &old).map_err(|e| anyhow::anyhow!("移出旧版本失败: {e}"))?;
     let ok = std::process::Command::new("ditto")
         .arg(&new_app)
@@ -858,14 +986,17 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
         .map(|s| s.success())
         .unwrap_or(false);
     if !ok {
-        // 回滚
         let _ = std::fs::rename(&old, &bundle);
         anyhow::bail!("写入新版本失败（已回滚）");
     }
-    notify_update("更新完成，正在重启…");
+    ulog("[update] 新版本已就位，准备重启");
     let bundle_str = bundle.to_string_lossy().to_string();
+    let old_str = old.to_string_lossy().to_string();
     std::process::Command::new("sh")
-        .args(["-c", &format!("sleep 1; open \"{bundle_str}\"")])
+        .args([
+            "-c",
+            &format!("sleep 1; AM_SELF_UPDATE=0 open \"{bundle_str}\"; sleep 3; rm -rf \"{old_str}\""),
+        ])
         .spawn()?;
     Ok(())
 }
@@ -877,6 +1008,7 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     let tmp = std::env::temp_dir();
     let installer = tmp.join("agent-monitor-setup.exe");
     download_to(&format!("{hub}/downloads/agent-monitor-setup.exe"), &installer)?;
+    ulog("[update] 安装器下载完成，静默安装");
     // 全静默更新，不出安装向导：NSIS /S 静默安装（沿用上次安装目录与组件选择，
     // 安装器内部会先结束本进程再覆盖），装完从注册表定位新程序并自动重启。
     // 整个流程放在独立的 bat 里执行 —— 本进程会被安装器 taskkill，
@@ -984,19 +1116,12 @@ pub(crate) fn spawn_update_watcher<R: tauri::Runtime>(
                 }
             }
 
-            // 常规更新：确认后自动更新；「稍后」则本次运行不再打扰（托盘仍可随时点）
+            // 常规更新：不打断使用 —— 每个新版本只发一次系统通知（右下角/右上角），
+            // 确认弹窗延后到用户重新打开 GUI 窗口时（见 maybe_prompt_update）
             if let Some(v) = latest {
                 if prompted.as_deref() != Some(v.as_str()) {
                     prompted = Some(v.clone());
-                    let ok = confirm_box(
-                        "终端任务监控 · 发现新版本",
-                        &format!("新版本 v{v} 可用（当前 v{local}）。\n更新将自动完成并重启，是否立即更新？"),
-                        "立即更新",
-                        "稍后",
-                    );
-                    if ok {
-                        spawn_self_update_inner(app.clone(), hub.clone(), false);
-                    }
+                    notify_new_version(&v);
                 }
             }
         }
@@ -1006,23 +1131,34 @@ pub(crate) fn spawn_update_watcher<R: tauri::Runtime>(
 /// 自更新执行（forced=true 时失败即退出：强制更新不允许带病运行）
 fn spawn_self_update_inner<R: tauri::Runtime>(app: tauri::AppHandle<R>, hub: String, forced: bool) {
     std::thread::spawn(move || {
-        notify_update("正在下载更新…");
+        ulog(&format!("[update] 开始自更新 forced={forced} hub={hub}"));
         match do_self_update(&hub) {
             Ok(()) => {
-                tracing::info!("自更新就绪，退出旧实例");
+                ulog("[update] 自更新就绪，退出旧实例");
                 app.exit(0);
+                // app.exit 走事件循环代理，个别路径（窗口全隐藏时）可能不生效；
+                // 稍候仍未退出就硬退，保证新旧实例交接
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                ulog("[update] app.exit 未生效，强制退出");
+                std::process::exit(0);
             }
             Err(e) => {
-                tracing::warn!("自更新失败: {e}");
-                #[cfg(windows)]
-                message_box(
+                ulog(&format!("[update] 自更新失败: {e:#}"));
+                alert_box(
                     "终端任务监控 · 更新失败",
-                    &format!("{e}\n\n{}", if forced { "程序将退出，请到官网手动下载安装。" } else { "可稍后重试，或到官网手动下载安装包。" }),
+                    &format!(
+                        "{e}\n\n{}",
+                        if forced {
+                            "程序将退出，请到官网手动下载安装。"
+                        } else {
+                            "可稍后重试，或到官网手动下载安装包。"
+                        }
+                    ),
                 );
-                #[cfg(not(windows))]
-                notify_update(&format!("更新失败：{e}"));
                 if forced {
                     app.exit(1);
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    std::process::exit(1);
                 }
             }
         }
