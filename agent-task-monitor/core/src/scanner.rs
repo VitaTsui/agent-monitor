@@ -599,7 +599,7 @@ pub fn build_tasks(
         if crate::process::is_stopped(p.pid) && !manual_paused(p.pid) {
             continue;
         }
-        let dir_name = p.cwd.rsplit(['/', '\\']).next().unwrap_or("").to_string();
+        let dir_name = short_name(&p.cwd);
         let status = if manual_paused(p.pid) {
             TaskStatus::Paused
         } else {
@@ -1414,7 +1414,13 @@ pub fn encode_path(p: &str) -> String {
 }
 
 fn short_name(cwd: &str) -> String {
-    cwd.rsplit(['/', '\\']).next().unwrap_or(cwd).to_string()
+    // 跳过空段：Windows 上报的 cwd 常带尾随反斜杠（D:\proj\），
+    // 直接取最后一段会得到空串 → 标题/项目名显示成空
+    cwd.split(['/', '\\'])
+        .rev()
+        .find(|s| !s.is_empty())
+        .unwrap_or(cwd)
+        .to_string()
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {
@@ -2063,5 +2069,19 @@ mod codex_tests {
             !tasks.iter().any(|t| t.id.starts_with("proc-")),
             "占位任务统一 pid- 前缀（attach_machine 只给 pid- 加机器前缀）"
         );
+    }
+}
+
+#[cfg(test)]
+mod short_name_tests {
+    use super::short_name;
+
+    /// Windows 上报的 cwd 常带尾随反斜杠，不能取出空项目名
+    #[test]
+    fn handles_trailing_separators() {
+        assert_eq!(short_name(r"D:\Program\Jingxin-Agent\"), "Jingxin-Agent");
+        assert_eq!(short_name("/Users/x/proj/"), "proj");
+        assert_eq!(short_name("/Users/x/proj"), "proj");
+        assert_eq!(short_name(r"D:\cursor\"), "cursor");
     }
 }

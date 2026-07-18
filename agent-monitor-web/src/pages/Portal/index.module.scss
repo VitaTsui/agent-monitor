@@ -275,7 +275,16 @@ $active-bg: rgba(36, 61, 66, 0.09);
         flex: 1;
         min-width: 0;
 
+        // 标题 + 右侧状态徽标同一行
+        .sessRow {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+
         .sessName {
+          flex: 1;
+          min-width: 0;
           font-size: 13px;
           color: $text;
           overflow: hidden;
@@ -283,13 +292,35 @@ $active-bg: rgba(36, 61, 66, 0.09);
           white-space: nowrap;
         }
 
-        .sessSub {
-          margin-top: 1px;
-          font-size: 11px;
+        // 状态徽标：与右侧会话面板的 statusChip 同一套配色
+        .sessStatus {
+          flex: none;
+          padding: 0 7px;
+          border-radius: 999px;
+          font-size: 10px;
+          line-height: 17px;
+          background: rgba(36, 61, 66, 0.07);
           color: $muted;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
+
+          &.running {
+            background: rgba(56, 178, 106, 0.14);
+            color: #22794a;
+          }
+
+          &.idle {
+            background: rgba(242, 178, 52, 0.16);
+            color: #9a6d0b;
+          }
+
+          &.paused {
+            background: rgba(245, 108, 108, 0.14);
+            color: #c0392b;
+          }
+
+          &.finished {
+            background: rgba(36, 61, 66, 0.07);
+            color: $muted;
+          }
         }
       }
 
