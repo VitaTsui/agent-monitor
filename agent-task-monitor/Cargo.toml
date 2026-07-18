@@ -1,53 +1,25 @@
-[package]
-name = "agent-task-monitor"
+[workspace]
+resolver = "2"
+members = ["core", "hub", "client"]
+
+[workspace.package]
 version = "0.2.0"
 edition = "2021"
-description = "跨平台监控 Cursor/VSCode/终端中 AI 编码代理（Claude Code、Codex 等）正在执行的任务，并提供 HTTP/WebSocket 管理接口"
 license = "MIT"
 
-[dependencies]
+[workspace.dependencies]
+am-core = { path = "core" }
 tokio = { version = "1", features = ["full"] }
-axum = { version = "0.7", features = ["ws", "multipart"] }
-tower-http = { version = "0.5", features = ["cors", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
-sysinfo = "0.30"
 dirs = "5"
 anyhow = "1"
-futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-base64 = "0.22"
-rsa = { version = "0.9", features = ["sha2"] }
-sha1 = "0.10"
-sha2 = "0.10"
-aes-gcm = "0.10"
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-
-# 桌面外壳（Tauri v2）：原生窗口 + 托盘。无界面/服务器构建用 --no-default-features 关闭。
-tauri = { version = "2", optional = true, features = ["tray-icon"] }
-subtle = "2.6"
-
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
-
-[features]
-default = ["desktop"]
-desktop = ["dep:tauri"]
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-[target.'cfg(windows)'.dependencies]
-# 启动失败/缺 WebView2 时的系统对话框与打开下载页（GUI 程序无控制台可用）
-windows-sys = { version = "0.59", features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_UI_Shell",
-] }
 
 [profile.release]
 lto = true

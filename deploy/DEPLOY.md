@@ -7,7 +7,7 @@
 > ⚠️ 二进制、前端产物（`agent-task-monitor`、`web/`）与全部密钥（`env`、
 > `rsa_private.pem`、各令牌 `.txt`）**不入版本库**（见 `.gitignore`）——它们只存在于
 > 本地工作副本，从本地 rsync 到服务器即可。若从全新 clone 起步：二进制用
-> `cargo zigbuild --release --target x86_64-unknown-linux-musl --no-default-features`
+> `cargo zigbuild -p am-hub --release --target x86_64-unknown-linux-musl`
 > 重新交叉编译，前端 `yarn build`，`env` 从 `env.example` 复制后填入真实密钥。
 
 ## 步骤 0 · 先配 DNS（务必先做）
@@ -54,7 +54,7 @@ sudo bash install.sh
 ## 步骤 3 · 让其它电脑接入（agent 模式）
 
 在每台要监控的电脑上跑 agent 版（该机需已装并使用过 Claude Code）。二进制按平台自备：
-Mac/Linux 用本仓库 `cargo build --release` 产物，Windows 用 `agent-task-monitor.exe`。
+Mac/Linux 用本仓库 `cargo build -p am-hub --release` 产物（bin 名仍为 agent-task-monitor）。
 
 macOS / Linux：
 
@@ -91,7 +91,7 @@ cat /opt/agent-monitor/data/registry.json   # 用户/设备注册表（唯一需
 
 ## 更新版本（以后改了代码）
 
-1. 本机重新交叉编译：`cd agent-task-monitor && cargo zigbuild --release --target x86_64-unknown-linux-musl --no-default-features`
+1. 本机重新交叉编译：`cd agent-task-monitor && cargo zigbuild -p am-hub --release --target x86_64-unknown-linux-musl`
 2. 前端（若改了）：用生产密钥的 `.env.prod` 跑 `yarn build`
 3. 传新的 `agent-task-monitor` 和 `web/` 覆盖 `/opt/agent-monitor/` 下同名文件（属主改回 agentmon）
 4. `systemctl restart agent-monitor`

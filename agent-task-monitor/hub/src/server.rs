@@ -1,5 +1,5 @@
 use crate::admin::{self, auth_user, err, ok};
-use crate::model::{ControlCmd, ControlReq, ReportPayload, Task, TaskStatus};
+use am_core::model::{ControlCmd, ControlReq, ReportPayload, Task, TaskStatus};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use crate::state::{MachineEntry, SharedState, OFFLINE_AFTER_SECS};
@@ -503,7 +503,7 @@ struct MsgQuery {
     limit: Option<usize>,
 }
 
-/// GET /monitor/tasks/:id/messages —— 本机实时解析；远程机器读上报缓存
+/// GET /monitor/tasks/:id/messages —— 读所属机器上报的消息缓存
 async fn task_messages(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -513,7 +513,7 @@ async fn task_messages(
     let Some(user) = auth_user(&state, &headers).await else {
         return err(401, "未登录");
     };
-    let limit = q.limit.unwrap_or(120).clamp(1, 500);
+    let _limit = q.limit.unwrap_or(120).clamp(1, 500);
     let machine_id = {
         let tasks = state.tasks_for(&user).await;
         tasks.iter().find(|t| t.id == id).map(|t| t.machine_id.clone())
@@ -522,25 +522,13 @@ async fn task_messages(
         return err(404, "任务不存在");
     };
 
-    if machine_id == state.config.machine_id {
-        // messages() 会 read_dir 全部项目目录、read_tail 最大 8MB 并逐行 serde 解析，
-        // 全是同步阻塞调用。前端每个聊天面板都在轮询这个接口，直接跑会占住 async
-        // worker；且它握着 scan_loop 每 1.5s 就要用的 scanner 锁，会连带拖慢所有 WS 推送。
-        // 与 local_scan 保持一致，用 block_in_place 把同线程其它任务挪走。
-        let mut scanner = state.scanner.lock().await;
-        match tokio::task::block_in_place(|| scanner.messages(&id, limit)) {
-            Ok(list) => ok(json!({ "list": list })),
-            Err(_) => ok(json!({ "list": [] })),
-        }
-    } else {
-        let machines = state.machines.read().await;
-        let list = machines
-            .get(&machine_id)
-            .and_then(|m| m.messages.get(&id))
-            .cloned()
-            .unwrap_or_default();
-        ok(json!({ "list": list }))
-    }
+    let machines = state.machines.read().await;
+    let list = machines
+        .get(&machine_id)
+        .and_then(|m| m.messages.get(&id))
+        .cloned()
+        .unwrap_or_default();
+    ok(json!({ "list": list }))
 }
 
 /// GET /monitor/tasks/:id/git-diff —— 会话项目目录的 git 改动概览（原文件 vs 修改后）。
@@ -562,15 +550,7 @@ async fn task_git_diff(
     };
     let cwd = task.process.as_ref().map(|p| p.cwd.clone()).unwrap_or_default();
 
-    if task.machine_id == state.config.machine_id {
-        // 本机：git 是阻塞式子进程调用，放到阻塞线程池，避免卡住 async 运行时
-        let overview = tokio::task::spawn_blocking(move || crate::gitdiff::git_overview(&cwd))
-            .await
-            .unwrap_or_default();
-        return ok(json!({ "overview": overview, "pending": false }));
-    }
-
-    // 远程：读缓存；同时下发一个请求让 agent 刷新（去重：同 task 已在队列则不重复入队）
+    // 读缓存；同时下发一个请求让 agent 刷新（去重：同 task 已在队列则不重复入队）
     let mut machines = state.machines.write().await;
     let Some(entry) = machines.get_mut(&task.machine_id) else {
         return err(404, "任务所属机器已离线");
@@ -580,7 +560,7 @@ async fn task_git_diff(
     }
     let cached = entry.git_cache.get(&id).cloned();
     if !entry.pending_git.iter().any(|q| q.task_id == id) {
-        entry.pending_git.push_back(crate::model::GitQuery {
+        entry.pending_git.push_back(am_core::model::GitQuery {
             task_id: id.clone(),
             cwd,
         });
@@ -607,13 +587,8 @@ async fn task_slash_commands(
     let Some(task) = task else {
         return err(404, "任务不存在");
     };
-    // 仅本机会话可扫描自定义命令目录；远程会话给内置命令
-    let project = if task.machine_id == state.config.machine_id {
-        task.project.clone()
-    } else {
-        String::new()
-    };
-    let list = crate::commands::collect(&task.provider, &project);
+    // hub 无法扫描远端机器的自定义命令目录，统一给该模型的内置命令集
+    let list = crate::commands::collect(&task.provider, "");
     ok(json!({ "list": list }))
 }
 
@@ -648,54 +623,21 @@ async fn control_task(
         _ => task.pid,
     };
 
-    if task.machine_id == state.config.machine_id {
-        let Some(pid) = pid else {
-            return err(400, "该任务没有存活进程，无法控制");
-        };
-        match crate::process::control(pid, req.action) {
-            Ok(label) => {
-                {
-                    // 加锁顺序必须与 enforce_quota 一致（auto_paused → paused），
-                    // 反过来拿会与扫描循环死锁。
-                    let mut auto = state.auto_paused.write().await;
-                    let mut paused = state.paused.write().await;
-                    match req.action {
-                        crate::model::ControlAction::Pause => {
-                            paused.insert(pid);
-                        }
-                        _ => {
-                            paused.remove(&pid);
-                            // 超额自动暂停的标记也必须一并清除。留着的话
-                            // enforce_quota 的 `!auto.contains(pid)` 恒为 false，
-                            // 该进程再也不会被重新暂停（额度管控彻底失效），
-                            // 界面却仍被强制显示成「已暂停(超额)」。
-                            // 清除后若确实仍超额，下一轮扫描会重新暂停 —— 这才是诚实的结果。
-                            auto.remove(&pid);
-                        }
-                    }
-                }
-                tracing::info!("控制任务 {id}: pid={pid} {label}");
-                ok(json!({ "pid": pid, "result": label }))
-            }
-            Err(e) => err(500, &e.to_string()),
-        }
-    } else {
-        let mut machines = state.machines.write().await;
-        let Some(entry) = machines.get_mut(&task.machine_id) else {
-            return err(404, "任务所属机器已离线");
-        };
-        if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
-            return err(500, "任务所属机器已离线，无法下发命令");
-        }
-        entry.pending.push_back(ControlCmd {
-            task_id: id.clone(),
-            pid,
-            action: req.action,
-            text: None,
-        });
-        tracing::info!("已向机器 {} 下发控制命令: {id}", task.machine_id);
-        ok(json!({ "pid": pid, "result": "命令已下发，等待执行" }))
+    let mut machines = state.machines.write().await;
+    let Some(entry) = machines.get_mut(&task.machine_id) else {
+        return err(404, "任务所属机器已离线");
+    };
+    if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
+        return err(500, "任务所属机器已离线，无法下发命令");
     }
+    entry.pending.push_back(ControlCmd {
+        task_id: id.clone(),
+        pid,
+        action: req.action,
+        text: None,
+    });
+    tracing::info!("已向机器 {} 下发控制命令: {id}", task.machine_id);
+    ok(json!({ "pid": pid, "result": "命令已下发，等待执行" }))
 }
 
 #[derive(Deserialize)]
@@ -740,40 +682,21 @@ async fn input_task(
         _ => task.pid,
     };
 
-    if task.machine_id == state.config.machine_id {
-        let Some(pid) = pid else {
-            return err(400, "该任务没有存活进程，无法发布");
-        };
-        // osascript 会遍历 Terminal/iTerm 全部窗口标签页，耗时以秒计且可能挂起，
-        // 必须放到阻塞线程池，不能占住 async worker（同 task_git_diff 的处理）。
-        let text_for_send = text.clone();
-        let res =
-            tokio::task::spawn_blocking(move || crate::process::send_input(pid, &text_for_send))
-                .await;
-        match res {
-            Ok(Ok(label)) => {
-                tracing::info!("向任务 {id} (pid={pid}) 注入输入: {}", truncate_log(&text));
-                ok(json!({ "pid": pid, "result": label }))
-            }
-            Ok(Err(e)) => err(500, &e.to_string()),
-            Err(e) => err(500, &format!("发送输入的阻塞任务异常: {e}")),
-        }
-    } else {
-        let mut machines = state.machines.write().await;
-        let Some(entry) = machines.get_mut(&task.machine_id) else {
-            return err(404, "任务所属机器已离线");
-        };
-        if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
-            return err(500, "任务所属机器已离线，无法下发");
-        }
-        entry.pending.push_back(ControlCmd {
-            task_id: id.clone(),
-            pid,
-            action: crate::model::ControlAction::Input,
-            text: Some(text),
-        });
-        ok(json!({ "pid": pid, "result": "已下发到目标机器" }))
+    let mut machines = state.machines.write().await;
+    let Some(entry) = machines.get_mut(&task.machine_id) else {
+        return err(404, "任务所属机器已离线");
+    };
+    if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
+        return err(500, "任务所属机器已离线，无法下发");
     }
+    tracing::info!("已向机器 {} 下发输入: {}", task.machine_id, truncate_log(&text));
+    entry.pending.push_back(ControlCmd {
+        task_id: id.clone(),
+        pid,
+        action: am_core::model::ControlAction::Input,
+        text: Some(text),
+    });
+    ok(json!({ "pid": pid, "result": "已下发到目标机器" }))
 }
 
 fn truncate_log(s: &str) -> String {
@@ -846,9 +769,6 @@ async fn delete_device(
     if let Err(e) = ensure_owner(&state, &headers, &id).await {
         return e;
     }
-    if id == state.config.machine_id {
-        return err(400, "不能删除 hub 本机");
-    }
     state.machines.write().await.remove(&id);
     state.registry.write().await.delete_device(&id);
     ok(json!({ "result": "已删除" }))
@@ -892,28 +812,10 @@ async fn upload_file(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "file.bin".into());
 
-    if id == state.config.machine_id {
-        // 本机直接写入。目录必须落在允许范围内（详见 safe_upload_dir）。
-        // 远程设备不在这里校验：safe_upload_dir 是拿 hub 自己的 upload_root 去比的，
-        // 对目标机毫无意义（hub 是 Linux、agent 是 Mac 时，/Users/xxx 这种目标机上
-        // 完全合法的路径会被 hub 拒掉）。目标机才是权威，agent 侧会用自己的 root 复验。
-        let target_dir = match crate::state::safe_upload_dir(&dir) {
-            Ok(d) => d,
-            Err(e) => return err(400, &e),
-        };
-        if let Err(e) = std::fs::create_dir_all(&target_dir) {
-            return err(500, &format!("创建目录失败: {e}"));
-        }
-        let target = target_dir.join(&safe_name);
-        match std::fs::write(&target, &bytes) {
-            Ok(_) => {
-                tracing::info!("已写入文件: {}", target.display());
-                ok(json!({ "path": target.to_string_lossy(), "size": bytes.len() }))
-            }
-            Err(e) => err(500, &format!("写入失败: {e}")),
-        }
-    } else {
-        // 远程设备：进文件队列由 agent 拉取写入
+    {
+        // 目标目录合法性由目标机权威校验：hub 是 Linux、目标机是 Mac 时，
+        // /Users/xxx 这种目标机上完全合法的路径在 hub 侧无从判断。
+        // 进文件队列由 agent 拉取，agent 侧用自己的 upload_root 复验后写入。
         let mut machines = state.machines.write().await;
         let Some(entry) = machines.get_mut(&id) else {
             return err(404, "设备不存在或已离线");
@@ -921,7 +823,7 @@ async fn upload_file(
         if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
             return err(500, "设备已离线，无法传输");
         }
-        entry.pending_files.push_back(crate::model::FileTransfer {
+        entry.pending_files.push_back(am_core::model::FileTransfer {
             dir,
             filename: safe_name,
             content_b64: B64.encode(&bytes),
@@ -976,14 +878,9 @@ async fn agent_status(State(state): State<SharedState>, headers: HeaderMap) -> J
     let running = tasks.iter().filter(|t| t.status == TaskStatus::Running).count();
     let process_count = tasks.iter().filter(|t| t.process.is_some()).count();
     let machines = state.devices_for(&user).await;
-    let scanner = state.scanner.lock().await;
     ok(json!({
-        "hostname": state.config.hostname,
-        "platform": state.config.platform,
-        "platformDsr": crate::model::platform_dsr(&state.config.platform),
         "version": env!("CARGO_PKG_VERSION"),
         "startedAt": state.started_at.to_rfc3339(),
-        "projectsDir": scanner.projects_dir().to_string_lossy(),
         "sessionCount": tasks.len(),
         "runningCount": running,
         "processCount": process_count,
@@ -1021,9 +918,6 @@ async fn report(
     let global_ok = crate::state::token_eq(global_token, &state.config.agent_token);
     if !dev_ok && !global_ok {
         return err(401, "设备未绑定账号：打开客户端窗口登录一次即可自动绑定");
-    }
-    if payload.machine_id == state.config.machine_id {
-        return err(400, "machineId 与 hub 本机冲突，请为 agent 指定 AM_MACHINE_ID");
     }
     // AM_USER 填了就必须是真实存在的账号。
     // 不校验的话，拼错一个字母就会登记成一台「谁都看不到、也无法信任」的孤儿设备：
@@ -1084,17 +978,22 @@ async fn report(
     entry.messages.retain(|k, _| alive.contains(k.as_str()));
     entry.git_cache.retain(|k, _| alive.contains(k.as_str()));
     let commands: Vec<ControlCmd> = entry.pending.drain(..).collect();
-    let files: Vec<crate::model::FileTransfer> = entry.pending_files.drain(..).collect();
-    let git_queries: Vec<crate::model::GitQuery> = entry.pending_git.drain(..).collect();
+    let files: Vec<am_core::model::FileTransfer> = entry.pending_files.drain(..).collect();
+    let git_queries: Vec<am_core::model::GitQuery> = entry.pending_git.drain(..).collect();
     // 告知 agent 是否已被信任：未信任时 agent 不应再上报任何会话数据
-    let trusted = state.registry.read().await.device_meta(&payload.machine_id).trusted;
-    // hubVersion：hub 与桌面客户端同一代码库，hub 的版本即最新客户端版本，
-    // agent 用它做更新提示（托盘「新版本可用」）
+    let (trusted, quota_limit) = {
+        let reg = state.registry.read().await;
+        (reg.device_meta(&payload.machine_id).trusted, reg.quota_limit())
+    };
+    // hubVersion：hub 与桌面客户端同一工作区发版，hub 的版本即最新客户端版本，
+    // agent 用它做更新提示（托盘「新版本可用」）；
+    // quotaLimit：5h token 上限随响应下发，客户端据此本地执行自动暂停/恢复
     ok(json!({
         "commands": commands,
         "files": files,
         "gitQueries": git_queries,
         "trusted": trusted,
+        "quotaLimit": quota_limit,
         "hubVersion": env!("CARGO_PKG_VERSION"),
     }))
 }
