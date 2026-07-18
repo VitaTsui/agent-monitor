@@ -181,10 +181,7 @@ const Home: React.FC = () => {
       <section id="clients" className={styles.clients}>
         <div className={styles.sectionHead}>
           <h2>客户端</h2>
-          <p>
-            桌面端是正常应用程序：打开即完整前台，关闭可选缩小到系统托盘——
-            后台持续同步本机会话，也可开机自启。
-          </p>
+
         </div>
         <div className={styles.clientCards}>
           {/* macOS 安装包暂不提供：无签名证书，Gatekeeper 拦截体验差；
@@ -192,17 +189,13 @@ const Home: React.FC = () => {
           <div className={`${styles.clientCard} ${styles.clientCardDisabled}`}>
             <AppleFilled className={styles.clientIcon} />
             <div className={styles.clientName}>macOS</div>
-            <div className={styles.clientDesc}>
-              安装包准备中（待签名公证），敬请期待
-            </div>
+            <div className={styles.clientDesc}>安装包准备中</div>
             <span className={styles.clientDl}>即将提供</span>
           </div>
           <a className={styles.clientCard} href={winUrl} download>
             <WindowsFilled className={styles.clientIcon} />
             <div className={styles.clientName}>Windows</div>
-            <div className={styles.clientDesc}>
-              中文安装向导（可选安装位置 / 桌面图标 / 开机自启），完整前台 + 托盘后台同步
-            </div>
+            <div className={styles.clientDesc}>适用于 Windows 10 / 11</div>
             <span className={styles.clientDl}>
               下载安装程序{ver.desktop ? ` v${ver.desktop}` : ""}
             </span>
@@ -210,17 +203,11 @@ const Home: React.FC = () => {
           <a className={styles.clientCard} href={apkUrl} download>
             <AndroidFilled className={styles.clientIcon} />
             <div className={styles.clientName}>Android</div>
-            <div className={styles.clientDesc}>移动端应用，前台功能随时随地可用</div>
+            <div className={styles.clientDesc}>适用于 Android 手机</div>
             <span className={styles.clientDl}>
               下载 .apk{ver.android ? ` v${ver.android}` : ""}
             </span>
           </a>
-        </div>
-        <div className={styles.clientHint}>
-          Windows：运行安装程序，按向导选择安装位置与桌面图标即可
-          （若弹「已保护你的电脑」：更多信息 → 仍要运行）。
-          安装后在客户端里登录你的账号，本机即自动绑定并建立链接——
-          网页、移动端与其他客户端上立刻可见这台电脑的终端会话（设备管理里可随时断开）。
         </div>
       </section>
 
