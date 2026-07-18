@@ -352,7 +352,12 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                         更新会自动下载安装并重启客户端
                       </div>
                     </div>
-                    <Button size="small" loading={checkingUpdate} onClick={checkUpdate}>
+                    <Button
+                      size="small"
+                      className={styles.checkUpdateBtn}
+                      loading={checkingUpdate}
+                      onClick={checkUpdate}
+                    >
                       检查更新
                     </Button>
                   </div>
