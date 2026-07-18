@@ -157,6 +157,12 @@ $border: rgba(36, 61, 66, 0.1);
 .clientCards {
   display: flex; gap: 20px; justify-content: center; flex-wrap: wrap;
 }
+.clientCardDisabled {
+  opacity: 0.55;
+  cursor: default;
+  pointer-events: none;
+}
+
 .clientCard {
   width: 280px;
   background: #fff; border: 1px solid rgba(36,61,66,.08);

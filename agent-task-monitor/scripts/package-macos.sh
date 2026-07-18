@@ -54,8 +54,8 @@ cat > "$OUT/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleExecutable</key><string>$EXE_NAME</string>
   <key>CFBundleIconFile</key><string>icon.icns</string>
-  <key>CFBundleVersion</key><string>0.2.0</string>
-  <key>CFBundleShortVersionString</key><string>0.2.0</string>
+  <key>CFBundleVersion</key><string>0.3.0</string>
+  <key>CFBundleShortVersionString</key><string>0.3.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <!-- 不设 LSUIElement：这是正常桌面应用（Dock 有图标、可 Cmd-Tab）。
@@ -74,3 +74,10 @@ codesign --verify --deep --strict "$OUT" && echo "▸ ad-hoc 签名校验通过"
 
 echo "✓ 打包完成: $OUT"
 echo "  零配置分发：用户安装后在窗口里登录账号即自动绑定本机"
+
+# 应用内自更新用的 zip 产物：客户端下载后原地换包重启（见 desktop.rs self_update）。
+# 用 ditto 保留资源叉/签名；zip 内是完整 .app。文件名用 ASCII，客户端拼 URL 免编码。
+mkdir -p target/dist
+rm -f "target/dist/agent-monitor-mac.zip"
+ditto -c -k --keepParent "$OUT" "target/dist/agent-monitor-mac.zip"
+echo "✓ 自更新包: target/dist/agent-monitor-mac.zip"

@@ -257,7 +257,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                         }
                         "browser" => open_external(&format!("{web_base_menu}/portal")),
                         // 更新推送入口：打开官网「客户端」下载区
-                        "update" => open_external(&format!("{web_base_menu}/#clients")),
+                        "update" => spawn_self_update(app.clone(), web_base_menu.clone()),
                         "autostart" => set_autostart(!autostart_enabled()),
                         "close_to_tray" => {
                             // 切换关闭行为并落盘；下次点菜单会重建反映新勾选态
@@ -399,14 +399,15 @@ fn build_tray_menu<R: tauri::Runtime>(
     let quit = MenuItem::with_id(manager, "quit", "退出", true, None::<&str>)?;
 
     let menu = Menu::new(manager)?;
-    // 更新推送：hub 端有更新版本时置顶提示，点击去官网下载区
+    // 更新推送：hub 端有更新版本时置顶提示，点击应用内直接更新
+    // （mac 自动换包重启；Windows 拉起安装向导），无需去官网手动下载
     if let Some(v) =
         tauri::async_runtime::block_on(async { state.hub_latest_version.read().await.clone() })
     {
         let upd = MenuItem::with_id(
             manager,
             "update",
-            format!("⬆ 新版本 v{v} 可用 · 点击下载"),
+            format!("⬆ 新版本 v{v} 可用 · 点击更新"),
             true,
             None::<&str>,
         )?;
@@ -728,4 +729,135 @@ fn open_external(url: &str) {
     if let Err(e) = r {
         tracing::warn!("打开浏览器失败: {e}");
     }
+}
+
+// ---------- 应用内自更新 ----------
+
+/// 托盘「点击更新」：后台线程执行自更新。
+/// - macOS：下载 zip → 原地替换 .app → 重启（全自动，无需用户操作）
+/// - Windows：下载安装向导并拉起（向导会先结束本进程再覆盖安装）
+fn spawn_self_update<R: tauri::Runtime>(app: tauri::AppHandle<R>, hub: String) {
+    std::thread::spawn(move || {
+        notify_update("正在下载更新…");
+        match do_self_update(&hub) {
+            Ok(()) => {
+                tracing::info!("自更新就绪，退出旧实例");
+                app.exit(0);
+            }
+            Err(e) => {
+                tracing::warn!("自更新失败: {e}");
+                notify_update(&format!("更新失败：{e}。可稍后重试或到官网手动下载"));
+                #[cfg(windows)]
+                message_box("终端任务监控 · 更新失败", &format!("{e}\n\n可稍后重试，或到官网手动下载安装包。"));
+            }
+        }
+    });
+}
+
+/// 更新过程的用户提示（mac 用系统通知；Windows 失败时另有对话框）
+fn notify_update(msg: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification \"{}\" with title \"终端任务监控\"",
+            msg.replace('"', "'")
+        );
+        let _ = std::process::Command::new("osascript").args(["-e", &script]).output();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        tracing::info!("更新提示: {msg}");
+    }
+}
+
+/// 下载 hub 上的文件到本地路径（自更新专用；产物文件名均为 ASCII）
+fn download_to(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let bytes = rt.block_on(async {
+        let resp = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()?
+            .get(url)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("下载失败 HTTP {}", resp.status());
+        }
+        Ok::<_, anyhow::Error>(resp.bytes().await?)
+    })?;
+    if bytes.len() < 1024 * 1024 {
+        anyhow::bail!("更新包异常（{} 字节），已取消", bytes.len());
+    }
+    std::fs::write(dest, &bytes)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn do_self_update(hub: &str) -> anyhow::Result<()> {
+    // 定位自身 .app：exe 位于 <bundle>.app/Contents/MacOS/ 下
+    let exe = std::env::current_exe()?;
+    let bundle = exe
+        .ancestors()
+        .nth(3)
+        .filter(|p| p.extension().map(|e| e == "app").unwrap_or(false))
+        .ok_or_else(|| anyhow::anyhow!("当前不是 .app 形态，无法自更新"))?
+        .to_path_buf();
+
+    let tmp = std::env::temp_dir().join(format!("am-update-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp)?;
+    let zip = tmp.join("update.zip");
+    download_to(&format!("{hub}/downloads/agent-monitor-mac.zip"), &zip)?;
+
+    // ditto 解包（保留签名/资源叉）
+    let ok = std::process::Command::new("ditto")
+        .args(["-x", "-k"])
+        .arg(&zip)
+        .arg(&tmp)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        anyhow::bail!("解包失败");
+    }
+    let new_app = tmp.join("终端任务监控.app");
+    if !new_app.join("Contents/MacOS/agent-monitor").exists() {
+        anyhow::bail!("更新包内容异常");
+    }
+
+    // 原地替换并重启：旧 .app 先挪到临时目录（正在运行的程序文件不能简单覆盖，
+    // rename 走 VFS 是安全的），再放新包，最后延迟 open 新实例。
+    let old = tmp.join("old.app");
+    std::fs::rename(&bundle, &old).map_err(|e| anyhow::anyhow!("移出旧版本失败: {e}"))?;
+    let ok = std::process::Command::new("ditto")
+        .arg(&new_app)
+        .arg(&bundle)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        // 回滚
+        let _ = std::fs::rename(&old, &bundle);
+        anyhow::bail!("写入新版本失败（已回滚）");
+    }
+    notify_update("更新完成，正在重启…");
+    let bundle_str = bundle.to_string_lossy().to_string();
+    std::process::Command::new("sh")
+        .args(["-c", &format!("sleep 1; open \"{bundle_str}\"")])
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn do_self_update(hub: &str) -> anyhow::Result<()> {
+    let installer = std::env::temp_dir().join("agent-monitor-setup.exe");
+    download_to(&format!("{hub}/downloads/agent-monitor-setup.exe"), &installer)?;
+    // 拉起安装向导（向导内部会 taskkill 本进程并覆盖安装）；本进程随后退出
+    std::process::Command::new(&installer).spawn()?;
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn do_self_update(_hub: &str) -> anyhow::Result<()> {
+    anyhow::bail!("当前平台暂不支持应用内更新")
 }
