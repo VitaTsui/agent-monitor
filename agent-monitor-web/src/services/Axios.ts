@@ -115,8 +115,19 @@ function safeRedirect(path: string): void {
   window.location.href = `${currentOrigin}${cleanPath}`;
 }
 
+/** 无需登录即可浏览的页面：401 只静默清理过期登录态，不打断浏览 */
+const PUBLIC_PATHS = ["/", "/login"];
+
 // 重新登录
 const reLogin = debounce(() => {
+  // 官网首页等公开页：带着过期 token 刷新时，后台预取（菜单/权限）会 401，
+  // 此时强跳登录页等于把公开页锁在登录后面。清掉过期凭证让页面回到
+  // 未登录形态即可；真正需要登录的页面（/portal、后管）仍走跳转。
+  if (PUBLIC_PATHS.includes(window.location.pathname)) {
+    wsCache.clear();
+    clearAllCookie();
+    return;
+  }
   notification.error({
     message: "登录已过期，请重新登录",
     duration: 0.5,
