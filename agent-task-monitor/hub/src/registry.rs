@@ -98,6 +98,32 @@ pub struct DeviceMeta {
     /// 最后一次上报（unix 秒，粗粒度节流写入）
     #[serde(default)]
     pub last_seen: u64,
+    /// 协助共享：设备主人生成的连接码 + 密码，供其他用户接入（类似远程控制）
+    #[serde(default)]
+    pub share: Option<ShareEntry>,
+    /// 已通过协助码接入本设备的用户名（可查看+控制其会话）；主人可随时撤销
+    #[serde(default)]
+    pub shared_with: Vec<String>,
+}
+
+/// 协助共享条目：连接码 + 密码哈希 + 有效期
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShareEntry {
+    /// 连接码（其他用户输入它 + 密码即可接入）
+    pub code: String,
+    /// 密码哈希（加盐 SHA-256，同账号口令）
+    pub password_hash: String,
+    /// 临时密码（true）到期自动失效；固定密码（false）长期有效
+    pub temporary: bool,
+    /// 到期时间（unix 秒，仅临时密码有值；0 = 不过期）
+    #[serde(default)]
+    pub expires_at: u64,
+}
+
+impl ShareEntry {
+    fn expired(&self) -> bool {
+        self.temporary && self.expires_at > 0 && crate::state::now_secs() >= self.expires_at
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -499,17 +525,147 @@ impl Registry {
         removed
     }
 
-    /// 该设备的会话是否允许被指定用户监控：已信任 且 归属本人。
-    /// 严格按归属隔离——超级管理员也不能看别人的设备会话。
+    /// 该设备的会话是否允许被指定用户监控：
+    /// - 主人：已信任 且 归属本人；
+    /// - 协助访客：通过协助码接入（主人显式共享，绕过信任判定）。
     pub fn can_view(&self, machine_id: &str, username: &str) -> bool {
         let m = self.device_meta(machine_id);
-        m.trusted && m.owner.as_deref() == Some(username)
+        (m.trusted && m.owner.as_deref() == Some(username))
+            || m.shared_with.iter().any(|u| u == username)
     }
 
     /// 该设备是否归属指定用户（用于设备管理列表，含未信任的 pending）
     pub fn owned_by(&self, machine_id: &str, username: &str) -> bool {
         self.device_meta(machine_id).owner.as_deref() == Some(username)
     }
+
+    // ---------- 协助共享（跨用户设备接入） ----------
+
+    /// 主人为自己的设备生成/刷新协助码。temporary=true 时用生成的随机
+    /// 临时密码（30 分钟过期）；否则用调用方给的固定密码。返回 (连接码, 明文密码)。
+    pub fn create_share(
+        &mut self,
+        machine_id: &str,
+        temporary: bool,
+        fixed_password: Option<&str>,
+    ) -> Result<(String, String), String> {
+        if !self.devices.contains_key(machine_id) {
+            return Err("设备不存在".into());
+        }
+        let password = if temporary {
+            // 8 位数字临时密码，好念好输
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            (0..8).map(|_| char::from(b'0' + rng.gen_range(0..10))).collect::<String>()
+        } else {
+            let p = fixed_password.unwrap_or("").trim().to_string();
+            if p.len() < 4 {
+                return Err("固定密码至少 4 位".into());
+            }
+            p
+        };
+        // 连接码沿用设备已有的（同一设备连接码稳定），首次生成新的
+        let code = self
+            .devices
+            .get(machine_id)
+            .and_then(|d| d.share.as_ref())
+            .map(|s| s.code.clone())
+            .unwrap_or_else(new_share_code);
+        let expires_at = if temporary { crate::state::now_secs() + 30 * 60 } else { 0 };
+        let entry = ShareEntry {
+            code: code.clone(),
+            password_hash: hash_password(&password, &random_salt()),
+            temporary,
+            expires_at,
+        };
+        if let Some(d) = self.devices.get_mut(machine_id) {
+            d.share = Some(entry);
+        }
+        self.save();
+        Ok((code, password))
+    }
+
+    /// 当前协助码信息（供主人查看）：返回 (连接码, 是否临时, 到期秒)
+    pub fn share_info(&self, machine_id: &str) -> Option<(String, bool, u64)> {
+        self.devices
+            .get(machine_id)
+            .and_then(|d| d.share.as_ref())
+            .filter(|s| !s.expired())
+            .map(|s| (s.code.clone(), s.temporary, s.expires_at))
+    }
+
+    /// 撤销协助码：清连接码 + 踢出所有已接入访客
+    pub fn revoke_share(&mut self, machine_id: &str) {
+        if let Some(d) = self.devices.get_mut(machine_id) {
+            d.share = None;
+            d.shared_with.clear();
+            self.save();
+        }
+    }
+
+    /// 访客用连接码 + 密码接入。成功返回 machine_id。
+    pub fn connect_share(&mut self, code: &str, password: &str, user: &str) -> Result<String, String> {
+        let code = code.trim();
+        let hit = self.devices.iter().find_map(|(id, d)| {
+            d.share.as_ref().filter(|s| s.code == code).map(|s| (id.clone(), s.clone()))
+        });
+        let Some((machine_id, share)) = hit else {
+            return Err("连接码无效".into());
+        };
+        if share.expired() {
+            return Err("临时密码已过期，请向设备主人索取新密码".into());
+        }
+        if self.owned_by(&machine_id, user) {
+            return Err("这是你自己的设备，无需接入".into());
+        }
+        if !verify_password(&share.password_hash, password) {
+            return Err("密码错误".into());
+        }
+        if let Some(d) = self.devices.get_mut(&machine_id) {
+            if !d.shared_with.iter().any(|u| u == user) {
+                d.shared_with.push(user.to_string());
+            }
+        }
+        self.save();
+        Ok(machine_id)
+    }
+
+    /// 访客主动断开自己对某设备的接入
+    pub fn disconnect_share(&mut self, machine_id: &str, user: &str) {
+        if let Some(d) = self.devices.get_mut(machine_id) {
+            let before = d.shared_with.len();
+            d.shared_with.retain(|u| u != user);
+            if d.shared_with.len() != before {
+                self.save();
+            }
+        }
+    }
+
+    /// 主人踢掉某个访客
+    pub fn kick_share_user(&mut self, machine_id: &str, user: &str) {
+        self.disconnect_share(machine_id, user);
+    }
+
+    /// 某设备当前已接入的访客列表（供主人查看）
+    pub fn share_guests(&self, machine_id: &str) -> Vec<String> {
+        self.devices.get(machine_id).map(|d| d.shared_with.clone()).unwrap_or_default()
+    }
+
+    /// 该用户通过协助码可访问的（他人）设备
+    pub fn shared_to(&self, username: &str) -> Vec<(String, DeviceMeta)> {
+        self.devices
+            .iter()
+            .filter(|(_, m)| m.shared_with.iter().any(|u| u == username))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+}
+
+/// 协助连接码：9 位数字，分三段好念（其他用户手输）
+fn new_share_code() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..9).map(|_| char::from(b'0' + rng.gen_range(0..10))).collect()
 }
 
 #[cfg(test)]
@@ -599,5 +755,78 @@ mod offline_visibility_tests {
         assert_eq!(meta.platform, "windows");
         assert!(meta.trusted);
         assert!(meta.last_seen > 0, "last_seen 应已记录");
+    }
+}
+
+#[cfg(test)]
+mod share_tests {
+    use super::*;
+
+    fn reg(tag: &str) -> Registry {
+        let dir = std::env::temp_dir().join(format!("am-share-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Registry::load(dir, "admin", "admin123")
+    }
+
+    /// 固定密码：访客用连接码+密码接入 → can_view 放行；密码错拒绝；撤销后失效
+    #[test]
+    fn fixed_password_flow() {
+        let mut r = reg("fixed");
+        r.register("alice", "pw123456", "").unwrap();
+        r.register("bob", "pw123456", "").unwrap();
+        r.ensure_device("pc-a", Some("alice"), true);
+        let (code, pw) = r.create_share("pc-a", false, Some("secret1")).unwrap();
+        assert_eq!(pw, "secret1");
+        // 接入前 bob 看不到
+        assert!(!r.can_view("pc-a", "bob"));
+        // 密码错误
+        assert!(r.connect_share(&code, "wrong", "bob").is_err());
+        // 正确接入
+        assert_eq!(r.connect_share(&code, "secret1", "bob").unwrap(), "pc-a");
+        assert!(r.can_view("pc-a", "bob"), "接入后可查看");
+        assert!(r.shared_to("bob").iter().any(|(id, _)| id == "pc-a"));
+        // 主人自己不能接入自己
+        assert!(r.connect_share(&code, "secret1", "alice").is_err());
+        // 撤销 → 踢出
+        r.revoke_share("pc-a");
+        assert!(!r.can_view("pc-a", "bob"), "撤销后失效");
+        assert!(r.share_info("pc-a").is_none());
+    }
+
+    /// 临时密码：过期后拒绝接入
+    #[test]
+    fn temp_password_expires() {
+        let mut r = reg("temp");
+        r.register("carol", "pw123456", "").unwrap();
+        r.register("dave", "pw123456", "").unwrap();
+        r.ensure_device("pc-c", Some("carol"), true);
+        let (code, pw) = r.create_share("pc-c", true, None).unwrap();
+        assert_eq!(pw.len(), 8);
+        assert!(pw.chars().all(|c| c.is_ascii_digit()));
+        // 手动把到期时间设到过去
+        if let Some(d) = r.devices.get_mut("pc-c") {
+            if let Some(s) = d.share.as_mut() {
+                s.expires_at = 1;
+            }
+        }
+        assert!(r.connect_share(&code, &pw, "dave").is_err(), "过期临时密码应拒绝");
+    }
+
+    /// 访客自断 & 主人踢人
+    #[test]
+    fn disconnect_and_kick() {
+        let mut r = reg("disc");
+        r.register("erin", "pw123456", "").unwrap();
+        r.register("frank", "pw123456", "").unwrap();
+        r.ensure_device("pc-e", Some("erin"), true);
+        let (code, pw) = r.create_share("pc-e", false, Some("pass12")).unwrap();
+        r.connect_share(&code, &pw, "frank").unwrap();
+        assert!(r.share_guests("pc-e").contains(&"frank".to_string()));
+        r.disconnect_share("pc-e", "frank");
+        assert!(!r.can_view("pc-e", "frank"), "自断后失效");
+        // 再接入后主人踢
+        r.connect_share(&code, &pw, "frank").unwrap();
+        r.kick_share_user("pc-e", "frank");
+        assert!(!r.can_view("pc-e", "frank"), "被踢后失效");
     }
 }

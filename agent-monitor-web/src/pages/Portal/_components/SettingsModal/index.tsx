@@ -13,10 +13,15 @@ import {
 } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
-import { PortalDevice } from "@/services/apis/portal";
+import {
+  PortalDevice,
+  connectShare,
+  disconnectShare,
+} from "@/services/apis/portal";
 import { getUserInfo, removeToken } from "@/utils/auth";
 import { localMachineId } from "@/utils/clientAuth";
 import PortalStore from "../../PortalStore";
+import ShareModal from "../ShareModal";
 import {
   BUILTIN_DANGER_PATTERNS,
   loadGuardConfig,
@@ -138,6 +143,36 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
       .then(() => loadTerminals())
       .catch(() => message.error("设置失败"));
   };
+  // 协助共享：主人管理弹窗的目标设备
+  const [shareDevice, setShareDevice] = useState<PortalDevice | null>(null);
+  // 接入他人设备弹窗
+  const [connectOpen, setConnectOpen] = useState(false);
+  const [connCode, setConnCode] = useState("");
+  const [connPwd, setConnPwd] = useState("");
+  const [connecting, setConnecting] = useState(false);
+
+  const doConnect = () => {
+    if (!connCode.trim() || !connPwd.trim()) {
+      message.warning("请输入连接码和密码");
+      return;
+    }
+    setConnecting(true);
+    connectShare(connCode.trim(), connPwd.trim())
+      .then((res) => {
+        if (res.code === 0) {
+          message.success("接入成功，已加入设备列表");
+          setConnectOpen(false);
+          setConnCode("");
+          setConnPwd("");
+          loadDevices();
+        } else {
+          message.error(res.msg ?? "接入失败");
+        }
+      })
+      .catch(() => message.error("接入失败，请检查网络"))
+      .finally(() => setConnecting(false));
+  };
+
   // 客户端窗口内标出「本机」
   const [localId, setLocalId] = useState<string | null>(null);
   useEffect(() => {
@@ -224,39 +259,69 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
           <span>{d.hostname}</span>
           <Tag color={PLATFORM_COLOR[d.platform ?? ""] || "default"}>{d.platformDsr}</Tag>
           {d.id === localId ? <Tag color="purple">本机</Tag> : null}
-          {d.trusted ? <Tag color="green">已信任</Tag> : <Tag color="warning">已断开</Tag>}
+          {d.shared ? (
+            <Tag color="cyan">协助接入{d.owner ? ` · ${d.owner}` : ""}</Tag>
+          ) : d.trusted ? (
+            <Tag color="green">已信任</Tag>
+          ) : (
+            <Tag color="warning">已断开</Tag>
+          )}
         </div>
         <div className={styles.devMeta}>
           {d.online ? "在线" : "离线"} · {d.sessionCount} 个会话 · v{d.version}
         </div>
       </div>
       <div className={styles.devActions}>
-        {d.trusted
-          ? !d.isHub && (
-              <Button
-                size="small"
-                className={styles.untrustBtn}
-                onClick={() => untrustDevice(d.id)}
-              >
-                撤销信任
-              </Button>
-            )
-          : (
+        {d.shared ? (
+          <Button
+            size="small"
+            className={styles.untrustBtn}
+            onClick={() => {
+              disconnectShare(d.id).then((res) => {
+                if (res.code === 0) {
+                  message.success("已断开");
+                  loadDevices();
+                }
+              });
+            }}
+          >
+            断开
+          </Button>
+        ) : (
+          <>
+            {d.trusted ? (
+              <>
+                <Button size="small" onClick={() => setShareDevice(d)}>
+                  协助共享
+                </Button>
+                {!d.isHub && (
+                  <Button
+                    size="small"
+                    className={styles.untrustBtn}
+                    onClick={() => untrustDevice(d.id)}
+                  >
+                    撤销信任
+                  </Button>
+                )}
+              </>
+            ) : (
               <Button size="small" type="primary" onClick={() => trustDevice(d.id)}>
                 信任
               </Button>
             )}
-        {!d.isHub && (
-          <Popconfirm
-            title="删除该设备记录？"
-            okText="删除"
-            cancelText="取消"
-            onConfirm={() => deleteDevice(d.id)}
-          >
-            <Button size="small" danger type="text">
-              删除
-            </Button>
-          </Popconfirm>
+            {!d.isHub && (
+              <Popconfirm
+                title="删除该设备记录？"
+                okText="删除"
+                cancelText="取消"
+                onConfirm={() => deleteDevice(d.id)}
+              >
+                <Button size="small" danger type="text">
+                  删除
+                </Button>
+              </Popconfirm>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -341,11 +406,18 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
 
           {tab === "devices" && (
             <div className={styles.pane}>
-              <div className={styles.paneTitle}>设备管理</div>
+              <div className={styles.paneHead}>
+                <div className={styles.paneTitle}>设备管理</div>
+                <Button size="small" type="primary" onClick={() => setConnectOpen(true)}>
+                  接入他人设备
+                </Button>
+              </div>
               <div className={styles.hint}>
                 新设备接入<strong>默认信任</strong>：在其它电脑安装客户端并登录你的账号，
                 它会自动出现在这里并开始同步。信任开关就是同步链接的开关——
                 撤销信任即断开该设备的同步（不会被自动恢复），随时可手动重新信任。
+                需要协助别人时，在自己设备上点「协助共享」生成连接码给对方；
+                接入别人的设备则点右上角「接入他人设备」。
               </div>
               {autostart !== null && (
                 <div className={styles.section}>
@@ -537,6 +609,33 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
         </section>
       </div>
 
+      <ShareModal device={shareDevice} onClose={() => setShareDevice(null)} />
+
+      <AntModal
+        title="接入他人设备"
+        open={connectOpen}
+        onCancel={() => setConnectOpen(false)}
+        onOk={doConnect}
+        okText="接入"
+        cancelText="取消"
+        confirmLoading={connecting}
+        width={400}
+      >
+        <div style={{ fontSize: 12, color: "#7c9096", marginBottom: 12 }}>
+          输入对方在「协助共享」里生成的连接码和密码，接入后即可查看、控制对方设备的终端会话。
+        </div>
+        <Input
+          placeholder="连接码"
+          value={connCode}
+          onChange={(v) => setConnCode(v)}
+          style={{ marginBottom: 10 }}
+        />
+        <Input
+          placeholder="密码"
+          value={connPwd}
+          onChange={(v) => setConnPwd(v)}
+        />
+      </AntModal>
     </Modal>
   );
 });
