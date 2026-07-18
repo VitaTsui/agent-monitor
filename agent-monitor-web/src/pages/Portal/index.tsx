@@ -23,6 +23,7 @@ import {
 import { observer } from "mobx-react-lite";
 
 import { getAccessToken, getUserInfo, removeToken } from "@/utils/auth";
+import { clientSilentLogin, inDesktopClient } from "@/utils/clientAuth";
 import PortalStore from "./PortalStore";
 import ChatPane from "./_components/ChatPane";
 import SettingsModal from "./_components/SettingsModal";
@@ -96,10 +97,21 @@ const Portal: React.FC = observer(() => {
     };
   }, [mobileNav]);
 
-  // 前台需登录：无 token 跳登录并带回跳地址
+  // 前台需登录：无 token 时，客户端窗口先用设备令牌静默续登（客户端登录
+  // 态永不过期），浏览器（或续登失败）才跳登录页并带回跳地址
   useEffect(() => {
     if (!getAccessToken()) {
-      window.location.href = "/login?redirect=%2Fportal";
+      if (inDesktopClient()) {
+        clientSilentLogin().then((ok) => {
+          if (ok) {
+            window.location.reload();
+          } else {
+            window.location.href = "/login?redirect=%2Fportal";
+          }
+        });
+      } else {
+        window.location.href = "/login?redirect=%2Fportal";
+      }
       return;
     }
     init();

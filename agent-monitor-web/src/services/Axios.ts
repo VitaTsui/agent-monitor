@@ -128,14 +128,26 @@ const reLogin = debounce(() => {
     clearAllCookie();
     return;
   }
-  notification.error({
-    message: "登录已过期，请重新登录",
-    duration: 0.5,
-    onClose: () => {
-      safeRedirect("/login");
-      wsCache.clear();
-      clearAllCookie();
-    },
+  // 桌面客户端：会话过期不打断使用 —— 用本机设备令牌静默换新会话后原地
+  // 刷新（客户端登录态对用户永不过期）；换取失败（设备被解绑）才回登录页。
+  // 动态 import 避免与 clientAuth ← Axios 的静态循环依赖。
+  void import("@/utils/clientAuth").then(async ({ inDesktopClient, clientSilentLogin }) => {
+    if (inDesktopClient()) {
+      const ok = await clientSilentLogin();
+      if (ok) {
+        window.location.reload();
+        return;
+      }
+    }
+    notification.error({
+      message: "登录已过期，请重新登录",
+      duration: 0.5,
+      onClose: () => {
+        safeRedirect("/login");
+        wsCache.clear();
+        clearAllCookie();
+      },
+    });
   });
 });
 

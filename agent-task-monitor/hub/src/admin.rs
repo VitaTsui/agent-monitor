@@ -100,6 +100,7 @@ pub async fn login(State(state): State<SharedState>, Json(req): Json<LoginReq>) 
         .write()
         .await
         .insert(token.clone(), crate::state::Session::new(user.username.clone()));
+    state.sessions_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
     let nickname = if user.display.is_empty() {
         user.username.clone()
     } else {
@@ -152,6 +153,7 @@ pub async fn register(State(state): State<SharedState>, Json(req): Json<Register
         .write()
         .await
         .insert(token.clone(), crate::state::Session::new(user.username.clone()));
+    state.sessions_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
     ok(json!({
         "token": token,
         "userInfo": { "id": user.id, "username": user.username, "nickname": user.display, "isSuper": false }
@@ -162,20 +164,37 @@ pub async fn register(State(state): State<SharedState>, Json(req): Json<Register
 pub async fn logout(State(state): State<SharedState>, headers: axum::http::HeaderMap) -> Json<Value> {
     if let Some(t) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
         state.tokens.write().await.remove(t);
+        state.sessions_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     ok(json!(true))
 }
 
-/// 从 Authorization 头解析出用户名（无效或已过期返回 None）
+/// 从 Authorization 头解析出用户名（无效或已过期返回 None）。
+/// 滑动续期：有活动就顺延 30 天窗口（距上次续期超 1 小时才写，避免锁churn）。
 pub async fn auth_user(state: &SharedState, headers: &axum::http::HeaderMap) -> Option<String> {
     let token = headers.get("authorization").and_then(|v| v.to_str().ok())?;
     // 快路径只拿读锁；命中过期项时再拿写锁把它摘掉，顺带清理其它过期会话。
     let hit = state.tokens.read().await.get(token).cloned();
     match hit {
-        Some(s) if !s.expired() => Some(s.username),
+        Some(s) if !s.expired() => {
+            if crate::state::now_secs().saturating_sub(s.last_seen)
+                >= crate::state::SESSION_TOUCH_SECS
+            {
+                if let Some(entry) = state.tokens.write().await.get_mut(token) {
+                    entry.touch();
+                }
+                state
+                    .sessions_dirty
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Some(s.username)
+        }
         Some(_) => {
             let mut map = state.tokens.write().await;
             map.retain(|_, s| !s.expired());
+            state
+                .sessions_dirty
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             None
         }
         None => None,
@@ -448,6 +467,7 @@ pub async fn user_del(
         Ok(_) => {
             // 用户已删除：踢掉其所有在线会话
             state.tokens.write().await.retain(|_, s| s.username != username);
+            state.sessions_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
             ok(json!(true))
         }
         Err(e) => err(400, &e),
