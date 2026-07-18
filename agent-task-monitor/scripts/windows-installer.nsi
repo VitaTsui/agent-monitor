@@ -8,10 +8,13 @@ Unicode true
 ManifestDPIAware true
 
 !define APP_NAME "终端任务监控"
-!define APP_EXE "终端任务监控.exe"
+; 安装路径全英文：目录/可执行文件/卸载器均无中文，避免个别环境的编码问题；
+; 中文只用于「显示名」（快捷方式、开始菜单、卸载列表）。
+!define APP_EXE "AgentMonitor.exe"
+!define APP_EXE_LEGACY "终端任务监控.exe"
 !define APP_ID "AgentMonitor"
 !define APP_PUBLISHER "VitaHsu"
-!define APP_VERSION "0.3.5"
+!define APP_VERSION "0.3.6"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
 
 !ifndef EXE
@@ -24,7 +27,7 @@ ManifestDPIAware true
 Name "${APP_NAME}"
 OutFile "${OUT}"
 ; 用户级安装（无需管理员），默认装到本地应用目录；向导页可改
-InstallDir "$LOCALAPPDATA\${APP_NAME}"
+InstallDir "$LOCALAPPDATA\${APP_ID}"
 InstallDirRegKey HKCU "Software\${APP_ID}" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
@@ -61,24 +64,42 @@ Function BringInstallerToFront
   BringToFront
 FunctionEnd
 
+Function .onInit
+  ; 旧版本默认装在中文目录：升级时迁移到英文目录（用户自选过其它目录则尊重）
+  StrCmp $INSTDIR "$LOCALAPPDATA\${APP_NAME}" 0 +2
+    StrCpy $INSTDIR "$LOCALAPPDATA\${APP_ID}"
+FunctionEnd
+
 Section "主程序（必装）" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
-  ; 覆盖安装前先结束运行中的旧实例，避免文件占用
+  ; 覆盖安装前先结束运行中的旧实例（含旧中文名），避免文件占用
   nsExec::Exec 'taskkill /F /IM "${APP_EXE}"'
+  nsExec::Exec 'taskkill /F /IM "${APP_EXE_LEGACY}"'
   File "/oname=${APP_EXE}" "${EXE}"
-  WriteUninstaller "$INSTDIR\卸载.exe"
+  ; 过渡兼容：旧版客户端的静默更新脚本按旧中文名重启，保留一个同内容副本；
+  ; 旧「开机自启」注册表项指向旧名时也能继续工作。后续版本可移除。
+  CopyFiles /SILENT "$INSTDIR\${APP_EXE}" "$INSTDIR\${APP_EXE_LEGACY}"
+  WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "Software\${APP_ID}" "InstallDir" "$INSTDIR"
+  ; 旧版遗留清理：中文目录里的旧程序与卸载器（迁移到英文目录后不再使用）
+  Delete "$LOCALAPPDATA\${APP_NAME}\${APP_EXE_LEGACY}"
+  Delete "$LOCALAPPDATA\${APP_NAME}\卸载.exe"
+  RMDir "$LOCALAPPDATA\${APP_NAME}"
+  ; 开机自启项若已存在，改指向新路径（旧路径的程序已被清理）
+  ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}"
+  StrCmp $0 "" +2
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}" '"$INSTDIR\${APP_EXE}"'
   ; 开始菜单
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
   CreateShortCut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
-  CreateShortCut "$SMPROGRAMS\${APP_NAME}\卸载 ${APP_NAME}.lnk" "$INSTDIR\卸载.exe"
+  CreateShortCut "$SMPROGRAMS\${APP_NAME}\卸载 ${APP_NAME}.lnk" "$INSTDIR\Uninstall.exe"
   ; 「设置 → 应用」卸载入口
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "${APP_NAME}"
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\${APP_EXE}"
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "${APP_VERSION}"
   WriteRegStr HKCU "${UNINST_KEY}" "Publisher" "${APP_PUBLISHER}"
-  WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" '"$INSTDIR\卸载.exe"'
+  WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
 SectionEnd
@@ -100,8 +121,10 @@ SectionEnd
 
 Section "Uninstall"
   nsExec::Exec 'taskkill /F /IM "${APP_EXE}"'
+  nsExec::Exec 'taskkill /F /IM "${APP_EXE_LEGACY}"'
   Delete "$INSTDIR\${APP_EXE}"
-  Delete "$INSTDIR\卸载.exe"
+  Delete "$INSTDIR\${APP_EXE_LEGACY}"
+  Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
   Delete "$DESKTOP\${APP_NAME}.lnk"
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
