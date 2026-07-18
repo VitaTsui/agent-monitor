@@ -197,6 +197,7 @@ const Home: React.FC = () => {
           </a>
         </div>
         <div className={styles.clientHint}>
+          macOS 首次打开：右键 App →「打开」通过 Gatekeeper（应用未上架公证）。
           安装后在客户端里登录你的账号，本机即自动绑定并建立链接——
           网页、移动端与其他客户端上立刻可见这台电脑的终端会话（设备管理里可随时断开）。
         </div>

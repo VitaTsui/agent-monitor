@@ -288,12 +288,26 @@ async fn run_hub(state: SharedState) -> Result<()> {
 }
 
 fn hostname() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".into())
+    // Windows：GUI 子系统程序拉起控制台命令会闪黑窗，直接读环境变量即可
+    #[cfg(windows)]
+    {
+        if let Ok(n) = std::env::var("COMPUTERNAME") {
+            let n = n.trim().to_string();
+            if !n.is_empty() {
+                return n;
+            }
+        }
+        return "unknown".into();
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("hostname")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".into())
+    }
 }
 
 /// 用户给电脑设置的设备名（macOS「关于本机」的名称 / Linux PRETTY_HOSTNAME），

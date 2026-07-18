@@ -41,6 +41,14 @@ desktop = ["dep:tauri"]
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+# 启动失败/缺 WebView2 时的系统对话框与打开下载页（GUI 程序无控制台可用）
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+] }
+
 [profile.release]
 lto = true
 strip = true
