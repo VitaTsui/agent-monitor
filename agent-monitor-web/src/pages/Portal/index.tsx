@@ -414,16 +414,21 @@ const Portal: React.FC = observer(() => {
                                 }`}
                               />
                               <div className={styles.sessBody}>
-                                <ScrollText
-                                  className={styles.sessName}
-                                  active={openIds.includes(t.id ?? "")}
-                                  plain={t.title || t.prompt || t.projectName || "新会话"}
-                                  text={t.title || t.prompt || t.projectName || "新会话"}
-                                />
-                                <div className={styles.sessSub}>
-                                  {/* 组标题已是项目名，这里给终端/IDE 来源 + 状态 */}
-                                  {t.ideDsr && t.ideDsr !== "—" ? `${t.ideDsr} · ` : ""}
-                                  {STATUS_LABEL[t.status ?? ""] ?? t.statusDsr}
+                                {/* 标题 + 右侧状态徽标同一行；来源等杂项不再展示 */}
+                                <div className={styles.sessRow}>
+                                  <ScrollText
+                                    className={styles.sessName}
+                                    active={openIds.includes(t.id ?? "")}
+                                    plain={t.title || t.prompt || t.projectName || "新会话"}
+                                    text={t.title || t.prompt || t.projectName || "新会话"}
+                                  />
+                                  <span
+                                    className={`${styles.sessStatus} ${
+                                      styles[t.status ?? ""] ?? ""
+                                    }`}
+                                  >
+                                    {STATUS_LABEL[t.status ?? ""] ?? t.statusDsr}
+                                  </span>
                                 </div>
                               </div>
                               <Tooltip title="拆分显示">
