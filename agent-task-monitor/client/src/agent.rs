@@ -1,5 +1,5 @@
 //! agent 模式：扫描本机，把任务快照上报给 hub，并执行 hub 下发的控制命令。
-use crate::model::{ControlCmd, ReportPayload, Task};
+use am_core::model::{ControlCmd, ReportPayload, Task};
 use crate::state::SharedState;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -7,7 +7,7 @@ use std::collections::HashMap;
 /// 活跃任务才携带消息缓存，且仅在会话文件变化时重读
 struct MsgCache {
     /// session_id → (mtime_ms, messages)
-    inner: HashMap<String, (u64, Vec<crate::model::MessageBrief>)>,
+    inner: HashMap<String, (u64, Vec<am_core::model::MessageBrief>)>,
 }
 
 pub async fn report_loop(state: SharedState, hub_url: String) {
@@ -25,7 +25,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     // 未被 hub 信任前，只发送心跳（设备登记），绝不上报任何会话/终端数据
     let mut trusted = false;
     // 待随下一轮上报回传的 git 对比结果
-    let mut pending_git_results: Vec<crate::model::GitResult> = Vec::new();
+    let mut pending_git_results: Vec<am_core::model::GitResult> = Vec::new();
 
     loop {
         // 配对阶段：还没有设备令牌（也没配全局令牌）时，不上报，只轮询配对状态。
@@ -150,6 +150,12 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                             *slot = next;
                         }
                     }
+                    // 额度上限由 hub 下发，本地扫描按它执行超额自动暂停/恢复
+                    if let Some(limit) = body.pointer("/data/quotaLimit").and_then(Value::as_u64) {
+                        state
+                            .quota_limit
+                            .store(limit, std::sync::atomic::Ordering::Relaxed);
+                    }
                     let now_trusted = body
                         .pointer("/data/trusted")
                         .and_then(Value::as_bool)
@@ -172,7 +178,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         execute(&state, cmd, &known_pids).await;
                     }
                     // 待写入文件（hub 下发的文件传输）
-                    let files: Vec<crate::model::FileTransfer> = body
+                    let files: Vec<am_core::model::FileTransfer> = body
                         .pointer("/data/files")
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
@@ -180,7 +186,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         write_transfer(&f);
                     }
                     // git 对比请求：本机跑 git，结果随下一轮上报回传
-                    let git_queries: Vec<crate::model::GitQuery> = body
+                    let git_queries: Vec<am_core::model::GitQuery> = body
                         .pointer("/data/gitQueries")
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
@@ -190,10 +196,10 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         // 否则大仓库的一次 diff 就把上报循环所在的 worker 线程占住。
                         let cwd = q.cwd.clone();
                         let overview =
-                            tokio::task::spawn_blocking(move || crate::gitdiff::git_overview(&cwd))
+                            tokio::task::spawn_blocking(move || am_core::gitdiff::git_overview(&cwd))
                                 .await
                                 .unwrap_or_default();
-                        pending_git_results.push(crate::model::GitResult {
+                        pending_git_results.push(am_core::model::GitResult {
                             task_id: q.task_id,
                             overview,
                         });
@@ -320,7 +326,7 @@ async fn attach_messages(state: &SharedState, tasks: &mut [Task], cache: &mut Ms
 }
 
 /// 写入 hub 下发的文件到本机目标目录
-fn write_transfer(f: &crate::model::FileTransfer) {
+fn write_transfer(f: &am_core::model::FileTransfer) {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     let Ok(bytes) = B64.decode(f.content_b64.as_bytes()) else {
         tracing::warn!("文件内容解码失败: {}", f.filename);
@@ -366,11 +372,11 @@ async fn execute(state: &SharedState, cmd: ControlCmd, known_pids: &std::collect
         return;
     }
     // 输入注入（发布任务）单独处理
-    if matches!(cmd.action, crate::model::ControlAction::Input) {
+    if matches!(cmd.action, am_core::model::ControlAction::Input) {
         let text = cmd.text.unwrap_or_default();
         // send_input 在 macOS 上走 osascript，会遍历 Terminal/iTerm 的每个窗口与标签页，
         // 常态就要数秒，终端处于模态/无响应时还可能一直挂着 —— 绝不能占住 async worker。
-        let res = tokio::task::spawn_blocking(move || crate::process::send_input(pid, &text)).await;
+        let res = tokio::task::spawn_blocking(move || am_core::process::send_input(pid, &text)).await;
         match res {
             Ok(Ok(_)) => tracing::info!("执行 hub 输入命令: 任务 {} pid={pid}", cmd.task_id),
             Ok(Err(e)) => tracing::warn!("执行 hub 输入命令失败: {e}"),
@@ -378,13 +384,13 @@ async fn execute(state: &SharedState, cmd: ControlCmd, known_pids: &std::collect
         }
         return;
     }
-    match crate::process::control(pid, cmd.action) {
+    match am_core::process::control(pid, cmd.action) {
         Ok(label) => {
             // 加锁顺序须与 enforce_quota 一致（auto_paused → paused），反序会死锁。
             let mut auto = state.auto_paused.write().await;
             let mut paused = state.paused.write().await;
             match cmd.action {
-                crate::model::ControlAction::Pause => {
+                am_core::model::ControlAction::Pause => {
                     paused.insert(pid);
                 }
                 _ => {

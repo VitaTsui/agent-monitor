@@ -1,0 +1,42 @@
+[package]
+name = "am-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "agent-monitor 桌面客户端：本机 AI 代理会话上报 + Tauri 窗口/托盘"
+
+[[bin]]
+# 保持可执行名与 .app 的 CFBundleExecutable 一致
+name = "agent-monitor"
+path = "src/main.rs"
+
+[features]
+# 桌面 GUI（窗口 + 托盘）。默认开启；纯后台构建可 --no-default-features。
+default = ["desktop"]
+desktop = []
+
+[dependencies]
+am-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rand.workspace = true
+uuid.workspace = true
+reqwest.workspace = true
+base64 = "0.22"
+tauri = { version = "2", features = ["tray-icon"] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+] }
