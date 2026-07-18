@@ -32,7 +32,12 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
         // 用户在客户端窗口里登录后，网页会自动认领，这里领到令牌即转入正常上报。
         let has_device_token = state.device_token.read().await.is_some();
         if !has_device_token && legacy_token.is_none() {
-            if let Some((code, pair_token)) = state.pair_info.read().await.clone() {
+            // 先克隆再解构：if-let 直接写 read().await.clone() 的话，读锁临时量会
+            // 存活到整个 if/else 结束 —— else 里的 start_pairing 要拿写锁，同任务
+            // 读锁未放即等写锁 = 自我死锁；主线程配对引导的 write().await 也会被
+            // 这把永不释放的读锁卡死，窗口和托盘永远出不来（Windows「只有进程」即此）。
+            let pair = state.pair_info.read().await.clone();
+            if let Some((code, pair_token)) = pair {
                 match client
                     .get(format!("{hub}/monitor/pair/status"))
                     .query(&[("code", code.as_str()), ("pairToken", pair_token.as_str())])
