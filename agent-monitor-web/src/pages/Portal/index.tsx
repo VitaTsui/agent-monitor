@@ -132,6 +132,18 @@ const Portal: React.FC = observer(() => {
   useApkUpdateCheck();
   // 客户端窗口内右下角的新版本提醒（浏览器里空转）
   useClientUpdateToast();
+  // 客户端窗口内：Cmd/Ctrl+R 刷新页面（webview 默认不绑，站点发新版可手动拉最新）
+  useEffect(() => {
+    if (!inDesktopClient()) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "r" || e.key === "R")) {
+        e.preventDefault();
+        window.location.reload();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // 设备配对认领：客户端窗口带 ?pair=码 打开本页，登录后自动把那台电脑
   // 绑定到当前账号（绑定即信任），页面随即出现该设备 —— 用户零手工配置。
