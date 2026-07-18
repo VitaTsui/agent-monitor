@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 
 import { Button, Input, Modal, Switch } from "@hsu-react/ui";
-import { Badge, Empty, Popconfirm, Tag, message } from "antd";
+import { Badge, Empty, Modal as AntModal, Popconfirm, Tag, message } from "antd";
 import {
   CloseOutlined,
   CodeOutlined,
@@ -75,6 +75,42 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
       .catch(() => setTerminals([]));
   };
 
+  // 客户端版本与更新（仅客户端窗口内）
+  const [clientVer, setClientVer] = useState<{ current: string; latest: string | null } | null>(
+    null,
+  );
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+
+  const loadClientVersion = () => {
+    tauriInvoke?.("update_status")
+      .then((v) => setClientVer(v as { current: string; latest: string | null }))
+      .catch(() => setClientVer(null));
+  };
+
+  const checkUpdate = () => {
+    setCheckingUpdate(true);
+    tauriInvoke?.("update_status")
+      .then((v) => {
+        const s = v as { current: string; latest: string | null };
+        setClientVer(s);
+        if (s.latest) {
+          AntModal.confirm({
+            title: `发现新版本 v${s.latest}`,
+            content: `当前版本 v${s.current}。更新将自动完成并重启客户端。`,
+            okText: "立即更新",
+            cancelText: "稍后",
+            onOk: () => {
+              tauriInvoke?.("update_start").catch(() => message.error("启动更新失败"));
+            },
+          });
+        } else {
+          message.success(`已是最新版本（v${s.current}）`);
+        }
+      })
+      .catch(() => message.error("检查更新失败"))
+      .finally(() => setCheckingUpdate(false));
+  };
+
   const toggleTerminal = (key: string, excluded: boolean) => {
     tauriInvoke?.("terminal_set_excluded", { key, excluded })
       .then(() => loadTerminals())
@@ -92,6 +128,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
         .then((v) => setAutostart(Boolean(v)))
         .catch(() => setAutostart(null));
       loadTerminals();
+      loadClientVersion();
     }
     // tauriInvoke 是宿主环境常量，不会在会话中途变化
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -299,6 +336,25 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                       </div>
                     </div>
                     <Switch checked={autostart} onChange={toggleAutostart} />
+                  </div>
+                  <div className={styles.device}>
+                    <div className={styles.devInfo}>
+                      <div className={styles.devName}>
+                        客户端版本
+                        {clientVer ? (
+                          <Tag color={clientVer.latest ? "warning" : "green"}>
+                            v{clientVer.current}
+                            {clientVer.latest ? ` → v${clientVer.latest} 可用` : " · 最新"}
+                          </Tag>
+                        ) : null}
+                      </div>
+                      <div className={styles.devMeta}>
+                        更新会自动下载安装并重启客户端
+                      </div>
+                    </div>
+                    <Button size="small" loading={checkingUpdate} onClick={checkUpdate}>
+                      检查更新
+                    </Button>
                   </div>
                   <div className={styles.termScope}>
                     <div className={styles.termScopeTitle}>监控范围</div>

@@ -78,7 +78,6 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
     if (m.role === "tool") {
       return (
         <div key={key} className={styles.toolLine}>
-          <span className={styles.toolDot}>⏺</span>
           <span className={styles.toolText}>{m.content}</span>
         </div>
       );
@@ -120,7 +119,6 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
     // assistant 文本
     return (
       <div key={key} className={styles.assistantLine}>
-        <span className={styles.assistantDot}>⏺</span>
         <div className={styles.assistantText}>{m.content}</div>
       </div>
     );
@@ -175,7 +173,8 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                   {visibleItems.map(({ m, k }) => renderItem(m, k))}
                   {inProgress ? (
                     <div className={styles.working}>
-                      <span className={styles.workingStar}>✳</span>
+                      {/* 只有正在执行的条目带（会动的）圆点，其余内容与终端一致不加点 */}
+                      <span className={styles.workingDot} />
                       <span className={styles.workingText}>
                         执行中…
                         {lastTool ? (
