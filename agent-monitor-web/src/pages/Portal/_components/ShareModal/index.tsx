@@ -164,10 +164,15 @@ const ShareModal: React.FC<ShareModalProps> = ({ device, onClose }) => {
               )}
             </div>
             <div className={styles.actions}>
-              <Button size="small" onClick={generate} loading={loading}>
+              <Button
+                size="small"
+                className={styles.regenBtn}
+                onClick={generate}
+                loading={loading}
+              >
                 重新生成
               </Button>
-              <Button size="small" danger onClick={stop}>
+              <Button size="small" className={styles.stopBtn} onClick={stop}>
                 停止共享
               </Button>
             </div>
@@ -211,7 +216,7 @@ const ShareModal: React.FC<ShareModalProps> = ({ device, onClose }) => {
             {guests.map((g) => (
               <div key={g} className={styles.guestRow}>
                 <span>{g}</span>
-                <Button size="small" danger type="text" onClick={() => kick(g)}>
+                <Button size="small" className={styles.kickBtn} type="text" onClick={() => kick(g)}>
                   移除
                 </Button>
               </div>
