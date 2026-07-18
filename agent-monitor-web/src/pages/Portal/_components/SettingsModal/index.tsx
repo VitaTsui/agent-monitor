@@ -7,6 +7,7 @@ import {
   CodeOutlined,
   InfoCircleOutlined,
   LaptopOutlined,
+  LinkOutlined,
   LogoutOutlined,
   SafetyOutlined,
   UserOutlined,
@@ -408,7 +409,13 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
             <div className={styles.pane}>
               <div className={styles.paneHead}>
                 <div className={styles.paneTitle}>设备管理</div>
-                <Button size="small" type="primary" onClick={() => setConnectOpen(true)}>
+                <Button
+                  size="small"
+                  type="primary"
+                  className={styles.connectBtn}
+                  icon={<LinkOutlined />}
+                  onClick={() => setConnectOpen(true)}
+                >
                   接入他人设备
                 </Button>
               </div>
@@ -620,6 +627,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
         cancelText="取消"
         confirmLoading={connecting}
         width={400}
+        centered
       >
         <div style={{ fontSize: 12, color: "#7c9096", marginBottom: 12 }}>
           输入对方在「协助共享」里生成的连接码和密码，接入后即可查看、控制对方设备的终端会话。

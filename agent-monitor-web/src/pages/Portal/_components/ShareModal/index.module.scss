@@ -2,38 +2,45 @@
   .hint {
     font-size: 12px;
     color: #7c9096;
-    line-height: 1.6;
-    margin-bottom: 14px;
+    line-height: 1.7;
+    margin-bottom: 16px;
   }
 
-  .codeCard,
+  .codeCard {
+    padding: 4px 0;
+  }
+
   .genCard {
-    padding: 14px;
-    border: 1px solid rgba(36, 61, 66, 0.1);
-    border-radius: 12px;
+    padding: 16px;
+    border: 1px solid rgba(36, 61, 66, 0.08);
+    border-radius: 14px;
     background: #f7fbfc;
   }
 
+  // 连接码 / 密码：整行卡片，值居中大字，右侧复制图标
   .codeRow {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 4px 0;
+    gap: 12px;
+    padding: 12px 16px;
+    border: 1px solid rgba(15, 155, 173, 0.18);
+    border-radius: 12px;
+    background: linear-gradient(180deg, #f2fbfc 0%, #eaf7f9 100%);
+    margin-bottom: 10px;
 
     .codeLabel {
       flex: none;
-      width: 40px;
       font-size: 12px;
       color: #7c9096;
     }
 
     .codeValue {
       flex: 1;
-      font-size: 20px;
+      font-size: 24px;
       font-weight: 700;
-      letter-spacing: 2px;
+      letter-spacing: 3px;
       font-family: "SF Mono", Menlo, Consolas, monospace;
-      color: #0f9bad;
+      color: #0a6b79;
     }
 
     .codeMuted {
@@ -41,26 +48,45 @@
       font-size: 12px;
       color: #a6b4b8;
     }
+
+    .copyBtn {
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      color: #0f9bad;
+      cursor: pointer;
+      transition: background 0.15s;
+
+      &:hover {
+        background: rgba(15, 155, 173, 0.12);
+      }
+    }
   }
 
   .codeMeta {
-    margin: 8px 0;
+    margin: 6px 0 14px;
   }
 
   .actions {
     display: flex;
     gap: 8px;
-    margin-top: 4px;
   }
 
   .tempHint {
     margin-top: 12px;
     font-size: 12px;
     color: #7c9096;
+    line-height: 1.6;
   }
 
   .guests {
-    margin-top: 16px;
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid rgba(36, 61, 66, 0.08);
 
     .guestsTitle {
       font-size: 13px;
@@ -72,9 +98,9 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 6px 10px;
+      padding: 7px 12px;
       border: 1px solid rgba(36, 61, 66, 0.09);
-      border-radius: 8px;
+      border-radius: 10px;
       margin-bottom: 6px;
       font-size: 13px;
     }
