@@ -327,7 +327,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                                     if dev_trusted {
                                         "终端任务监控 · 已连接（已信任）".to_string()
                                     } else {
-                                        "终端任务监控 · 已连接（待信任）".to_string()
+                                        "终端任务监控 · 已连接（同步已断开）".to_string()
                                     }
                                 } else {
                                     // 同状态行：配置错误要说清楚，别和断网混为一谈
@@ -414,7 +414,7 @@ fn build_tray_menu<R: tauri::Runtime>(
             if trusted {
                 "● 已连接 · 已信任".to_string()
             } else {
-                "● 已连接 · 待信任（去网页信任本设备）".to_string()
+                "● 已连接 · 同步已断开（在设备管理里重新信任）".to_string()
             }
         } else {
             // 被 hub 拒绝（令牌错、machineId 冲突…）与网络不通要分开说：

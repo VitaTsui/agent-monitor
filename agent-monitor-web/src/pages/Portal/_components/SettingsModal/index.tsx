@@ -197,7 +197,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
           <span>{d.hostname}</span>
           <Tag color={PLATFORM_COLOR[d.platform ?? ""] || "default"}>{d.platformDsr}</Tag>
           {d.isHub ? <Tag color="purple">本机</Tag> : null}
-          {d.trusted ? <Tag color="green">已信任</Tag> : <Tag color="warning">待信任</Tag>}
+          {d.trusted ? <Tag color="green">已信任</Tag> : <Tag color="warning">已断开</Tag>}
         </div>
         <div className={styles.devMeta}>
           {d.online ? "在线" : "离线"} · {d.sessionCount} 个会话 · v{d.version}
@@ -325,9 +325,9 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
             <div className={styles.pane}>
               <div className={styles.paneTitle}>设备管理</div>
               <div className={styles.hint}>
-                只有<strong>信任</strong>的设备才会被监控；信任开关就是同步链接的开关，
-                撤销信任即断开该设备的同步，随时可恢复。在其它电脑安装客户端并登录
-                你的账号，它就会自动出现在这里（登录即自动信任）。
+                新设备接入<strong>默认信任</strong>：在其它电脑安装客户端并登录你的账号，
+                它会自动出现在这里并开始同步。信任开关就是同步链接的开关——
+                撤销信任即断开该设备的同步（不会被自动恢复），随时可手动重新信任。
               </div>
               {autostart !== null && (
                 <div className={styles.section}>
@@ -345,7 +345,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
               )}
               {pending.length > 0 && (
                 <div className={styles.section}>
-                  <div className={styles.sectionTitle}>待信任（{pending.length}）</div>
+                  <div className={styles.sectionTitle}>未信任 · 已断开（{pending.length}）</div>
                   {pending.map(renderDevice)}
                 </div>
               )}
