@@ -141,6 +141,8 @@ export interface PortalDevice {
   runningCount: number;
   owner: string | null;
   trusted: boolean;
+  /** 是否是「他人协助码共享给我」的设备 */
+  shared: boolean;
 }
 
 export const getPortalDevices = async () => {
@@ -157,6 +159,60 @@ export const untrustPortalDevice = async (id: string) => {
 
 export const deletePortalDevice = async (id: string) => {
   return await del(`/monitor/devices/${id}`);
+};
+
+// ---------- 协助共享（跨用户接入） ----------
+
+export interface ShareInfo {
+  code: string;
+  temporary: boolean;
+  expiresAt: number;
+}
+
+export interface ShareCreated extends ShareInfo {
+  password: string;
+}
+
+/** 查看本设备当前协助码（主人） */
+export const getShareInfo = async (id: string) => {
+  return await get<ShareInfo | null>(`/monitor/share/${id}`);
+};
+
+/** 生成/刷新协助码（主人）；temporary=true 用系统生成的临时密码 */
+export const createShare = async (
+  id: string,
+  temporary: boolean,
+  password?: string,
+) => {
+  return await post<ShareCreated>(`/monitor/share/${id}`, { temporary, password });
+};
+
+/** 停止共享（主人） */
+export const revokeShare = async (id: string) => {
+  return await del(`/monitor/share/${id}`);
+};
+
+/** 当前接入的访客（主人） */
+export const getShareGuests = async (id: string) => {
+  return await get<ListRes<string>>(`/monitor/share/${id}/guests`);
+};
+
+/** 踢掉访客（主人） */
+export const kickShareGuest = async (id: string, user: string) => {
+  return await post(`/monitor/share/${id}/kick`, { user });
+};
+
+/** 访客用连接码 + 密码接入他人设备 */
+export const connectShare = async (code: string, password: string) => {
+  return await post<{ machineId: string }>("/monitor/share/connect", {
+    code,
+    password,
+  });
+};
+
+/** 访客断开自己的接入 */
+export const disconnectShare = async (machineId: string) => {
+  return await post("/monitor/share/disconnect", { machineId });
 };
 
 // ---------- 额度（5h token 上限）----------

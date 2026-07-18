@@ -300,6 +300,7 @@ impl AppState {
                         .count(),
                     owner: meta.owner,
                     trusted: meta.trusted,
+                    shared: false,
                 }
             })
             .collect();
@@ -327,6 +328,35 @@ impl AppState {
                 running_count: 0,
                 owner: meta.owner.clone(),
                 trusted: meta.trusted,
+                shared: false,
+                id,
+            });
+        }
+        // 协助码共享给我的（他人）设备：作为只读+可控条目并入列表
+        let mine: std::collections::HashSet<String> = out.iter().map(|m| m.id.clone()).collect();
+        for (id, meta) in registry.shared_to(username) {
+            if mine.contains(&id) {
+                continue;
+            }
+            let live = machines.get(&id);
+            let online = live
+                .map(|e| e.last_report.elapsed().as_secs() < OFFLINE_AFTER_SECS)
+                .unwrap_or(false);
+            out.push(MachineInfo {
+                hostname: if meta.hostname.is_empty() { id.clone() } else { meta.hostname.clone() },
+                platform_dsr: am_core::model::platform_dsr(&meta.platform),
+                platform: meta.platform.clone(),
+                version: meta.version.clone(),
+                online,
+                is_hub: false,
+                last_report_at: None,
+                session_count: live.map(|e| e.tasks.len()).unwrap_or(0),
+                running_count: live
+                    .map(|e| e.tasks.iter().filter(|t| online && t.status == TaskStatus::Running).count())
+                    .unwrap_or(0),
+                owner: meta.owner.clone(),
+                trusted: true,
+                shared: true,
                 id,
             });
         }

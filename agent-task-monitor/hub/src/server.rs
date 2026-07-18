@@ -74,6 +74,12 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/devices/:id/untrust", post(untrust_device))
         .route("/monitor/devices/:id", axum::routing::delete(delete_device))
         .route("/monitor/devices/:id/upload", post(upload_file))
+        // ---- 协助共享（跨用户设备接入，类似远程控制）----
+        .route("/monitor/share/:id", get(share_info).post(share_create).delete(share_revoke))
+        .route("/monitor/share/:id/guests", get(share_guests))
+        .route("/monitor/share/:id/kick", post(share_kick))
+        .route("/monitor/share/connect", post(share_connect))
+        .route("/monitor/share/disconnect", post(share_disconnect))
         // ---- 设备配对（注册+安装即可用，无需管理员发令牌）----
         .route("/monitor/pair/start", post(pair_start))
         .route("/monitor/pair/claim", post(pair_claim))
@@ -798,6 +804,161 @@ async fn delete_device(
     state.machines.write().await.remove(&id);
     state.registry.write().await.delete_device(&id);
     ok(json!({ "result": "已删除" }))
+}
+
+// ---------- 协助共享 ----------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareCreateReq {
+    /// true=临时密码（系统生成，30 分钟过期）；false=固定密码
+    temporary: bool,
+    #[serde(default)]
+    password: String,
+}
+
+/// GET /monitor/share/:id —— 查看本设备当前协助码（主人）
+async fn share_info(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Json<Value> {
+    if let Err(e) = ensure_owner(&state, &headers, &id).await {
+        return e;
+    }
+    match state.registry.read().await.share_info(&id) {
+        Some((code, temporary, expires_at)) => {
+            ok(json!({ "code": code, "temporary": temporary, "expiresAt": expires_at }))
+        }
+        None => ok(json!(null)),
+    }
+}
+
+/// POST /monitor/share/:id —— 生成/刷新协助码（主人）。返回连接码 + 明文密码。
+async fn share_create(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<ShareCreateReq>,
+) -> Json<Value> {
+    if let Err(e) = ensure_owner(&state, &headers, &id).await {
+        return e;
+    }
+    let fixed = (!req.temporary).then_some(req.password.as_str());
+    // 先 clone 出结果再释放写锁：写锁临时量若活到 match 结束，Ok 分支里
+    // 再取读锁 share_info 会自我死锁（同 if-let 锁跨块陷阱）。
+    let created = state.registry.write().await.create_share(&id, req.temporary, fixed);
+    match created {
+        Ok((code, password)) => {
+            let expires_at = state.registry.read().await.share_info(&id).map(|(_, _, e)| e).unwrap_or(0);
+            ok(json!({
+                "code": code,
+                "password": password,
+                "temporary": req.temporary,
+                "expiresAt": expires_at,
+            }))
+        }
+        Err(e) => err(400, &e),
+    }
+}
+
+/// DELETE /monitor/share/:id —— 撤销协助码 + 踢出所有访客（主人）
+async fn share_revoke(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Json<Value> {
+    if let Err(e) = ensure_owner(&state, &headers, &id).await {
+        return e;
+    }
+    state.registry.write().await.revoke_share(&id);
+    ok(json!({ "result": "已停止共享" }))
+}
+
+/// GET /monitor/share/:id/guests —— 当前接入的访客（主人）
+async fn share_guests(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Json<Value> {
+    if let Err(e) = ensure_owner(&state, &headers, &id).await {
+        return e;
+    }
+    let list = state.registry.read().await.share_guests(&id);
+    ok(json!({ "list": list }))
+}
+
+#[derive(Deserialize)]
+struct KickReq {
+    user: String,
+}
+
+/// POST /monitor/share/:id/kick —— 踢掉某访客（主人）
+async fn share_kick(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<KickReq>,
+) -> Json<Value> {
+    if let Err(e) = ensure_owner(&state, &headers, &id).await {
+        return e;
+    }
+    state.registry.write().await.kick_share_user(&id, &req.user);
+    ok(json!({ "result": "已移除" }))
+}
+
+#[derive(Deserialize)]
+struct ShareConnectReq {
+    code: String,
+    password: String,
+}
+
+/// POST /monitor/share/connect —— 访客用连接码 + 密码接入他人设备
+async fn share_connect(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<ShareConnectReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    // 密码爆破节流（复用登录节流器，按连接码计账）
+    let delay = state.login_throttle.read().await.delay_for(&req.code);
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+    // 先释放注册表写锁再动 login_throttle，避免跨锁持有
+    let res = state.registry.write().await.connect_share(&req.code, &req.password, &user);
+    match res {
+        Ok(machine_id) => {
+            state.login_throttle.write().await.record_success(&req.code);
+            tracing::info!("用户 {user} 通过协助码接入设备 {machine_id}");
+            ok(json!({ "machineId": machine_id, "result": "接入成功" }))
+        }
+        Err(e) => {
+            state.login_throttle.write().await.record_fail(&req.code);
+            err(400, &e)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareDisconnectReq {
+    machine_id: String,
+}
+
+/// POST /monitor/share/disconnect —— 访客主动断开自己的接入
+async fn share_disconnect(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<ShareDisconnectReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    state.registry.write().await.disconnect_share(&req.machine_id, &user);
+    ok(json!({ "result": "已断开" }))
 }
 
 /// POST /monitor/devices/:id/upload —— 传输文件到该设备的指定目录。
