@@ -962,20 +962,52 @@ fn alert_box(title: &str, text: &str) {
     }
 }
 
-/// 下载 hub 上的文件到本地路径（自更新专用；产物文件名均为 ASCII）
+/// 下载 hub 上的文件到本地路径（自更新专用；产物文件名均为 ASCII）。
+/// 流式下载 + 进度日志 + 30s 无数据即报错：跨境网络常见「连上了但一直
+/// 不来数据」，整体超时要干等 5 分钟且全程无反馈（实际用户日志：三次
+/// 「开始自更新」后连下载完成都没有）——停滞必须快速可见地失败。
 fn download_to(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let bytes = rt.block_on(async {
-        let resp = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .build()?
-            .get(url)
-            .send()
-            .await?;
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .build()?;
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            client.get(url).send(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("连接更新服务器超时（30s）"))??;
         if !resp.status().is_success() {
             anyhow::bail!("下载失败 HTTP {}", resp.status());
         }
-        Ok::<_, anyhow::Error>(resp.bytes().await?)
+        let total = resp.content_length().unwrap_or(0);
+        ulog(&format!("[update] 开始下载 {} 字节", total));
+        let mut resp = resp;
+        let mut out: Vec<u8> = Vec::with_capacity(total as usize);
+        let mut last_mark = 0usize;
+        loop {
+            let chunk = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                resp.chunk(),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "下载停滞（30s 无数据，已收 {}/{} 字节），请稍后重试或到官网手动下载",
+                    out.len(),
+                    total
+                )
+            })??;
+            let Some(chunk) = chunk else { break };
+            out.extend_from_slice(&chunk);
+            // 每 2MB 记一次进度，网络问题可从日志直接定位
+            if out.len() - last_mark >= 2 * 1024 * 1024 {
+                last_mark = out.len();
+                ulog(&format!("[update] 已下载 {}/{} 字节", out.len(), total));
+            }
+        }
+        Ok::<_, anyhow::Error>(out)
     })?;
     if bytes.len() < 1024 * 1024 {
         anyhow::bail!("更新包异常（{} 字节），已取消", bytes.len());
