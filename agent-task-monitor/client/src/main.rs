@@ -97,6 +97,12 @@ fn main() -> Result<()> {
     };
     let hub_url = hub_url.trim_end_matches('/').to_string();
 
+    // 诊断入口：AM_SELF_UPDATE=1 直接跑一遍自更新流程并打印结果（支持排查用）
+    #[cfg(feature = "desktop")]
+    if std::env::var("AM_SELF_UPDATE").ok().as_deref() == Some("1") {
+        desktop::self_update_probe(&hub_url);
+    }
+
     // 上报服务在后台线程的 tokio runtime 中运行（前台/后台/缩到托盘均持续同步）
     let svc_state = state.clone();
     let svc_hub = hub_url.clone();
