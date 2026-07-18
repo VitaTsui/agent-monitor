@@ -851,7 +851,7 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     // cmd 宿主不受影响，能等安装结束再拉起新版本。
     let bat = tmp.join("agent-monitor-update.bat");
     let script = format!(
-        "@echo off\r\nchcp 65001 >nul\r\n\"{}\" /S\r\nset \"DIR=\"\r\nfor /f \"skip=2 tokens=2,*\" %%a in ('reg query \"HKCU\\Software\\AgentMonitor\" /v \"InstallDir\" 2^>nul') do set \"DIR=%%b\"\r\nif not defined DIR set \"DIR=%LOCALAPPDATA%\\终端任务监控\"\r\nstart \"\" \"%DIR%\\终端任务监控.exe\"\r\ndel \"%~f0\"\r\n",
+        "@echo off\r\nchcp 65001 >nul\r\n\"{}\" /S\r\nset \"DIR=\"\r\nfor /f \"skip=2 tokens=2,*\" %%a in ('reg query \"HKCU\\Software\\AgentMonitor\" /v \"InstallDir\" 2^>nul') do set \"DIR=%%b\"\r\nif not defined DIR set \"DIR=%LOCALAPPDATA%\\AgentMonitor\"\r\nif exist \"%DIR%\\AgentMonitor.exe\" (start \"\" \"%DIR%\\AgentMonitor.exe\") else (start \"\" \"%DIR%\\终端任务监控.exe\")\r\ndel \"%~f0\"\r\n",
         installer.display()
     );
     std::fs::write(&bat, script.as_bytes())?;
