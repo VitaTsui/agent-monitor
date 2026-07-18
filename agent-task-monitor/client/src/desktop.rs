@@ -264,6 +264,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                             });
                             show_main_with_pair(app, pair);
                         }
+                        "refresh" => reload_main(app),
                         "browser" => open_external(&format!("{web_base_menu}/portal")),
                         // 更新推送入口：打开官网「客户端」下载区
                         "update" => spawn_self_update(app.clone(), web_base_menu.clone()),
@@ -420,6 +421,14 @@ fn build_tray_menu<R: tauri::Runtime>(
 ) -> tauri::Result<Menu<R>> {
     let sep = || PredefinedMenuItem::separator(manager);
     let show = MenuItem::with_id(manager, "show", "显示窗口", true, None::<&str>)?;
+    // 刷新界面：webview 首次加载后不会自动更新，站点发新版需手动刷新（快捷键 Cmd/Ctrl+R）
+    let refresh = MenuItem::with_id(
+        manager,
+        "refresh",
+        "刷新界面",
+        true,
+        Some(if cfg!(target_os = "macos") { "Cmd+R" } else { "Ctrl+R" }),
+    )?;
     let browser = MenuItem::with_id(manager, "browser", "在浏览器打开", true, None::<&str>)?;
     let scope = build_scope_submenu(manager, state)?;
     // 关闭窗口的行为：勾选=最小化到托盘（后台继续跑），不勾=直接退出
@@ -483,6 +492,7 @@ fn build_tray_menu<R: tauri::Runtime>(
         menu.append(&sep()?)?;
     }
     menu.append(&show)?;
+    menu.append(&refresh)?;
     menu.append(&browser)?;
     menu.append(&sep()?)?;
     menu.append(&close_to_tray)?;
@@ -776,6 +786,14 @@ fn set_autostart(enable: bool) {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let _ = (enable, target);
+    }
+}
+
+/// 刷新主窗口（重载远端页面）：站点发新版后拉取最新前端。
+/// 用 location.reload 而非 navigate —— 保留当前路由与登录态。
+fn reload_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.eval("location.reload()");
     }
 }
 
