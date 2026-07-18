@@ -43,12 +43,20 @@ impl ProcessScanner {
             };
             let (ide, ide_name) = self.detect_ide(*pid);
             let tty = tty_path_of(pid.as_u32()).unwrap_or_default();
-            // 只监控「终端会话」：unix 上没有控制终端（TTY）的代理进程是
-            // IDE 插件/后台服务 —— 典型如 Cursor 的 Codex 插件常驻进程，
-            // 用户并没有开任何 codex 终端会话，却会被采集成一条「codex 终端」。
-            // Windows 拿不到 tty，一律放行（该场景主要在 mac/linux 出现）。
+            // 只监控「终端会话」：
+            // - unix：没有控制终端（TTY）的代理进程是 IDE 插件/后台服务 ——
+            //   典型如 Cursor 的 Codex 插件常驻进程，用户并没有开任何 codex
+            //   终端会话，却会被采集成一条「codex 终端」。
             #[cfg(unix)]
             if tty.is_empty() {
+                continue;
+            }
+            // - Windows 拿不到 tty，改用父链启发式：终端里跑的代理其父链必有
+            //   shell（powershell/cmd/bash…）；IDE 插件进程由扩展宿主直接拉起，
+            //   父链没有 shell（实测 Cursor 的 Codex 插件即如此，cwd 还是
+            //   Cursor 安装目录）。
+            #[cfg(windows)]
+            if !self.has_shell_ancestor(*pid) {
                 continue;
             }
             result.push(ProcessInfo {
@@ -66,6 +74,34 @@ impl ProcessScanner {
         }
         result.sort_by_key(|p| p.start_time);
         result
+    }
+
+    /// Windows：父链里是否存在 shell（终端会话的标志）。
+    /// IDE 插件/后台服务由扩展宿主直接拉起，父链没有 shell。
+    #[cfg(windows)]
+    fn has_shell_ancestor(&self, pid: Pid) -> bool {
+        let mut cur = pid.as_u32();
+        for _ in 0..16 {
+            if cur <= 1 {
+                break;
+            }
+            let Some(proc_) = self.sys.process(Pid::from_u32(cur)) else {
+                break;
+            };
+            let name = proc_.name().to_lowercase();
+            if matches!(
+                name.as_str(),
+                "powershell.exe" | "pwsh.exe" | "cmd.exe" | "bash.exe" | "sh.exe"
+                    | "wsl.exe" | "nu.exe" | "powershell" | "pwsh" | "cmd" | "bash"
+            ) {
+                return true;
+            }
+            match proc_.parent().map(|p| p.as_u32()) {
+                Some(pp) if pp != cur => cur = pp,
+                _ => break,
+            }
+        }
+        false
     }
 
     /// 沿父进程链向上找宿主应用。

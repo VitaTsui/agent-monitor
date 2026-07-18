@@ -34,6 +34,37 @@ $muted: #7c9096;
     .headInfo {
       min-width: 0;
 
+      .statusChip {
+        flex: none;
+        padding: 0 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 500;
+        line-height: 18px;
+        background: rgba(36, 61, 66, 0.07);
+        color: $muted;
+
+        &.running {
+          background: rgba(56, 178, 106, 0.14);
+          color: #22794a;
+        }
+
+        &.idle {
+          background: rgba(242, 178, 52, 0.16);
+          color: #9a6d0b;
+        }
+
+        &.paused {
+          background: rgba(245, 108, 108, 0.14);
+          color: #c0392b;
+        }
+
+        &.finished {
+          background: rgba(36, 61, 66, 0.07);
+          color: $muted;
+        }
+      }
+
       .headTitle {
         display: flex;
         align-items: center;
@@ -69,29 +100,6 @@ $muted: #7c9096;
           font-family: "SF Mono", Menlo, Consolas, monospace;
         }
 
-        .statusChip {
-          padding: 0 8px;
-          border-radius: 999px;
-          font-size: 11px;
-          line-height: 18px;
-          background: rgba(36, 61, 66, 0.07);
-          color: $muted;
-
-          &.running {
-            background: rgba(56, 178, 106, 0.14);
-            color: #22794a;
-          }
-
-          &.idle {
-            background: rgba(242, 178, 52, 0.16);
-            color: #9a6d0b;
-          }
-
-          &.paused {
-            background: rgba(245, 108, 108, 0.14);
-            color: #c0392b;
-          }
-        }
       }
     }
 
