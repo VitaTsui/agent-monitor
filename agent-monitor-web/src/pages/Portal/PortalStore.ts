@@ -32,7 +32,9 @@ const POLL_MS = 2000;
 
 /** 一个设备下的终端类型分组 */
 export interface TermGroup {
-  key: "ide" | "external";
+  /** 分组键：proj-<项目路径>（按项目名分组） */
+  key: string;
+  /** 组标题 = 项目目录名 */
   title: string;
   tasks: PortalTaskData[];
 }
@@ -149,27 +151,27 @@ class PortalStore {
   };
 
   /**
-   * 所选设备的终端分组（项目终端 = Cursor/VSCode 内嵌，外部终端 = 其它），可折叠。
+   * 所选设备的会话按「项目名」分组：同一项目下的会话（无论跑在 Cursor、
+   * VSCode 还是外部终端）归在一起，组标题就是项目目录名。
+   * Map 保持插入序 —— 列表本身按活跃度排序，最活跃的项目自然靠前。
    */
   get selectedGroups(): TermGroup[] {
     const mid = this.selectedMachineId;
     const list = this.filtered.filter(
       (t) => (t.machineId || t.hostname || "unknown") === mid
     );
-    const ide = list.filter(
-      (t) => t.process?.ide === "cursor" || t.process?.ide === "vscode"
-    );
-    const external = list.filter(
-      (t) => !(t.process?.ide === "cursor" || t.process?.ide === "vscode")
-    );
-    const groups: TermGroup[] = [];
-    if (ide.length) {
-      groups.push({ key: "ide", title: "项目终端", tasks: ide });
+    const byProject = new Map<string, TermGroup>();
+    for (const t of list) {
+      const title = t.projectName || t.project || "未知项目";
+      const key = `proj-${t.project || title}`;
+      const group = byProject.get(key);
+      if (group) {
+        group.tasks.push(t);
+      } else {
+        byProject.set(key, { key, title, tasks: [t] });
+      }
     }
-    if (external.length) {
-      groups.push({ key: "external", title: "外部终端", tasks: external });
-    }
-    return groups;
+    return [...byProject.values()];
   }
 
   get devices() {

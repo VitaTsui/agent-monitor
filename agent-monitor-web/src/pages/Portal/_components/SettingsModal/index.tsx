@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 
-import { Button, Input, Modal, Switch, Upload } from "@hsu-react/ui";
+import { Button, Input, Modal, Switch } from "@hsu-react/ui";
 // Progress：hsu-ui 无对应组件，按规范用 antd 兜底
 import { Badge, Empty, Popconfirm, Progress, Tag, message } from "antd";
 import {
@@ -11,7 +11,6 @@ import {
   LaptopOutlined,
   LogoutOutlined,
   SafetyOutlined,
-  UploadOutlined,
   UserOutlined,
 } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
@@ -20,7 +19,6 @@ import {
   PortalDevice,
   getPortalQuota,
   setPortalQuota,
-  uploadPortalFile,
 } from "@/services/apis/portal";
 import { getUserInfo, removeToken } from "@/utils/auth";
 import { localMachineId } from "@/utils/clientAuth";
@@ -64,11 +62,6 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
   const [quotaLimit, setQuotaLimit] = useState<number>(0);
   const [quotaUsed, setQuotaUsed] = useState<number>(0);
   const [savingQuota, setSavingQuota] = useState(false);
-  // 文件传输
-  const [uploadDevice, setUploadDevice] = useState<PortalDevice | null>(null);
-  const [uploadDir, setUploadDir] = useState("");
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploading, setUploading] = useState(false);
   // 安全防护（危险输入多重确认）
   const [guardEnabled, setGuardEnabled] = useState(true);
   const [guardPatterns, setGuardPatterns] = useState("");
@@ -130,26 +123,6 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
     }
   };
 
-  const doUpload = () => {
-    if (!uploadDevice || !uploadDir.trim() || !uploadFile) {
-      message.warning("请填写目标目录并选择文件");
-      return;
-    }
-    setUploading(true);
-    uploadPortalFile(uploadDevice.id, uploadDir.trim(), uploadFile)
-      .then((res) => {
-        if (res.code === 0) {
-          message.success(res.data?.result ?? `已传输到 ${res.data?.path ?? uploadDir}`);
-          setUploadDevice(null);
-          setUploadDir("");
-          setUploadFile(null);
-        } else {
-          message.error(res.msg ?? "传输失败");
-        }
-      })
-      .catch(() => message.error("传输失败，请检查网络"))
-      .finally(() => setUploading(false));
-  };
 
   useEffect(() => {
     if (open) {
@@ -210,22 +183,13 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
         </div>
       </div>
       <div className={styles.devActions}>
-        {d.trusted && (
-          <Button
-            size="small"
-            icon={<UploadOutlined />}
-            onClick={() => {
-              setUploadDevice(d);
-              setUploadDir("");
-              setUploadFile(null);
-            }}
-          >
-            传文件
-          </Button>
-        )}
         {d.trusted
           ? !d.isHub && (
-              <Button size="small" onClick={() => untrustDevice(d.id)}>
+              <Button
+                size="small"
+                className={styles.untrustBtn}
+                onClick={() => untrustDevice(d.id)}
+              >
                 撤销信任
               </Button>
             )
@@ -493,40 +457,6 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
         </section>
       </div>
 
-      <Modal
-        title={`传输文件到 ${uploadDevice?.hostname ?? ""}`}
-        open={!!uploadDevice}
-        onCancel={() => setUploadDevice(null)}
-        onOk={doUpload}
-        okText="传输"
-        cancelText="取消"
-        confirmLoading={uploading}
-        okButtonProps={{ disabled: !uploadDir.trim() || !uploadFile }}
-      >
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 13, marginBottom: 6 }}>目标目录（该设备上的绝对路径）</div>
-          <Input
-            placeholder="如 /Users/xxx/Downloads 或 C:\\Users\\xxx\\Downloads"
-            value={uploadDir}
-            onChange={(value) => setUploadDir(value)}
-          />
-        </div>
-        <Upload
-          maxCount={1}
-          beforeUpload={(file) => {
-            setUploadFile(file);
-            return false;
-          }}
-          onRemove={() => setUploadFile(null)}
-          fileList={
-            uploadFile
-              ? [{ uid: "1", name: uploadFile.name } as never]
-              : []
-          }
-        >
-          <Button icon={<UploadOutlined />}>选择文件</Button>
-        </Upload>
-      </Modal>
     </Modal>
   );
 });

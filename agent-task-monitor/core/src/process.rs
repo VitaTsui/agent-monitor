@@ -43,6 +43,14 @@ impl ProcessScanner {
             };
             let (ide, ide_name) = self.detect_ide(*pid);
             let tty = tty_path_of(pid.as_u32()).unwrap_or_default();
+            // 只监控「终端会话」：unix 上没有控制终端（TTY）的代理进程是
+            // IDE 插件/后台服务 —— 典型如 Cursor 的 Codex 插件常驻进程，
+            // 用户并没有开任何 codex 终端会话，却会被采集成一条「codex 终端」。
+            // Windows 拿不到 tty，一律放行（该场景主要在 mac/linux 出现）。
+            #[cfg(unix)]
+            if tty.is_empty() {
+                continue;
+            }
             result.push(ProcessInfo {
                 pid: pid.as_u32(),
                 agent: agent.to_string(),

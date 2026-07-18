@@ -218,8 +218,26 @@ $hover: rgba(36, 61, 66, 0.06);
 
     .devActions {
       display: flex;
-      gap: 4px;
+      gap: 6px;
       white-space: nowrap;
+      align-items: center;
+
+      // 撤销信任 = 断开同步：胶囊形轻量警示样式，悬停时才转红，
+      // 平时不喧宾夺主
+      .untrustBtn {
+        border-radius: 999px;
+        padding-inline: 12px;
+        color: $muted;
+        border-color: $border;
+        background: transparent;
+        transition: all 0.2s;
+
+        &:hover {
+          color: #d4380d;
+          border-color: #ffbb96;
+          background: #fff2e8;
+        }
+      }
     }
   }
 
