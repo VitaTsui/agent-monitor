@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 
 import { Button } from "@hsu-react/ui";
 import { useNavigate } from "react-router-dom";
@@ -17,6 +17,7 @@ import {
 } from "@ant-design/icons";
 
 import { getAccessToken } from "@/utils/auth";
+import { getVersionInfo } from "@/services/apis/portal";
 import MockPortal from "./_components/MockPortal";
 import styles from "./index.module.scss";
 
@@ -59,17 +60,29 @@ const STEPS = [
   { n: "3", t: "网页监控", d: "登录网页前台，实时查看、控制、发布任务；信任设备后即可见其会话。" },
 ];
 
-/** 客户端安装包直链（hub /downloads 托管；开发经 /api 代理） */
+/** 客户端安装包直链（hub /downloads 托管；开发经 /api 代理）。
+ * 文件名统一英文 + 版本号（AgentMonitor-x.y.z-setup.exe）；版本号从
+ * /monitor/version 动态获取，取不到时回退无版本的稳定别名。 */
 const DL_BASE = `${process.env.API_BASE ?? ""}/downloads`;
-const DOWNLOADS = {
-  win: `${DL_BASE}/${encodeURIComponent("终端任务监控.exe")}`,
-  android: `${DL_BASE}/${encodeURIComponent("终端任务监控.apk")}`,
-};
 
 const Home: React.FC = () => {
   const navigate = useNavigate();
   const loggedIn = !!getAccessToken();
   const enter = () => navigate(loggedIn ? "/portal" : "/login?redirect=%2Fportal");
+  const [ver, setVer] = useState<{ desktop?: string; android?: string | null }>({});
+  useEffect(() => {
+    getVersionInfo()
+      .then((res) => {
+        if (res.code === 0 && res.data) setVer(res.data);
+      })
+      .catch(() => void 0);
+  }, []);
+  const winUrl = ver.desktop
+    ? `${DL_BASE}/AgentMonitor-${ver.desktop}-setup.exe`
+    : `${DL_BASE}/agent-monitor-setup.exe`;
+  const apkUrl = ver.android
+    ? `${DL_BASE}/AgentMonitor-${ver.android}.apk`
+    : `${DL_BASE}/AgentMonitor.apk`;
 
   return (
     <div className={styles.Home}>
@@ -184,19 +197,23 @@ const Home: React.FC = () => {
             </div>
             <span className={styles.clientDl}>即将提供</span>
           </div>
-          <a className={styles.clientCard} href={DOWNLOADS.win} download>
+          <a className={styles.clientCard} href={winUrl} download>
             <WindowsFilled className={styles.clientIcon} />
             <div className={styles.clientName}>Windows</div>
             <div className={styles.clientDesc}>
               中文安装向导（可选安装位置 / 桌面图标 / 开机自启），完整前台 + 托盘后台同步
             </div>
-            <span className={styles.clientDl}>下载安装程序</span>
+            <span className={styles.clientDl}>
+              下载安装程序{ver.desktop ? ` v${ver.desktop}` : ""}
+            </span>
           </a>
-          <a className={styles.clientCard} href={DOWNLOADS.android} download>
+          <a className={styles.clientCard} href={apkUrl} download>
             <AndroidFilled className={styles.clientIcon} />
             <div className={styles.clientName}>Android</div>
             <div className={styles.clientDesc}>移动端应用，前台功能随时随地可用</div>
-            <span className={styles.clientDl}>下载 .apk</span>
+            <span className={styles.clientDl}>
+              下载 .apk{ver.android ? ` v${ver.android}` : ""}
+            </span>
           </a>
         </div>
         <div className={styles.clientHint}>

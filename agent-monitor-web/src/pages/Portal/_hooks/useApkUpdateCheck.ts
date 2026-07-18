@@ -27,12 +27,15 @@ function newer(a: string, b: string): boolean {
   return false;
 }
 
-const APK_URL = `${process.env.API_BASE ?? ""}/downloads/${encodeURIComponent(
-  "终端任务监控.apk",
-)}`;
+/** APK 直链：英文 + 版本号命名，稳定别名兜底 */
+const apkUrl = (version?: string | null) =>
+  `${process.env.API_BASE ?? ""}/downloads/${
+    version ? `AgentMonitor-${version}.apk` : "AgentMonitor.apk"
+  }`;
 
 /** 强制更新弹窗：只有「去更新」，点了也不关（必须装新版才能继续用） */
 function showForcedModal(latest: string, cap: CapacitorBridge) {
+  const url = apkUrl(latest);
   Modal.confirm({
     title: `必须更新到 v${latest}`,
     content:
@@ -43,7 +46,7 @@ function showForcedModal(latest: string, cap: CapacitorBridge) {
     maskClosable: false,
     keyboard: false,
     onOk: () => {
-      window.open(APK_URL, "_blank");
+      window.open(url, "_blank");
       // 返回被拒绝的 Promise：弹窗保持打开，App 维持锁定状态
       return Promise.reject(new Error("keep-open"));
     },
@@ -103,7 +106,7 @@ export function useApkUpdateCheck() {
             okText: "去更新",
             cancelText: "稍后",
             onOk: () => {
-              window.open(APK_URL, "_blank");
+              window.open(apkUrl(latest), "_blank");
             },
           });
         }

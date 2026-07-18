@@ -11,7 +11,7 @@ ManifestDPIAware true
 !define APP_EXE "终端任务监控.exe"
 !define APP_ID "AgentMonitor"
 !define APP_PUBLISHER "VitaHsu"
-!define APP_VERSION "0.3.4"
+!define APP_VERSION "0.3.5"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
 
 !ifndef EXE
@@ -29,12 +29,24 @@ InstallDirRegKey HKCU "Software\${APP_ID}" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
+; 文件属性里的版本信息（资源管理器「详细信息」/ SmartScreen 展示用）
+VIProductVersion "${APP_VERSION}.0"
+VIAddVersionKey /LANG=2052 "ProductName" "Agent Monitor"
+VIAddVersionKey /LANG=2052 "FileDescription" "${APP_NAME}安装程序"
+VIAddVersionKey /LANG=2052 "ProductVersion" "${APP_VERSION}"
+VIAddVersionKey /LANG=2052 "FileVersion" "${APP_VERSION}"
+VIAddVersionKey /LANG=2052 "CompanyName" "${APP_PUBLISHER}"
+VIAddVersionKey /LANG=2052 "LegalCopyright" "© ${APP_PUBLISHER}"
+
 !include "MUI2.nsh"
 !define MUI_ICON "${ICO}"
 !define MUI_UNICON "${ICO}"
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT "立即启动 ${APP_NAME}"
+; 启动时把向导窗口带到前台：部分环境（从浏览器下载栏直接运行）下
+; 窗口会启动在后台，用户误以为「点了没反应」，得去点任务栏图标才出来
+!define MUI_CUSTOMFUNCTION_GUIINIT BringInstallerToFront
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_COMPONENTS
@@ -44,6 +56,10 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
+
+Function BringInstallerToFront
+  BringToFront
+FunctionEnd
 
 Section "主程序（必装）" SecMain
   SectionIn RO
