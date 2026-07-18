@@ -54,8 +54,8 @@ cat > "$OUT/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleExecutable</key><string>$EXE_NAME</string>
   <key>CFBundleIconFile</key><string>icon.icns</string>
-  <key>CFBundleVersion</key><string>0.3.9</string>
-  <key>CFBundleShortVersionString</key><string>0.3.9</string>
+  <key>CFBundleVersion</key><string>0.3.10</string>
+  <key>CFBundleShortVersionString</key><string>0.3.10</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <!-- 不设 LSUIElement：这是正常桌面应用（Dock 有图标、可 Cmd-Tab）。

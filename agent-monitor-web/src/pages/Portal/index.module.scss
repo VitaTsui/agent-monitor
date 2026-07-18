@@ -324,11 +324,15 @@ $active-bg: rgba(36, 61, 66, 0.09);
         }
       }
 
+      // 悬停才出现且才占位：常态 display:none，状态徽标右侧不再留白
+      &:hover .splitBtn {
+        display: block;
+      }
+
       .splitBtn {
-        opacity: 0;
+        display: none;
         font-size: 12px;
         color: $muted;
-        transition: opacity 0.15s;
 
         &:hover {
           color: $accent;
