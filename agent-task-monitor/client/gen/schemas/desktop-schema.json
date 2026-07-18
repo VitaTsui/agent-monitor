@@ -177,6 +177,102 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the autostart_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-autostart-get",
+          "markdownDescription": "Enables the autostart_get command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the autostart_set command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-autostart-set",
+          "markdownDescription": "Enables the autostart_set command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the client_auth command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-client-auth",
+          "markdownDescription": "Enables the client_auth command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the local_machine_id command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-local-machine-id",
+          "markdownDescription": "Enables the local_machine_id command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_set_excluded command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-set-excluded",
+          "markdownDescription": "Enables the terminal_set_excluded command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminals_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminals-get",
+          "markdownDescription": "Enables the terminals_get command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the update_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-update-start",
+          "markdownDescription": "Enables the update_start command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the update_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-update-status",
+          "markdownDescription": "Enables the update_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the autostart_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-autostart-get",
+          "markdownDescription": "Denies the autostart_get command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the autostart_set command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-autostart-set",
+          "markdownDescription": "Denies the autostart_set command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the client_auth command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-client-auth",
+          "markdownDescription": "Denies the client_auth command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the local_machine_id command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-local-machine-id",
+          "markdownDescription": "Denies the local_machine_id command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_set_excluded command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-set-excluded",
+          "markdownDescription": "Denies the terminal_set_excluded command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminals_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminals-get",
+          "markdownDescription": "Denies the terminals_get command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the update_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-update-start",
+          "markdownDescription": "Denies the update_start command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the update_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-update-status",
+          "markdownDescription": "Denies the update_status command without any pre-configured scope."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",

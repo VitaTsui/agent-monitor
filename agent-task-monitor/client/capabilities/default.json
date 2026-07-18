@@ -2,9 +2,17 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "终端任务监控桌面客户端默认权限",
-  "windows": ["main", "*"],
+  "windows": [
+    "main",
+    "*"
+  ],
   "remote": {
-    "urls": ["https://*", "http://*"]
+    "urls": [
+      "https://*/*",
+      "http://*/*",
+      "https://*",
+      "http://*"
+    ]
   },
   "permissions": [
     "core:default",
@@ -15,6 +23,14 @@
     "core:window:allow-set-focus",
     "core:app:default",
     "core:tray:default",
-    "core:menu:default"
+    "core:menu:default",
+    "allow-autostart-get",
+    "allow-autostart-set",
+    "allow-client-auth",
+    "allow-local-machine-id",
+    "allow-terminals-get",
+    "allow-terminal-set-excluded",
+    "allow-update-status",
+    "allow-update-start"
   ]
 }
