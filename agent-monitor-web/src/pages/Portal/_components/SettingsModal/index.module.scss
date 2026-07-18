@@ -217,67 +217,6 @@ $hover: rgba(36, 61, 66, 0.06);
     }
 
     // 本机客户端 · 监控范围：与设备行同一视觉语言（圆角卡片行）
-    .termScope {
-      margin-top: 12px;
-
-      .termScopeTitle {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        font-size: 13px;
-        font-weight: 600;
-        color: $text;
-        margin-bottom: 8px;
-
-        &::before {
-          content: "";
-          width: 3px;
-          height: 12px;
-          border-radius: 2px;
-          background: $accent;
-        }
-      }
-
-      .termScopeRow {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        padding: 9px 12px;
-        border: 1px solid $border;
-        border-radius: 10px;
-        margin-bottom: 6px;
-        transition: border-color 0.15s, background 0.15s;
-
-        &:hover {
-          border-color: rgba(15, 155, 173, 0.35);
-          background: rgba(15, 155, 173, 0.04);
-        }
-
-        .termScopeName {
-          font-size: 13px;
-          color: $text;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-      }
-
-      .termScopeEmpty {
-        padding: 14px 12px;
-        border: 1px dashed $border;
-        border-radius: 10px;
-        font-size: 12px;
-        color: $muted;
-        text-align: center;
-      }
-
-      .termScopeHint {
-        margin-top: 2px;
-        font-size: 11px;
-        color: $muted;
-      }
-    }
 
     .devActions {
       display: flex;
@@ -288,8 +227,10 @@ $hover: rgba(36, 61, 66, 0.06);
       // 撤销信任 = 断开同步：胶囊形轻量警示样式，悬停时才转红，
       // 平时不喧宾夺主
       .untrustBtn {
+        height: 26px;
         border-radius: 999px;
-        padding-inline: 12px;
+        padding-inline: 14px;
+        font-size: 12px;
         color: $muted;
         border-color: $border;
         background: transparent;
@@ -301,6 +242,86 @@ $hover: rgba(36, 61, 66, 0.06);
           background: #fff2e8;
         }
       }
+    }
+  }
+
+  // 检查更新：主题色胶囊描边，悬停填充
+  .checkUpdateBtn {
+    height: 26px;
+    border-radius: 999px;
+    padding-inline: 14px;
+    font-size: 12px;
+    color: $accent;
+    border-color: rgba(15, 155, 173, 0.45);
+    background: transparent;
+    transition: all 0.2s;
+
+    &:hover {
+      color: #fff;
+      border-color: $accent;
+      background: $accent;
+    }
+  }
+
+  .termScope {
+    margin-top: 12px;
+
+    .termScopeTitle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      color: $text;
+      margin-bottom: 8px;
+
+      &::before {
+        content: "";
+        width: 3px;
+        height: 12px;
+        border-radius: 2px;
+        background: $accent;
+      }
+    }
+
+    .termScopeRow {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 9px 12px;
+      border: 1px solid $border;
+      border-radius: 10px;
+      margin-bottom: 6px;
+      transition: border-color 0.15s, background 0.15s;
+
+      &:hover {
+        border-color: rgba(15, 155, 173, 0.35);
+        background: rgba(15, 155, 173, 0.04);
+      }
+
+      .termScopeName {
+        font-size: 13px;
+        color: $text;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    }
+
+    .termScopeEmpty {
+      padding: 14px 12px;
+      border: 1px dashed $border;
+      border-radius: 10px;
+      font-size: 12px;
+      color: $muted;
+      text-align: center;
+    }
+
+    .termScopeHint {
+      margin-top: 2px;
+      font-size: 11px;
+      color: $muted;
     }
   }
 
