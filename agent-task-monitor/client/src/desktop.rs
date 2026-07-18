@@ -390,6 +390,16 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             }
             // 更新监视：新版本弹确认框；低于强制下限必须更新否则退出
             spawn_update_watcher(handle.clone(), state_setup.clone(), web_base.clone());
+            // [test] 模拟点击更新：与托盘/设置里的真实点击走同一路径
+            if std::env::var("AM_TEST_UPDATE_CLICK").ok().as_deref() == Some("1") {
+                let th = handle.clone();
+                let tw = web_base.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    ulog("[test] 模拟点击更新");
+                    spawn_self_update_inner(th, tw, false);
+                });
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -904,6 +914,34 @@ fn maybe_prompt_update<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     });
 }
 
+/// 更新进行中的轻量提示（不打断）：mac 系统通知 / Windows 右下角气泡
+fn notify_progress(msg: &str) {
+    ulog(&format!("[update] {msg}"));
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification \"{}\" with title \"终端任务监控\"",
+            msg.replace('"', "'")
+        );
+        let _ = std::process::Command::new("osascript").args(["-e", &script]).output();
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let ps = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; $n.ShowBalloonTip(6000, '终端任务监控', '{}', 'Info'); Start-Sleep 7; $n.Dispose()",
+            msg.replace('\'', " ")
+        );
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = msg;
+}
+
 /// 阻塞式提示框（更新结果必须让用户看见；通知对未签名应用常被系统吞掉）
 fn alert_box(title: &str, text: &str) {
     #[cfg(windows)]
@@ -1020,7 +1058,7 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     std::process::Command::new("sh")
         .args([
             "-c",
-            &format!("sleep 1; AM_SELF_UPDATE=0 open \"{bundle_str}\"; sleep 3; rm -rf \"{old_str}\""),
+            &format!("sleep 1; AM_SELF_UPDATE=0 AM_TEST_UPDATE_CLICK=0 open \"{bundle_str}\"; sleep 3; rm -rf \"{old_str}\""),
         ])
         .spawn()?;
     Ok(())
@@ -1157,6 +1195,7 @@ pub(crate) fn spawn_update_watcher<R: tauri::Runtime>(
 fn spawn_self_update_inner<R: tauri::Runtime>(app: tauri::AppHandle<R>, hub: String, forced: bool) {
     std::thread::spawn(move || {
         ulog(&format!("[update] 开始自更新 forced={forced} hub={hub}"));
+        notify_progress("正在下载更新，完成后将自动重启…");
         match do_self_update(&hub) {
             Ok(()) => {
                 ulog("[update] 自更新就绪，退出旧实例");
