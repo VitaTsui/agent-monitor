@@ -837,7 +837,7 @@ async fn get_quota(State(state): State<SharedState>, headers: HeaderMap) -> Json
     let Some(user) = auth_user(&state, &headers).await else {
         return err(401, "未登录");
     };
-    let limit = state.registry.read().await.quota_limit();
+    let limit = state.registry.read().await.quota_limit_of(&user);
     let tasks = state.tasks_for(&user).await;
     // 口径必须与 enforce_quota 一致：额度是「按会话」判定的（某个会话用量达到
     // 上限就暂停该会话），所以这里报「用量最高的那个会话」，而不是所有会话求和。
@@ -860,12 +860,10 @@ async fn set_quota(
     let Some(user) = auth_user(&state, &headers).await else {
         return err(401, "未登录");
     };
-    // 额度是全局配置，会触发所有用户会话的自动暂停/恢复 —— 仅超级管理员可改
-    let mut reg = state.registry.write().await;
-    if !reg.is_super_user(&user) {
-        return err(403, "仅管理员可设置额度上限");
+    // 额度是每用户配置：只影响自己名下设备的自动暂停/恢复，用户自行设置
+    if !state.registry.write().await.set_quota_limit_for(&user, req.limit) {
+        return err(404, "账号不存在");
     }
-    reg.set_quota_limit(req.limit);
     ok(json!({ "limit": req.limit }))
 }
 
@@ -983,7 +981,11 @@ async fn report(
     // 告知 agent 是否已被信任：未信任时 agent 不应再上报任何会话数据
     let (trusted, quota_limit) = {
         let reg = state.registry.read().await;
-        (reg.device_meta(&payload.machine_id).trusted, reg.quota_limit())
+        (
+            reg.device_meta(&payload.machine_id).trusted,
+            // 额度是设备归属者（用户）的个人配置
+            reg.quota_limit_for_device(&payload.machine_id),
+        )
     };
     // hubVersion：hub 与桌面客户端同一工作区发版，hub 的版本即最新客户端版本，
     // agent 用它做更新提示（托盘「新版本可用」）；

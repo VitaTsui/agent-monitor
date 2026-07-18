@@ -164,6 +164,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
     let state_setup = state.clone();
 
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![autostart_get, autostart_set])
         .setup(move |app| {
             let handle = app.handle().clone();
 
@@ -507,6 +508,21 @@ fn reg_command(args: &[&str]) -> std::io::Result<std::process::Output> {
         .output()
 }
 
+/// 网页端 IPC：查询开机自启状态。
+/// 客户端窗口加载的是远端前台页；页面里的「开机自启」开关经这两个命令
+/// 操作本机（浏览器里打开同一页面时没有 __TAURI__，开关不渲染）。
+#[tauri::command]
+fn autostart_get() -> bool {
+    autostart_enabled()
+}
+
+/// 网页端 IPC：设置开机自启，返回设置后的真实状态（以系统为准，而非请求值）
+#[tauri::command]
+fn autostart_set(enable: bool) -> bool {
+    set_autostart(enable);
+    autostart_enabled()
+}
+
 fn autostart_enabled() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -641,8 +657,24 @@ fn show_main_with_pair<R: tauri::Runtime>(app: &tauri::AppHandle<R>, pair_url: O
 fn open_external(url: &str) {
     #[cfg(target_os = "macos")]
     let r = std::process::Command::new("open").arg(url).spawn();
+    // 不能走 `cmd /C start`：GUI 子系统下会先闪出一个控制台窗口再打开浏览器。
+    // ShellExecuteW 直接按 URL 协议关联打开默认浏览器，无任何中间窗口。
     #[cfg(target_os = "windows")]
-    let r = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    let r: std::io::Result<()> = {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        let wide = |x: &str| x.encode_utf16().chain([0]).collect::<Vec<u16>>();
+        let (op, u) = (wide("open"), wide(url));
+        let h = unsafe {
+            ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), u.as_ptr(),
+                std::ptr::null(), std::ptr::null(), 1)
+        };
+        // 按 Win32 约定，返回值 > 32 表示成功
+        if h as usize > 32 {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!("ShellExecuteW 返回 {}", h as usize)))
+        }
+    };
     #[cfg(all(unix, not(target_os = "macos")))]
     let r = std::process::Command::new("xdg-open").arg(url).spawn();
     if let Err(e) = r {

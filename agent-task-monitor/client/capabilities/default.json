@@ -3,6 +3,9 @@
   "identifier": "default",
   "description": "终端任务监控桌面客户端默认权限",
   "windows": ["main", "*"],
+  "remote": {
+    "urls": ["https://*", "http://*"]
+  },
   "permissions": [
     "core:default",
     "core:window:default",

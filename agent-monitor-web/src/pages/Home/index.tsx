@@ -186,8 +186,10 @@ const Home: React.FC = () => {
           <a className={styles.clientCard} href={DOWNLOADS.win} download>
             <WindowsFilled className={styles.clientIcon} />
             <div className={styles.clientName}>Windows</div>
-            <div className={styles.clientDesc}>单文件程序，双击即用，完整前台 + 托盘后台同步</div>
-            <span className={styles.clientDl}>下载 .exe</span>
+            <div className={styles.clientDesc}>
+              中文安装向导（可选安装位置 / 桌面图标 / 开机自启），完整前台 + 托盘后台同步
+            </div>
+            <span className={styles.clientDl}>下载安装程序</span>
           </a>
           <a className={styles.clientCard} href={DOWNLOADS.android} download>
             <AndroidFilled className={styles.clientIcon} />
@@ -198,7 +200,8 @@ const Home: React.FC = () => {
         </div>
         <div className={styles.clientHint}>
           macOS：打开 dmg 后<b>双击「安装.command」</b>一键装好并启动
-          （若被拦：右键它 →「打开」）。
+          （若被拦：右键它 →「打开」）。Windows：运行安装程序，按向导选择
+          安装位置与桌面图标即可（若弹「已保护你的电脑」：更多信息 → 仍要运行）。
           安装后在客户端里登录你的账号，本机即自动绑定并建立链接——
           网页、移动端与其他客户端上立刻可见这台电脑的终端会话（设备管理里可随时断开）。
         </div>

@@ -71,6 +71,37 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
   // 安全防护（危险输入多重确认）
   const [guardEnabled, setGuardEnabled] = useState(true);
   const [guardPatterns, setGuardPatterns] = useState("");
+  // 桌面客户端 IPC 桥：仅在客户端窗口内存在（浏览器里为 undefined，相关 UI 不渲染）
+  const tauriInvoke = (
+    window as unknown as {
+      __TAURI__?: { core?: { invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } };
+    }
+  ).__TAURI__?.core?.invoke;
+  // null = 尚未取到（或不在客户端内）
+  const [autostart, setAutostart] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (open && tauriInvoke) {
+      tauriInvoke("autostart_get")
+        .then((v) => setAutostart(Boolean(v)))
+        .catch(() => setAutostart(null));
+    }
+    // tauriInvoke 是宿主环境常量，不会在会话中途变化
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const toggleAutostart = (next: boolean) => {
+    tauriInvoke?.("autostart_set", { enable: next })
+      .then((r) => {
+        // 以系统真实状态为准：设置可能因权限等原因未生效
+        const actual = Boolean(r);
+        setAutostart(actual);
+        if (actual !== next) {
+          message.warning("设置未生效，请稍后重试或使用托盘菜单");
+        }
+      })
+      .catch(() => message.error("设置失败"));
+  };
 
   useEffect(() => {
     if (open) {
@@ -294,10 +325,24 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
             <div className={styles.pane}>
               <div className={styles.paneTitle}>设备管理</div>
               <div className={styles.hint}>
-                只有<strong>信任</strong>的设备才会被监控；非信任设备的会话不会显示。
-                在其它电脑运行客户端并设置 <code>AM_HUB_URL</code> 指向本机、
-                <code>AM_USER</code> 指定你的用户名，即可在此审批。
+                只有<strong>信任</strong>的设备才会被监控；信任开关就是同步链接的开关，
+                撤销信任即断开该设备的同步，随时可恢复。在其它电脑安装客户端并登录
+                你的账号，它就会自动出现在这里（登录即自动信任）。
               </div>
+              {autostart !== null && (
+                <div className={styles.section}>
+                  <div className={styles.sectionTitle}>本机客户端</div>
+                  <div className={styles.device}>
+                    <div className={styles.devInfo}>
+                      <div className={styles.devName}>开机自启</div>
+                      <div className={styles.devMeta}>
+                        随系统启动，在后台持续同步本机终端会话
+                      </div>
+                    </div>
+                    <Switch checked={autostart} onChange={toggleAutostart} />
+                  </div>
+                </div>
+              )}
               {pending.length > 0 && (
                 <div className={styles.section}>
                   <div className={styles.sectionTitle}>待信任（{pending.length}）</div>
@@ -322,8 +367,9 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
             <div className={styles.pane}>
               <div className={styles.paneTitle}>额度限制</div>
               <div className={styles.hint}>
-                统计各会话近 <strong>5 小时</strong>滚动窗口的 token 用量（input +
-                output + 缓存创建）。设置上限后，某会话用量达到上限会<strong>自动暂停</strong>
+                这是<strong>你自己的账号额度</strong>，只作用于你名下的设备。统计各会话近{" "}
+                <strong>5 小时</strong>滚动窗口的 token 用量（input + output +
+                缓存创建）。设置上限后，某会话用量达到上限会<strong>自动暂停</strong>
                 该终端任务；随着旧用量移出 5 小时窗口、用量回落到上限以下，会
                 <strong>自动恢复</strong>。设为 0 表示不限制。
               </div>
@@ -335,16 +381,10 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                   value={String(quotaLimit)}
                   onChange={(v) => setQuotaLimit(Number(v || 0))}
                   wrapperClassName={styles.quotaInput}
-                  disabled={!user.isSuper}
                 />
-                {/* 全局配置：仅管理员可改（后端同样校验） */}
-                {user.isSuper ? (
-                  <Button type="primary" loading={savingQuota} onClick={saveQuota}>
-                    保存
-                  </Button>
-                ) : (
-                  <span className={styles.quotaReadonly}>仅管理员可修改</span>
-                )}
+                <Button type="primary" loading={savingQuota} onClick={saveQuota}>
+                  保存
+                </Button>
               </div>
               {quotaLimit > 0 ? (
                 <>
