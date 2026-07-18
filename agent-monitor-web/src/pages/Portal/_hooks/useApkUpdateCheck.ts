@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-import { notification } from "antd";
+import { Modal } from "antd";
 
 import { getVersionInfo } from "@/services/apis/portal";
 
@@ -8,7 +8,10 @@ import { getVersionInfo } from "@/services/apis/portal";
 interface CapacitorBridge {
   isNativePlatform?: () => boolean;
   Plugins?: {
-    App?: { getInfo?: () => Promise<{ version?: string }> };
+    App?: {
+      getInfo?: () => Promise<{ version?: string }>;
+      exitApp?: () => Promise<void>;
+    };
   };
 }
 
@@ -24,12 +27,45 @@ function newer(a: string, b: string): boolean {
   return false;
 }
 
+const APK_URL = `${process.env.API_BASE ?? ""}/downloads/${encodeURIComponent(
+  "终端任务监控.apk",
+)}`;
+
+/** 强制更新弹窗：只有「去更新」，点了也不关（必须装新版才能继续用） */
+function showForcedModal(latest: string, cap: CapacitorBridge) {
+  Modal.confirm({
+    title: `必须更新到 v${latest}`,
+    content:
+      "当前 App 版本已停止支持，必须更新后才能继续使用。点击「去更新」下载安装包，安装后重新打开；选择退出将关闭应用。",
+    okText: "去更新",
+    cancelText: "退出应用",
+    closable: false,
+    maskClosable: false,
+    keyboard: false,
+    onOk: () => {
+      window.open(APK_URL, "_blank");
+      // 返回被拒绝的 Promise：弹窗保持打开，App 维持锁定状态
+      return Promise.reject(new Error("keep-open"));
+    },
+    onCancel: () => {
+      const exit = cap.Plugins?.App?.exitApp;
+      if (exit) {
+        void exit();
+      } else {
+        // 退不掉（个别壳版本无 exitApp）就重新弹出，保持锁定
+        showForcedModal(latest, cap);
+      }
+    },
+  });
+}
+
 /**
  * 移动端更新推送：仅在 Capacitor 原生壳内生效。
  *
- * 远程壳的网页本身随站点发布自动更新；这里管的是 APK 壳自身——
- * 用 @capacitor/app 取本机版本，与 hub 的 /monitor/version（android 字段，
- * 打包时写进 downloads/manifest.json）比对，有新版弹通知带下载链接。
+ * 远程壳的网页本身随站点发布自动更新；这里管的是 APK 壳自身：
+ * - 有新版：弹确认框，用户点「去更新」下载安装包；
+ * - 低于强制更新下限（/monitor/version 的 androidMin）：锁定弹窗，
+ *   必须更新才能继续使用，拒绝则退出应用。
  * 浏览器里没有 Capacitor 全局，钩子空转。
  */
 export function useApkUpdateCheck() {
@@ -50,19 +86,27 @@ export function useApkUpdateCheck() {
           return;
         }
         const latest = res.data?.android;
+        const minVer = res.data?.androidMin;
         const current = info?.version;
-        if (!latest || !current || !newer(latest, current)) {
+        if (!current) {
           return;
         }
-        const dl = `${process.env.API_BASE ?? ""}/downloads/${encodeURIComponent(
-          "终端任务监控-android.apk",
-        )}`;
-        notification.info({
-          message: `新版 App v${latest} 可用`,
-          description: "点击下载安装包，安装后覆盖当前版本即可。",
-          duration: 0,
-          onClick: () => window.open(dl, "_blank"),
-        });
+        // 强制更新优先：低于下限就锁定
+        if (minVer && newer(minVer, current)) {
+          showForcedModal(latest ?? minVer, cap);
+          return;
+        }
+        if (latest && newer(latest, current)) {
+          Modal.confirm({
+            title: `发现新版 App v${latest}`,
+            content: "是否立即下载更新？安装后覆盖当前版本即可。",
+            okText: "去更新",
+            cancelText: "稍后",
+            onOk: () => {
+              window.open(APK_URL, "_blank");
+            },
+          });
+        }
       })
       .catch(() => {
         // 检测失败静默：更新提示是锦上添花，不该打扰使用

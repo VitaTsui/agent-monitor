@@ -357,6 +357,8 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
 
             crumb_setup("tray built");
             let _ = tray;
+            // 更新监视：新版本弹确认框；低于强制下限必须更新否则退出
+            spawn_update_watcher(handle.clone(), state_setup.clone(), web_base.clone());
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -737,21 +739,7 @@ fn open_external(url: &str) {
 /// - macOS：下载 zip → 原地替换 .app → 重启（全自动，无需用户操作）
 /// - Windows：下载安装向导并拉起（向导会先结束本进程再覆盖安装）
 fn spawn_self_update<R: tauri::Runtime>(app: tauri::AppHandle<R>, hub: String) {
-    std::thread::spawn(move || {
-        notify_update("正在下载更新…");
-        match do_self_update(&hub) {
-            Ok(()) => {
-                tracing::info!("自更新就绪，退出旧实例");
-                app.exit(0);
-            }
-            Err(e) => {
-                tracing::warn!("自更新失败: {e}");
-                notify_update(&format!("更新失败：{e}。可稍后重试或到官网手动下载"));
-                #[cfg(windows)]
-                message_box("终端任务监控 · 更新失败", &format!("{e}\n\n可稍后重试，或到官网手动下载安装包。"));
-            }
-        }
-    });
+    spawn_self_update_inner(app, hub, false);
 }
 
 /// 更新过程的用户提示（mac 用系统通知；Windows 失败时另有对话框）
@@ -860,4 +848,133 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn do_self_update(_hub: &str) -> anyhow::Result<()> {
     anyhow::bail!("当前平台暂不支持应用内更新")
+}
+
+// ---------- 更新提示（确认后更新 / 强制更新） ----------
+
+/// 跨平台确认框：返回用户是否点了「确认」侧按钮。
+/// Windows 用系统 MessageBox（是/否）；macOS 用 osascript 对话框（自定义按钮文案）。
+fn confirm_box(title: &str, text: &str, ok_label: &str, cancel_label: &str) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            MessageBoxW, IDYES, MB_ICONQUESTION, MB_YESNO,
+        };
+        let _ = (ok_label, cancel_label); // 系统按钮固定「是/否」
+        let wide = |x: &str| x.encode_utf16().chain([0]).collect::<Vec<u16>>();
+        let (t, m) = (wide(title), wide(text));
+        let r = unsafe {
+            MessageBoxW(std::ptr::null_mut(), m.as_ptr(), t.as_ptr(), MB_YESNO | MB_ICONQUESTION)
+        };
+        r == IDYES
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let esc = |s: &str| s.replace('"', "'");
+        let script = format!(
+            "display dialog \"{}\" with title \"{}\" buttons {{\"{}\", \"{}\"}} default button \"{}\"",
+            esc(text),
+            esc(title),
+            esc(cancel_label),
+            esc(ok_label),
+            esc(ok_label),
+        );
+        std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(ok_label))
+            .unwrap_or(false)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = (title, text, ok_label, cancel_label);
+        false
+    }
+}
+
+/// 更新监视线程：发现新版本弹确认框（同一版本每次运行只问一次）；
+/// 低于强制更新下限时必须更新 —— 拒绝或更新失败都会退出程序。
+pub(crate) fn spawn_update_watcher<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: SharedState,
+    hub: String,
+) {
+    std::thread::spawn(move || {
+        let local = env!("CARGO_PKG_VERSION");
+        let mut prompted: Option<String> = None;
+        let mut forced_prompted = false;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let (latest, min) = tauri::async_runtime::block_on(async {
+                (
+                    state.hub_latest_version.read().await.clone(),
+                    state.hub_min_version.read().await.clone(),
+                )
+            });
+
+            // 强制更新：本机低于下限 → 不更新就不能继续使用
+            if !forced_prompted {
+                if let Some(min) = min.as_deref().filter(|m| crate::agent::version_newer(m, local)) {
+                    forced_prompted = true;
+                    let ok = confirm_box(
+                        "终端任务监控 · 需要更新",
+                        &format!(
+                            "当前版本 v{local} 已停止支持（最低要求 v{min}）。\n必须更新后才能继续使用；选择退出将关闭程序。"
+                        ),
+                        "立即更新",
+                        "退出程序",
+                    );
+                    if ok {
+                        spawn_self_update_inner(app.clone(), hub.clone(), true);
+                    } else {
+                        tracing::warn!("用户拒绝强制更新，退出");
+                        app.exit(0);
+                    }
+                    continue;
+                }
+            }
+
+            // 常规更新：确认后自动更新；「稍后」则本次运行不再打扰（托盘仍可随时点）
+            if let Some(v) = latest {
+                if prompted.as_deref() != Some(v.as_str()) {
+                    prompted = Some(v.clone());
+                    let ok = confirm_box(
+                        "终端任务监控 · 发现新版本",
+                        &format!("新版本 v{v} 可用（当前 v{local}）。\n更新将自动完成并重启，是否立即更新？"),
+                        "立即更新",
+                        "稍后",
+                    );
+                    if ok {
+                        spawn_self_update_inner(app.clone(), hub.clone(), false);
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// 自更新执行（forced=true 时失败即退出：强制更新不允许带病运行）
+fn spawn_self_update_inner<R: tauri::Runtime>(app: tauri::AppHandle<R>, hub: String, forced: bool) {
+    std::thread::spawn(move || {
+        notify_update("正在下载更新…");
+        match do_self_update(&hub) {
+            Ok(()) => {
+                tracing::info!("自更新就绪，退出旧实例");
+                app.exit(0);
+            }
+            Err(e) => {
+                tracing::warn!("自更新失败: {e}");
+                #[cfg(windows)]
+                message_box(
+                    "终端任务监控 · 更新失败",
+                    &format!("{e}\n\n{}", if forced { "程序将退出，请到官网手动下载安装。" } else { "可稍后重试，或到官网手动下载安装包。" }),
+                );
+                #[cfg(not(windows))]
+                notify_update(&format!("更新失败：{e}"));
+                if forced {
+                    app.exit(1);
+                }
+            }
+        }
+    });
 }

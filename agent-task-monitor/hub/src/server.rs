@@ -242,12 +242,32 @@ async fn version_info(State(state): State<SharedState>) -> Json<Value> {
     let downloads_dir = std::env::var("AM_DOWNLOADS_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| state.config.data_dir.join("downloads"));
-    let android = tokio::fs::read_to_string(downloads_dir.join("manifest.json"))
+    let manifest = tokio::fs::read_to_string(downloads_dir.join("manifest.json"))
         .await
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|m| m.pointer("/android/version").and_then(Value::as_str).map(String::from));
-    ok(json!({ "desktop": env!("CARGO_PKG_VERSION"), "android": android }))
+        .unwrap_or(Value::Null);
+    let pick = |ptr: &str| manifest.pointer(ptr).and_then(Value::as_str).map(String::from);
+    // minVersion = 强制更新下限：低于它的客户端必须更新才能继续使用
+    // （有根本性协议/安全变更时在 manifest.json 里抬高对应字段）
+    ok(json!({
+        "desktop": env!("CARGO_PKG_VERSION"),
+        "desktopMin": pick("/desktop/minVersion"),
+        "android": pick("/android/version"),
+        "androidMin": pick("/android/minVersion"),
+    }))
+}
+
+/// 强制更新下限（桌面端，随上报响应下发）；manifest 缺失时无强制
+async fn desktop_min_version(state: &SharedState) -> Option<String> {
+    let downloads_dir = std::env::var("AM_DOWNLOADS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| state.config.data_dir.join("downloads"));
+    tokio::fs::read_to_string(downloads_dir.join("manifest.json"))
+        .await
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|m| m.pointer("/desktop/minVersion").and_then(Value::as_str).map(String::from))
 }
 
 /// 前端构建产物目录：AM_WEB_DIST > 可执行文件旁的 web/ > ../agent-monitor-web/dist
@@ -1006,6 +1026,8 @@ async fn report(
         "trusted": trusted,
         "quotaLimit": quota_limit,
         "hubVersion": env!("CARGO_PKG_VERSION"),
+        // 强制更新下限：客户端低于它必须更新才能继续使用
+        "minVersion": desktop_min_version(&state).await,
     }))
 }
 
