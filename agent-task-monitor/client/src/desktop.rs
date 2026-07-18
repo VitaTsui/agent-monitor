@@ -833,16 +833,7 @@ fn open_external(url: &str) {
 /// 更新流程日志：GUI 应用没有可见 stderr，必须落盘才能排查
 /// （~/.agent-monitor/client.log）
 fn ulog(msg: &str) {
-    tracing::info!("{msg}");
-    let path = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".agent-monitor")
-        .join("client.log");
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let ts = chrono::Local::now().format("%m-%d %H:%M:%S");
-        let _ = writeln!(f, "[{ts}] {msg}");
-    }
+    crate::state::client_log(msg);
 }
 
 /// 托盘「点击更新」：后台线程执行自更新。
