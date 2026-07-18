@@ -79,22 +79,74 @@ fn minimize_to_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     set_app_visible_in_dock(app, false);
 }
 
+/// Windows：系统消息框（GUI 子系统没有控制台，出错必须可见）
+#[cfg(windows)]
+fn message_box(title: &str, text: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
+    let wide = |x: &str| x.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (t, m) = (wide(title), wide(text));
+    unsafe { MessageBoxW(std::ptr::null_mut(), m.as_ptr(), t.as_ptr(), MB_OK | MB_ICONWARNING) };
+}
+
+/// Windows：检测 WebView2 运行时。缺失时 Tauri 建不出窗口、进程会静默退出，
+/// 用户只会觉得「双击没反应」。这里预检并引导安装。
+#[cfg(windows)]
+fn ensure_webview2() -> bool {
+    const CLIENT: &str = r"\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+    for root in [
+        format!(r"HKLM\SOFTWARE{CLIENT}"),
+        format!(r"HKLM\SOFTWARE\WOW6432Node{CLIENT}"),
+        format!(r"HKCU\Software{CLIENT}"),
+    ] {
+        if reg_command(&["query", &root, "/v", "pv"])
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    message_box(
+        "终端任务监控",
+        "缺少 Microsoft Edge WebView2 运行时，无法显示界面。
+
+         点击确定后将打开官方下载页，安装（常青版引导程序）后重新运行本程序即可。",
+    );
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    let wide = |x: &str| x.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (op, url) = (wide("open"), wide("https://go.microsoft.com/fwlink/p/?LinkId=2124703"));
+    unsafe {
+        ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), url.as_ptr(),
+            std::ptr::null(), std::ptr::null(), 1)
+    };
+    false
+}
+
 /// 运行 Tauri 桌面应用（阻塞，不返回）。
 pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
+    // Windows：先确认 WebView2 存在，否则 Tauri 静默失败，用户以为程序坏了
+    #[cfg(windows)]
+    if !ensure_webview2() {
+        return Ok(());
+    }
+
     // 未绑定账号的 agent：窗口地址带 ?pair=配对码 —— 用户在窗口里登录后，
     // 网页会自动把本机绑定到该账号（无需任何手工令牌）。
-    let pair_q = tauri::async_runtime::block_on(async {
-        if state.device_token.read().await.is_some() {
+    let (pair_q, unpaired) = tauri::async_runtime::block_on(async {
+        let paired = state.device_token.read().await.is_some();
+        let legacy = std::env::var("AM_AGENT_TOKEN").ok().filter(|s| !s.is_empty()).is_some();
+        let code = if paired {
             None
         } else {
             state.pair_info.read().await.as_ref().map(|(c, _)| c.clone())
-        }
+        };
+        (code, !paired && !legacy)
     });
     let portal_url = match &pair_q {
         Some(code) => format!("{}/portal?pair={code}", cfg.web_base),
         None => format!("{}/portal", cfg.web_base),
     };
-    let need_onboard = pair_q.is_some();
+    // 只要未绑定就弹窗引导登录（即便离线没领到配对码——联网后 show_main 会补带码地址）
+    let need_onboard = unpaired;
     let web_base = cfg.web_base.clone();
     let is_agent = cfg.is_agent;
     let state_setup = state.clone();
@@ -282,7 +334,12 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .map_err(|e| anyhow::anyhow!("Tauri 运行失败: {e}"))?;
+        .map_err(|e| {
+            // GUI 子系统没有控制台：失败必须让用户看见，否则就是「双击没反应」
+            #[cfg(windows)]
+            message_box("终端任务监控", &format!("启动失败：{e}"));
+            anyhow::anyhow!("Tauri 运行失败: {e}")
+        })?;
     Ok(())
 }
 

@@ -13,8 +13,9 @@
     />
     <meta name="description" content="" />
     <!-- 引入路径必须为 /to/file/path -->
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="icon" href="/favicon.ico" type="image/x-icon" />
+    <!-- v=2 破 favicon 强缓存（旧访客的标签图标才会刷新） -->
+    <link rel="icon" href="/favicon.ico?v=2" sizes="16x16 32x32 48x48" type="image/x-icon" />
+    <link rel="icon" href="/favicon.svg?v=2" type="image/svg+xml" />
     <meta name="theme-color" content="#0f9bad" />
     <script src="/config.js"></script>
     <script>

@@ -67,5 +67,11 @@ cat > "$OUT/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# ad-hoc 深度签名：不签的话链接器签名只覆盖二进制，bundle 里的 icon/config
+# 不在签名内 —— 用户从网上下载（带隔离标记）后 macOS 会直接判「已损坏」，
+# 连右键打开都无法绕过。ad-hoc 签完变成「无法验证开发者」，右键→打开即可运行。
+codesign --force --deep -s - "$OUT"
+codesign --verify --deep --strict "$OUT" && echo "▸ ad-hoc 签名校验通过"
+
 echo "✓ 打包完成: $OUT"
 echo "  零配置分发：用户安装后在窗口里登录账号即自动绑定本机"
