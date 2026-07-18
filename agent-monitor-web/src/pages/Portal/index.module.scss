@@ -176,6 +176,19 @@ $active-bg: rgba(36, 61, 66, 0.09);
           white-space: nowrap;
         }
 
+        // 「本机」徽标：客户端窗口里标出当前这台电脑
+        .localTag {
+          display: inline-block;
+          margin-left: 6px;
+          padding: 0 5px;
+          border-radius: 6px;
+          font-size: 10px;
+          line-height: 16px;
+          color: #fff;
+          background: $accent;
+          vertical-align: 1px;
+        }
+
         .deviceTabStat {
           font-size: 11px;
           color: $muted;

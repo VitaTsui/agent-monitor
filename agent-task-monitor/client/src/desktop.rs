@@ -169,7 +169,12 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
     });
     tauri::Builder::default()
         .manage(ipc_ctx)
-        .invoke_handler(tauri::generate_handler![autostart_get, autostart_set, client_auth])
+        .invoke_handler(tauri::generate_handler![
+            autostart_get,
+            autostart_set,
+            client_auth,
+            local_machine_id
+        ])
         .setup(move |app| {
             let handle = app.handle().clone();
 
@@ -543,6 +548,12 @@ fn client_auth(
         "machineId": ctx.state.config.machine_id,
         "deviceToken": token,
     }))
+}
+
+/// 网页端 IPC：本机 machine_id（非敏感），页面用它在设备列表里标出「本机」
+#[tauri::command]
+fn local_machine_id(ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>) -> String {
+    ctx.state.config.machine_id.clone()
 }
 
 /// 网页端 IPC：查询开机自启状态。

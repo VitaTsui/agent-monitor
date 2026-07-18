@@ -493,10 +493,14 @@ pub fn build_tasks(
 
     // 同一 (provider, 项目) 下的活跃会话，按最后活动时间与进程配对（排序见下方）
     let mut sess_by_key: HashMap<(String, String), Vec<&SessionSummary>> = HashMap::new();
-    // 只有「近期活跃」的会话才参与进程配对（老会话大概率已结束）
+    // 只有「近期活跃」的会话才参与进程配对（太老的会话大概率已结束）。
+    // 窗口须足够宽：IDE 里挂着的会话闲置大半天很常见（午休/过夜），
+    // 6 小时窗口会让活着的会话配不到进程 → 判 Finished，同时进程沦为
+    // 「会话尚未产生记录」占位 —— 一个会话变两条。7 天足以覆盖长挂会话，
+    // 配对时按最近活动排序 + zip 截断，也不会把真正的死会话捞回来。
     let now = now_ms();
     for s in sessions {
-        if now.saturating_sub(s.mtime_ms) < 6 * 3600 * 1000 {
+        if now.saturating_sub(s.mtime_ms) < 7 * 24 * 3600 * 1000 {
             sess_by_key
                 .entry((s.provider.clone(), s.project_key.clone()))
                 .or_default()
@@ -582,90 +586,49 @@ pub fn build_tasks(
         });
     }
 
-    // 有进程但没配到任何会话（刚启动还没写文件）→ 生成占位任务
-    let matched: std::collections::HashSet<u32> =
-        pid_of_session.values().map(|p| p.pid).collect();
-    for p in processes {
-        if !matched.contains(&p.pid) {
-            // 被系统挂起（非我方暂停）的占位进程判为孤儿，前台会过滤掉
-            if crate::process::is_stopped(p.pid) && !manual_paused(p.pid) {
-                continue;
-            }
-            let status = if manual_paused(p.pid) {
-                TaskStatus::Paused
-            } else {
-                TaskStatus::Idle
-            };
-            tasks.push(Task {
-                id: format!("pid-{}", p.pid),
-                machine_id: String::new(),
-                hostname: String::new(),
-                platform: String::new(),
-                platform_dsr: String::new(),
-                provider: p.agent.clone(),
-                provider_dsr: crate::model::provider_dsr(&p.agent),
-                title: String::new(),
-                used_tokens_5h: 0,
-                token_limit: 0,
-                auto_paused: false,
-                status_dsr: status.dsr().to_string(),
-                ide_dsr: p.ide_name.clone(),
-                pid: Some(p.pid),
-                project: p.cwd.clone(),
-                project_name: short_name(&p.cwd),
-                prompt: "（会话尚未产生记录）".into(),
-                last_action: "等待输入".into(),
-                status,
-                started_at: None,
-                last_active_at: None,
-                mtime_ms: p.start_time * 1000,
-                line_count: 0,
-                version: None,
-                git_branch: None,
-                process: Some(p.clone()),
-                recent_messages: Vec::new(),
-            });
-        }
-    }
-
-    // 没配到任何会话文件的代理进程（Gemini/Aider 等暂无解析器的，或刚启动
-    // 尚未落盘的 Claude/Codex）：以「进程任务」出现 —— 标题给 provider + 目录，
-    // 状态与控制（暂停/恢复/中断/终止走信号）完全可用，只是没有对话流。
-    let now2 = now_ms();
+    // 没配到会话文件的代理进程（刚启动尚未落盘，或 Gemini/Aider 等暂无
+    // 解析器）→ 每个进程恰好一条「进程任务」：标题给 provider + 项目目录，
+    // 控制（暂停/恢复/中断/终止走信号）完全可用，只是没有对话流。
+    // 注意：必须只有这一个循环 —— 历史上这里有 pid-/proc- 两个循环、
+    // 判断条件等价，每个未配对进程会重复出现两次。
     for p in processes {
         if paired_pids.contains(&p.pid) {
             continue;
         }
+        // 被系统挂起（非我方暂停）的占位进程判为孤儿，前台会过滤掉
+        if crate::process::is_stopped(p.pid) && !manual_paused(p.pid) {
+            continue;
+        }
         let dir_name = p.cwd.rsplit(['/', '\\']).next().unwrap_or("").to_string();
-        let status = if manual_paused(p.pid) || crate::process::is_stopped(p.pid) {
+        let status = if manual_paused(p.pid) {
             TaskStatus::Paused
         } else {
-            TaskStatus::Running
+            TaskStatus::Idle
         };
-        let status_dsr = status.dsr().to_string();
         tasks.push(Task {
-            id: format!("proc-{}", p.pid),
+            // id 用 pid- 前缀：attach_machine 会给它加机器前缀防跨机冲突
+            id: format!("pid-{}", p.pid),
             machine_id: String::new(),
             hostname: String::new(),
             platform: String::new(),
             platform_dsr: String::new(),
             provider: p.agent.clone(),
             provider_dsr: crate::model::provider_dsr(&p.agent),
-            project: p.cwd.clone(),
-            project_name: dir_name.clone(),
             title: format!("{} · {}", crate::model::provider_dsr(&p.agent), dir_name),
             used_tokens_5h: 0,
             token_limit: 0,
             auto_paused: false,
-            status_dsr,
+            status_dsr: status.dsr().to_string(),
             ide_dsr: p.ide_name.clone(),
             pid: Some(p.pid),
-            prompt: String::new(),
-            last_action: String::new(),
+            project: p.cwd.clone(),
+            project_name: short_name(&p.cwd),
+            prompt: "（会话尚未产生记录）".into(),
+            last_action: "等待输入".into(),
             status,
             started_at: None,
             last_active_at: None,
-            mtime_ms: now2,
+            mtime_ms: p.start_time * 1000,
             line_count: 0,
             version: None,
             git_branch: None,
@@ -2086,10 +2049,19 @@ mod codex_tests {
         assert_eq!(by("x1").pid, Some(22), "codex 会话配 codex 进程");
         assert_eq!(by("x1").provider, "codex");
 
-        let g = by("proc-33");
+        let g = by("pid-33");
         assert_eq!(g.provider, "gemini", "无解析器代理以进程任务出现");
         assert_eq!(g.pid, Some(33), "pid 在 → 暂停/中断等信号控制可用");
         assert_eq!(g.provider_dsr, "Gemini CLI");
         assert!(g.title.contains("app"), "标题带目录名");
+
+        // 回归：每个未配对进程必须恰好一条任务 —— 历史上 pid-/proc- 两个
+        // 循环并存，同一进程会重复出现两次（用户看到 5 会话变 14 条）
+        let dup: Vec<_> = tasks.iter().filter(|t| t.pid == Some(33)).collect();
+        assert_eq!(dup.len(), 1, "未配对进程只能生成一条任务，不得重复");
+        assert!(
+            !tasks.iter().any(|t| t.id.starts_with("proc-")),
+            "占位任务统一 pid- 前缀（attach_machine 只给 pid- 加机器前缀）"
+        );
     }
 }

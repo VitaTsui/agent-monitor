@@ -176,8 +176,13 @@ fn name_via_ps(_pid: u32) -> Option<String> {
 
 /// 判断进程属于哪种 AI 编码代理；未来在此扩展新代理（如 gemini 等）
 fn agent_kind(name: &str, cmd: &[String]) -> Option<&'static str> {
-    // 支持的 AI 编码代理：进程名/命令行命中即识别为对应 provider。
-    // 即便某 provider 没有会话解析器，也会以「进程任务」出现并可控制（信号是通用的）。
+    // 只认「精确命中」：进程名、可执行文件基名、node 包装脚本的路径分量/基名。
+    // 绝不能在整串命令行里 contains 子串 —— MCP 配置路径、扩展目录等参数里
+    // 带个 "codex"/"claude" 字样，就会把无关进程识别成代理
+    // （用户实际遇到：只开了 Claude Code，列表里却多出两个 codex）。
+    fn base(s: &str) -> &str {
+        s.rsplit(['/', '\\']).next().unwrap_or(s)
+    }
     for (agent, needle) in [
         ("claude", "claude"),
         ("codex", "codex"),
@@ -185,24 +190,33 @@ fn agent_kind(name: &str, cmd: &[String]) -> Option<&'static str> {
         ("aider", "aider"),
         ("opencode", "opencode"),
     ] {
-        if name == needle {
+        let exe = format!("{needle}.exe");
+        if name == needle || name == exe {
             return Some(agent);
         }
-        if let Some(first) = cmd.first() {
-            let is_node = name.starts_with("node") || first.ends_with("node") || first.ends_with("node.exe");
-            let joined = cmd.join(" ");
-            if is_node
-                && (joined.contains(&format!("{needle}-code"))
-                    || joined.contains(&format!("/{needle} "))
-                    || joined.ends_with(&format!("/{needle}")))
-            {
-                return Some(agent);
-            }
-            if first.ends_with(&format!("/{needle}"))
-                || first == needle
-                || first.ends_with(&format!("\\{needle}.exe"))
-            {
-                return Some(agent);
+        let Some(first) = cmd.first() else { continue };
+        let fb = base(first);
+        if fb == needle || fb == exe {
+            return Some(agent);
+        }
+        // node 包装（npm 全局安装形态，如 node …/@anthropic-ai/claude-code/cli.js）：
+        // 只看被执行脚本（第二个参数）的路径分量与基名，不看后续业务参数
+        let is_node = name.starts_with("node") || fb == "node" || fb == "node.exe";
+        if is_node {
+            if let Some(script) = cmd.get(1) {
+                let pkg = format!("{needle}-code");
+                let sb = base(script);
+                let sb_noext = sb
+                    .strip_suffix(".js")
+                    .or_else(|| sb.strip_suffix(".mjs"))
+                    .or_else(|| sb.strip_suffix(".cjs"))
+                    .unwrap_or(sb);
+                if sb_noext == needle
+                    || sb_noext == pkg
+                    || script.split(['/', '\\']).any(|c| c == needle || c == pkg)
+                {
+                    return Some(agent);
+                }
             }
         }
     }
@@ -452,5 +466,45 @@ fn action_label(action: ControlAction) -> &'static str {
         ControlAction::Stop => "已终止",
         ControlAction::Kill => "已强制终止",
         ControlAction::Input => "已发送",
+    }
+}
+
+#[cfg(test)]
+mod agent_kind_tests {
+    use super::agent_kind;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn exact_matches() {
+        assert_eq!(agent_kind("claude", &s(&["claude", "--flag"])), Some("claude"));
+        assert_eq!(agent_kind("codex.exe", &s(&["C:\\bin\\codex.exe"])), Some("codex"));
+        assert_eq!(agent_kind("zsh", &s(&["/usr/local/bin/claude"])), Some("claude"));
+        // npm 全局安装形态：node + 包目录 claude-code
+        assert_eq!(
+            agent_kind("node", &s(&["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"])),
+            Some("claude")
+        );
+        assert_eq!(agent_kind("node", &s(&["node", "/opt/bin/codex"])), Some("codex"));
+    }
+
+    /// 用户实际踩过：只开了 Claude Code，列表却多出 codex ——
+    /// 业务参数（MCP 配置路径、扩展目录等）里的子串绝不能触发识别
+    #[test]
+    fn args_substrings_do_not_match() {
+        assert_eq!(
+            agent_kind("node", &s(&["node", "/x/mcp-server.js", "--config", "/Users/a/.claude/codex mcp.json"])),
+            None,
+            "第三个参数里的 codex/claude 字样不该命中"
+        );
+        assert_eq!(
+            agent_kind("node", &s(&["node", "/app/extensions/vendor-codex-helper/main.js"])),
+            None,
+            "路径分量是 vendor-codex-helper 而非 codex，不该命中"
+        );
+        assert_eq!(agent_kind("Cursor Helper", &s(&["/Applications/Cursor.app/x"])), None);
+        assert_eq!(agent_kind("claude-backup-tool", &s(&["claude-backup-tool"])), None);
     }
 }

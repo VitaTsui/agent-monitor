@@ -23,6 +23,7 @@ import {
   uploadPortalFile,
 } from "@/services/apis/portal";
 import { getUserInfo, removeToken } from "@/utils/auth";
+import { localMachineId } from "@/utils/clientAuth";
 import PortalStore from "../../PortalStore";
 import {
   BUILTIN_DANGER_PATTERNS,
@@ -79,6 +80,11 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
   ).__TAURI__?.core?.invoke;
   // null = 尚未取到（或不在客户端内）
   const [autostart, setAutostart] = useState<boolean | null>(null);
+  // 客户端窗口内标出「本机」
+  const [localId, setLocalId] = useState<string | null>(null);
+  useEffect(() => {
+    localMachineId().then(setLocalId);
+  }, []);
 
   useEffect(() => {
     if (open && tauriInvoke) {
@@ -196,7 +202,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
           <Badge status={d.online ? "success" : "default"} />
           <span>{d.hostname}</span>
           <Tag color={PLATFORM_COLOR[d.platform ?? ""] || "default"}>{d.platformDsr}</Tag>
-          {d.isHub ? <Tag color="purple">本机</Tag> : null}
+          {d.id === localId ? <Tag color="purple">本机</Tag> : null}
           {d.trusted ? <Tag color="green">已信任</Tag> : <Tag color="warning">已断开</Tag>}
         </div>
         <div className={styles.devMeta}>
