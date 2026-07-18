@@ -442,7 +442,10 @@ impl Registry {
     }
 
     /// 首次见到设备时登记；已存在则仅在其尚无 owner 时补认领者
-    pub fn ensure_device(&mut self, machine_id: &str, claim_owner: Option<&str>, auto_trust: bool) {
+    /// default_trust 只在「设备创建」或「首次被认领」时生效 —— 设备接入默认信任，
+    /// 但用户手动撤销信任后，后续上报绝不能把它又打开（撤销要有粘性，
+    /// 否则信任开关形同虚设）。
+    pub fn ensure_device(&mut self, machine_id: &str, claim_owner: Option<&str>, default_trust: bool) {
         // 该函数在每次 agent 上报（1.5s 一次）时都会被调用，绝大多数情况下
         // 什么都没变。只有真的改了才落盘，否则等于把整个注册表按 1.5s × 设备数
         // 的频率反复重写。
@@ -451,19 +454,19 @@ impl Registry {
             dirty = true;
             DeviceMeta {
                 owner: claim_owner.map(str::to_string),
-                trusted: auto_trust,
+                trusted: default_trust,
                 device_token: None,
             }
         });
         if entry.owner.is_none() {
             if let Some(o) = claim_owner {
                 entry.owner = Some(o.to_string());
+                // 首次认领视同新接入：按默认信任策略处理
+                if default_trust && !entry.trusted {
+                    entry.trusted = true;
+                }
                 dirty = true;
             }
-        }
-        if auto_trust && !entry.trusted {
-            entry.trusted = true;
-            dirty = true;
         }
         if dirty {
             self.save();
@@ -576,5 +579,47 @@ mod quota_tests {
         let r = Registry::load(dir, "admin", "admin123");
         assert_eq!(r.quota_limit_of("admin"), 800_000);
         assert_eq!(r.quota_limit_of("carol"), 800_000);
+    }
+}
+
+#[cfg(test)]
+mod default_trust_tests {
+    use super::*;
+
+    fn reg(tag: &str) -> Registry {
+        let dir = std::env::temp_dir().join(format!("am-dt-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Registry::load(dir, "admin", "admin123")
+    }
+
+    /// 新设备接入默认信任；用户撤销后，后续上报不得把信任又打开（粘性）
+    #[test]
+    fn default_trust_and_sticky_revoke() {
+        let mut r = reg("sticky");
+        r.register("dave", "pw123456", "").unwrap();
+        // 首次上报登记 → 默认信任
+        r.ensure_device("pc-1", Some("dave"), true);
+        assert!(r.device_meta("pc-1").trusted, "新设备应默认信任");
+        // 用户撤销信任（断开链接）
+        assert!(r.set_trust("pc-1", false));
+        // 该设备继续上报（每 1.5s 一次）—— 不得重新信任
+        r.ensure_device("pc-1", Some("dave"), true);
+        r.ensure_device("pc-1", None, true);
+        assert!(!r.device_meta("pc-1").trusted, "撤销必须有粘性，上报不能重新打开信任");
+        // 用户手动恢复信任
+        assert!(r.set_trust("pc-1", true));
+        assert!(r.device_meta("pc-1").trusted);
+    }
+
+    /// 无归属设备被首次认领时，同样按默认信任处理
+    #[test]
+    fn claim_applies_default_trust() {
+        let mut r = reg("claim");
+        r.register("erin", "pw123456", "").unwrap();
+        // 匿名先上报（无 owner），后被认领
+        r.ensure_device("pc-2", None, true);
+        r.ensure_device("pc-2", Some("erin"), true);
+        assert_eq!(r.device_meta("pc-2").owner.as_deref(), Some("erin"));
+        assert!(r.device_meta("pc-2").trusted, "首次认领视同新接入，默认信任");
     }
 }

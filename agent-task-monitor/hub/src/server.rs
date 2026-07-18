@@ -931,12 +931,13 @@ async fn report(
             );
         }
     }
-    // 登记设备（首次见到 → pending，等 owner 在设备管理里信任）
+    // 登记设备：新设备默认信任（信任开关是「断开链接」的手段，撤销有粘性，
+    // 不会被后续上报重新打开）
     state
         .registry
         .write()
         .await
-        .ensure_device(&payload.machine_id, claim_owner, false);
+        .ensure_device(&payload.machine_id, claim_owner, true);
 
     let mut machines = state.machines.write().await;
     let entry = machines
