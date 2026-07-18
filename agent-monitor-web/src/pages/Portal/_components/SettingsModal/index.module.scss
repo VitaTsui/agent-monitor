@@ -245,6 +245,27 @@ $hover: rgba(36, 61, 66, 0.06);
     }
   }
 
+  // 更新进度（版本行内）
+  .updateProgress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+    max-width: 320px;
+
+    :global(.ant-progress) {
+      flex: 1;
+      margin: 0;
+    }
+
+    .updateProgressText {
+      flex: none;
+      font-size: 11px;
+      color: $muted;
+      white-space: nowrap;
+    }
+  }
+
   // 检查更新：主题色胶囊描边，悬停填充
   .checkUpdateBtn {
     height: 26px;
