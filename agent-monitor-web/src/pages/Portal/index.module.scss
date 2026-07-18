@@ -339,12 +339,15 @@ $active-bg: rgba(36, 61, 66, 0.09);
         height: 22px;
         border-radius: 6px;
         font-size: 12px;
-        color: $muted;
-        background: rgba(36, 61, 66, 0.1);
+        color: #536b71;
+        // 必须不透明：按钮悬浮在状态徽标之上，半透明底会让下层文字
+        // 透出来叠在图标上。取「行悬停底色叠在侧栏底色上」的实色近似值
+        background: #dbe7ea;
+        box-shadow: 0 1px 3px rgba(36, 61, 66, 0.15);
 
         &:hover {
           color: $accent;
-          background: rgba(15, 155, 173, 0.16);
+          background: #c9e6ea;
         }
       }
     }
