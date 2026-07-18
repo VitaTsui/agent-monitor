@@ -303,6 +303,33 @@ impl AppState {
                 }
             })
             .collect();
+        // 注册表兜底：hub 重启后实时表是空的，未在上报的设备（关机/客户端未开）
+        // 也必须留在列表里 —— 否则设备会随每次发版「凭空消失」，
+        // 用户既看不到它、也无法对它撤销信任或删除。
+        for (id, meta) in registry.devices_of(username) {
+            if machines.contains_key(&id) {
+                continue;
+            }
+            let last = (meta.last_seen > 0).then(|| {
+                chrono::DateTime::from_timestamp(meta.last_seen as i64, 0)
+                    .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_default()
+            });
+            out.push(MachineInfo {
+                hostname: if meta.hostname.is_empty() { id.clone() } else { meta.hostname.clone() },
+                platform_dsr: am_core::model::platform_dsr(&meta.platform),
+                platform: meta.platform.clone(),
+                version: meta.version.clone(),
+                online: false,
+                is_hub: false,
+                last_report_at: last,
+                session_count: 0,
+                running_count: 0,
+                owner: meta.owner.clone(),
+                trusted: meta.trusted,
+                id,
+            });
+        }
         out.sort_by(|a, b| {
             b.is_hub
                 .cmp(&a.is_hub)
