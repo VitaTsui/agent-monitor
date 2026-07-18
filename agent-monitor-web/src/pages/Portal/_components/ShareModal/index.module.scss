@@ -74,6 +74,39 @@
   .actions {
     display: flex;
     gap: 8px;
+
+    .regenBtn,
+    .stopBtn {
+      height: 30px;
+      border-radius: 999px;
+      padding-inline: 16px;
+      font-size: 13px;
+      transition: all 0.18s;
+    }
+
+    .regenBtn {
+      color: #0f9bad;
+      border-color: rgba(15, 155, 173, 0.45);
+      background: transparent;
+
+      &:hover {
+        color: #fff;
+        border-color: #0f9bad;
+        background: #0f9bad;
+      }
+    }
+
+    .stopBtn {
+      color: #7c9096;
+      border-color: rgba(36, 61, 66, 0.12);
+      background: transparent;
+
+      &:hover {
+        color: #d4380d;
+        border-color: #ffbb96;
+        background: #fff2e8;
+      }
+    }
   }
 
   .tempHint {
@@ -103,6 +136,14 @@
       border-radius: 10px;
       margin-bottom: 6px;
       font-size: 13px;
+
+      .kickBtn {
+        color: #7c9096;
+
+        &:hover {
+          color: #d4380d;
+        }
+      }
     }
   }
 }

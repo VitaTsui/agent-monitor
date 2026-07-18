@@ -9,6 +9,7 @@ import {
   LaptopOutlined,
   LinkOutlined,
   LogoutOutlined,
+  RightOutlined,
   SafetyOutlined,
   UserOutlined,
 } from "@ant-design/icons";
@@ -276,7 +277,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
         {d.shared ? (
           <Button
             size="small"
-            className={styles.untrustBtn}
+            className={styles.actBtn}
             onClick={() => {
               disconnectShare(d.id).then((res) => {
                 if (res.code === 0) {
@@ -286,19 +287,23 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
               });
             }}
           >
-            断开
+            断开接入
           </Button>
         ) : (
           <>
             {d.trusted ? (
               <>
-                <Button size="small" onClick={() => setShareDevice(d)}>
+                <Button
+                  size="small"
+                  className={styles.shareBtn}
+                  onClick={() => setShareDevice(d)}
+                >
                   协助共享
                 </Button>
                 {!d.isHub && (
                   <Button
                     size="small"
-                    className={styles.untrustBtn}
+                    className={styles.actBtn}
                     onClick={() => untrustDevice(d.id)}
                   >
                     撤销信任
@@ -306,7 +311,12 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                 )}
               </>
             ) : (
-              <Button size="small" type="primary" onClick={() => trustDevice(d.id)}>
+              <Button
+                size="small"
+                type="primary"
+                className={styles.trustBtn}
+                onClick={() => trustDevice(d.id)}
+              >
                 信任
               </Button>
             )}
@@ -317,7 +327,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                 cancelText="取消"
                 onConfirm={() => deleteDevice(d.id)}
               >
-                <Button size="small" danger type="text">
+                <Button size="small" className={styles.delBtn} danger type="text">
                   删除
                 </Button>
               </Popconfirm>
@@ -407,24 +417,12 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
 
           {tab === "devices" && (
             <div className={styles.pane}>
-              <div className={styles.paneHead}>
-                <div className={styles.paneTitle}>设备管理</div>
-                <Button
-                  size="small"
-                  type="primary"
-                  className={styles.connectBtn}
-                  icon={<LinkOutlined />}
-                  onClick={() => setConnectOpen(true)}
-                >
-                  接入他人设备
-                </Button>
-              </div>
+              <div className={styles.paneTitle}>设备管理</div>
               <div className={styles.hint}>
                 新设备接入<strong>默认信任</strong>：在其它电脑安装客户端并登录你的账号，
                 它会自动出现在这里并开始同步。信任开关就是同步链接的开关——
                 撤销信任即断开该设备的同步（不会被自动恢复），随时可手动重新信任。
-                需要协助别人时，在自己设备上点「协助共享」生成连接码给对方；
-                接入别人的设备则点右上角「接入他人设备」。
+                需要协助别人时，在自己设备上点「协助共享」生成连接码给对方。
               </div>
               {autostart !== null && (
                 <div className={styles.section}>
@@ -542,6 +540,31 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                     description="暂无已信任设备"
                   />
                 )}
+              </div>
+
+              {/* 接入他人电脑：独立入口（输入对方协助码），与「管理自己的设备」区分开 */}
+              <div
+                className={styles.connectEntry}
+                role="button"
+                tabIndex={0}
+                onClick={() => setConnectOpen(true)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setConnectOpen(true);
+                  }
+                }}
+              >
+                <span className={styles.connectEntryIcon}>
+                  <LinkOutlined />
+                </span>
+                <div className={styles.connectEntryText}>
+                  <div className={styles.connectEntryTitle}>接入他人电脑</div>
+                  <div className={styles.connectEntryDesc}>
+                    输入对方的协助码，远程查看、控制其终端会话
+                  </div>
+                </div>
+                <RightOutlined className={styles.connectEntryArrow} />
               </div>
             </div>
           )}
