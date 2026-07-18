@@ -74,10 +74,6 @@ pub struct User {
     /// 用于隔离两类账号：口令账号不可被 OAuth 顶掉，反之亦然。
     #[serde(default)]
     pub oauth_provider: Option<String>,
-    /// 该用户的 5h token 额度上限（0 = 不限制）。用户自行设置，
-    /// 随上报响应下发到其名下设备，由客户端本地执行自动暂停/恢复。
-    #[serde(default)]
-    pub quota_limit: u64,
 }
 
 /// 每台设备的元数据（key = machine_id）
@@ -108,8 +104,7 @@ pub struct DeviceMeta {
 struct Persisted {
     users: Vec<User>,
     devices: HashMap<String, DeviceMeta>,
-    /// 旧版全局 5h token 上限；已迁移为每用户 User.quota_limit，
-    /// 字段保留仅为兼容读取旧文件（load 时一次性搬到各用户）。
+    /// 历史字段（旧版全局额度）；额度功能已整体移除，仅为兼容旧文件保留反序列化位
     #[serde(default)]
     quota_limit: u64,
     /// 超级管理员用户名（首次启动由 AM_USERNAME 种子决定）
@@ -121,8 +116,6 @@ pub struct Registry {
     dir: PathBuf,
     users: Vec<User>,
     devices: HashMap<String, DeviceMeta>,
-    /// 旧全局额度，仅作迁移中转（load 后恒为 0）
-    legacy_quota: u64,
     super_user: String,
 }
 
@@ -153,27 +146,15 @@ impl Registry {
             } else {
                 p.super_user
             };
-            Registry { dir, users: p.users, devices: p.devices, legacy_quota: p.quota_limit, super_user }
+            Registry { dir, users: p.users, devices: p.devices, super_user }
         } else {
             Registry {
                 dir,
                 users: Vec::new(),
                 devices: HashMap::new(),
-                legacy_quota: 0,
                 super_user: seed_user.to_string(),
             }
         };
-        // 迁移：旧版全局额度一次性搬到每个尚未自设额度的用户名下
-        if reg.legacy_quota > 0 {
-            let legacy = reg.legacy_quota;
-            for u in reg.users.iter_mut() {
-                if u.quota_limit == 0 {
-                    u.quota_limit = legacy;
-                }
-            }
-            reg.legacy_quota = 0;
-            reg.save();
-        }
         if reg.users.is_empty() {
             reg.users.push(User {
                 id: "1".into(),
@@ -181,7 +162,6 @@ impl Registry {
                 password: hash_password(seed_pass, &random_salt()),
                 display: "超级管理员".into(),
                 oauth_provider: None,
-                quota_limit: 0,
             });
             reg.save();
         }
@@ -203,7 +183,7 @@ impl Registry {
         let p = Persisted {
             users: self.users.clone(),
             devices: self.devices.clone(),
-            quota_limit: self.legacy_quota,
+            quota_limit: 0,
             super_user: self.super_user.clone(),
         };
         let Ok(txt) = serde_json::to_string_pretty(&p) else {
@@ -231,33 +211,8 @@ impl Registry {
         }
     }
 
-    /// 该用户设置的 5h token 上限（0 = 不限制；用户不存在也视为不限制）
-    pub fn quota_limit_of(&self, username: &str) -> u64 {
-        self.users
-            .iter()
-            .find(|u| u.username == username)
-            .map(|u| u.quota_limit)
-            .unwrap_or(0)
-    }
 
-    /// 用户给自己设置额度上限
-    pub fn set_quota_limit_for(&mut self, username: &str, limit: u64) -> bool {
-        let Some(u) = self.users.iter_mut().find(|u| u.username == username) else {
-            return false;
-        };
-        u.quota_limit = limit;
-        self.save();
-        true
-    }
 
-    /// 设备归属者的额度上限（随上报响应下发给该设备；无归属 = 不限制）
-    pub fn quota_limit_for_device(&self, machine_id: &str) -> u64 {
-        self.devices
-            .get(machine_id)
-            .and_then(|d| d.owner.as_deref())
-            .map(|o| self.quota_limit_of(o))
-            .unwrap_or(0)
-    }
 
     /// 注册新用户（用户名已存在则失败）。返回创建的用户。
     pub fn register(&mut self, username: &str, password: &str, display: &str) -> Result<User, String> {
@@ -295,7 +250,6 @@ impl Registry {
             password: hash_password(password, &random_salt()),
             display: if display.is_empty() { username.to_string() } else { display.to_string() },
             oauth_provider: None,
-            quota_limit: 0,
         };
         self.users.push(user.clone());
         self.save();
@@ -456,7 +410,6 @@ impl Registry {
                 display.trim().to_string()
             },
             oauth_provider: Some(provider.to_string()),
-            quota_limit: 0,
         };
         self.users.push(user.clone());
         self.save();
@@ -578,62 +531,6 @@ mod user_exists_tests {
         assert!(!r.user_exists("admln"), "拼错的用户名不该被当成存在");
         assert!(!r.user_exists(""), "空用户名不存在");
         assert!(!r.user_exists("Admin"), "用户名区分大小写（owned_by 也是严格相等）");
-    }
-}
-
-#[cfg(test)]
-mod quota_tests {
-    use super::*;
-
-    fn reg(tag: &str) -> Registry {
-        let dir = std::env::temp_dir().join(format!("am-q-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        Registry::load(dir, "admin", "admin123")
-    }
-
-    /// 额度是每用户的：自己设自己的，互不影响；未知用户 = 不限制
-    #[test]
-    fn per_user_quota() {
-        let mut r = reg("per-user");
-        r.register("alice", "pw123456", "").unwrap();
-        assert!(r.set_quota_limit_for("alice", 500_000));
-        assert_eq!(r.quota_limit_of("alice"), 500_000);
-        assert_eq!(r.quota_limit_of("admin"), 0, "别的用户不受影响");
-        assert_eq!(r.quota_limit_of("ghost"), 0, "未知用户视为不限制");
-        assert!(!r.set_quota_limit_for("ghost", 1), "未知用户设置应失败");
-    }
-
-    /// 上报响应下发的是设备归属者的额度；无归属设备不限制
-    #[test]
-    fn device_owner_quota() {
-        let mut r = reg("dev-owner");
-        r.register("bob", "pw123456", "").unwrap();
-        r.set_quota_limit_for("bob", 300_000);
-        r.ensure_device("mac-1", Some("bob"), true);
-        r.ensure_device("mac-orphan", None, false);
-        assert_eq!(r.quota_limit_for_device("mac-1"), 300_000);
-        assert_eq!(r.quota_limit_for_device("mac-orphan"), 0);
-        assert_eq!(r.quota_limit_for_device("mac-unknown"), 0);
-    }
-
-    /// 旧版全局额度：load 时一次性搬到每个未自设额度的用户，之后不再有全局值
-    #[test]
-    fn migrates_legacy_global_quota() {
-        let dir = std::env::temp_dir().join(format!("am-q-mig-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        {
-            let mut r = Registry::load(dir.clone(), "admin", "admin123");
-            r.register("carol", "pw123456", "").unwrap();
-            // 手工写入旧格式：全局 quota_limit > 0
-            let path = dir.join("registry.json");
-            let mut v: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            v["quota_limit"] = serde_json::json!(800_000u64);
-            std::fs::write(&path, serde_json::to_string(&v).unwrap()).unwrap();
-        }
-        let r = Registry::load(dir, "admin", "admin123");
-        assert_eq!(r.quota_limit_of("admin"), 800_000);
-        assert_eq!(r.quota_limit_of("carol"), 800_000);
     }
 }
 

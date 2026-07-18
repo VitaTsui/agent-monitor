@@ -161,13 +161,7 @@ export const deletePortalDevice = async (id: string) => {
 
 // ---------- 额度（5h token 上限）----------
 
-export const getPortalQuota = async () => {
-  return await get<{ limit: number; used: number }>("/monitor/quota");
-};
 
-export const setPortalQuota = async (limit: number) => {
-  return await post<{ limit: number }>("/monitor/quota", { limit });
-};
 
 // ---------- 文件传输到指定设备目录 ----------
 

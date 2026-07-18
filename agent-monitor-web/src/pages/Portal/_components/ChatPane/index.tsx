@@ -86,11 +86,6 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
             >
               {task.statusDsr}
             </span>
-            {task.autoPaused ? (
-              <span className={`${styles.statusChip} ${styles.paused}`}>
-                额度暂停
-              </span>
-            ) : null}
             <span className={styles.headTitleText}>
               {task.title || task.prompt || task.projectName || "会话"}
             </span>
@@ -101,7 +96,6 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
               <Tooltip title="近 5 小时 token 用量（输入 + 输出 + 缓存创建）">
                 <span className={styles.tokenChip}>
                   5h · {fmtTokens(task.usedTokens5h)}
-                  {task.tokenLimit ? ` / ${fmtTokens(task.tokenLimit)}` : ""}
                 </span>
               </Tooltip>
             ) : null}
