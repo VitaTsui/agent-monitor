@@ -600,6 +600,12 @@ pub fn build_tasks(
             continue;
         }
         let dir_name = short_name(&p.cwd);
+        // 目录名取不到时只显示 provider，不留悬空的「 · 」
+        let title = if dir_name.is_empty() {
+            crate::model::provider_dsr(&p.agent)
+        } else {
+            format!("{} · {}", crate::model::provider_dsr(&p.agent), dir_name)
+        };
         let status = if manual_paused(p.pid) {
             TaskStatus::Paused
         } else {
@@ -614,7 +620,7 @@ pub fn build_tasks(
             platform_dsr: String::new(),
             provider: p.agent.clone(),
             provider_dsr: crate::model::provider_dsr(&p.agent),
-            title: format!("{} · {}", crate::model::provider_dsr(&p.agent), dir_name),
+            title,
             used_tokens_5h: 0,
             token_limit: 0,
             auto_paused: false,
@@ -2069,6 +2075,27 @@ mod codex_tests {
             !tasks.iter().any(|t| t.id.starts_with("proc-")),
             "占位任务统一 pid- 前缀（attach_machine 只给 pid- 加机器前缀）"
         );
+    }
+
+    /// cwd 取不到目录名时，标题只显示 provider，不留悬空的「 · 」
+    #[test]
+    fn placeholder_title_without_dangling_separator() {
+        let procs = vec![ProcessInfo {
+            pid: 77,
+            agent: "claude".into(),
+            tty: "/dev/ttys077".into(),
+            cwd: String::new(),
+            ide: crate::model::IdeKind::Terminal,
+            ide_name: "Terminal".into(),
+            start_time: 1000,
+            cpu_usage: 0.0,
+            memory: 0,
+            command: "claude".into(),
+        }];
+        let tasks = build_tasks(&[], &procs, &|_| false);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Claude Code", "空目录名不该带「 · 」尾巴");
+        assert!(!tasks[0].title.contains('·'));
     }
 }
 
