@@ -1,0 +1,47 @@
+.ScrollText {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+
+  // 隐藏测量节点：与真实内容同字体同布局，仅用于 scrollWidth 比对
+  .measure {
+    position: absolute;
+    visibility: hidden;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+
+  .static {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .track {
+    display: inline-flex;
+    white-space: nowrap;
+    animation: scroll-text 10s linear infinite;
+
+    .copy {
+      flex: none;
+      padding-right: 40px;
+    }
+  }
+
+  // 悬停暂停，方便阅读
+  &:hover .track {
+    animation-play-state: paused;
+  }
+}
+
+@keyframes scroll-text {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(-50%);
+  }
+}

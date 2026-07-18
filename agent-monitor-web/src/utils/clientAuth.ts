@@ -16,6 +16,27 @@ interface ClientCred {
   deviceToken?: string;
 }
 
+/** 本机 machine_id（仅客户端窗口内有值；浏览器返回 null）。结果缓存。 */
+let cachedLocalId: string | null | undefined;
+export async function localMachineId(): Promise<string | null> {
+  if (cachedLocalId !== undefined) {
+    return cachedLocalId;
+  }
+  const invoke = (window as unknown as { __TAURI__?: TauriBridge }).__TAURI__
+    ?.core?.invoke;
+  if (!invoke) {
+    cachedLocalId = null;
+    return null;
+  }
+  try {
+    const id = (await invoke("local_machine_id")) as string;
+    cachedLocalId = id || null;
+  } catch {
+    cachedLocalId = null;
+  }
+  return cachedLocalId;
+}
+
 interface SessionRes {
   code: number;
   data?: { token?: string; userInfo?: object };
