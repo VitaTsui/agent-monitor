@@ -159,7 +159,17 @@ class PortalStore {
   }
 
   public selectMachine = (id: string) => {
+    if (id === this.selectedMachineId) {
+      return;
+    }
     this._selectedMachineId = id;
+    // 切换设备：右侧重置 —— 关掉原设备的格子，落到新设备的首个会话（没有则空态）
+    const first = this._tasks.find((t) => t.machineId === id);
+    this._openIds = first?.id ? [first.id] : [];
+    this.dropMessageCache();
+    if (first?.id) {
+      this.fetchMessages(first.id, true);
+    }
   };
 
   /**
@@ -367,7 +377,13 @@ class PortalStore {
     }
 
     if (!this._openIds.length && this._tasks.length) {
-      this.select(this._tasks[0].id ?? "");
+      // 默认选中限定在当前设备内，不跨设备乱跳
+      const first = this._tasks.find(
+        (t) => t.machineId === this.selectedMachineId,
+      );
+      if (first?.id) {
+        this.select(first.id);
+      }
       return;
     }
     const alive = this._openIds.filter((id) =>
