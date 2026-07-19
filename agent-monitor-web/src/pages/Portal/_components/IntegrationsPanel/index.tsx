@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 
-import { Switch, Tooltip, message } from "antd";
+import { Tooltip, message } from "antd";
 import {
   CheckOutlined,
   CopyOutlined,
@@ -9,7 +9,7 @@ import {
   WechatOutlined,
 } from "@ant-design/icons";
 
-import { Button, Input, Modal } from "@hsu-react/ui";
+import { Button, Input, Modal, Switch } from "@hsu-react/ui";
 
 import {
   IntegrationsInfo,
