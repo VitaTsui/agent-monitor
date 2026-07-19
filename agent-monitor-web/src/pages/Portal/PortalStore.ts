@@ -595,12 +595,27 @@ class PortalStore {
           let prev = this._messagesById[id] ?? [];
           // 终端同步回了同内容的 user 消息 → 撤下对应的本地乐观回显，
           // 让真实消息（带终端时间戳）接管，避免同一条显示两遍。
+          // 归一化比对：空白差异（换行/缩进/首尾）一律视为同一条
+          const norm = (s: string) => s.replace(/\s+/g, " ").trim();
           const incomingUser = new Set(
-            incoming.filter((m) => m.role === "user").map((m) => m.content.trim()),
+            incoming.filter((m) => m.role === "user").map((m) => norm(m.content)),
           );
-          const withoutEcho = prev.filter(
-            (m) => !(m.local && incomingUser.has(m.content.trim())),
-          );
+          const now = Date.now();
+          const withoutEcho = prev.filter((m) => {
+            if (!m.local) {
+              return true;
+            }
+            if (incomingUser.has(norm(m.content))) {
+              return false;
+            }
+            // 自愈兜底：已送达终端超 5 分钟仍没等来同步替换（内容被终端改写等
+            // 罕见情况），回显转为普通消息幻影没意义，直接撤下防止重复观感
+            const age = now - new Date(m.timestamp).getTime();
+            if (m.delivered && age > 5 * 60_000) {
+              return false;
+            }
+            return true;
+          });
           const echoReplaced = withoutEcho.length !== prev.length;
           prev = withoutEcho;
           // key 带上全文长度，降低同时间戳+同前缀不同消息被误判重复的概率
