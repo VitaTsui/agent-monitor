@@ -240,3 +240,31 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     word-break: break-all;
   }
 }
+
+
+// 移动端：斜杠命令改单行横向滚动（省纵向空间 + iOS 建议条质感），
+// 常驻的两行 chip 太占地方
+@media (max-width: 760px) {
+  .Composer .commands {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 6px;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+
+    &::-webkit-scrollbar {
+      display: none;
+    }
+
+    .cmdChip {
+      flex: none;
+      font-size: 12.5px;
+      padding: 5px 11px;
+    }
+
+    // 横向滚动能看全部，不需要「+N/收起」
+    .cmdMore {
+      display: none;
+    }
+  }
+}
