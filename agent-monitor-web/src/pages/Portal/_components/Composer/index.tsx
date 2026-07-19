@@ -7,6 +7,7 @@ import { PaperClipOutlined, WarningOutlined } from "@ant-design/icons";
 import {
   SlashCommand,
   getPortalSlashCommands,
+  getTaskDirs,
   uploadPortalFile,
 } from "@/services/apis/portal";
 import { CONFIRM_WORD, DangerHit, checkDanger } from "../../_utils/dangerCheck";
@@ -54,9 +55,51 @@ const Composer: React.FC<ComposerProps> = (props) => {
     ta.focus();
   };
 
-  // 选中的待上传文件 + 目标目录（默认会话所在目录，可改）
+  // 选中的待上传文件 + 目录树浏览（根 = 会话所在目录，只能往下走）
   const [pendingFile, setPendingFile] = useState<File | null>(null);
-  const [uploadDir, setUploadDir] = useState("");
+  const [dirRel, setDirRel] = useState("");
+  const [dirList, setDirList] = useState<string[]>([]);
+  const [dirLoading, setDirLoading] = useState(false);
+  const dirPollRef = useRef(0);
+
+  // 拉取 rel 下的子目录；agent 异步回带，pending 时 1.2s 后重试（最多 8 次）
+  const loadDirs = (rel: string, attempt = 0) => {
+    if (!taskId) return;
+    const seq = ++dirPollRef.current;
+    setDirLoading(true);
+    getTaskDirs(taskId, rel)
+      .then((res) => {
+        if (seq !== dirPollRef.current) return;
+        if (res.code !== 0) {
+          setDirLoading(false);
+          message.error(res.msg ?? "读取目录失败");
+          return;
+        }
+        if (res.data?.pending && attempt < 8) {
+          window.setTimeout(() => loadDirs(rel, attempt + 1), 1200);
+          return;
+        }
+        setDirList(res.data?.dirs ?? []);
+        setDirLoading(false);
+      })
+      .catch(() => {
+        if (seq === dirPollRef.current) setDirLoading(false);
+      });
+  };
+
+  const enterDir = (name: string) => {
+    const next = dirRel ? `${dirRel}/${name}` : name;
+    setDirRel(next);
+    setDirList([]);
+    loadDirs(next);
+  };
+
+  const upDir = () => {
+    const next = dirRel.split("/").slice(0, -1).join("/");
+    setDirRel(next);
+    setDirList([]);
+    loadDirs(next);
+  };
 
   const onPickFile = (file: File) => {
     if (!machineId || !cwd) {
@@ -64,27 +107,28 @@ const Composer: React.FC<ComposerProps> = (props) => {
       return;
     }
     setPendingFile(file);
-    setUploadDir(cwd);
+    setDirRel("");
+    setDirList([]);
+    loadDirs("");
   };
 
-  /** 确认上传到指定目录，成功后把路径填入输入框 */
+  /** 确认上传到当前浏览目录，成功后把相对路径填入输入框 */
   const doUpload = () => {
     const file = pendingFile;
-    const dir = uploadDir.trim();
-    if (!file || !machineId || !dir) {
+    if (!file || !machineId || !cwd) {
       return;
     }
+    // 设备侧绝对目录 = 会话目录 + 相对子路径（按设备的分隔符拼）
+    const sep = cwd.includes("\\") ? "\\" : "/";
+    const dir = dirRel ? `${cwd}${sep}${dirRel.split("/").join(sep)}` : cwd;
     setUploading(true);
     setPendingFile(null);
     uploadPortalFile(machineId, dir, file)
       .then((res) => {
         if (res.code === 0) {
           message.success(res.data?.result ?? "已上传");
-          // 传到会话目录用相对路径，其他目录用完整路径
-          const sep = dir.includes("\\") ? "\\" : "/";
-          appendToInput(
-            dir === cwd ? `./${file.name}` : `${dir}${sep}${file.name}`,
-          );
+          // 回填相对路径（相对会话目录，正斜杠通用）
+          appendToInput(dirRel ? `./${dirRel}/${file.name}` : `./${file.name}`);
         } else {
           message.error(res.msg ?? "上传失败");
         }
@@ -231,12 +275,37 @@ const Composer: React.FC<ComposerProps> = (props) => {
           <div className={styles.uploadFile}>
             文件：<b>{pendingFile?.name}</b>
           </div>
-          <div className={styles.uploadLabel}>目标目录（默认会话所在目录）</div>
-          <Input
-            value={uploadDir}
-            onChange={(v) => setUploadDir(v)}
-            placeholder="设备上的目标目录"
-          />
+          <div className={styles.uploadLabel}>目标目录（会话目录内选择）</div>
+          <div className={styles.dirCrumb}>
+            会话目录{dirRel ? ` / ${dirRel.split("/").join(" / ")}` : ""}
+          </div>
+          <div className={styles.dirTree}>
+            {dirRel ? (
+              <div className={styles.dirItem} onClick={upDir} role="button" tabIndex={0}>
+                <span className={styles.dirIcon}>↩</span> 返回上级
+              </div>
+            ) : null}
+            {dirLoading ? (
+              <div className={styles.dirEmpty}>读取目录中…</div>
+            ) : dirList.length === 0 ? (
+              <div className={styles.dirEmpty}>{dirRel ? "没有子目录" : "该目录下没有子目录"}</div>
+            ) : (
+              dirList.map((d) => (
+                <div
+                  key={d}
+                  className={styles.dirItem}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => enterDir(d)}
+                >
+                  <span className={styles.dirIcon}>📁</span> {d}
+                </div>
+              ))
+            )}
+          </div>
+          <div className={styles.uploadHint}>
+            将上传到：<b>./{dirRel ? `${dirRel}/` : ""}{pendingFile?.name}</b>
+          </div>
         </div>
       </Modal>
 

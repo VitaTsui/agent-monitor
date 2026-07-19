@@ -8,6 +8,7 @@
     "@capacitor/cli": "^7",
     "@capacitor/core": "^7",
     "@capacitor/filesystem": "^7.1.8",
-    "@capacitor/ios": "^7"
+    "@capacitor/ios": "^7",
+    "@capacitor/splash-screen": "^7.0.5"
   }
 }

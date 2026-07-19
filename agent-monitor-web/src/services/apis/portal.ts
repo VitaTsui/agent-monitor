@@ -337,3 +337,11 @@ export const getQueuedInputs = async (id: string) => {
 export const recallPortalInput = async (id: string, cmdId: string) => {
   return await post<boolean>(`/monitor/tasks/${id}/recall`, { cmdId });
 };
+
+/** 会话目录下的子目录（异步：pending=true 时轮询重试） */
+export const getTaskDirs = async (id: string, rel: string) => {
+  return await get<{ dirs: string[]; cwd: string; pending: boolean }>(
+    `/monitor/tasks/${id}/dirs`,
+    { params: { rel } },
+  );
+};

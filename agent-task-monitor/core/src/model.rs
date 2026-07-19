@@ -195,6 +195,8 @@ pub struct ReportPayload {
     /// 上一轮 hub 请求的 git 对比结果（回传）
     #[serde(default)]
     pub git_results: Vec<GitResult>,
+    #[serde(default)]
+    pub dir_results: Vec<DirResult>,
 }
 
 /// 一个改动文件（git status --porcelain 解析）
@@ -237,6 +239,27 @@ pub struct GitQuery {
     pub task_id: String,
     /// 会话项目目录（agent 本机路径）
     pub cwd: String,
+}
+
+/// hub → agent：列出会话目录下某相对子路径的子目录（上传选目录用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirQuery {
+    pub task_id: String,
+    /// 会话项目目录（agent 本机路径，作为根，不允许越出）
+    pub cwd: String,
+    /// 相对根的子路径（"" 表示根本身），分隔符统一 '/'
+    pub rel: String,
+}
+
+/// agent → hub：目录列表结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirResult {
+    pub task_id: String,
+    pub rel: String,
+    /// 子目录名（仅目录，不含文件；已排序，隐藏目录靠后）
+    pub dirs: Vec<String>,
 }
 
 /// hub → agent 的待执行控制命令
