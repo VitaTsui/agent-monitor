@@ -31,4 +31,6 @@ rsa = { version = "0.9", features = ["sha2"] }
 sha1 = "0.10"
 sha2 = "0.10"
 aes-gcm = "0.10"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
 subtle = "2.6"

@@ -568,3 +568,41 @@ $hover: rgba(36, 61, 66, 0.06);
   }
 }
 
+
+.SettingsModal {
+  .wecomSection {
+    margin-top: 22px;
+    padding-top: 18px;
+    border-top: 1px solid rgba(36, 61, 66, 0.08);
+
+    .wecomCode {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 10px 0 12px;
+      padding: 12px 16px;
+      border: 1px solid rgba(15, 155, 173, 0.2);
+      border-radius: 12px;
+      background: linear-gradient(180deg, #f2fbfc 0%, #eaf7f9 100%);
+
+      .wecomCodeLabel {
+        font-size: 12px;
+        color: #7c9096;
+      }
+
+      .wecomCodeValue {
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: 3px;
+        font-family: "SF Mono", Menlo, Consolas, monospace;
+        color: #0a6b79;
+      }
+
+      .wecomCodeHint {
+        font-size: 11px;
+        color: #7c9096;
+      }
+    }
+  }
+}

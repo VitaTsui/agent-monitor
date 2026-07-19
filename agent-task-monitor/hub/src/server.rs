@@ -80,6 +80,12 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/share/:id/kick", post(share_kick))
         .route("/monitor/share/connect", post(share_connect))
         .route("/monitor/share/disconnect", post(share_disconnect))
+        // ---- 企业微信机器人 ----
+        .route(
+            "/monitor/wecom/callback",
+            get(crate::wecom_bot::verify).post(crate::wecom_bot::message),
+        )
+        .route("/monitor/wecom/bindcode", post(wecom_bindcode))
         // ---- 设备配对（注册+安装即可用，无需管理员发令牌）----
         .route("/monitor/pair/start", post(pair_start))
         .route("/monitor/pair/claim", post(pair_claim))
@@ -804,6 +810,18 @@ async fn delete_device(
     state.machines.write().await.remove(&id);
     state.registry.write().await.delete_device(&id);
     ok(json!({ "result": "已删除" }))
+}
+
+/// POST /monitor/wecom/bindcode —— 生成一次性企业微信绑定码（登录用户）
+async fn wecom_bindcode(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    if state.wecom.is_none() {
+        return err(400, "本站未启用企业微信机器人");
+    }
+    let code = crate::wecom_bot::gen_bind_code(&state, &user).await;
+    ok(json!({ "code": code, "ttlSeconds": 600 }))
 }
 
 // ---------- 协助共享 ----------
