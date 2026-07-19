@@ -162,7 +162,8 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
       ul,
       ol {
-        padding-left: 18px;
+        padding-left: 1.7em;
+        list-style-position: outside;
       }
 
       code {
@@ -416,5 +417,35 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   }
   50% {
     opacity: 0.3;
+  }
+}
+
+
+.TerminalFeed {
+  .toolGroup {
+    .toolGroupHead {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.55);
+      cursor: pointer;
+      user-select: none;
+
+      &:hover {
+        color: rgba(255, 255, 255, 0.85);
+      }
+
+      .toolGroupArrow {
+        font-size: 10px;
+      }
+    }
+
+    .toolGroupBody {
+      margin-top: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
   }
 }

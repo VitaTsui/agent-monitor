@@ -359,7 +359,16 @@ fn inject_tiocsti(tty: &str, text: &str) -> Result<&'static str> {
             anyhow!("注入失败：无法打开终端 {tty}（{e}）。跨会话注入通常需以 root 运行监控端，或使用 Terminal/iTerm。")
         })?;
     let fd = file.as_raw_fd();
-    let mut bytes = text.as_bytes().to_vec();
+    // 多行内容用 bracketed paste 包裹：TUI（Claude Code 等）会把块内换行当
+    // 文本而非提交键，否则第一个 \n 就提交了前半句、剩余卡在输入框里出不去
+    let mut bytes = Vec::with_capacity(text.len() + 16);
+    if text.contains('\n') {
+        bytes.extend_from_slice(b"\x1b[200~");
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(b"\x1b[201~");
+    } else {
+        bytes.extend_from_slice(text.as_bytes());
+    }
     bytes.push(b'\n');
     for b in bytes {
         let c = b as libc::c_char;
@@ -384,7 +393,16 @@ fn applescript_write(tty: &str, text: &str) -> Result<&'static str> {
             .replace('\r', "\\r")
     };
     let tty_e = esc(tty);
-    let text_e = esc(text);
+    // 多行：包 bracketed paste（ESC [200~ … ESC [201~），换行只当文本；
+    // write text/do script 末尾自带的回车在包裹外，负责提交整块
+    let text_e = if text.contains('\n') {
+        format!(
+            "\" & (character id 27) & \"[200~{}\" & (character id 27) & \"[201~\" & \"",
+            esc(text)
+        )
+    } else {
+        esc(text)
+    };
 
     // iTerm2：write text 会自动追加回车
     let iterm = format!(
