@@ -244,26 +244,32 @@ const IntegrationsPanel: React.FC = () => {
         open={editing === "robot"}
         onCancel={() => setEditing(null)}
         footer={null}
-        width={440}
+        width={520}
         centered
       >
         <div className={styles.form}>
           <div className={styles.desc}>
             个人钉钉建群即可用：群「智能群助手 → 添加机器人 → 自定义」，安全设置选「加签」。
           </div>
-          <Input
-            placeholder="钉钉机器人 Webhook 地址"
-            value={robot.webhook}
-            onChange={(v) => setRobot((r) => ({ ...r, webhook: v }))}
-            style={{ marginBottom: 8 }}
-          />
-          <Input
-            placeholder={robot.hasSecret ? "加签密钥（已设置，留空不改）" : "加签密钥 SEC...（推荐）"}
-            value={robot.secret}
-            onChange={(v) => setRobot((r) => ({ ...r, secret: v }))}
-            style={{ marginBottom: 12 }}
-          />
-          <div className={styles.events}>
+          <div className={styles.field}>
+            <label className={styles.label}>Webhook 地址</label>
+            <Input
+              placeholder="粘贴钉钉机器人 Webhook"
+              value={robot.webhook}
+              onChange={(v) => setRobot((r) => ({ ...r, webhook: v }))}
+            />
+          </div>
+          <div className={styles.field}>
+            <label className={styles.label}>加签密钥</label>
+            <Input
+              placeholder={robot.hasSecret ? "已设置，留空不改" : "SEC... （推荐开启加签）"}
+              value={robot.secret}
+              onChange={(v) => setRobot((r) => ({ ...r, secret: v }))}
+            />
+          </div>
+          <div className={styles.field}>
+            <label className={styles.label}>推送事件</label>
+            <div className={styles.events}>
             {([
               ["waiting", "等待输入"],
               ["finished", "会话结束"],
@@ -275,6 +281,7 @@ const IntegrationsPanel: React.FC = () => {
                 <span>{label}</span>
               </label>
             ))}
+            </div>
           </div>
           <div className={styles.actions}>
             <Button
@@ -298,7 +305,7 @@ const IntegrationsPanel: React.FC = () => {
         open={editing === "wecom"}
         onCancel={() => setEditing(null)}
         footer={null}
-        width={460}
+        width={540}
         centered
       >
         <div className={styles.form}>
@@ -306,24 +313,30 @@ const IntegrationsPanel: React.FC = () => {
             企业微信后台建自建应用，把下方回调地址填进「接收消息」，即可发指令
             （会话 / 暂停 N / 发 N 内容 …）遥控会话。
           </div>
-          <Input
-            placeholder="企业 CorpID"
-            value={wecom.corpId}
-            onChange={(v) => setWecom((w) => ({ ...w, corpId: v }))}
-            style={{ marginBottom: 8 }}
-          />
-          <Input
-            placeholder="接收消息 Token"
-            value={wecom.token}
-            onChange={(v) => setWecom((w) => ({ ...w, token: v }))}
-            style={{ marginBottom: 8 }}
-          />
-          <Input
-            placeholder={wecom.hasAesKey ? "EncodingAESKey（已设置，留空不改）" : "EncodingAESKey（43 位）"}
-            value={wecom.aesKey}
-            onChange={(v) => setWecom((w) => ({ ...w, aesKey: v }))}
-            style={{ marginBottom: 12 }}
-          />
+          <div className={styles.field}>
+            <label className={styles.label}>企业 CorpID</label>
+            <Input
+              placeholder="企业微信「我的企业」里的企业 ID"
+              value={wecom.corpId}
+              onChange={(v) => setWecom((w) => ({ ...w, corpId: v }))}
+            />
+          </div>
+          <div className={styles.field}>
+            <label className={styles.label}>接收消息 Token</label>
+            <Input
+              placeholder="自建应用「接收消息」的 Token"
+              value={wecom.token}
+              onChange={(v) => setWecom((w) => ({ ...w, token: v }))}
+            />
+          </div>
+          <div className={styles.field}>
+            <label className={styles.label}>EncodingAESKey</label>
+            <Input
+              placeholder={wecom.hasAesKey ? "已设置，留空不改" : "43 位"}
+              value={wecom.aesKey}
+              onChange={(v) => setWecom((w) => ({ ...w, aesKey: v }))}
+            />
+          </div>
           {wecomUrl ? (
             <div className={styles.urlRow}>
               <span className={styles.urlLabel}>回调地址</span>
@@ -345,7 +358,7 @@ const IntegrationsPanel: React.FC = () => {
         open={editing === "ding"}
         onCancel={() => setEditing(null)}
         footer={null}
-        width={460}
+        width={540}
         centered
       >
         <div className={styles.form}>
@@ -353,12 +366,14 @@ const IntegrationsPanel: React.FC = () => {
             钉钉开放平台建企业内部应用机器人，「消息接收模式」选 HTTP 填下方回调地址，
             AppSecret 用于验签。
           </div>
-          <Input
-            placeholder={ding.hasSecret ? "AppSecret（已设置，留空不改）" : "钉钉应用 AppSecret"}
-            value={ding.appSecret}
-            onChange={(v) => setDing((d) => ({ ...d, appSecret: v }))}
-            style={{ marginBottom: 12 }}
-          />
+          <div className={styles.field}>
+            <label className={styles.label}>AppSecret</label>
+            <Input
+              placeholder={ding.hasSecret ? "已设置，留空不改" : "钉钉企业内部应用的 AppSecret"}
+              value={ding.appSecret}
+              onChange={(v) => setDing((d) => ({ ...d, appSecret: v }))}
+            />
+          </div>
           {dingUrl ? (
             <div className={styles.urlRow}>
               <span className={styles.urlLabel}>回调地址</span>
