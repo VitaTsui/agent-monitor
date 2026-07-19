@@ -145,7 +145,7 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
         }
         return turns.map((turn, ti) => {
         // 执行中的活动轮：不铺工具流水，只同步 Q&A（助手文本），
-        // 工具过程等回合结束后一次性完整呈现。
+        // 工具过程收进折叠块，需要时再展开。
         const inProgress = !!running && ti === lastActive;
         // 用内容指纹做 key：执行中 → 完成态切换时 key 不变，避免整块重挂载闪烁；
         // 且不随消息裁剪而漂移（下标会）。
@@ -167,18 +167,20 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
               <div className={styles.userRow}>
                 <div
                   className={`${styles.userBubble} ${
-                    turn.user.local && turn.user.queued ? styles.queued : ""
+                    turn.user.local && (turn.user.queued || turn.user.delivered)
+                      ? styles.queued
+                      : ""
                   }`}
                 >
                   {turn.user.content}
                 </div>
-                {turn.user.local && turn.user.queued ? (
+                {turn.user.local && (turn.user.queued || turn.user.delivered) ? (
                   <div className={styles.queuedRow}>
                     <span className={styles.queuedTag}>
                       <span className={styles.queuedDot} />
-                      排队中
+                      {turn.user.queued ? "排队中" : "已入终端队列 · 等待执行"}
                     </span>
-                    {onRecall && turn.user.cmdId ? (
+                    {turn.user.queued && onRecall && turn.user.cmdId ? (
                       <span
                         className={styles.recallBtn}
                         role="button"
@@ -218,7 +220,58 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                   </span>
                 </div>
                 <div className={styles.termBody}>
-                  {visibleItems.map(({ m, k }) => renderItem(m, k))}
+                  {(() => {
+                    // 工具流水（tool/tool_result）折叠成摘要行，默认收起 ——
+                    // 连续的一段工具消息归成一组，助手文本/方案保持原位展开。
+                    const out: React.ReactNode[] = [];
+                    let group: { m: PortalMessage; k: string }[] = [];
+                    const flush = () => {
+                      if (!group.length) {
+                        return;
+                      }
+                      const gkey = `tg-${group[0].k}`;
+                      const openG = !!expanded[gkey];
+                      const steps = group.filter((x) => x.m.role === "tool").length;
+                      out.push(
+                        <div key={gkey} className={styles.toolGroup}>
+                          <span
+                            className={styles.toolGroupHead}
+                            role="button"
+                            tabIndex={0}
+                            aria-expanded={openG}
+                            onClick={() => toggleExpand(gkey)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                toggleExpand(gkey);
+                              }
+                            }}
+                          >
+                            <span className={styles.toolGroupArrow}>
+                              {openG ? "▾" : "▸"}
+                            </span>
+                            执行过程 · {steps || group.length} 步
+                          </span>
+                          {openG ? (
+                            <div className={styles.toolGroupBody}>
+                              {group.map(({ m, k }) => renderItem(m, k))}
+                            </div>
+                          ) : null}
+                        </div>,
+                      );
+                      group = [];
+                    };
+                    visibleItems.forEach(({ m, k }) => {
+                      if (m.role === "tool" || m.role === "tool_result") {
+                        group.push({ m, k });
+                      } else {
+                        flush();
+                        out.push(renderItem(m, k));
+                      }
+                    });
+                    flush();
+                    return out;
+                  })()}
                   {inProgress ? (
                     <div className={styles.working}>
                       {/* 只有正在执行的条目带（会动的）圆点，其余内容与终端一致不加点 */}

@@ -541,7 +541,7 @@ class PortalStore {
             ...this._messagesById,
             [id]: cur.map((m) =>
               m.local && m.queued && !still.has(m.cmdId ?? "")
-                ? { ...m, queued: false }
+                ? { ...m, queued: false, delivered: true }
                 : m,
             ),
           };

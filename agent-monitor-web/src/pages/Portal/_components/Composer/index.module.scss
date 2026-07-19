@@ -161,9 +161,12 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   }
 }
 
-// 上传按钮图标加大（工具栏回形针）
-.uploadIcon {
-  font-size: 19px;
+// 上传按钮图标加大（icon 的 className 会被 Chat.Input 克隆吞掉，
+// 从容器选择器压进去才生效）
+.Composer :global(.anticon-paper-clip),
+.chatInput :global(.anticon-paper-clip) {
+  // 组件库按钮内 .anticon 有更高优先级的 14px，这里必须 !important 压回
+  font-size: 20px !important;
 }
 
 // 上传目录确认弹窗（Modal portal 在外，选择器不可嵌套组件根类）
