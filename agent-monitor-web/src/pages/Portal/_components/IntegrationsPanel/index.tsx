@@ -5,10 +5,11 @@ import {
   CheckOutlined,
   CopyOutlined,
   DingtalkOutlined,
+  RightOutlined,
   WechatOutlined,
 } from "@ant-design/icons";
 
-import { Button, Input } from "@hsu-react/ui";
+import { Button, Input, Modal } from "@hsu-react/ui";
 
 import {
   IntegrationsInfo,
@@ -41,12 +42,15 @@ const CopyBtn: React.FC<{ text: string }> = ({ text }) => {
   );
 };
 
+type Editing = "robot" | "wecom" | "ding" | null;
+
 /**
- * 机器人接入（每个用户自助配置自己的渠道）：
- * - 钉钉群机器人：会话状态变化主动推送
- * - 企业微信自建应用 / 钉钉企业应用：双向遥控（专属回调地址填进各自后台）
+ * 机器人接入：外层三个精简卡片，点击卡片打开对应弹窗配置。
+ * - 钉钉群机器人：主动推送
+ * - 企业微信自建应用 / 钉钉企业应用：双向遥控
  */
 const IntegrationsPanel: React.FC = () => {
+  const [editing, setEditing] = useState<Editing>(null);
   // 钉钉群机器人（推送）
   const [robot, setRobot] = useState({
     webhook: "",
@@ -116,6 +120,7 @@ const IntegrationsPanel: React.FC = () => {
           );
         } else {
           message.success("已保存");
+          setEditing(null);
         }
       })
       .catch(() => message.error("保存失败，请检查网络"))
@@ -160,156 +165,214 @@ const IntegrationsPanel: React.FC = () => {
       .finally(() => setDingSaving(false));
   };
 
+  const cards: {
+    key: Exclude<Editing, null>;
+    icon: React.ReactNode;
+    iconCls: string;
+    title: string;
+    type: string;
+    typeCls: string;
+    sub: string;
+    on: boolean;
+  }[] = [
+    {
+      key: "robot",
+      icon: <DingtalkOutlined />,
+      iconCls: styles.ding,
+      title: "钉钉群机器人",
+      type: "主动推送",
+      typeCls: styles.push,
+      sub: "会话状态变化时主动推到你的钉钉群",
+      on: !!robot.webhook,
+    },
+    {
+      key: "wecom",
+      icon: <WechatOutlined />,
+      iconCls: styles.wecom,
+      title: "企业微信自建应用",
+      type: "双向遥控",
+      typeCls: styles.two,
+      sub: "在企业微信里发指令遥控会话",
+      on: !!wecomUrl,
+    },
+    {
+      key: "ding",
+      icon: <DingtalkOutlined />,
+      iconCls: styles.ding,
+      title: "钉钉企业应用",
+      type: "双向遥控",
+      typeCls: styles.two,
+      sub: "在钉钉里 @机器人 发指令遥控会话",
+      on: !!dingUrl,
+    },
+  ];
+
   return (
     <div className={styles.IntegrationsPanel}>
-      {/* 钉钉群机器人 · 主动推送 */}
-      <div className={styles.card}>
-        <div className={styles.cardHead}>
-          <span className={`${styles.icon} ${styles.ding}`}>
-            <DingtalkOutlined />
-          </span>
+      {cards.map((c) => (
+        <div
+          key={c.key}
+          className={styles.card}
+          role="button"
+          tabIndex={0}
+          onClick={() => setEditing(c.key)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              setEditing(c.key);
+            }
+          }}
+        >
+          <span className={`${styles.icon} ${c.iconCls}`}>{c.icon}</span>
           <div className={styles.headText}>
             <div className={styles.headTitle}>
-              钉钉群机器人
-              <span className={`${styles.typeTag} ${styles.push}`}>主动推送</span>
+              {c.title}
+              <span className={`${styles.typeTag} ${c.typeCls}`}>{c.type}</span>
             </div>
-            <div className={styles.headSub}>会话状态变化时主动推到你的钉钉群</div>
+            <div className={styles.headSub}>{c.sub}</div>
           </div>
-          <span className={`${styles.status} ${robot.webhook ? styles.on : ""}`}>
-            {robot.webhook ? "已启用" : "未配置"}
+          <span className={`${styles.status} ${c.on ? styles.on : ""}`}>
+            {c.on ? "已启用" : "未配置"}
           </span>
+          <RightOutlined className={styles.arrow} />
         </div>
-        <div className={styles.desc}>
-          个人钉钉建群即可用：群「智能群助手 → 添加机器人 → 自定义」，安全设置选「加签」。
-        </div>
-        <Input
-          placeholder="钉钉机器人 Webhook 地址"
-          value={robot.webhook}
-          onChange={(v) => setRobot((r) => ({ ...r, webhook: v }))}
-          style={{ marginBottom: 8 }}
-        />
-        <Input
-          placeholder={robot.hasSecret ? "加签密钥（已设置，留空不改）" : "加签密钥 SEC...（推荐）"}
-          value={robot.secret}
-          onChange={(v) => setRobot((r) => ({ ...r, secret: v }))}
-          style={{ marginBottom: 10 }}
-        />
-        <div className={styles.events}>
-          {([
-            ["waiting", "等待输入"],
-            ["finished", "会话结束"],
-            ["newSession", "新会话"],
-            ["device", "设备上线/离线"],
-          ] as const).map(([k, label]) => (
-            <label key={k} className={styles.event}>
-              <Switch checked={robot[k]} onChange={(on) => setRobot((r) => ({ ...r, [k]: on }))} />
-              <span>{label}</span>
-            </label>
-          ))}
-        </div>
-        <div className={styles.actions}>
-          <Button type="primary" className={styles.actBtn} loading={robotSaving} onClick={() => saveRobot(false)}>
-            保存
-          </Button>
-          <Button className={styles.actBtn} onClick={() => saveRobot(true)}>
-            保存并测试
-          </Button>
-        </div>
-      </div>
+      ))}
 
-      {/* 企业微信自建应用 · 双向 */}
-      <div className={styles.card}>
-        <div className={styles.cardHead}>
-          <span className={`${styles.icon} ${styles.wecom}`}>
-            <WechatOutlined />
-          </span>
-          <div className={styles.headText}>
-            <div className={styles.headTitle}>
-              企业微信自建应用
-              <span className={`${styles.typeTag} ${styles.two}`}>双向遥控</span>
-            </div>
-            <div className={styles.headSub}>在企业微信里发指令遥控会话</div>
+      {/* 钉钉群机器人 */}
+      <Modal
+        title="钉钉群机器人 · 主动推送"
+        open={editing === "robot"}
+        onCancel={() => setEditing(null)}
+        footer={null}
+        width={440}
+        centered
+      >
+        <div className={styles.form}>
+          <div className={styles.desc}>
+            个人钉钉建群即可用：群「智能群助手 → 添加机器人 → 自定义」，安全设置选「加签」。
           </div>
-          <span className={`${styles.status} ${wecomUrl ? styles.on : ""}`}>
-            {wecomUrl ? "已启用" : "未配置"}
-          </span>
-        </div>
-        <div className={styles.desc}>
-          企业微信后台建自建应用，把下方回调地址填进「接收消息」，即可发指令
-          （会话 / 暂停 N / 发 N 内容 …）遥控会话。
-        </div>
-        <Input
-          placeholder="企业 CorpID"
-          value={wecom.corpId}
-          onChange={(v) => setWecom((w) => ({ ...w, corpId: v }))}
-          style={{ marginBottom: 8 }}
-        />
-        <Input
-          placeholder="接收消息 Token"
-          value={wecom.token}
-          onChange={(v) => setWecom((w) => ({ ...w, token: v }))}
-          style={{ marginBottom: 8 }}
-        />
-        <Input
-          placeholder={wecom.hasAesKey ? "EncodingAESKey（已设置，留空不改）" : "EncodingAESKey（43 位）"}
-          value={wecom.aesKey}
-          onChange={(v) => setWecom((w) => ({ ...w, aesKey: v }))}
-          style={{ marginBottom: 10 }}
-        />
-        {wecomUrl ? (
-          <div className={styles.urlRow}>
-            <span className={styles.urlLabel}>回调地址</span>
-            <span className={styles.urlValue}>{wecomUrl}</span>
-            <CopyBtn text={wecomUrl} />
+          <Input
+            placeholder="钉钉机器人 Webhook 地址"
+            value={robot.webhook}
+            onChange={(v) => setRobot((r) => ({ ...r, webhook: v }))}
+            style={{ marginBottom: 8 }}
+          />
+          <Input
+            placeholder={robot.hasSecret ? "加签密钥（已设置，留空不改）" : "加签密钥 SEC...（推荐）"}
+            value={robot.secret}
+            onChange={(v) => setRobot((r) => ({ ...r, secret: v }))}
+            style={{ marginBottom: 12 }}
+          />
+          <div className={styles.events}>
+            {([
+              ["waiting", "等待输入"],
+              ["finished", "会话结束"],
+              ["newSession", "新会话"],
+              ["device", "设备上线/离线"],
+            ] as const).map(([k, label]) => (
+              <label key={k} className={styles.event}>
+                <Switch checked={robot[k]} onChange={(on) => setRobot((r) => ({ ...r, [k]: on }))} />
+                <span>{label}</span>
+              </label>
+            ))}
           </div>
-        ) : null}
-        <div className={styles.actions}>
-          <Button type="primary" className={styles.actBtn} loading={wecomSaving} onClick={saveWecom}>
-            保存并生成回调地址
-          </Button>
+          <div className={styles.actions}>
+            <Button
+              type="primary"
+              className={styles.actBtn}
+              loading={robotSaving}
+              onClick={() => saveRobot(false)}
+            >
+              保存
+            </Button>
+            <Button className={styles.actBtn} onClick={() => saveRobot(true)}>
+              保存并测试
+            </Button>
+          </div>
         </div>
-      </div>
+      </Modal>
 
-      {/* 钉钉企业应用 · 双向 */}
-      <div className={styles.card}>
-        <div className={styles.cardHead}>
-          <span className={`${styles.icon} ${styles.ding}`}>
-            <DingtalkOutlined />
-          </span>
-          <div className={styles.headText}>
-            <div className={styles.headTitle}>
-              钉钉企业应用
-              <span className={`${styles.typeTag} ${styles.two}`}>双向遥控</span>
+      {/* 企业微信自建应用 */}
+      <Modal
+        title="企业微信自建应用 · 双向遥控"
+        open={editing === "wecom"}
+        onCancel={() => setEditing(null)}
+        footer={null}
+        width={460}
+        centered
+      >
+        <div className={styles.form}>
+          <div className={styles.desc}>
+            企业微信后台建自建应用，把下方回调地址填进「接收消息」，即可发指令
+            （会话 / 暂停 N / 发 N 内容 …）遥控会话。
+          </div>
+          <Input
+            placeholder="企业 CorpID"
+            value={wecom.corpId}
+            onChange={(v) => setWecom((w) => ({ ...w, corpId: v }))}
+            style={{ marginBottom: 8 }}
+          />
+          <Input
+            placeholder="接收消息 Token"
+            value={wecom.token}
+            onChange={(v) => setWecom((w) => ({ ...w, token: v }))}
+            style={{ marginBottom: 8 }}
+          />
+          <Input
+            placeholder={wecom.hasAesKey ? "EncodingAESKey（已设置，留空不改）" : "EncodingAESKey（43 位）"}
+            value={wecom.aesKey}
+            onChange={(v) => setWecom((w) => ({ ...w, aesKey: v }))}
+            style={{ marginBottom: 12 }}
+          />
+          {wecomUrl ? (
+            <div className={styles.urlRow}>
+              <span className={styles.urlLabel}>回调地址</span>
+              <span className={styles.urlValue}>{wecomUrl}</span>
+              <CopyBtn text={wecomUrl} />
             </div>
-            <div className={styles.headSub}>在钉钉里 @机器人 发指令遥控会话</div>
+          ) : null}
+          <div className={styles.actions}>
+            <Button type="primary" className={styles.actBtn} loading={wecomSaving} onClick={saveWecom}>
+              保存并生成回调地址
+            </Button>
           </div>
-          <span className={`${styles.status} ${dingUrl ? styles.on : ""}`}>
-            {dingUrl ? "已启用" : "未配置"}
-          </span>
         </div>
-        <div className={styles.desc}>
-          钉钉开放平台建企业内部应用机器人，「消息接收模式」选 HTTP 填下方回调地址，
-          AppSecret 用于验签。
-        </div>
-        <Input
-          placeholder={ding.hasSecret ? "AppSecret（已设置，留空不改）" : "钉钉应用 AppSecret"}
-          value={ding.appSecret}
-          onChange={(v) => setDing((d) => ({ ...d, appSecret: v }))}
-          style={{ marginBottom: 10 }}
-        />
-        {dingUrl ? (
-          <div className={styles.urlRow}>
-            <span className={styles.urlLabel}>回调地址</span>
-            <span className={styles.urlValue}>{dingUrl}</span>
-            <CopyBtn text={dingUrl} />
+      </Modal>
+
+      {/* 钉钉企业应用 */}
+      <Modal
+        title="钉钉企业应用 · 双向遥控"
+        open={editing === "ding"}
+        onCancel={() => setEditing(null)}
+        footer={null}
+        width={460}
+        centered
+      >
+        <div className={styles.form}>
+          <div className={styles.desc}>
+            钉钉开放平台建企业内部应用机器人，「消息接收模式」选 HTTP 填下方回调地址，
+            AppSecret 用于验签。
           </div>
-        ) : null}
-        <div className={styles.actions}>
-          <Button type="primary" className={styles.actBtn} loading={dingSaving} onClick={saveDing}>
-            保存并生成回调地址
-          </Button>
+          <Input
+            placeholder={ding.hasSecret ? "AppSecret（已设置，留空不改）" : "钉钉应用 AppSecret"}
+            value={ding.appSecret}
+            onChange={(v) => setDing((d) => ({ ...d, appSecret: v }))}
+            style={{ marginBottom: 12 }}
+          />
+          {dingUrl ? (
+            <div className={styles.urlRow}>
+              <span className={styles.urlLabel}>回调地址</span>
+              <span className={styles.urlValue}>{dingUrl}</span>
+              <CopyBtn text={dingUrl} />
+            </div>
+          ) : null}
+          <div className={styles.actions}>
+            <Button type="primary" className={styles.actBtn} loading={dingSaving} onClick={saveDing}>
+              保存并生成回调地址
+            </Button>
+          </div>
         </div>
-      </div>
+      </Modal>
     </div>
   );
 };
