@@ -215,7 +215,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
       </div>
 
       {/* 清单与后台任务是「当前状态」而非时序事件：悬浮在本格右侧、可收起 */}
-      <SessionPanels messages={messages} />
+      <SessionPanels messages={messages} running={task.status === "running"} />
 
       <div className={styles.composerWrap}>
         <div className={styles.chatColumn}>
