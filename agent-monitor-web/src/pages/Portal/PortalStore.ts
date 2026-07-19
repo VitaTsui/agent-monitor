@@ -591,10 +591,10 @@ class PortalStore {
           // 终端同步回了同内容的 user 消息 → 撤下对应的本地乐观回显，
           // 让真实消息（带终端时间戳）接管，避免同一条显示两遍。
           const incomingUser = new Set(
-            incoming.filter((m) => m.role === "user").map((m) => m.content),
+            incoming.filter((m) => m.role === "user").map((m) => m.content.trim()),
           );
           const withoutEcho = prev.filter(
-            (m) => !(m.local && incomingUser.has(m.content)),
+            (m) => !(m.local && incomingUser.has(m.content.trim())),
           );
           const echoReplaced = withoutEcho.length !== prev.length;
           prev = withoutEcho;

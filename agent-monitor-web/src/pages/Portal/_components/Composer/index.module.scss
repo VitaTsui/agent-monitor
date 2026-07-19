@@ -160,3 +160,27 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     outline-offset: 2px;
   }
 }
+
+// 上传按钮图标加大（工具栏回形针）
+.uploadIcon {
+  font-size: 19px;
+}
+
+// 上传目录确认弹窗（Modal portal 在外，选择器不可嵌套组件根类）
+.uploadForm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 0 2px;
+
+  .uploadFile {
+    font-size: 13px;
+    color: #4a5f64;
+    word-break: break-all;
+  }
+
+  .uploadLabel {
+    font-size: 12.5px;
+    color: #7c9096;
+  }
+}
