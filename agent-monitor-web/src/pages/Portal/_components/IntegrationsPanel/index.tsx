@@ -1,7 +1,12 @@
 import React, { useCallback, useEffect, useState } from "react";
 
 import { Switch, Tooltip, message } from "antd";
-import { CheckOutlined, CopyOutlined } from "@ant-design/icons";
+import {
+  CheckOutlined,
+  CopyOutlined,
+  DingtalkOutlined,
+  WechatOutlined,
+} from "@ant-design/icons";
 
 import { Button, Input } from "@hsu-react/ui";
 
@@ -159,10 +164,23 @@ const IntegrationsPanel: React.FC = () => {
     <div className={styles.IntegrationsPanel}>
       {/* 钉钉群机器人 · 主动推送 */}
       <div className={styles.card}>
-        <div className={styles.cardTitle}>钉钉群机器人 · 主动推送</div>
+        <div className={styles.cardHead}>
+          <span className={`${styles.icon} ${styles.ding}`}>
+            <DingtalkOutlined />
+          </span>
+          <div className={styles.headText}>
+            <div className={styles.headTitle}>
+              钉钉群机器人
+              <span className={`${styles.typeTag} ${styles.push}`}>主动推送</span>
+            </div>
+            <div className={styles.headSub}>会话状态变化时主动推到你的钉钉群</div>
+          </div>
+          <span className={`${styles.status} ${robot.webhook ? styles.on : ""}`}>
+            {robot.webhook ? "已启用" : "未配置"}
+          </span>
+        </div>
         <div className={styles.desc}>
-          会话状态变化时主动推到你的钉钉群。个人钉钉建群即可用：群「智能群助手 →
-          添加机器人 → 自定义」，安全设置选「加签」。
+          个人钉钉建群即可用：群「智能群助手 → 添加机器人 → 自定义」，安全设置选「加签」。
         </div>
         <Input
           placeholder="钉钉机器人 Webhook 地址"
@@ -201,10 +219,24 @@ const IntegrationsPanel: React.FC = () => {
 
       {/* 企业微信自建应用 · 双向 */}
       <div className={styles.card}>
-        <div className={styles.cardTitle}>企业微信自建应用 · 双向遥控</div>
+        <div className={styles.cardHead}>
+          <span className={`${styles.icon} ${styles.wecom}`}>
+            <WechatOutlined />
+          </span>
+          <div className={styles.headText}>
+            <div className={styles.headTitle}>
+              企业微信自建应用
+              <span className={`${styles.typeTag} ${styles.two}`}>双向遥控</span>
+            </div>
+            <div className={styles.headSub}>在企业微信里发指令遥控会话</div>
+          </div>
+          <span className={`${styles.status} ${wecomUrl ? styles.on : ""}`}>
+            {wecomUrl ? "已启用" : "未配置"}
+          </span>
+        </div>
         <div className={styles.desc}>
-          在企业微信管理后台建自建应用，把下方生成的回调地址填进「接收消息」，即可在
-          企业微信里发指令（会话 / 暂停 N / 发 N 内容 …）遥控你的会话。
+          企业微信后台建自建应用，把下方回调地址填进「接收消息」，即可发指令
+          （会话 / 暂停 N / 发 N 内容 …）遥控会话。
         </div>
         <Input
           placeholder="企业 CorpID"
@@ -240,10 +272,24 @@ const IntegrationsPanel: React.FC = () => {
 
       {/* 钉钉企业应用 · 双向 */}
       <div className={styles.card}>
-        <div className={styles.cardTitle}>钉钉企业应用 · 双向遥控</div>
+        <div className={styles.cardHead}>
+          <span className={`${styles.icon} ${styles.ding}`}>
+            <DingtalkOutlined />
+          </span>
+          <div className={styles.headText}>
+            <div className={styles.headTitle}>
+              钉钉企业应用
+              <span className={`${styles.typeTag} ${styles.two}`}>双向遥控</span>
+            </div>
+            <div className={styles.headSub}>在钉钉里 @机器人 发指令遥控会话</div>
+          </div>
+          <span className={`${styles.status} ${dingUrl ? styles.on : ""}`}>
+            {dingUrl ? "已启用" : "未配置"}
+          </span>
+        </div>
         <div className={styles.desc}>
-          在钉钉开放平台建企业内部应用机器人，「消息接收模式」选 HTTP，把下方回调地址填进去，
-          填应用的 AppSecret 用于验签。之后在钉钉里 @机器人 发指令遥控。
+          钉钉开放平台建企业内部应用机器人，「消息接收模式」选 HTTP 填下方回调地址，
+          AppSecret 用于验签。
         </div>
         <Input
           placeholder={ding.hasSecret ? "AppSecret（已设置，留空不改）" : "钉钉应用 AppSecret"}
