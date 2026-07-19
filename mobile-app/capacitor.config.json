@@ -4,8 +4,15 @@
   "webDir": "www",
   "server": {
     "url": "https://monitor.vita-llm.com/portal",
-    "cleartext": false
+    "cleartext": false,
+    "allowNavigation": [
+      "monitor.vita-llm.com"
+    ]
   },
-  "ios": { "contentInset": "always" },
-  "android": { "backgroundColor": "#f4fafb" }
+  "ios": {
+    "contentInset": "always"
+  },
+  "android": {
+    "backgroundColor": "#f4fafb"
+  }
 }
