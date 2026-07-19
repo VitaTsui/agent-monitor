@@ -23,6 +23,10 @@
       "backgroundColor": "#f4fafb",
       "showSpinner": false,
       "androidScaleType": "CENTER_INSIDE"
+    },
+    "Keyboard": {
+      "resize": "none",
+      "resizeOnFullScreen": true
     }
   }
 }

@@ -215,15 +215,26 @@ $hover: rgba(36, 61, 66, 0.06);
 
       .mobileBack {
         position: absolute;
-        left: 10px;
+        left: 6px;
         top: 0;
         height: 48px;
         display: flex;
         align-items: center;
+        gap: 3px;
         padding: 0 8px;
-        font-size: 16px;
+        font-size: 16.5px;
         color: #0f9bad;
         cursor: pointer;
+
+        // iOS 返回箭头：加大加粗的 chevron
+        .mobileBackIcon {
+          font-size: 20px;
+
+          svg {
+            stroke: currentColor;
+            stroke-width: 40; // 视觉加粗（antd 图标默认偏细）
+          }
+        }
       }
     }
 
