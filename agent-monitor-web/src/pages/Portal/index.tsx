@@ -26,6 +26,7 @@ import { observer } from "mobx-react-lite";
 import { getAccessToken, getUserInfo, removeToken } from "@/utils/auth";
 import { clientSilentLogin, inDesktopClient, localMachineId } from "@/utils/clientAuth";
 import PortalStore from "./PortalStore";
+import { ShareReceiveModal } from "./_hooks/useShareReceive";
 import ChatPane from "./_components/ChatPane";
 import ScrollText from "./_components/ScrollText";
 import SettingsModal from "./_components/SettingsModal";
@@ -545,6 +546,7 @@ const Portal: React.FC = observer(() => {
         initialTab={settingsTab}
         onClose={() => setSettingsOpen(false)}
       />
+      <ShareReceiveModal />
     </div>
     </ConfigProvider>
   );
