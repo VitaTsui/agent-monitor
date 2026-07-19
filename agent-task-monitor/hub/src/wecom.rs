@@ -1,13 +1,6 @@
-//! 企业微信自建应用机器人：接收成员消息 → 指令调度 → 被动回复。
-//! 走官方合规通道（自建应用回调），不碰个人微信 hook。
-//!
-//! 配置（全部来自环境变量，任一缺失则机器人路由静默停用）：
-//!   AM_WECOM_TOKEN     自建应用「接收消息」的 Token
-//!   AM_WECOM_AESKEY    EncodingAESKey（43 位）
-//!   AM_WECOM_CORPID    企业 CorpID（回调里的 ToUserName/receiveid）
-//!
-//! 交互采用「被动回复」：收到消息后在 HTTP 响应里直接回一条加密文本，
-//! 无需 access_token，也就无需 Secret —— 自用机器人最省心。
+//! 企业微信/公众号消息加解密（WXBizMsgCrypt）：sha1 签名 + AES-256-CBC +
+//! 企业微信特有的 32 块 PKCS7。被 bot.rs 的各用户回调复用（配置来自用户
+//! 自助填写，非环境变量）。
 
 use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use base64::engine::general_purpose::STANDARD as B64;
@@ -26,22 +19,11 @@ pub struct WecomConfig {
 }
 
 impl WecomConfig {
-    /// 企业微信配置（AM_WECOM_*）齐全才启用；缺任一项返回 None
-    pub fn from_env() -> Option<Self> {
-        Self::from_prefixed("AM_WECOM_TOKEN", "AM_WECOM_AESKEY", "AM_WECOM_CORPID")
-    }
-
-    /// 公众号配置（AM_MP_*）：receiveid = 公众号 AppID，其余同企业微信
-    pub fn mp_from_env() -> Option<Self> {
-        Self::from_prefixed("AM_MP_TOKEN", "AM_MP_AESKEY", "AM_MP_APPID")
-    }
-
-    fn from_prefixed(token_var: &str, aeskey_var: &str, id_var: &str) -> Option<Self> {
-        let token = std::env::var(token_var).ok().filter(|s| !s.is_empty())?;
-        let aeskey = std::env::var(aeskey_var).ok().filter(|s| !s.is_empty())?;
-        let corp_id = std::env::var(id_var).ok().filter(|s| !s.is_empty())?;
-        let aes_key = decode_aes_key(&aeskey)?;
-        Some(Self { token, aes_key, corp_id })
+    /// 从用户自助填写的配置构造（token / EncodingAESKey 原文 / receiveid）。
+    /// receiveid：企业微信=CorpID，公众号=AppID。AESKey 非法则返回 None。
+    pub fn from_parts(token: &str, encoding_aes_key: &str, receiveid: &str) -> Option<Self> {
+        let aes_key = decode_aes_key(encoding_aes_key)?;
+        Some(Self { token: token.to_string(), aes_key, corp_id: receiveid.to_string() })
     }
 }
 
@@ -64,14 +46,6 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 公众号 URL 验证签名：sha1( 排序拼接[token, timestamp, nonce] )，不含 echostr
-pub fn plain_signature(token: &str, timestamp: &str, nonce: &str) -> String {
-    let mut arr = [token, timestamp, nonce];
-    arr.sort_unstable();
-    let mut hasher = Sha1::new();
-    hasher.update(arr.concat().as_bytes());
-    hex(&hasher.finalize())
-}
 
 /// 解密回调密文，返回 (明文, receiveid)。校验 receiveid 与 corp_id 一致。
 pub fn decrypt(cfg: &WecomConfig, encrypt_b64: &str) -> Result<String, String> {
