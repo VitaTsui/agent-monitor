@@ -109,6 +109,12 @@ const Portal: React.FC = observer(() => {
     setMobileNav(false);
   };
 
+  // 移动端点设备同理：切换后右侧已落到该设备首个会话，直接收起抽屉看内容
+  const selectMachineAndClose = (id: string) => {
+    selectMachine(id);
+    setMobileNav(false);
+  };
+
   // 抽屉打开时：锁背景滚动 + Esc 关闭
   useEffect(() => {
     if (!mobileNav) return;
@@ -437,11 +443,11 @@ const Portal: React.FC = observer(() => {
                       role="button"
                       tabIndex={0}
                       aria-pressed={d.machineId === selectedMachineId}
-                      onClick={() => selectMachine(d.machineId)}
+                      onClick={() => selectMachineAndClose(d.machineId)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
-                          selectMachine(d.machineId);
+                          selectMachineAndClose(d.machineId);
                         }
                       }}
                       title={`${d.hostname} · ${d.platformDsr}${d.running > 0 ? ` · ${d.running} 执行中` : ""}`}
