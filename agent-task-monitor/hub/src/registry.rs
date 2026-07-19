@@ -136,6 +136,9 @@ struct Persisted {
     /// 超级管理员用户名（首次启动由 AM_USERNAME 种子决定）
     #[serde(default)]
     super_user: String,
+    /// 企业微信机器人绑定：wecom userid → 平台用户名
+    #[serde(default)]
+    wecom_users: HashMap<String, String>,
 }
 
 pub struct Registry {
@@ -143,6 +146,7 @@ pub struct Registry {
     users: Vec<User>,
     devices: HashMap<String, DeviceMeta>,
     super_user: String,
+    wecom_users: HashMap<String, String>,
 }
 
 impl Registry {
@@ -172,13 +176,14 @@ impl Registry {
             } else {
                 p.super_user
             };
-            Registry { dir, users: p.users, devices: p.devices, super_user }
+            Registry { dir, users: p.users, devices: p.devices, super_user, wecom_users: p.wecom_users }
         } else {
             Registry {
                 dir,
                 users: Vec::new(),
                 devices: HashMap::new(),
                 super_user: seed_user.to_string(),
+                wecom_users: HashMap::new(),
             }
         };
         if reg.users.is_empty() {
@@ -209,6 +214,7 @@ impl Registry {
         let p = Persisted {
             users: self.users.clone(),
             devices: self.devices.clone(),
+            wecom_users: self.wecom_users.clone(),
             quota_limit: 0,
             super_user: self.super_user.clone(),
         };
@@ -326,6 +332,27 @@ impl Registry {
     /// 按用户名取用户（客户端静默续登等需要完整用户信息的场景）
     pub fn user_by_name(&self, username: &str) -> Option<&User> {
         self.users.iter().find(|u| u.username == username)
+    }
+
+    // ---------- 企业微信机器人绑定 ----------
+
+    /// 绑定 wecom userid → 平台账号（覆盖旧绑定）
+    pub fn bind_wecom(&mut self, wecom_userid: &str, username: &str) {
+        self.wecom_users.insert(wecom_userid.to_string(), username.to_string());
+        self.save();
+    }
+
+    /// 解绑（预留：换绑/注销时用）
+    #[allow(dead_code)]
+    pub fn unbind_wecom(&mut self, wecom_userid: &str) {
+        if self.wecom_users.remove(wecom_userid).is_some() {
+            self.save();
+        }
+    }
+
+    /// wecom userid 对应的平台账号（未绑定返回 None）
+    pub fn wecom_user_of(&self, wecom_userid: &str) -> Option<String> {
+        self.wecom_users.get(wecom_userid).cloned()
     }
 
     /// 该用户名下全部设备（含离线；设备管理列表用）
