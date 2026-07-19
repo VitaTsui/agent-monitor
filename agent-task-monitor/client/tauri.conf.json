@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "终端任务监控",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "identifier": "com.vitahsu.agent-monitor",
   "build": {
     "frontendDist": "../../agent-monitor-web/dist"

@@ -428,10 +428,11 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                 </div>
               </div>
               <div className={styles.wecomSection}>
-                <div className={styles.sectionTitle}>企业微信机器人</div>
+                <div className={styles.sectionTitle}>微信机器人</div>
                 <div className={styles.hint}>
-                  绑定后，可在企业微信里用文字指令遥控你的会话（查看 / 暂停 / 恢复 /
-                  中断 / 发布输入）。生成绑定码，发给机器人：<code>绑定 &lt;码&gt;</code>。
+                  绑定后，可在微信（公众号）或企业微信里用文字指令遥控你的会话
+                  （查看 / 暂停 / 恢复 / 中断 / 发布输入）。生成绑定码，发给机器人：
+                  <code>绑定 &lt;码&gt;</code>。
                 </div>
                 {wecomCode ? (
                   <div className={styles.wecomCode}>
