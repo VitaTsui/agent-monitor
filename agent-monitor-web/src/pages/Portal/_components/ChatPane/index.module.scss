@@ -142,8 +142,10 @@ $muted: #7c9096;
   // 底部内边距让开手势条 / Home Indicator：原生壳里窗口延伸到系统栏下，
   // 不加的话输入框会被手势条压住。浏览器里 env() 为 0，等价于原来的 14px。
   .composerWrap {
+    // 底部：安全区（home 指示条）之外只留 6px，避免 iOS 上双份留白显得空
     padding: 6px calc(18px + env(safe-area-inset-right))
-      calc(14px + env(safe-area-inset-bottom)) calc(18px + env(safe-area-inset-left));
+      max(10px, calc(6px + env(safe-area-inset-bottom)))
+      calc(18px + env(safe-area-inset-left));
   }
 }
 

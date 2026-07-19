@@ -21,9 +21,7 @@
       "launchAutoHide": true,
       "launchFadeOutDuration": 350,
       "backgroundColor": "#f4fafb",
-      "showSpinner": true,
-      "spinnerColor": "#0F9BAD",
-      "iosSpinnerStyle": "small",
+      "showSpinner": false,
       "androidScaleType": "CENTER_INSIDE"
     }
   }
