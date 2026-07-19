@@ -130,10 +130,23 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
 
   return (
     <div className={styles.TerminalFeed}>
-      {turns.map((turn, ti) => {
-        // 执行中的最后一轮：不铺工具流水，只同步 Q&A（助手文本），
+      {(() => {
+        // 「最后一个有实际活动的轮次」：本地回显（发送排队）新开的轮次还没有
+        // 任何助手/工具消息，执行中的收敛逻辑必须仍作用于它前面真正在跑的
+        // 那一轮 —— 否则一发送，跑着的轮次就不再是最后一轮，整段 Bash 工具
+        // 流水会提前铺出来。
+        let lastActive = turns.length - 1;
+        while (
+          lastActive > 0 &&
+          turns[lastActive].items.length === 0 &&
+          turns[lastActive].user?.local
+        ) {
+          lastActive--;
+        }
+        return turns.map((turn, ti) => {
+        // 执行中的活动轮：不铺工具流水，只同步 Q&A（助手文本），
         // 工具过程等回合结束后一次性完整呈现。
-        const inProgress = !!running && ti === turns.length - 1;
+        const inProgress = !!running && ti === lastActive;
         // 用内容指纹做 key：执行中 → 完成态切换时 key 不变，避免整块重挂载闪烁；
         // 且不随消息裁剪而漂移（下标会）。
         const keyed = turn.items.map((m) => ({ m, k: msgKey(m) }));
@@ -225,7 +238,8 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
             )}
           </div>
         );
-      })}
+        });
+      })()}
     </div>
   );
 };

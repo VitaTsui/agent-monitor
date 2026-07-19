@@ -54,19 +54,37 @@ const Composer: React.FC<ComposerProps> = (props) => {
     ta.focus();
   };
 
-  /** 上传文件到会话所在设备的工作目录，成功后把相对路径填入输入框 */
+  // 选中的待上传文件 + 目标目录（默认会话所在目录，可改）
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [uploadDir, setUploadDir] = useState("");
+
   const onPickFile = (file: File) => {
     if (!machineId || !cwd) {
       message.warning("该会话缺少设备或目录信息，无法传文件");
       return;
     }
+    setPendingFile(file);
+    setUploadDir(cwd);
+  };
+
+  /** 确认上传到指定目录，成功后把路径填入输入框 */
+  const doUpload = () => {
+    const file = pendingFile;
+    const dir = uploadDir.trim();
+    if (!file || !machineId || !dir) {
+      return;
+    }
     setUploading(true);
-    uploadPortalFile(machineId, cwd, file)
+    setPendingFile(null);
+    uploadPortalFile(machineId, dir, file)
       .then((res) => {
         if (res.code === 0) {
           message.success(res.data?.result ?? "已上传");
-          // 文件写入会话工作目录，相对路径即 ./文件名
-          appendToInput(`./${file.name}`);
+          // 传到会话目录用相对路径，其他目录用完整路径
+          const sep = dir.includes("\\") ? "\\" : "/";
+          appendToInput(
+            dir === cwd ? `./${file.name}` : `${dir}${sep}${file.name}`,
+          );
         } else {
           message.error(res.msg ?? "上传失败");
         }
@@ -189,7 +207,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
             ? [
                 {
                   title: "传文件到会话目录（完成后自动填入路径）",
-                  icon: <PaperClipOutlined />,
+                  icon: <PaperClipOutlined className={styles.uploadIcon} />,
                   type: "text",
                   loading: uploading,
                   onClick: () => fileRef.current?.click(),
@@ -198,6 +216,30 @@ const Composer: React.FC<ComposerProps> = (props) => {
             : undefined
         }
       />
+      {/* 上传目录确认：默认会话所在目录，可改成设备上任意目录 */}
+      <Modal
+        title="传文件到设备"
+        open={!!pendingFile}
+        onCancel={() => setPendingFile(null)}
+        onOk={doUpload}
+        okText="上传"
+        cancelText="取消"
+        width={460}
+        centered
+      >
+        <div className={styles.uploadForm}>
+          <div className={styles.uploadFile}>
+            文件：<b>{pendingFile?.name}</b>
+          </div>
+          <div className={styles.uploadLabel}>目标目录（默认会话所在目录）</div>
+          <Input
+            value={uploadDir}
+            onChange={(v) => setUploadDir(v)}
+            placeholder="设备上的目标目录"
+          />
+        </div>
+      </Modal>
+
       {/* 隐藏的文件选择器（由工具栏回形针按钮触发） */}
       <input
         ref={fileRef}
