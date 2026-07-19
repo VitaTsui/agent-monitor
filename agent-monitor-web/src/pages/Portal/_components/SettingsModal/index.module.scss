@@ -285,6 +285,34 @@ $hover: rgba(36, 61, 66, 0.06);
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
       padding: 16px 16px calc(20px + env(safe-area-inset-bottom));
+
+      // 顶部固定头部已显示分区标题，内容区再来一个大标题是重复 —— 隐藏
+      .paneTitle {
+        display: none;
+      }
+    }
+
+    // 设备卡片：窄屏下操作按钮换行到设备信息下方，不再横向挤压设备名
+    .device {
+      flex-direction: column;
+      align-items: stretch;
+
+      .devActions {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        margin-top: 2px;
+
+        .actBtn,
+        .shareBtn,
+        .trustBtn {
+          height: 34px;
+          font-size: 13px;
+        }
+
+        .delBtn {
+          height: 34px;
+        }
+      }
     }
 
     // 视图切换

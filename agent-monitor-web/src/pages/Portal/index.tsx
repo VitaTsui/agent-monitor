@@ -609,8 +609,11 @@ const Portal: React.FC = observer(() => {
               </span>
               你好，{nickname}
             </div>
-            <div className={styles.greetSub}>从左侧选择一个终端会话查看执行内容</div>
-            <div className={styles.hint}>
+            <div className={styles.greetSub}>
+              <span className={styles.descDesktop}>从左侧选择一个终端会话查看执行内容</span>
+              <span className={styles.descMobile}>点左上角菜单，选择一个终端会话查看</span>
+            </div>
+            <div className={`${styles.hint} ${styles.descDesktop}`}>
               点击会话右侧的 <SplitCellsOutlined /> 可并排显示多个任务
             </div>
           </div>
