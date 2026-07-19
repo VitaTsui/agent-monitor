@@ -248,6 +248,9 @@ pub struct ControlCmd {
     pub action: ControlAction,
     #[serde(default)]
     pub text: Option<String>,
+    /// 队列指令 id：网页据此查询「还在排队」与撤回（旧客户端忽略该字段）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 /// hub → agent 的待写入文件（传输文件到远程设备目录）

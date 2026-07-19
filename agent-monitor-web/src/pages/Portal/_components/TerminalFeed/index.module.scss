@@ -119,10 +119,98 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
     .assistantText {
       color: $term-text;
-      white-space: pre-wrap;
       word-break: break-word;
       overflow-wrap: anywhere;
       min-width: 0;
+
+      // Markdown 渲染在深色终端卡片内：全部继承终端配色，压掉默认浅色主题
+      :global(.hsu-markdown),
+      :global(.markdown-body) {
+        background: transparent;
+        color: $term-text;
+        font-family: $mono;
+        font-size: 12.5px;
+      }
+
+      p,
+      ul,
+      ol,
+      blockquote,
+      pre,
+      h1,
+      h2,
+      h3,
+      h4,
+      h5,
+      h6,
+      table {
+        margin: 0 0 6px;
+        color: $term-text;
+
+        &:last-child {
+          margin-bottom: 0;
+        }
+      }
+
+      h1,
+      h2,
+      h3,
+      h4 {
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      ul,
+      ol {
+        padding-left: 18px;
+      }
+
+      code {
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 4px;
+        padding: 1px 5px;
+        font-size: 12px;
+        color: #9fe8f0;
+      }
+
+      pre {
+        background: rgba(0, 0, 0, 0.35);
+        border-radius: 8px;
+        padding: 8px 10px;
+        overflow-x: auto;
+
+        code {
+          background: none;
+          padding: 0;
+          color: $term-text;
+        }
+      }
+
+      a {
+        color: #7fd8e3;
+      }
+
+      blockquote {
+        border-left: 3px solid rgba(255, 255, 255, 0.25);
+        padding-left: 10px;
+        color: rgba(255, 255, 255, 0.75);
+      }
+
+      table {
+        border-collapse: collapse;
+
+        th,
+        td {
+          border: 1px solid rgba(255, 255, 255, 0.18);
+          padding: 3px 8px;
+        }
+      }
+
+      hr {
+        border: none;
+        border-top: 1px solid rgba(255, 255, 255, 0.18);
+        margin: 8px 0;
+      }
     }
   }
 
@@ -276,5 +364,57 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   50% {
     transform: scale(1.45);
     opacity: 0.55;
+  }
+}
+
+.TerminalFeed {
+  // 排队中的气泡：虚线边 + 弱化底色，与已接收消息区分
+  .userBubble.queued {
+    opacity: 0.85;
+    border: 1px dashed rgba(15, 155, 173, 0.45);
+  }
+
+  .queuedRow {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 3px;
+
+    .queuedTag {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      color: #8a9ba0;
+
+      .queuedDot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #f2b234;
+        animation: queuedPulse 1.2s ease-in-out infinite;
+      }
+    }
+
+    .recallBtn {
+      font-size: 11px;
+      color: #0f9bad;
+      cursor: pointer;
+
+      &:hover {
+        text-decoration: underline;
+      }
+    }
+  }
+}
+
+@keyframes queuedPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
   }
 }

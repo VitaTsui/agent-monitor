@@ -42,6 +42,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     control,
     closePane,
     sendInput,
+    recallInput,
     syncMessages,
   } = PortalStore;
   const chatRef = useRef<HTMLDivElement>(null);
@@ -179,6 +180,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 messages={feedMessages}
                 running={task.status === "running"}
                 providerDsr={task.providerDsr}
+                onRecall={(cmdId) => recallInput(id, cmdId)}
               />
             </div>
           )}

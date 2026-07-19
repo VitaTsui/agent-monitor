@@ -12,6 +12,8 @@ interface TerminalFeedProps {
   running?: boolean;
   /** 终端卡标题：来源代理名（Claude Code / Codex / Gemini CLI …） */
   providerDsr?: string;
+  /** 撤回仍在排队的输入（排队气泡上的撤回按钮） */
+  onRecall?: (cmdId: string) => void;
 }
 
 /** 一轮对话：一条用户消息 + 其后的助手/工具活动 */
@@ -53,7 +55,7 @@ const fmtTime = (ts?: string) => (ts ? dayjs(ts).format("MM-DD HH:mm") : "");
 const RESULT_CLAMP_LINES = 4;
 
 const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
-  const { messages, running, providerDsr } = props;
+  const { messages, running, providerDsr, onRecall } = props;
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   const turns = toTurns(messages);
@@ -116,10 +118,12 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
       );
     }
 
-    // assistant 文本
+    // assistant 文本：按 Markdown 渲染（同步内容常带 **加粗**/代码块/列表）
     return (
       <div key={key} className={styles.assistantLine}>
-        <div className={styles.assistantText}>{m.content}</div>
+        <div className={styles.assistantText}>
+          <Markdown.Views>{m.content}</Markdown.Views>
+        </div>
       </div>
     );
   };
@@ -148,8 +152,39 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
           <div key={turn.key} className={styles.turn}>
             {turn.user ? (
               <div className={styles.userRow}>
-                <div className={styles.userBubble}>{turn.user.content}</div>
-                <div className={styles.userTime}>{fmtTime(turn.user.timestamp)}</div>
+                <div
+                  className={`${styles.userBubble} ${
+                    turn.user.local && turn.user.queued ? styles.queued : ""
+                  }`}
+                >
+                  {turn.user.content}
+                </div>
+                {turn.user.local && turn.user.queued ? (
+                  <div className={styles.queuedRow}>
+                    <span className={styles.queuedTag}>
+                      <span className={styles.queuedDot} />
+                      排队中
+                    </span>
+                    {onRecall && turn.user.cmdId ? (
+                      <span
+                        className={styles.recallBtn}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => onRecall(turn.user!.cmdId!)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            onRecall(turn.user!.cmdId!);
+                          }
+                        }}
+                      >
+                        撤回
+                      </span>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className={styles.userTime}>{fmtTime(turn.user.timestamp)}</div>
+                )}
               </div>
             ) : null}
 

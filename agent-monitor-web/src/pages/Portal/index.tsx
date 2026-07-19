@@ -62,7 +62,13 @@ const Portal: React.FC = observer(() => {
   // 客户端窗口内标出「本机」（浏览器里为 null，不标）
   const [localId, setLocalId] = useState<string | null>(null);
   useEffect(() => {
-    localMachineId().then(setLocalId);
+    localMachineId().then((id) => {
+      setLocalId(id);
+      // 客户端窗口默认选中本机（用户手动切换过则不覆盖）
+      if (id) {
+        PortalStore.setLocalMachineId(id);
+      }
+    });
   }, []);
   const [siderFolded, setSiderFolded] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);

@@ -65,6 +65,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/tasks/:id/slash-commands", get(task_slash_commands))
         .route("/monitor/tasks/:id/control", post(control_task))
         .route("/monitor/tasks/:id/input", post(input_task))
+        .route("/monitor/tasks/:id/queued", get(queued_inputs))
+        .route("/monitor/tasks/:id/recall", post(recall_input))
         .route("/monitor/machines", get(machines))
         .route("/monitor/agent", get(agent_status))
         .route("/monitor/ws", get(ws_handler))
@@ -680,6 +682,7 @@ async fn control_task(
         pid,
         action: req.action,
         text: None,
+        id: None,
     });
     tracing::info!("已向机器 {} 下发控制命令: {id}", task.machine_id);
     ok(json!({ "pid": pid, "result": "命令已下发，等待执行" }))
@@ -735,13 +738,90 @@ async fn input_task(
         return err(500, "任务所属机器已离线，无法下发");
     }
     tracing::info!("已向机器 {} 下发输入: {}", task.machine_id, truncate_log(&text));
+    let cmd_id = uuid::Uuid::new_v4().to_string();
     entry.pending.push_back(ControlCmd {
         task_id: id.clone(),
         pid,
         action: am_core::model::ControlAction::Input,
         text: Some(text),
+        id: Some(cmd_id.clone()),
     });
-    ok(json!({ "pid": pid, "result": "已下发到目标机器" }))
+    ok(json!({ "pid": pid, "result": "已下发到目标机器", "cmdId": cmd_id }))
+}
+
+/// GET /monitor/tasks/:id/queued —— 该会话仍在 hub 队列里、还没被客户端
+/// 取走的输入（网页据此显示「排队中」并提供撤回）。
+async fn queued_inputs(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let task = {
+        let tasks = state.tasks_for(&user).await;
+        tasks.into_iter().find(|t| t.id == id)
+    };
+    let Some(task) = task else {
+        return err(404, "任务不存在");
+    };
+    let machines = state.machines.read().await;
+    let list: Vec<Value> = machines
+        .get(&task.machine_id)
+        .map(|entry| {
+            entry
+                .pending
+                .iter()
+                .filter(|c| {
+                    c.task_id == id
+                        && matches!(c.action, am_core::model::ControlAction::Input)
+                        && c.id.is_some()
+                })
+                .map(|c| json!({ "cmdId": c.id, "text": c.text }))
+                .collect()
+        })
+        .unwrap_or_default();
+    ok(json!({ "list": list }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecallReq {
+    cmd_id: String,
+}
+
+/// POST /monitor/tasks/:id/recall —— 撤回仍在排队的输入。
+/// 只在 hub 队列里有效；已被客户端取走（写进终端）则撤不回。
+async fn recall_input(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<RecallReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let task = {
+        let tasks = state.tasks_for(&user).await;
+        tasks.into_iter().find(|t| t.id == id)
+    };
+    let Some(task) = task else {
+        return err(404, "任务不存在");
+    };
+    let mut machines = state.machines.write().await;
+    let Some(entry) = machines.get_mut(&task.machine_id) else {
+        return err(404, "任务所属机器已离线");
+    };
+    let before = entry.pending.len();
+    entry
+        .pending
+        .retain(|c| c.id.as_deref() != Some(req.cmd_id.as_str()));
+    if entry.pending.len() < before {
+        ok(json!(true))
+    } else {
+        err(410, "已被终端接收，无法撤回")
+    }
 }
 
 fn truncate_log(s: &str) -> String {
