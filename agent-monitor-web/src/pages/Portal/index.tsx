@@ -364,7 +364,7 @@ const Portal: React.FC = observer(() => {
                           selectMachine(d.machineId);
                         }
                       }}
-                      title={`${d.hostname} · ${d.platformDsr}`}
+                      title={`${d.hostname} · ${d.platformDsr}${d.running > 0 ? ` · ${d.running} 执行中` : ""}`}
                     >
                       <LaptopOutlined />
                       <ScrollText
@@ -380,10 +380,7 @@ const Portal: React.FC = observer(() => {
                           </>
                         }
                       />
-                      <span className={styles.deviceTabStat}>
-                        {d.count} 会话
-                        {d.running > 0 ? ` · ${d.running} 执行中` : ""}
-                      </span>
+                      <span className={styles.deviceTabStat}>{d.count} 会话</span>
                       {d.running > 0 ? (
                         <span className={styles.deviceTabDot} />
                       ) : null}
