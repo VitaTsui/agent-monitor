@@ -113,6 +113,9 @@ $muted: #7c9096;
   .chat {
     flex: 1;
     overflow-y: auto;
+    // iOS 惯性滚动 + 阻断滚动传染到页面
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
     padding: 20px 18px 10px;
     // 隐藏滚动条（保留滚动），避免占宽导致内容列与底部输入框错位
     scrollbar-width: none;
