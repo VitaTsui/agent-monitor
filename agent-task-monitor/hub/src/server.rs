@@ -85,6 +85,11 @@ pub fn router(state: SharedState) -> Router {
             "/monitor/wecom/callback",
             get(crate::wecom_bot::verify).post(crate::wecom_bot::message),
         )
+        // 微信公众号（个人订阅号即可）：同一套指令，验证方式不同
+        .route(
+            "/monitor/mp/callback",
+            get(crate::wecom_bot::mp_verify).post(crate::wecom_bot::mp_message),
+        )
         .route("/monitor/wecom/bindcode", post(wecom_bindcode))
         // ---- 设备配对（注册+安装即可用，无需管理员发令牌）----
         .route("/monitor/pair/start", post(pair_start))
@@ -817,8 +822,8 @@ async fn wecom_bindcode(State(state): State<SharedState>, headers: HeaderMap) ->
     let Some(user) = auth_user(&state, &headers).await else {
         return err(401, "未登录");
     };
-    if state.wecom.is_none() {
-        return err(400, "本站未启用企业微信机器人");
+    if state.wecom.is_none() && state.mp.is_none() {
+        return err(400, "本站未启用微信机器人");
     }
     let code = crate::wecom_bot::gen_bind_code(&state, &user).await;
     ok(json!({ "code": code, "ttlSeconds": 600 }))

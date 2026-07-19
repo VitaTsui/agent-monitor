@@ -26,11 +26,20 @@ pub struct WecomConfig {
 }
 
 impl WecomConfig {
-    /// 环境变量齐全才启用；缺任一项返回 None（机器人停用）
+    /// 企业微信配置（AM_WECOM_*）齐全才启用；缺任一项返回 None
     pub fn from_env() -> Option<Self> {
-        let token = std::env::var("AM_WECOM_TOKEN").ok().filter(|s| !s.is_empty())?;
-        let aeskey = std::env::var("AM_WECOM_AESKEY").ok().filter(|s| !s.is_empty())?;
-        let corp_id = std::env::var("AM_WECOM_CORPID").ok().filter(|s| !s.is_empty())?;
+        Self::from_prefixed("AM_WECOM_TOKEN", "AM_WECOM_AESKEY", "AM_WECOM_CORPID")
+    }
+
+    /// 公众号配置（AM_MP_*）：receiveid = 公众号 AppID，其余同企业微信
+    pub fn mp_from_env() -> Option<Self> {
+        Self::from_prefixed("AM_MP_TOKEN", "AM_MP_AESKEY", "AM_MP_APPID")
+    }
+
+    fn from_prefixed(token_var: &str, aeskey_var: &str, id_var: &str) -> Option<Self> {
+        let token = std::env::var(token_var).ok().filter(|s| !s.is_empty())?;
+        let aeskey = std::env::var(aeskey_var).ok().filter(|s| !s.is_empty())?;
+        let corp_id = std::env::var(id_var).ok().filter(|s| !s.is_empty())?;
         let aes_key = decode_aes_key(&aeskey)?;
         Some(Self { token, aes_key, corp_id })
     }
@@ -53,6 +62,15 @@ pub fn msg_signature(token: &str, timestamp: &str, nonce: &str, encrypt: &str) -
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 公众号 URL 验证签名：sha1( 排序拼接[token, timestamp, nonce] )，不含 echostr
+pub fn plain_signature(token: &str, timestamp: &str, nonce: &str) -> String {
+    let mut arr = [token, timestamp, nonce];
+    arr.sort_unstable();
+    let mut hasher = Sha1::new();
+    hasher.update(arr.concat().as_bytes());
+    hex(&hasher.finalize())
 }
 
 /// 解密回调密文，返回 (明文, receiveid)。校验 receiveid 与 corp_id 一致。
