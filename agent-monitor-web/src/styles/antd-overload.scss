@@ -10,6 +10,12 @@
     // 让弹窗贴底（antd 默认垂直方向 flex/定位居中）
     display: block;
     overflow: hidden;
+    // 必须压过侧栏抽屉(z-index 1002)，否则弹窗被抽屉盖住、无法交互
+    z-index: 1200;
+  }
+
+  .ant-modal-root .ant-modal-mask {
+    z-index: 1199;
   }
 
   .ant-modal-root .ant-modal {
