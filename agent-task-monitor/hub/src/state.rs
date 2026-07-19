@@ -39,6 +39,8 @@ pub struct MachineEntry {
     pub pending_git: VecDeque<am_core::model::GitQuery>,
     /// 会话 ID → 最近一次 git 对比结果（agent 回传后缓存）
     pub git_cache: HashMap<String, am_core::model::GitOverview>,
+    /// 上次通知过的在线状态（钉钉推送用，边沿触发上线/离线，避免重复）
+    pub notified_online: bool,
 }
 
 /// 机器离线判定阈值
@@ -404,6 +406,31 @@ pub async fn tick_loop(state: SharedState) {
         // 会话变更定期落盘（~60s 一次）：登录/登出/活动续期都只标脏，这里统一写
         if tick % 40 == 0 && state.sessions_dirty.swap(false, Ordering::Relaxed) {
             save_sessions(&state).await;
+        }
+        // 设备离线边沿检测（每 ~3s）：曾在线、现超阈值未上报 → 推「离线」
+        if tick % 2 == 0 {
+            let mut offline_events = Vec::new();
+            {
+                let reg = state.registry.read().await;
+                let mut machines = state.machines.write().await;
+                for (id, m) in machines.iter_mut() {
+                    if m.notified_online && m.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
+                        m.notified_online = false;
+                        if let Some(owner) = reg.device_meta(id).owner {
+                            offline_events.push(crate::dingtalk::NotifyEvent {
+                                owner,
+                                kind: crate::dingtalk::EventKind::Device,
+                                text: format!("🔴 设备离线 · {}", m.hostname),
+                            });
+                        }
+                    }
+                }
+            }
+            if !offline_events.is_empty() {
+                let st = state.clone();
+                let now_ms = now_secs() * 1000;
+                tokio::spawn(async move { crate::dingtalk::deliver(&st, offline_events, now_ms).await });
+            }
         }
         let _ = state.tx.send(tick);
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;

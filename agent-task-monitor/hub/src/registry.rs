@@ -139,6 +139,9 @@ struct Persisted {
     /// 企业微信机器人绑定：wecom userid → 平台用户名
     #[serde(default)]
     wecom_users: HashMap<String, String>,
+    /// 钉钉推送配置：用户名 → 钉钉机器人 webhook + 事件开关
+    #[serde(default)]
+    dingtalk: HashMap<String, crate::dingtalk::DingtalkNotify>,
 }
 
 pub struct Registry {
@@ -147,6 +150,7 @@ pub struct Registry {
     devices: HashMap<String, DeviceMeta>,
     super_user: String,
     wecom_users: HashMap<String, String>,
+    dingtalk: HashMap<String, crate::dingtalk::DingtalkNotify>,
 }
 
 impl Registry {
@@ -176,7 +180,7 @@ impl Registry {
             } else {
                 p.super_user
             };
-            Registry { dir, users: p.users, devices: p.devices, super_user, wecom_users: p.wecom_users }
+            Registry { dir, users: p.users, devices: p.devices, super_user, wecom_users: p.wecom_users, dingtalk: p.dingtalk }
         } else {
             Registry {
                 dir,
@@ -184,6 +188,7 @@ impl Registry {
                 devices: HashMap::new(),
                 super_user: seed_user.to_string(),
                 wecom_users: HashMap::new(),
+                dingtalk: HashMap::new(),
             }
         };
         if reg.users.is_empty() {
@@ -215,6 +220,7 @@ impl Registry {
             users: self.users.clone(),
             devices: self.devices.clone(),
             wecom_users: self.wecom_users.clone(),
+            dingtalk: self.dingtalk.clone(),
             quota_limit: 0,
             super_user: self.super_user.clone(),
         };
@@ -353,6 +359,21 @@ impl Registry {
     /// wecom userid 对应的平台账号（未绑定返回 None）
     pub fn wecom_user_of(&self, wecom_userid: &str) -> Option<String> {
         self.wecom_users.get(wecom_userid).cloned()
+    }
+
+    // ---------- 钉钉推送配置 ----------
+
+    pub fn set_dingtalk(&mut self, username: &str, cfg: crate::dingtalk::DingtalkNotify) {
+        if cfg.webhook.trim().is_empty() {
+            self.dingtalk.remove(username);
+        } else {
+            self.dingtalk.insert(username.to_string(), cfg);
+        }
+        self.save();
+    }
+
+    pub fn dingtalk_of(&self, username: &str) -> Option<crate::dingtalk::DingtalkNotify> {
+        self.dingtalk.get(username).cloned()
     }
 
     /// 该用户名下全部设备（含离线；设备管理列表用）
