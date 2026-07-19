@@ -367,6 +367,13 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
 
             crumb_setup("tray built");
             let _ = tray;
+            #[cfg(target_os = "macos")]
+            {
+                if let Ok(m) = build_app_menu(app.handle(), &state_setup, is_agent) {
+                    let _ = app.handle().set_menu(m);
+                }
+                crumb_setup("app menu set");
+            }
             // [diag] 远程页 IPC 桥自检：把探测结果写进页面标题再读回来
             if std::env::var("AM_IPC_DIAG").ok().as_deref() == Some("1") {
                 if let Some(dw) = app.get_webview_window("main") {
@@ -501,6 +508,34 @@ fn build_tray_menu<R: tauri::Runtime>(
     menu.append(&scope)?;
     menu.append(&sep()?)?;
     menu.append(&quit)?;
+    Ok(menu)
+}
+
+/// macOS 顶部应用菜单：左上角「终端任务监控」下拉 = 托盘同款功能。
+/// 条目 id 与托盘一致 —— 托盘的 on_menu_event 是全局菜单监听，
+/// 应用菜单点击会走同一处理器，无需重复注册。
+#[cfg(target_os = "macos")]
+fn build_app_menu<R: tauri::Runtime>(
+    manager: &impl Manager<R>,
+    state: &SharedState,
+    is_agent: bool,
+) -> tauri::Result<Menu<R>> {
+    let app_sub = Submenu::new(manager, "终端任务监控", true)?;
+    for item in build_tray_menu(manager, state, is_agent)?.items()? {
+        app_sub.append(&item)?;
+    }
+    // 编辑菜单：没有它 webview 里 Cmd+C/V/X/A 全失灵（macOS 快捷键走菜单）
+    let edit = Submenu::new(manager, "编辑", true)?;
+    edit.append(&PredefinedMenuItem::undo(manager, Some("撤销"))?)?;
+    edit.append(&PredefinedMenuItem::redo(manager, Some("重做"))?)?;
+    edit.append(&PredefinedMenuItem::separator(manager)?)?;
+    edit.append(&PredefinedMenuItem::cut(manager, Some("剪切"))?)?;
+    edit.append(&PredefinedMenuItem::copy(manager, Some("拷贝"))?)?;
+    edit.append(&PredefinedMenuItem::paste(manager, Some("粘贴"))?)?;
+    edit.append(&PredefinedMenuItem::select_all(manager, Some("全选"))?)?;
+    let menu = Menu::new(manager)?;
+    menu.append(&app_sub)?;
+    menu.append(&edit)?;
     Ok(menu)
 }
 
