@@ -88,6 +88,15 @@ $hover: rgba(36, 61, 66, 0.06);
     position: relative;
   }
 
+  // 移动端二级头部：桌面隐藏
+  .mobileHead {
+    display: none;
+  }
+
+  .navChevron {
+    display: none;
+  }
+
   // 右上角关闭按钮（弹窗无标题栏，需要显式的关闭入口）
   .closeBtn {
     position: absolute;
@@ -177,59 +186,114 @@ $hover: rgba(36, 61, 66, 0.06);
     }
   }
 
-  // 窄屏（手机 / 客户端小窗）：左侧菜单变顶部横向滚动条，内容区全宽
+  // 移动端：iOS 设置式两级界面 —— 一级=菜单列表，二级=分区内容（固定
+  // 头部：返回 + 标题 + 关闭，内容区单独滚动，关闭钮永远可达）
   @media (max-width: 760px) {
     .layout {
       flex-direction: column;
-      // 移动端整屏设置（底部抽屉内）：固定拉高到 ~5/6 屏，内容区滚动
       height: 84dvh;
       max-height: 84dvh;
+      overflow: hidden;
     }
 
-    .nav {
-      width: 100%;
-      min-width: 0;
+    // 固定头部（不随内容滚动）
+    .mobileHead {
       display: flex;
       align-items: center;
-      gap: 4px;
-      // 右侧给关闭按钮留位，避免最后一项被 ✕ 压住
-      padding: 10px 48px 10px 12px;
-      border-right: none;
-      border-bottom: 1px solid $border;
-      overflow-x: auto;
-      scrollbar-width: none;
+      justify-content: center;
+      position: relative;
+      flex: none;
+      height: 48px;
+      border-bottom: 0.5px solid rgba(36, 61, 66, 0.14);
 
-      &::-webkit-scrollbar {
-        display: none;
+      .mobileHeadTitle {
+        font-size: 17px;
+        font-weight: 600;
+        color: $text;
       }
+
+      .mobileBack {
+        position: absolute;
+        left: 10px;
+        top: 0;
+        height: 48px;
+        display: flex;
+        align-items: center;
+        padding: 0 8px;
+        font-size: 16px;
+        color: #0f9bad;
+        cursor: pointer;
+      }
+    }
+
+    .closeBtn {
+      top: 9px;
+      right: 12px;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: rgba(36, 61, 66, 0.07);
+      z-index: 3;
+    }
+
+    // 一级：菜单占满，内容不渲染滚动；二级：菜单藏、内容全屏
+    .nav {
+      flex: 1;
+      width: 100%;
+      min-width: 0;
+      border-right: none;
+      padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+      overflow-y: auto;
 
       .navTitle {
         display: none;
       }
 
-      // 菜单项的无类名包裹层：横向排布可滚动
-      > div:not([class]) {
-        display: flex;
-        gap: 4px;
-        min-width: 0;
-        overflow-x: auto;
-        scrollbar-width: none;
-
-        &::-webkit-scrollbar {
-          display: none;
-        }
-      }
-
       .navItem {
-        flex: none;
-        margin-bottom: 0;
-        padding: 7px 12px;
-        white-space: nowrap;
+        padding: 14px 14px;
+        font-size: 16px;
+        border-radius: 12px;
+        margin-bottom: 2px;
+
+        :global(.anticon) {
+          font-size: 18px;
+        }
+
+        .navChevron {
+          display: inline;
+          margin-left: auto;
+          color: #b9c4c7;
+          font-size: 18px;
+          line-height: 1;
+        }
+
+        // 一级列表不需要选中态高亮
+        &.active {
+          background: transparent;
+          font-weight: 400;
+        }
+
+        &:active {
+          background: rgba(36, 61, 66, 0.07);
+        }
       }
     }
 
     .content {
-      padding: 18px 16px 22px;
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 16px 16px calc(20px + env(safe-area-inset-bottom));
+    }
+
+    // 视图切换
+    .layout.mobileMenu .content {
+      display: none;
+    }
+
+    .layout.mobileContent .nav {
+      display: none;
     }
   }
 

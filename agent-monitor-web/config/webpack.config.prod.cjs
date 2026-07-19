@@ -13,6 +13,26 @@ const definePlugin = {};
 Object.keys(envConfig).map((key) => {
   definePlugin[`process.env.${key}`] = JSON.stringify(envConfig[key]);
 });
+// 构建号：页面运行时对比服务端 build-id.txt，不一致自动强刷 ——
+// 根治 WKWebView（iOS 壳/客户端）拿旧缓存页的顽疾
+const BUILD_ID = Date.now().toString(36);
+definePlugin["process.env.BUILD_ID"] = JSON.stringify(BUILD_ID);
+
+class EmitBuildIdPlugin {
+  apply(compiler) {
+    compiler.hooks.thisCompilation.tap("EmitBuildId", (compilation) => {
+      compilation.hooks.processAssets.tap(
+        { name: "EmitBuildId", stage: compiler.webpack.Compilation.PROCESS_ASSETS_STAGE_ADDITIONAL },
+        () => {
+          compilation.emitAsset(
+            "build-id.txt",
+            new compiler.webpack.sources.RawSource(BUILD_ID),
+          );
+        },
+      );
+    });
+  }
+}
 
 // 路径处理函数
 const normalizePath = (inputPath) => {
@@ -40,6 +60,7 @@ const config = {
   },
   plugins: [
     new webpack.DefinePlugin(definePlugin),
+    new EmitBuildIdPlugin(),
     new MiniCssExtractPlugin({
       filename: (pathData) => {
         let name = pathData.chunk.name;

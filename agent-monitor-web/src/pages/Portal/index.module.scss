@@ -712,7 +712,9 @@ $active-bg: rgba(36, 61, 66, 0.09);
       top: 0;
       left: 0;
       bottom: 0;
-      z-index: 1002;
+      // 低于 antd 弹窗默认基线(1000)：弹窗自然叠在抽屉之上，且多层弹窗
+      // 保留 antd 的递增层级（父/子弹窗不再同层互相拦截点击）
+      z-index: 940;
       width: calc(84vw + env(safe-area-inset-left));
       max-width: calc(320px + env(safe-area-inset-left));
       min-width: 0;
@@ -739,7 +741,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
       display: block;
       position: fixed;
       inset: 0;
-      z-index: 1001;
+      z-index: 939;
       background: rgba(0, 0, 0, 0.4);
     }
 

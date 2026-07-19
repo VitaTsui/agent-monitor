@@ -1,5 +1,9 @@
 import "./install-object-has-own-polyfill";
 
+import { installFreshnessGuard } from "./utils/freshness";
+
+installFreshnessGuard();
+
 import "./index.scss";
 // hsu-ui 全局样式（antd 观感覆盖），项目特有增量在本地 styles/antd-overload.scss
 import "@hsu-react/ui/es/styles/antd-overload.scss";
