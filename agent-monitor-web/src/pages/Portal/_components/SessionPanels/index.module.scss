@@ -119,14 +119,22 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
 .todoItem {
   display: flex;
-  gap: 7px;
-  line-height: 1.75;
+  align-items: flex-start; // 方框与首行文字对齐（文字可换行，不能整体居中）
+  gap: 8px;
   font-size: 12px;
+  line-height: 1.7;
+  margin-bottom: 2px;
 
+  // 真正的方框：尺寸/位置可控，替代对不齐的 unicode glyph
   .todoBox {
     flex: none;
-    color: $muted;
-    font-family: $mono;
+    position: relative;
+    top: 3px; // 压到首行文字的视觉中线
+    width: 13px;
+    height: 13px;
+    border-radius: 3px;
+    border: 1.5px solid rgba(36, 61, 66, 0.35);
+    box-sizing: border-box;
   }
 
   .todoText {
@@ -135,14 +143,34 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     color: $text;
   }
 
-  // 已完成的条目不再展示，故无 .completed 样式
-
+  // 进行中（仅会话运行时）：方框半填充 + 脉冲，文字主题色
   &.in_progress {
-    .todoBox,
+    .todoBox {
+      border-color: $accent;
+      background:
+        linear-gradient(135deg, $accent 0 50%, transparent 50% 100%);
+      animation: todoPulse 1.4s ease-in-out infinite;
+    }
+
     .todoText {
       color: $accent;
       font-weight: 500;
     }
+  }
+
+  // 未完成（含会话已停的原进行中项）：空框、中性文字
+  &.pending .todoBox {
+    border-color: rgba(36, 61, 66, 0.35);
+  }
+}
+
+@keyframes todoPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
   }
 }
 
