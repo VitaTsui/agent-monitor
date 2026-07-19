@@ -171,6 +171,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
 
         .deviceTabName {
           flex: 1;
+          min-width: 0;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
@@ -190,6 +191,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
         }
 
         .deviceTabStat {
+          flex: none;
           font-size: 11px;
           color: $muted;
           white-space: nowrap;

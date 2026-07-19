@@ -1,0 +1,15 @@
+{
+  "name": "终端任务监控",
+  "short_name": "任务监控",
+  "description": "监控多台电脑终端里 AI 编码代理正在执行的任务",
+  "start_url": "/portal",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f4fafb",
+  "theme_color": "#0F9BAD",
+  "icons": [
+    { "src": "/pwa-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/pwa-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
