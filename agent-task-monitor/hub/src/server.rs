@@ -144,7 +144,12 @@ pub fn router(state: SharedState) -> Router {
             async move {
                 match tokio::fs::read(index.as_ref()).await {
                     Ok(bytes) => (
-                        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                        [
+                            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                            // HTML 不带 Cache-Control 时 WKWebView 会启发式缓存，
+                            // 发版后客户端拿旧页 —— 强制每次向服务器校验
+                            (axum::http::header::CACHE_CONTROL, "no-cache"),
+                        ],
                         bytes,
                     )
                         .into_response(),
@@ -152,7 +157,17 @@ pub fn router(state: SharedState) -> Router {
                 }
             }
         });
-        router = router.fallback_service(ServeDir::new(&dist).fallback(spa_fallback));
+        // 静态资源缓存策略：统一 no-cache（每次向服务器校验，未变走 304，
+        // 带 hash 的资源校验成本可忽略）。SetResponseHeader 只在响应缺该头
+        // 时补，不覆盖上面 fallback 显式设置的值。
+        use tower_http::set_header::SetResponseHeaderLayer;
+        let static_srv = tower::ServiceBuilder::new()
+            .layer(SetResponseHeaderLayer::if_not_present(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-cache"),
+            ))
+            .service(ServeDir::new(&dist).fallback(spa_fallback));
+        router = router.fallback_service(static_srv);
     }
     router
 }

@@ -10,7 +10,7 @@
     ]
   },
   "ios": {
-    "contentInset": "always"
+    "contentInset": "never"
   },
   "android": {
     "backgroundColor": "#f4fafb"

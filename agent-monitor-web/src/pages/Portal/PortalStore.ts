@@ -206,6 +206,11 @@ class PortalStore {
     return this._devices.filter((d) => !d.trusted).length;
   }
 
+  /** 全量会话列表（分享接收等场景选目标用） */
+  get tasks() {
+    return this._tasks;
+  }
+
   get openIds() {
     return this._openIds;
   }
