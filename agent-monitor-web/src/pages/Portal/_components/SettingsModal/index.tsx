@@ -248,6 +248,14 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
     window.location.href = "/login?redirect=%2Fportal";
   };
 
+  // 移动端两级导航：menu=一级菜单列表，content=二级分区内容（带返回）
+  const [mobileView, setMobileView] = useState<"menu" | "content">("menu");
+  useEffect(() => {
+    if (open) {
+      setMobileView("menu");
+    }
+  }, [open]);
+
   const navItems: { key: Tab; label: string; icon: React.ReactNode; badge?: number }[] = [
     { key: "account", label: "账户", icon: <UserOutlined /> },
     { key: "devices", label: "设备管理", icon: <LaptopOutlined />, badge: pendingCount },
@@ -354,7 +362,37 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
       title={null}
       closable={false}
     >
-      <div className={styles.layout}>
+      <div
+        className={`${styles.layout} ${
+          mobileView === "content" ? styles.mobileContent : styles.mobileMenu
+        }`}
+      >
+        {/* 移动端二级头部：返回 + 标题（一级/桌面隐藏，见 scss） */}
+        <div className={styles.mobileHead}>
+          {mobileView === "content" ? (
+            <span
+              className={styles.mobileBack}
+              role="button"
+              tabIndex={0}
+              onClick={() => setMobileView("menu")}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setMobileView("menu");
+                }
+              }}
+            >
+              ‹ 设置
+            </span>
+          ) : (
+            <span className={styles.mobileHeadTitle}>设置</span>
+          )}
+          {mobileView === "content" ? (
+            <span className={styles.mobileHeadTitle}>
+              {navItems.find((n) => n.key === tab)?.label}
+            </span>
+          ) : null}
+        </div>
         <span
           className={styles.closeBtn}
           role="button"
@@ -380,17 +418,22 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                 role="tab"
                 tabIndex={0}
                 aria-selected={tab === n.key}
-                onClick={() => setTab(n.key)}
+                onClick={() => {
+                  setTab(n.key);
+                  setMobileView("content");
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
                     setTab(n.key);
+                    setMobileView("content");
                   }
                 }}
               >
                 {n.icon}
                 <span>{n.label}</span>
                 {n.badge ? <Badge count={n.badge} size="small" /> : null}
+                <span className={styles.navChevron}>›</span>
               </div>
             ))}
           </div>

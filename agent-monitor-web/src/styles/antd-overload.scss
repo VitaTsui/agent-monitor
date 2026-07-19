@@ -10,12 +10,6 @@
     // 让弹窗贴底（antd 默认垂直方向 flex/定位居中）
     display: block;
     overflow: hidden;
-    // 必须压过侧栏抽屉(z-index 1002)，否则弹窗被抽屉盖住、无法交互
-    z-index: 1200;
-  }
-
-  .ant-modal-root .ant-modal-mask {
-    z-index: 1199;
   }
 
   .ant-modal-root .ant-modal {
@@ -50,20 +44,24 @@
     }
   }
 
-  // 关闭钮：iOS 风格灰底圆钮，右上角，加大触控区
+  // 关闭钮：iOS 风格灰底圆钮，右上角，加大触控区。
+  // content 是 flex 列，后面的 body 会形成层叠上下文盖住绝对定位的
+  // close —— 必须给 z-index 抬到 body 之上，否则真实触摸打在 body 上、
+  // ✕ 点不动（编程 click 能过是因绕过了命中检测）。
   .ant-modal-root .ant-modal .ant-modal-close {
-    top: 14px;
-    inset-inline-end: 14px;
-    width: 30px;
-    height: 30px;
+    top: 12px;
+    inset-inline-end: 12px;
+    width: 40px;
+    height: 40px;
     border-radius: 50%;
     background: rgba(36, 61, 66, 0.08);
+    z-index: 20;
 
     .ant-modal-close-x {
-      width: 30px;
-      height: 30px;
-      line-height: 30px;
-      font-size: 12px;
+      width: 40px;
+      height: 40px;
+      line-height: 40px;
+      font-size: 14px;
       color: rgba(36, 61, 66, 0.65);
     }
   }
@@ -89,9 +87,11 @@
     border-radius: 18px 18px 0 0;
     max-height: 92dvh;
     min-height: 40dvh;
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior: contain;
+    // 头部（标题/关闭钮）固定，仅 body 滚动 —— 关闭钮永远可达，
+    // 不随内容滚走、不被键盘顶出可视区
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     padding-bottom: calc(16px + env(safe-area-inset-bottom));
 
     // 顶部抓手条（iOS 底部抽屉惯例）
@@ -104,6 +104,20 @@
       background: rgba(36, 61, 66, 0.18);
       margin: 2px auto 10px;
     }
+  }
+}
+
+@media (max-width: 760px) {
+  .ant-modal-root .ant-modal .ant-modal-header {
+    flex: none;
+  }
+
+  .ant-modal-root .ant-modal .ant-modal-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
   }
 }
 
