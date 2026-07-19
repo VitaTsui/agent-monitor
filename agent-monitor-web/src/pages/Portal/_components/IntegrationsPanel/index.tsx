@@ -208,10 +208,10 @@ const IntegrationsPanel: React.FC = () => {
           ))}
         </div>
         <div className={styles.actions}>
-          <Button type="primary" size="small" loading={robotSaving} onClick={() => saveRobot(false)}>
+          <Button type="primary" className={styles.actBtn} loading={robotSaving} onClick={() => saveRobot(false)}>
             保存
           </Button>
-          <Button size="small" onClick={() => saveRobot(true)}>
+          <Button className={styles.actBtn} onClick={() => saveRobot(true)}>
             保存并测试
           </Button>
         </div>
@@ -264,7 +264,7 @@ const IntegrationsPanel: React.FC = () => {
           </div>
         ) : null}
         <div className={styles.actions}>
-          <Button type="primary" size="small" loading={wecomSaving} onClick={saveWecom}>
+          <Button type="primary" className={styles.actBtn} loading={wecomSaving} onClick={saveWecom}>
             保存并生成回调地址
           </Button>
         </div>
@@ -305,7 +305,7 @@ const IntegrationsPanel: React.FC = () => {
           </div>
         ) : null}
         <div className={styles.actions}>
-          <Button type="primary" size="small" loading={dingSaving} onClick={saveDing}>
+          <Button type="primary" className={styles.actBtn} loading={dingSaving} onClick={saveDing}>
             保存并生成回调地址
           </Button>
         </div>
