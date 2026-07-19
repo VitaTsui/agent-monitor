@@ -225,6 +225,36 @@ export const genWecomBindCode = async () => {
   );
 };
 
+// ---------- 钉钉主动推送 ----------
+
+export interface DingtalkConfig {
+  webhook: string;
+  hasSecret: boolean;
+  waiting: boolean;
+  finished: boolean;
+  newSession: boolean;
+  device: boolean;
+}
+
+export const getDingtalk = async () => {
+  return await get<DingtalkConfig | null>("/monitor/dingtalk");
+};
+
+export const setDingtalk = async (data: {
+  webhook: string;
+  secret?: string;
+  waiting: boolean;
+  finished: boolean;
+  newSession: boolean;
+  device: boolean;
+}) => {
+  return await post<boolean>("/monitor/dingtalk", data);
+};
+
+export const testDingtalk = async () => {
+  return await post<boolean>("/monitor/dingtalk/test", {});
+};
+
 // ---------- 额度（5h token 上限）----------
 
 

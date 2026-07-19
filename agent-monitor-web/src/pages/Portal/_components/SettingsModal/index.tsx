@@ -20,6 +20,9 @@ import {
   connectShare,
   disconnectShare,
   genWecomBindCode,
+  getDingtalk,
+  setDingtalk,
+  testDingtalk,
 } from "@/services/apis/portal";
 import { getUserInfo, removeToken } from "@/utils/auth";
 import { localMachineId } from "@/utils/clientAuth";
@@ -179,6 +182,60 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
   // 企业微信机器人绑定码
   const [wecomCode, setWecomCode] = useState<string | null>(null);
   const [wecomLoading, setWecomLoading] = useState(false);
+  // 钉钉主动推送
+  const [ding, setDing] = useState({
+    webhook: "",
+    secret: "",
+    hasSecret: false,
+    waiting: true,
+    finished: true,
+    newSession: true,
+    device: false,
+  });
+  const [dingSaving, setDingSaving] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    getDingtalk()
+      .then((res) => {
+        if (res.code === 0 && res.data) {
+          setDing({ ...res.data, secret: "" });
+        }
+      })
+      .catch(() => void 0);
+  }, [open]);
+  const saveDing = (thenTest?: boolean) => {
+    if (!ding.webhook.trim()) {
+      message.warning("请填写钉钉机器人 Webhook 地址");
+      return;
+    }
+    setDingSaving(true);
+    setDingtalk({
+      webhook: ding.webhook.trim(),
+      secret: ding.secret || undefined,
+      waiting: ding.waiting,
+      finished: ding.finished,
+      newSession: ding.newSession,
+      device: ding.device,
+    })
+      .then((res) => {
+        if (res.code !== 0) {
+          message.error(res.msg ?? "保存失败");
+          return;
+        }
+        setDing((d) => ({ ...d, secret: "", hasSecret: d.hasSecret || !!d.secret }));
+        if (thenTest) {
+          testDingtalk().then((r) =>
+            r.code === 0
+              ? message.success("已保存并发送测试推送，去钉钉看看")
+              : message.error(r.msg ?? "测试推送失败"),
+          );
+        } else {
+          message.success("已保存");
+        }
+      })
+      .catch(() => message.error("保存失败，请检查网络"))
+      .finally(() => setDingSaving(false));
+  };
   const genWecom = () => {
     setWecomLoading(true);
     genWecomBindCode()
@@ -444,6 +501,53 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                 <Button size="small" loading={wecomLoading} onClick={genWecom}>
                   {wecomCode ? "重新生成" : "生成绑定码"}
                 </Button>
+              </div>
+
+              <div className={styles.wecomSection}>
+                <div className={styles.sectionTitle}>钉钉主动推送</div>
+                <div className={styles.hint}>
+                  会话状态变化（等待输入 / 结束 / 新会话 / 设备上线离线）时，主动推到你的
+                  钉钉群。在钉钉群「智能群助手 → 添加机器人 → 自定义」拿 Webhook，
+                  安全设置选「加签」把密钥填这里（推荐）。
+                </div>
+                <Input
+                  placeholder="钉钉机器人 Webhook 地址"
+                  value={ding.webhook}
+                  onChange={(v) => setDing((d) => ({ ...d, webhook: v }))}
+                  style={{ marginBottom: 8 }}
+                />
+                <Input
+                  placeholder={
+                    ding.hasSecret ? "加签密钥（已设置，留空不改）" : "加签密钥 SEC...（可选，推荐）"
+                  }
+                  value={ding.secret}
+                  onChange={(v) => setDing((d) => ({ ...d, secret: v }))}
+                  style={{ marginBottom: 10 }}
+                />
+                <div className={styles.dingEvents}>
+                  {([
+                    ["waiting", "等待输入"],
+                    ["finished", "会话结束"],
+                    ["newSession", "新会话"],
+                    ["device", "设备上线/离线"],
+                  ] as const).map(([k, label]) => (
+                    <label key={k} className={styles.dingEvent}>
+                      <Switch
+                        checked={ding[k]}
+                        onChange={(on) => setDing((d) => ({ ...d, [k]: on }))}
+                      />
+                      <span>{label}</span>
+                    </label>
+                  ))}
+                </div>
+                <div className={styles.dingActions}>
+                  <Button type="primary" size="small" loading={dingSaving} onClick={() => saveDing(false)}>
+                    保存
+                  </Button>
+                  <Button size="small" onClick={() => saveDing(true)}>
+                    保存并测试
+                  </Button>
+                </div>
               </div>
 
               <Button icon={<LogoutOutlined />} danger onClick={onLogout} style={{ marginTop: 20 }}>

@@ -91,6 +91,9 @@ pub fn router(state: SharedState) -> Router {
             get(crate::wecom_bot::mp_verify).post(crate::wecom_bot::mp_message),
         )
         .route("/monitor/wecom/bindcode", post(wecom_bindcode))
+        // ---- 钉钉推送配置 ----
+        .route("/monitor/dingtalk", get(dingtalk_get).post(dingtalk_set))
+        .route("/monitor/dingtalk/test", post(dingtalk_test))
         // ---- 设备配对（注册+安装即可用，无需管理员发令牌）----
         .route("/monitor/pair/start", post(pair_start))
         .route("/monitor/pair/claim", post(pair_claim))
@@ -817,6 +820,82 @@ async fn delete_device(
     ok(json!({ "result": "已删除" }))
 }
 
+/// GET /monitor/dingtalk —— 读当前用户的钉钉推送配置（密钥不回传，只回是否已设）
+async fn dingtalk_get(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    match state.registry.read().await.dingtalk_of(&user) {
+        Some(c) => ok(json!({
+            "webhook": c.webhook,
+            "hasSecret": !c.secret.is_empty(),
+            "waiting": c.waiting,
+            "finished": c.finished,
+            "newSession": c.new_session,
+            "device": c.device,
+        })),
+        None => ok(json!(null)),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DingtalkSetReq {
+    webhook: String,
+    #[serde(default)]
+    secret: String,
+    #[serde(default)]
+    waiting: bool,
+    #[serde(default)]
+    finished: bool,
+    #[serde(default)]
+    new_session: bool,
+    #[serde(default)]
+    device: bool,
+}
+
+/// POST /monitor/dingtalk —— 保存钉钉推送配置（webhook 为空即关闭）
+async fn dingtalk_set(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<DingtalkSetReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    // secret 留空视为不改（前端不回传已存密钥）：沿用旧值
+    let secret = if req.secret.is_empty() {
+        state.registry.read().await.dingtalk_of(&user).map(|c| c.secret).unwrap_or_default()
+    } else {
+        req.secret
+    };
+    let cfg = crate::dingtalk::DingtalkNotify {
+        webhook: req.webhook.trim().to_string(),
+        secret,
+        waiting: req.waiting,
+        finished: req.finished,
+        new_session: req.new_session,
+        device: req.device,
+    };
+    state.registry.write().await.set_dingtalk(&user, cfg);
+    ok(json!(true))
+}
+
+/// POST /monitor/dingtalk/test —— 发一条测试推送
+async fn dingtalk_test(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let Some(cfg) = state.registry.read().await.dingtalk_of(&user) else {
+        return err(400, "尚未配置钉钉机器人");
+    };
+    let now_ms = crate::state::now_secs() * 1000;
+    match crate::dingtalk::push_text(&cfg, "✅ 终端任务监控 · 钉钉推送测试成功", now_ms).await {
+        Ok(_) => ok(json!(true)),
+        Err(e) => err(400, &e),
+    }
+}
+
 /// POST /monitor/wecom/bindcode —— 生成一次性企业微信绑定码（登录用户）
 async fn wecom_bindcode(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
     let Some(user) = auth_user(&state, &headers).await else {
@@ -1121,23 +1200,33 @@ async fn report(
         );
     }
 
+    // 钉钉推送：本次上报的归属者（用于状态变化推送）
+    let notify_owner = state.registry.read().await.device_meta(&payload.machine_id).owner;
+
     let mut machines = state.machines.write().await;
+    let mut was_new = false;
     let entry = machines
         .entry(payload.machine_id.clone())
-        .or_insert_with(|| MachineEntry {
-            hostname: payload.hostname.clone(),
-            platform: payload.platform.clone(),
-            version: payload.version.clone(),
-            is_hub: false,
-            tasks: Vec::new(),
-            last_report: Instant::now(),
-            pending: VecDeque::new(),
-            pending_files: VecDeque::new(),
-            messages: HashMap::new(),
-            pending_git: VecDeque::new(),
-            git_cache: HashMap::new(),
+        .or_insert_with(|| {
+            was_new = true;
+            MachineEntry {
+                hostname: payload.hostname.clone(),
+                platform: payload.platform.clone(),
+                version: payload.version.clone(),
+                is_hub: false,
+                tasks: Vec::new(),
+                last_report: Instant::now(),
+                pending: VecDeque::new(),
+                pending_files: VecDeque::new(),
+                messages: HashMap::new(),
+                pending_git: VecDeque::new(),
+                git_cache: HashMap::new(),
+                notified_online: false,
+            }
         });
-    entry.hostname = payload.hostname;
+    // 设备上线边沿：新登记 或 之前已判离线（超阈值）
+    let was_offline = was_new || entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS;
+    entry.hostname = payload.hostname.clone();
     entry.platform = payload.platform;
     entry.version = payload.version;
     entry.last_report = Instant::now();
@@ -1146,6 +1235,64 @@ async fn report(
         if !t.recent_messages.is_empty() {
             entry.messages.insert(t.id.clone(), std::mem::take(&mut t.recent_messages));
         }
+    }
+    // 会话状态变化事件（对比旧快照）
+    let mut events: Vec<crate::dingtalk::NotifyEvent> = Vec::new();
+    if let Some(owner) = &notify_owner {
+        use crate::dingtalk::{EventKind, NotifyEvent};
+        let old: std::collections::HashMap<&str, TaskStatus> =
+            entry.tasks.iter().map(|t| (t.id.as_str(), t.status)).collect();
+        let dev = &entry.hostname;
+        for t in &tasks {
+            let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
+            let title: String = title.chars().take(24).collect();
+            match old.get(t.id.as_str()) {
+                None => events.push(NotifyEvent {
+                    owner: owner.clone(),
+                    kind: EventKind::NewSession,
+                    text: format!("🆕 新会话 · {dev}\n{title}（{}）", t.project_name),
+                }),
+                Some(&prev) => {
+                    if prev == TaskStatus::Running && t.status == TaskStatus::Idle {
+                        events.push(NotifyEvent {
+                            owner: owner.clone(),
+                            kind: EventKind::Waiting,
+                            text: format!("⏸ 等待输入 · {dev}\n{title}（{}）", t.project_name),
+                        });
+                    } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
+                        events.push(NotifyEvent {
+                            owner: owner.clone(),
+                            kind: EventKind::Finished,
+                            text: format!("✅ 会话结束 · {dev}\n{title}（{}）", t.project_name),
+                        });
+                    }
+                }
+            }
+        }
+        // 消失的会话 = 结束
+        let new_ids: std::collections::HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+        for t in &entry.tasks {
+            if !new_ids.contains(t.id.as_str()) && t.status != TaskStatus::Finished {
+                let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
+                let title: String = title.chars().take(24).collect();
+                events.push(NotifyEvent {
+                    owner: owner.clone(),
+                    kind: EventKind::Finished,
+                    text: format!("✅ 会话结束 · {dev}\n{title}", ),
+                });
+            }
+        }
+        // 设备上线边沿
+        if was_offline && !entry.notified_online {
+            events.push(NotifyEvent {
+                owner: owner.clone(),
+                kind: EventKind::Device,
+                text: format!("🟢 设备上线 · {dev}"),
+            });
+        }
+    }
+    if notify_owner.is_some() {
+        entry.notified_online = true;
     }
     entry.tasks = tasks;
     // 缓存 agent 回传的 git 对比结果
@@ -1161,6 +1308,15 @@ async fn report(
     let commands: Vec<ControlCmd> = entry.pending.drain(..).collect();
     let files: Vec<am_core::model::FileTransfer> = entry.pending_files.drain(..).collect();
     let git_queries: Vec<am_core::model::GitQuery> = entry.pending_git.drain(..).collect();
+    drop(machines);
+
+    // 钉钉推送：不阻塞上报响应，后台异步发
+    if !events.is_empty() {
+        let st = state.clone();
+        let now_ms = crate::state::now_secs() * 1000;
+        tokio::spawn(async move { crate::dingtalk::deliver(&st, events, now_ms).await });
+    }
+
     // 告知 agent 是否已被信任：未信任时 agent 不应再上报任何会话数据
     let trusted = state.registry.read().await.device_meta(&payload.machine_id).trusted;
     // hubVersion：hub 与桌面客户端同一工作区发版，hub 的版本即最新客户端版本，
