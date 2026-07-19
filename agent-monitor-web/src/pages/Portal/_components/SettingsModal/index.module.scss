@@ -606,3 +606,25 @@ $hover: rgba(36, 61, 66, 0.06);
     }
   }
 }
+
+.SettingsModal {
+  .dingEvents {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    margin-bottom: 12px;
+
+    .dingEvent {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+  }
+
+  .dingActions {
+    display: flex;
+    gap: 8px;
+  }
+}

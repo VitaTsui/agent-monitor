@@ -4,6 +4,7 @@
 mod admin;
 mod commands;
 mod crypto;
+mod dingtalk;
 mod oauth;
 mod registry;
 mod server;
