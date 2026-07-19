@@ -62,8 +62,35 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     const el = chatRef.current;
     if (el && stickBottomRef.current) {
       el.scrollTop = el.scrollHeight;
+      // Markdown/代码块/字体异步渲染会让高度继续涨，同步滚一次会差一截：
+      // 下一帧再钉一次兜住首帧的增量
+      requestAnimationFrame(() => {
+        const cur = chatRef.current;
+        if (cur && stickBottomRef.current) {
+          cur.scrollTop = cur.scrollHeight;
+        }
+      });
     }
   }, [messages]);
+
+  // 内容高度变化（渲染完成、折叠展开等）时，只要用户仍在底部就保持钉底；
+  // 用户主动上滚后 stickBottomRef 为 false，不会抢滚动。
+  useEffect(() => {
+    const el = chatRef.current;
+    if (!el) {
+      return;
+    }
+    const ro = new ResizeObserver(() => {
+      if (stickBottomRef.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+    ro.observe(el);
+    if (el.firstElementChild) {
+      ro.observe(el.firstElementChild);
+    }
+    return () => ro.disconnect();
+  }, []);
 
   const onChatScroll = () => {
     const el = chatRef.current;
