@@ -10,11 +10,10 @@ $active-bg: rgba(36, 61, 66, 0.09);
 
 .Portal {
   height: 100vh;
-  // iOS WKWebView 的 100vh 与实际可视高不一致，dvh 跟随动态视口
+  // iOS WKWebView 的 100vh 与实际可视高不一致，dvh 跟随动态视口。
+  // 键盘由 Keyboard 插件 resize:native 处理：WKWebView 缩放到键盘上方，
+  // 100dvh 即缩放后视口 —— 顶栏固定、输入区贴键盘、无空白。
   height: 100dvh;
-  // 键盘弹出时 JS 把可视高度写进 --app-vh：顶栏固定、内容与输入区
-  // 一起从底部收缩到键盘上方（ChatGPT/Claude 式）
-  height: var(--app-vh, 100dvh);
   display: flex;
   background: $cream;
   color: $text;

@@ -321,9 +321,18 @@ $hover: rgba(36, 61, 66, 0.06);
           font-size: 17px;
         }
 
+        // 一级抽屉式列表无持久选中态：进二级返回后不该有项还高亮
         &.active {
           background: transparent;
           font-weight: 400;
+
+          .navChevron {
+            color: #c2c8cf;
+          }
+
+          .navIcon :global(.anticon) {
+            color: #fff;
+          }
         }
 
         &:active {
@@ -353,17 +362,22 @@ $hover: rgba(36, 61, 66, 0.06);
       .devActions {
         flex-wrap: wrap;
         justify-content: flex-end;
-        margin-top: 2px;
+        gap: 8px;
+        margin-top: 6px;
 
+        // 按钮收小一点（之前 34px 偏大），保持触控可用
         .actBtn,
         .shareBtn,
         .trustBtn {
-          height: 34px;
-          font-size: 13px;
+          height: 30px;
+          padding-inline: 14px;
+          font-size: 12.5px;
         }
 
         .delBtn {
-          height: 34px;
+          height: 30px;
+          padding-inline: 10px;
+          font-size: 12.5px;
         }
       }
     }

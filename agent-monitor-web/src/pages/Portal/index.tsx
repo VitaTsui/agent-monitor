@@ -2,7 +2,6 @@ import React, { useEffect, useState } from "react";
 
 import { Input } from "@hsu-react/ui";
 import { Badge, ConfigProvider, Popover, Tooltip } from "antd";
-import { platformIcon } from "./_utils/platform";
 import { useNativeBack } from "./_hooks/useNativeBack";
 import { useApkUpdateCheck } from "./_hooks/useApkUpdateCheck";
 import { useClientUpdateToast } from "./_hooks/useClientUpdateToast";
@@ -447,16 +446,15 @@ const Portal: React.FC = observer(() => {
                       }}
                       title={`${d.hostname} · ${d.platformDsr}${d.running > 0 ? ` · ${d.running} 执行中` : ""}`}
                     >
-                      {/* 平台有 emoji(🪟/🐧) 就只显示它；没有(如 macOS) 才用笔记本图标兜底，
-                          避免「笔记本图标 + 🪟」两个图标重复 */}
-                      {platformIcon(d.platform) ? null : <LaptopOutlined />}
+                      {/* 统一用电脑图标(像 iOS 设备列表)，不再在名称前加平台 emoji */}
+                      <LaptopOutlined />
                       <ScrollText
                         className={styles.deviceTabName}
                         active={d.machineId === selectedMachineId}
                         plain={d.hostname}
                         text={
                           <>
-                            {platformIcon(d.platform) ? `${platformIcon(d.platform)} ` : ""}{d.hostname}
+                            {d.hostname}
                             {d.machineId === localId ? (
                               <span className={styles.localTag}>本机</span>
                             ) : null}
