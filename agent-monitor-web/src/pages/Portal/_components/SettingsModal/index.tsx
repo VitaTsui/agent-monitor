@@ -10,6 +10,7 @@ import {
   LinkOutlined,
   LogoutOutlined,
   RightOutlined,
+  RobotOutlined,
   SafetyOutlined,
   UserOutlined,
 } from "@ant-design/icons";
@@ -19,15 +20,12 @@ import {
   PortalDevice,
   connectShare,
   disconnectShare,
-  genWecomBindCode,
-  getDingtalk,
-  setDingtalk,
-  testDingtalk,
 } from "@/services/apis/portal";
 import { getUserInfo, removeToken } from "@/utils/auth";
 import { localMachineId } from "@/utils/clientAuth";
 import PortalStore from "../../PortalStore";
 import ShareModal from "../ShareModal";
+import IntegrationsPanel from "../IntegrationsPanel";
 import {
   BUILTIN_DANGER_PATTERNS,
   loadGuardConfig,
@@ -35,7 +33,7 @@ import {
 } from "../../_utils/dangerCheck";
 import styles from "./index.module.scss";
 
-export type SettingsTab = "account" | "devices" | "security" | "about";
+export type SettingsTab = "account" | "devices" | "bots" | "security" | "about";
 
 interface SettingsModalProps {
   open?: boolean;
@@ -179,77 +177,6 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
       .finally(() => setConnecting(false));
   };
 
-  // 企业微信机器人绑定码
-  const [wecomCode, setWecomCode] = useState<string | null>(null);
-  const [wecomLoading, setWecomLoading] = useState(false);
-  // 钉钉主动推送
-  const [ding, setDing] = useState({
-    webhook: "",
-    secret: "",
-    hasSecret: false,
-    waiting: true,
-    finished: true,
-    newSession: true,
-    device: false,
-  });
-  const [dingSaving, setDingSaving] = useState(false);
-  useEffect(() => {
-    if (!open) return;
-    getDingtalk()
-      .then((res) => {
-        if (res.code === 0 && res.data) {
-          setDing({ ...res.data, secret: "" });
-        }
-      })
-      .catch(() => void 0);
-  }, [open]);
-  const saveDing = (thenTest?: boolean) => {
-    if (!ding.webhook.trim()) {
-      message.warning("请填写钉钉机器人 Webhook 地址");
-      return;
-    }
-    setDingSaving(true);
-    setDingtalk({
-      webhook: ding.webhook.trim(),
-      secret: ding.secret || undefined,
-      waiting: ding.waiting,
-      finished: ding.finished,
-      newSession: ding.newSession,
-      device: ding.device,
-    })
-      .then((res) => {
-        if (res.code !== 0) {
-          message.error(res.msg ?? "保存失败");
-          return;
-        }
-        setDing((d) => ({ ...d, secret: "", hasSecret: d.hasSecret || !!d.secret }));
-        if (thenTest) {
-          testDingtalk().then((r) =>
-            r.code === 0
-              ? message.success("已保存并发送测试推送，去钉钉看看")
-              : message.error(r.msg ?? "测试推送失败"),
-          );
-        } else {
-          message.success("已保存");
-        }
-      })
-      .catch(() => message.error("保存失败，请检查网络"))
-      .finally(() => setDingSaving(false));
-  };
-  const genWecom = () => {
-    setWecomLoading(true);
-    genWecomBindCode()
-      .then((res) => {
-        if (res.code === 0 && res.data) {
-          setWecomCode(res.data.code);
-        } else {
-          message.error(res.msg ?? "本站未启用企业微信机器人");
-        }
-      })
-      .catch(() => message.error("生成失败，请检查网络"))
-      .finally(() => setWecomLoading(false));
-  };
-
   // 客户端窗口内标出「本机」
   const [localId, setLocalId] = useState<string | null>(null);
   useEffect(() => {
@@ -324,6 +251,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
   const navItems: { key: Tab; label: string; icon: React.ReactNode; badge?: number }[] = [
     { key: "account", label: "账户", icon: <UserOutlined /> },
     { key: "devices", label: "设备管理", icon: <LaptopOutlined />, badge: pendingCount },
+    { key: "bots", label: "机器人接入", icon: <RobotOutlined /> },
     { key: "security", label: "安全防护", icon: <SafetyOutlined /> },
     { key: "about", label: "关于", icon: <InfoCircleOutlined /> },
   ];
@@ -484,72 +412,6 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                   </div>
                 </div>
               </div>
-              <div className={styles.wecomSection}>
-                <div className={styles.sectionTitle}>微信机器人</div>
-                <div className={styles.hint}>
-                  绑定后，可在微信（公众号）或企业微信里用文字指令遥控你的会话
-                  （查看 / 暂停 / 恢复 / 中断 / 发布输入）。生成绑定码，发给机器人：
-                  <code>绑定 &lt;码&gt;</code>。
-                </div>
-                {wecomCode ? (
-                  <div className={styles.wecomCode}>
-                    <span className={styles.wecomCodeLabel}>绑定码</span>
-                    <span className={styles.wecomCodeValue}>{wecomCode}</span>
-                    <span className={styles.wecomCodeHint}>10 分钟内有效 · 发送「绑定 {wecomCode}」</span>
-                  </div>
-                ) : null}
-                <Button size="small" loading={wecomLoading} onClick={genWecom}>
-                  {wecomCode ? "重新生成" : "生成绑定码"}
-                </Button>
-              </div>
-
-              <div className={styles.wecomSection}>
-                <div className={styles.sectionTitle}>钉钉主动推送</div>
-                <div className={styles.hint}>
-                  会话状态变化（等待输入 / 结束 / 新会话 / 设备上线离线）时，主动推到你的
-                  钉钉群。在钉钉群「智能群助手 → 添加机器人 → 自定义」拿 Webhook，
-                  安全设置选「加签」把密钥填这里（推荐）。
-                </div>
-                <Input
-                  placeholder="钉钉机器人 Webhook 地址"
-                  value={ding.webhook}
-                  onChange={(v) => setDing((d) => ({ ...d, webhook: v }))}
-                  style={{ marginBottom: 8 }}
-                />
-                <Input
-                  placeholder={
-                    ding.hasSecret ? "加签密钥（已设置，留空不改）" : "加签密钥 SEC...（可选，推荐）"
-                  }
-                  value={ding.secret}
-                  onChange={(v) => setDing((d) => ({ ...d, secret: v }))}
-                  style={{ marginBottom: 10 }}
-                />
-                <div className={styles.dingEvents}>
-                  {([
-                    ["waiting", "等待输入"],
-                    ["finished", "会话结束"],
-                    ["newSession", "新会话"],
-                    ["device", "设备上线/离线"],
-                  ] as const).map(([k, label]) => (
-                    <label key={k} className={styles.dingEvent}>
-                      <Switch
-                        checked={ding[k]}
-                        onChange={(on) => setDing((d) => ({ ...d, [k]: on }))}
-                      />
-                      <span>{label}</span>
-                    </label>
-                  ))}
-                </div>
-                <div className={styles.dingActions}>
-                  <Button type="primary" size="small" loading={dingSaving} onClick={() => saveDing(false)}>
-                    保存
-                  </Button>
-                  <Button size="small" onClick={() => saveDing(true)}>
-                    保存并测试
-                  </Button>
-                </div>
-              </div>
-
               <Button icon={<LogoutOutlined />} danger onClick={onLogout} style={{ marginTop: 20 }}>
                 退出登录
               </Button>
@@ -707,6 +569,17 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                 </div>
                 <RightOutlined className={styles.connectEntryArrow} />
               </div>
+            </div>
+          )}
+
+          {tab === "bots" && (
+            <div className={styles.pane}>
+              <div className={styles.paneTitle}>机器人接入</div>
+              <div className={styles.hint}>
+                每种渠道都由你自己接入：钉钉群机器人做主动推送，企业微信自建应用 /
+                钉钉企业应用做双向遥控（把生成的回调地址填进各自后台）。
+              </div>
+              <IntegrationsPanel />
             </div>
           )}
 

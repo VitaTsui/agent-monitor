@@ -49,6 +49,20 @@ fn signed_url(webhook: &str, secret: &str, now_ms: u64) -> String {
     format!("{webhook}{sep}timestamp={now_ms}&sign={sig}")
 }
 
+/// 校验钉钉企业应用「消息接收(HTTP)」回调签名。
+/// 钉钉：sign = base64(HmacSHA256(key=appSecret, msg="{timestamp}\n{appSecret}"))
+pub fn verify_app_sign(app_secret: &str, timestamp: &str, sign: &str) -> bool {
+    let string_to_sign = format!("{timestamp}\n{app_secret}");
+    let mut mac = match HmacSha256::new_from_slice(app_secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(string_to_sign.as_bytes());
+    let expect = B64.encode(mac.finalize().into_bytes());
+    // 常量时间比较无必要（签名非秘密），直接比
+    expect == sign
+}
+
 /// 最小 URL 编码（只处理 base64 里会出现的 + / = 和空格）
 fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
