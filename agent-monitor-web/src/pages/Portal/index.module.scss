@@ -10,6 +10,8 @@ $active-bg: rgba(36, 61, 66, 0.09);
 
 .Portal {
   height: 100vh;
+  // iOS WKWebView 的 100vh 与实际可视高不一致，dvh 跟随动态视口
+  height: 100dvh;
   display: flex;
   background: $cream;
   color: $text;
@@ -422,6 +424,8 @@ $active-bg: rgba(36, 61, 66, 0.09);
     display: flex;
     flex-direction: column;
     min-width: 0;
+    // 列方向 flex 缺它会被内容撑开（iOS 整页滚动的根源之一）
+    min-height: 0;
     background: $cream;
   }
 
@@ -748,7 +752,8 @@ $active-bg: rgba(36, 61, 66, 0.09);
     .paneGrid[data-count="3"],
     .paneGrid[data-count="4"] {
       grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: none;
+      // auto 行高会按内容撑开（iOS 整页滚动的根源之二），必须钉在容器高内
+      grid-template-rows: minmax(0, 1fr);
     }
 
     .mainEmpty .greeting {
