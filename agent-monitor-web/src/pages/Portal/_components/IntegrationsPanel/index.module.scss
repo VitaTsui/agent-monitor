@@ -100,111 +100,117 @@
     }
   }
 
-  // 弹窗内的表单
-  .form {
-    padding: 4px 4px 2px;
 
-    .desc {
-      font-size: 12.5px;
-      color: #7c9096;
-      line-height: 1.75;
-      margin-bottom: 20px;
+}
+
+// 弹窗内的表单（Modal 会 portal 到 body 外，样式须顶层，不能嵌套 .IntegrationsPanel）
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding: 6px 4px 2px;
+
+  .desc {
+    font-size: 12.5px;
+    color: #7c9096;
+    line-height: 1.75;
+    margin: 0;
+  }
+
+  // 字段：标签 + 输入
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    margin: 0;
+
+    .label {
+      font-size: 13px;
+      font-weight: 500;
+      color: #4a5f64;
     }
 
-    // 字段：标签 + 输入，纵向留白充足
-    .field {
-      margin-bottom: 18px;
-
-      .label {
-        display: block;
-        font-size: 12.5px;
-        font-weight: 500;
-        color: #4a5f64;
-        margin-bottom: 7px;
-      }
-
-      :global(.hsu-input),
-      :global(input) {
-        height: 38px;
-      }
+    :global(.hsu-input),
+    :global(input) {
+      height: 40px;
     }
+  }
 
-    .events {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
+  .events {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 0;
 
-      .event {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        padding: 7px 14px 7px 9px;
-        border: 1px solid rgba(36, 61, 66, 0.1);
-        border-radius: 999px;
-        font-size: 13px;
-        white-space: nowrap;
-        cursor: pointer;
-        user-select: none;
-
-        &:hover {
-          border-color: rgba(15, 155, 173, 0.3);
-        }
-      }
-    }
-
-    .actions {
-      display: flex;
-      gap: 10px;
-      margin-top: 22px;
-
-      .actBtn {
-        height: 38px;
-        padding-inline: 22px;
-        border-radius: 10px;
-        font-size: 14px;
-      }
-    }
-
-    .urlRow {
+    .event {
       display: flex;
       align-items: center;
-      gap: 10px;
-      padding: 12px 14px;
-      margin-top: 4px;
-      margin-bottom: 4px;
-      border: 1px solid rgba(15, 155, 173, 0.2);
-      border-radius: 12px;
-      background: linear-gradient(180deg, #f2fbfc 0%, #eaf7f9 100%);
+      gap: 7px;
+      padding: 7px 14px 7px 9px;
+      border: 1px solid rgba(36, 61, 66, 0.1);
+      border-radius: 999px;
+      font-size: 13px;
+      white-space: nowrap;
+      cursor: pointer;
+      user-select: none;
 
-      .urlLabel {
-        flex: none;
-        font-size: 12px;
-        color: #7c9096;
+      &:hover {
+        border-color: rgba(15, 155, 173, 0.3);
       }
+    }
+  }
 
-      .urlValue {
-        flex: 1;
-        min-width: 0;
-        font-size: 12px;
-        font-family: "SF Mono", Menlo, Consolas, monospace;
-        color: #0a6b79;
-        word-break: break-all;
-      }
+  .actions {
+    display: flex;
+    gap: 10px;
+    margin: 4px 0 0;
 
-      .copyBtn {
-        flex: none;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 28px;
-        height: 28px;
-        border-radius: 8px;
-        color: #0f9bad;
-        cursor: pointer;
+    .actBtn {
+      height: 38px;
+      padding-inline: 22px;
+      border-radius: 10px;
+      font-size: 14px;
+    }
+  }
 
-        &:hover {
-          background: rgba(15, 155, 173, 0.12);
-        }
+  .urlRow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;
+    margin: 0;
+    border: 1px solid rgba(15, 155, 173, 0.2);
+    border-radius: 12px;
+    background: linear-gradient(180deg, #f2fbfc 0%, #eaf7f9 100%);
+
+    .urlLabel {
+      flex: none;
+      font-size: 12px;
+      color: #7c9096;
+    }
+
+    .urlValue {
+      flex: 1;
+      min-width: 0;
+      font-size: 12px;
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+      color: #0a6b79;
+      word-break: break-all;
+    }
+
+    .copyBtn {
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      color: #0f9bad;
+      cursor: pointer;
+
+      &:hover {
+        background: rgba(15, 155, 173, 0.12);
       }
     }
   }
