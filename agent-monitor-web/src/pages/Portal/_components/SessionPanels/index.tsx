@@ -26,13 +26,10 @@ interface BgTask {
 
 interface SessionPanelsProps {
   messages: PortalMessage[];
+  /** 会话是否正在运行：非运行时清单里的「进行中」降级为「未完成」，
+      不再显示会动的进行态（会话都停了就没有正在做的任务）。 */
+  running?: boolean;
 }
-
-/** 清单状态 → 勾选框字样（对齐终端里的呈现；已完成的不展示，故无需 completed） */
-const TODO_BOX: Record<string, string> = {
-  in_progress: "▣",
-  pending: "☐",
-};
 
 const BG_LABEL: Record<string, string> = {
   running: "执行中",
@@ -138,7 +135,7 @@ const Dock: React.FC<DockProps> = ({ title, count, pill, children }) => {
  * 多个会话并排时每格各带各的浮层。
  */
 const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
-  const { messages } = props;
+  const { messages, running } = props;
 
   const allTodos = parseLast<TodoItem>(messages, "todos");
   const allBg = parseLast<BgTask>(messages, "bgtasks");
@@ -169,15 +166,16 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
             </>
           }
         >
-          {todos.map((t) => (
-            <div
-              key={t.id}
-              className={`${styles.todoItem} ${styles[t.status] ?? ""}`}
-            >
-              <span className={styles.todoBox}>{TODO_BOX[t.status] ?? "☐"}</span>
-              <span className={styles.todoText}>{t.subject}</span>
-            </div>
-          ))}
+          {todos.map((t) => {
+            // 会话停了就没有「正在进行」的任务，进行中降级为未完成
+            const eff = !running && t.status === "in_progress" ? "pending" : t.status;
+            return (
+              <div key={t.id} className={`${styles.todoItem} ${styles[eff] ?? ""}`}>
+                <span className={styles.todoBox} aria-hidden />
+                <span className={styles.todoText}>{t.subject}</span>
+              </div>
+            );
+          })}
         </Dock>
       )}
 
