@@ -23,7 +23,14 @@
     width: 100vw !important;
     max-width: 100vw !important;
     transform-origin: bottom center !important;
-    animation: amSheetUp 0.28s cubic-bezier(0.32, 0.72, 0.2, 1);
+  }
+
+  // 底部滑入：只在「进入」态用 antd 的 motion 类触发，不给 .ant-modal 挂
+  // 无条件 animation（那会与 antd 离场动画抢 animationend，WebKit 下弹窗
+  // 卡住关不掉）。zoom-enter 是 antd Modal 默认入场 motion 前缀。
+  .ant-modal-root .ant-modal.ant-zoom-enter,
+  .ant-modal-root .ant-modal.ant-zoom-appear {
+    animation: amSheetUp 0.28s cubic-bezier(0.32, 0.72, 0.2, 1) !important;
   }
 
   // 遮罩：压暗 + 轻微模糊（原生 sheet 质感）
