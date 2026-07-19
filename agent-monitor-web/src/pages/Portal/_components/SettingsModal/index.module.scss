@@ -165,9 +165,10 @@ $hover: rgba(36, 61, 66, 0.06);
         }
       }
 
-      // .anticon 也是 span，必须排除，否则图标被 flex:1 拉宽、与文字隔开一大截
-      span:not(:global(.anticon)) {
+      // 只让标题占满剩余空间；彩色图标 chip 与角标各自保持原宽
+      .navLabel {
         flex: 1;
+        min-width: 0;
       }
     }
   }
@@ -236,45 +237,86 @@ $hover: rgba(36, 61, 66, 0.06);
       z-index: 3;
     }
 
-    // 一级：菜单占满，内容不渲染滚动；二级：菜单藏、内容全屏
+    // 一级：iOS 设置式分组列表（灰底页面 + 白色圆角分组卡 + 彩色图标 + 分隔线）
     .nav {
       flex: 1;
       width: 100%;
       min-width: 0;
       border-right: none;
-      padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+      background: #f2f3f5; // iOS 分组列表页面底色
+      padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
       overflow-y: auto;
 
       .navTitle {
         display: none;
       }
 
-      .navItem {
-        padding: 14px 14px;
-        font-size: 16px;
-        border-radius: 12px;
-        margin-bottom: 2px;
+      // 整组做成一张白色圆角卡
+      .navList {
+        background: #fff;
+        border-radius: 14px;
+        overflow: hidden;
+      }
 
-        :global(.anticon) {
-          font-size: 18px;
+      .navItem {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 14px;
+        font-size: 16.5px;
+        border-radius: 0;
+        margin: 0;
+
+        // 分隔线：从图标右侧起（iOS 惯例，内缩到文字对齐），最后一项无线
+        position: relative;
+
+        &:not(:last-child)::after {
+          content: "";
+          position: absolute;
+          left: 56px;
+          right: 0;
+          bottom: 0;
+          height: 0.5px;
+          background: rgba(36, 61, 66, 0.12);
+        }
+
+        // 彩色圆角图标底（iOS 设置图标质感）
+        .navIcon {
+          flex: none;
+          width: 30px;
+          height: 30px;
+          border-radius: 8px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: #fff;
+
+          :global(.anticon) {
+            font-size: 17px;
+            color: #fff;
+          }
+        }
+
+        .navLabel {
+          flex: 1;
+          min-width: 0;
         }
 
         .navChevron {
-          display: inline;
+          display: inline-flex;
+          flex: none;
           margin-left: auto;
-          color: #b9c4c7;
-          font-size: 18px;
-          line-height: 1;
+          color: #c2c8cf;
+          font-size: 17px;
         }
 
-        // 一级列表不需要选中态高亮
         &.active {
           background: transparent;
           font-weight: 400;
         }
 
         &:active {
-          background: rgba(36, 61, 66, 0.07);
+          background: rgba(36, 61, 66, 0.06);
         }
       }
     }

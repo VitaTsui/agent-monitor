@@ -256,12 +256,18 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
     }
   }, [open]);
 
-  const navItems: { key: Tab; label: string; icon: React.ReactNode; badge?: number }[] = [
-    { key: "account", label: "账户", icon: <UserOutlined /> },
-    { key: "devices", label: "设备管理", icon: <LaptopOutlined />, badge: pendingCount },
-    { key: "bots", label: "机器人接入", icon: <RobotOutlined /> },
-    { key: "security", label: "安全防护", icon: <SafetyOutlined /> },
-    { key: "about", label: "关于", icon: <InfoCircleOutlined /> },
+  const navItems: {
+    key: Tab;
+    label: string;
+    icon: React.ReactNode;
+    color: string;
+    badge?: number;
+  }[] = [
+    { key: "account", label: "账户", icon: <UserOutlined />, color: "#0f9bad" },
+    { key: "devices", label: "设备管理", icon: <LaptopOutlined />, color: "#3a8cff", badge: pendingCount },
+    { key: "bots", label: "机器人接入", icon: <RobotOutlined />, color: "#21b34a" },
+    { key: "security", label: "安全防护", icon: <SafetyOutlined />, color: "#f2933c" },
+    { key: "about", label: "关于", icon: <InfoCircleOutlined />, color: "#8a94a6" },
   ];
 
   const renderDevice = (d: PortalDevice) => (
@@ -430,10 +436,15 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                   }
                 }}
               >
-                {n.icon}
-                <span>{n.label}</span>
+                <span
+                  className={styles.navIcon}
+                  style={{ backgroundColor: n.color }}
+                >
+                  {n.icon}
+                </span>
+                <span className={styles.navLabel}>{n.label}</span>
                 {n.badge ? <Badge count={n.badge} size="small" /> : null}
-                <span className={styles.navChevron}>›</span>
+                <RightOutlined className={styles.navChevron} />
               </div>
             ))}
           </div>
