@@ -177,6 +177,61 @@ $hover: rgba(36, 61, 66, 0.06);
     }
   }
 
+  // 窄屏（手机 / 客户端小窗）：左侧菜单变顶部横向滚动条，内容区全宽
+  @media (max-width: 640px) {
+    .layout {
+      flex-direction: column;
+      height: auto;
+      max-height: calc(100vh - 90px);
+    }
+
+    .nav {
+      width: 100%;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      // 右侧给关闭按钮留位，避免最后一项被 ✕ 压住
+      padding: 10px 48px 10px 12px;
+      border-right: none;
+      border-bottom: 1px solid $border;
+      overflow-x: auto;
+      scrollbar-width: none;
+
+      &::-webkit-scrollbar {
+        display: none;
+      }
+
+      .navTitle {
+        display: none;
+      }
+
+      // 菜单项的无类名包裹层：横向排布可滚动
+      > div:not([class]) {
+        display: flex;
+        gap: 4px;
+        min-width: 0;
+        overflow-x: auto;
+        scrollbar-width: none;
+
+        &::-webkit-scrollbar {
+          display: none;
+        }
+      }
+
+      .navItem {
+        flex: none;
+        margin-bottom: 0;
+        padding: 7px 12px;
+        white-space: nowrap;
+      }
+    }
+
+    .content {
+      padding: 18px 16px 22px;
+    }
+  }
+
   .pane {
     .paneTitle {
       font-size: 18px;

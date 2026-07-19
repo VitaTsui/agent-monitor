@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 
 import { Input } from "@hsu-react/ui";
-import { Badge, Popover, Tooltip } from "antd";
+import { Badge, ConfigProvider, Popover, Tooltip } from "antd";
 import { platformIcon } from "./_utils/platform";
 import { useNativeBack } from "./_hooks/useNativeBack";
 import { useApkUpdateCheck } from "./_hooks/useApkUpdateCheck";
@@ -259,6 +259,9 @@ const Portal: React.FC = observer(() => {
   );
 
   return (
+    // Portal 路由挂在全局 Theme 之外，自带品牌主色；
+    // ConfigProvider 走 React context，portal 出去的弹窗一样生效。
+    <ConfigProvider theme={{ token: { colorPrimary: "#0F9BAD" } }}>
     <div className={styles.Portal}>
       {/* 移动端顶部栏（仅窄屏显示） */}
       <div className={styles.mobileBar}>
@@ -540,6 +543,7 @@ const Portal: React.FC = observer(() => {
         onClose={() => setSettingsOpen(false)}
       />
     </div>
+    </ConfigProvider>
   );
 });
 
