@@ -8,6 +8,9 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
+/// 桌面启动动画页（data: URL，无本地资源依赖）
+const SPLASH_DATA_URL: &str = "data:text/html;charset=utf-8,%3C%21doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Cstyle%3Ehtml%2Cbody%7Bmargin%3A0%3Bheight%3A100%25%3Bdisplay%3Aflex%3Balign-items%3Acenter%3Bjustify-content%3Acenter%3Bbackground%3Alinear-gradient%28180deg%2C%23f4fafb%200%25%2C%23eaf4f6%20100%25%29%3Bfont-family%3A-apple-system%2C%22PingFang%20SC%22%2Csans-serif%7D.box%7Bdisplay%3Aflex%3Bflex-direction%3Acolumn%3Balign-items%3Acenter%3Bgap%3A18px%7D.logo%7Bwidth%3A76px%3Bheight%3A76px%3Bborder-radius%3A18px%3Bbackground%3Alinear-gradient%28135deg%2C%2314a3b8%2C%230f9bad%29%3Bdisplay%3Aflex%3Balign-items%3Acenter%3Bjustify-content%3Acenter%3Bcolor%3A%23fff%3Bfont-size%3A34px%3Bfont-weight%3A700%3Bbox-shadow%3A0%2010px%2030px%20rgba%2815%2C155%2C173%2C.35%29%3Banimation%3Apulse%201.6s%20ease-in-out%20infinite%7D.name%7Bfont-size%3A15px%3Bcolor%3A%23243d42%3Bfont-weight%3A600%7D.dots%7Bdisplay%3Aflex%3Bgap%3A6px%7D.dots%20i%7Bwidth%3A7px%3Bheight%3A7px%3Bborder-radius%3A50%25%3Bbackground%3A%230f9bad%3Bopacity%3A.25%3Banimation%3Ablink%201.2s%20ease-in-out%20infinite%7D.dots%20i%3Anth-child%282%29%7Banimation-delay%3A.2s%7D.dots%20i%3Anth-child%283%29%7Banimation-delay%3A.4s%7D%40keyframes%20pulse%7B0%25%2C100%25%7Btransform%3Ascale%281%29%7D50%25%7Btransform%3Ascale%281.06%29%7D%7D%40keyframes%20blink%7B0%25%2C100%25%7Bopacity%3A.25%7D50%25%7Bopacity%3A1%7D%7D%3C/style%3E%3C/head%3E%3Cbody%3E%3Cdiv%20class%3D%22box%22%3E%3Cdiv%20class%3D%22logo%22%3E%26gt%3B_%3C/div%3E%3Cdiv%20class%3D%22name%22%3E%E7%BB%88%E7%AB%AF%E4%BB%BB%E5%8A%A1%E7%9B%91%E6%8E%A7%3C/div%3E%3Cdiv%20class%3D%22dots%22%3E%3Ci%3E%3C/i%3E%3Ci%3E%3C/i%3E%3Ci%3E%3C/i%3E%3C/div%3E%3C/div%3E%3C/body%3E%3C/html%3E";
+
 pub struct DesktopConfig {
     /// 前台基础地址（hub 本机 http://localhost:port；agent 模式为远端 hub 地址）
     pub web_base: String,
@@ -199,14 +202,54 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             // 主窗口：加载完整前台页面（设备树 / 会话 / 对话 / 设置 / git diff 等全部功能）。
             // agent 模式直接以隐藏态创建 —— 先可见再 hide 会闪一下窗口。
             let url: tauri::Url = portal_url.parse().expect("非法前台地址");
+            // 启动动画：远程页面加载期间主窗口是白屏，先给一个本地
+            // 无边框小启动窗（data: URL，零依赖），主页面 load 完成后
+            // 显示主窗、关掉启动窗；15s 兜底防止网络异常卡死在启动窗。
+            let want_visible = !background_launch || need_onboard;
+            if want_visible {
+                let splash_url: tauri::Url = SPLASH_DATA_URL.parse().expect("splash url");
+                let _ = WebviewWindowBuilder::new(app, "splash", WebviewUrl::External(splash_url))
+                    .title("终端任务监控")
+                    .inner_size(320.0, 340.0)
+                    .resizable(false)
+                    .decorations(false)
+                    .center()
+                    .build();
+            }
+            fn reveal<R: tauri::Runtime>(app: &tauri::AppHandle<R>, want_visible: bool) {
+                if let Some(s) = app.get_webview_window("splash") {
+                    let _ = s.close();
+                }
+                if want_visible {
+                    if let Some(m) = app.get_webview_window("main") {
+                        let _ = m.show();
+                        let _ = m.set_focus();
+                    }
+                }
+            }
             let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("终端任务监控")
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(960.0, 640.0)
                 // 首次打开居中显示（不设的话 Windows 上位置有偏移）
                 .center()
-                .visible(!background_launch || need_onboard)
+                .visible(false)
+                .on_page_load(move |w, payload| {
+                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                        reveal(w.app_handle(), want_visible);
+                    }
+                })
                 .build()?;
+            // 兜底：远程页面加载失败/超时也要露出主窗（白屏好过永远的启动窗）
+            {
+                let h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                    if h.get_webview_window("splash").is_some() {
+                        reveal(&h, want_visible);
+                    }
+                });
+            }
 
             // 点右上角关闭按钮：按用户设置的关闭行为处理。
             // - 最小化到托盘（默认）：隐藏窗口，程序留后台继续运行；

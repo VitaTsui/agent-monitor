@@ -146,3 +146,11 @@ $muted: #7c9096;
       calc(14px + env(safe-area-inset-bottom)) calc(18px + env(safe-area-inset-left));
   }
 }
+
+
+// 移动端：标题与操作已上移到全局顶栏，本格头部整行隐藏
+@media (max-width: 760px) {
+  .ChatPane .paneHeader {
+    display: none;
+  }
+}

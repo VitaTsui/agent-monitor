@@ -67,6 +67,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/tasks/:id/input", post(input_task))
         .route("/monitor/tasks/:id/queued", get(queued_inputs))
         .route("/monitor/tasks/:id/recall", post(recall_input))
+        .route("/monitor/tasks/:id/dirs", get(task_dirs))
         .route("/monitor/machines", get(machines))
         .route("/monitor/agent", get(agent_status))
         .route("/monitor/ws", get(ws_handler))
@@ -839,6 +840,66 @@ async fn recall_input(
     }
 }
 
+#[derive(Deserialize)]
+struct DirsQuery {
+    #[serde(default)]
+    rel: String,
+}
+
+/// GET /monitor/tasks/:id/dirs?rel=a/b —— 会话目录下的子目录（异步：
+/// 首次返回 pending，agent 下一轮上报带回结果后再查即有缓存）。
+async fn task_dirs(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<DirsQuery>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    // rel 归一化：拒绝越出根的路径（.. 与绝对路径）
+    let rel = q.rel.trim().trim_matches('/').to_string();
+    if rel.split('/').any(|seg| seg == "..") || rel.starts_with('/') {
+        return err(400, "非法目录");
+    }
+    let task = {
+        let tasks = state.tasks_for(&user).await;
+        tasks.into_iter().find(|t| t.id == id)
+    };
+    let Some(task) = task else {
+        return err(404, "任务不存在");
+    };
+    let cwd = task.process.as_ref().map(|p| p.cwd.clone()).unwrap_or_default();
+    if cwd.is_empty() {
+        return err(400, "该会话没有工作目录信息");
+    }
+    let mut machines = state.machines.write().await;
+    let Some(entry) = machines.get_mut(&task.machine_id) else {
+        return err(404, "任务所属机器已离线");
+    };
+    if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
+        return err(500, "任务所属机器已离线");
+    }
+    let key = (id.clone(), rel.clone());
+    let cached = entry.dir_cache.get(&key).cloned();
+    if cached.is_none()
+        && !entry
+            .pending_dir
+            .iter()
+            .any(|x| x.task_id == id && x.rel == rel)
+    {
+        entry.pending_dir.push_back(am_core::model::DirQuery {
+            task_id: id.clone(),
+            cwd: cwd.clone(),
+            rel: rel.clone(),
+        });
+    }
+    match cached {
+        Some(dirs) => ok(json!({ "dirs": dirs, "cwd": cwd, "pending": false })),
+        None => ok(json!({ "dirs": [], "cwd": cwd, "pending": true })),
+    }
+}
+
 fn truncate_log(s: &str) -> String {
     s.chars().take(60).collect()
 }
@@ -1385,6 +1446,8 @@ async fn report(
                 pending_files: VecDeque::new(),
                 messages: HashMap::new(),
                 pending_git: VecDeque::new(),
+                pending_dir: VecDeque::new(),
+                dir_cache: HashMap::new(),
                 git_cache: HashMap::new(),
                 notified_online: false,
             }
@@ -1461,6 +1524,9 @@ async fn report(
     }
     entry.tasks = tasks;
     // 缓存 agent 回传的 git 对比结果
+    for r in payload.dir_results {
+        entry.dir_cache.insert((r.task_id.clone(), r.rel.clone()), r.dirs);
+    }
     for r in payload.git_results {
         entry.git_cache.insert(r.task_id, r.overview);
     }
@@ -1473,6 +1539,7 @@ async fn report(
     let commands: Vec<ControlCmd> = entry.pending.drain(..).collect();
     let files: Vec<am_core::model::FileTransfer> = entry.pending_files.drain(..).collect();
     let git_queries: Vec<am_core::model::GitQuery> = entry.pending_git.drain(..).collect();
+    let dir_queries: Vec<am_core::model::DirQuery> = entry.pending_dir.drain(..).collect();
     drop(machines);
 
     // 钉钉推送：不阻塞上报响应，后台异步发
@@ -1490,6 +1557,7 @@ async fn report(
         "commands": commands,
         "files": files,
         "gitQueries": git_queries,
+        "dirQueries": dir_queries,
         "trusted": trusted,
         "hubVersion": env!("CARGO_PKG_VERSION"),
         // 强制更新下限：客户端低于它必须更新才能继续使用

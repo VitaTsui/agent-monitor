@@ -26,6 +26,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     let mut trusted = false;
     // 待随下一轮上报回传的 git 对比结果
     let mut pending_git_results: Vec<am_core::model::GitResult> = Vec::new();
+    let mut pending_dir_results: Vec<am_core::model::DirResult> = Vec::new();
 
     loop {
         // 配对阶段：还没有设备令牌（也没配全局令牌）时，不上报，只轮询配对状态。
@@ -100,6 +101,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             owner: owner.clone(),
             tasks,
             git_results: std::mem::take(&mut pending_git_results),
+            dir_results: std::mem::take(&mut pending_dir_results),
         };
 
         let mut req = client.post(format!("{hub}/monitor/report"));
@@ -208,6 +210,18 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         pending_git_results.push(am_core::model::GitResult {
                             task_id: q.task_id,
                             overview,
+                        });
+                    }
+                    // 目录列举请求（上传选目录）：列出 cwd/rel 下的子目录
+                    let dir_queries: Vec<am_core::model::DirQuery> = body
+                        .pointer("/data/dirQueries")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    for q in dir_queries {
+                        pending_dir_results.push(am_core::model::DirResult {
+                            dirs: list_subdirs(&q.cwd, &q.rel),
+                            task_id: q.task_id,
+                            rel: q.rel,
                         });
                     }
                 }
@@ -459,4 +473,36 @@ mod version_tests {
         assert!(version_newer("0.1.0.1", "0.1.0"), "段数不同按 0 补齐");
         assert!(!version_newer("abc", "0.1.0"), "解析不了按 0，不误报");
     }
+}
+
+
+/// 列出 root/rel 下的子目录名（仅目录；防越出 root；隐藏目录排后；上限 300）
+fn list_subdirs(root: &str, rel: &str) -> Vec<String> {
+    use std::path::Path;
+    // rel 已在 hub 侧拒绝 ".."，这里再兜一层
+    if rel.split('/').any(|s| s == "..") {
+        return Vec::new();
+    }
+    let base = Path::new(root).join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let (Ok(canon_base), Ok(canon_root)) = (base.canonicalize(), Path::new(root).canonicalize())
+    else {
+        return Vec::new();
+    };
+    if !canon_base.starts_with(&canon_root) {
+        return Vec::new();
+    }
+    let Ok(rd) = std::fs::read_dir(&canon_base) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<String> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .take(300)
+        .collect();
+    // 常规目录在前、隐藏目录在后，各自字典序
+    dirs.sort_by(|a, b| {
+        (a.starts_with('.'), a.to_lowercase()).cmp(&(b.starts_with('.'), b.to_lowercase()))
+    });
+    dirs
 }
