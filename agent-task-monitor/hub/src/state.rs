@@ -224,6 +224,8 @@ pub struct AppState {
     pub wecom_last_list: RwLock<HashMap<String, Vec<String>>>,
     /// 企业微信机器人配置（环境变量齐全才 Some，否则回调路由停用）
     pub wecom: Option<crate::wecom::WecomConfig>,
+    /// 微信公众号机器人配置（个人订阅号即可；同一套指令）
+    pub mp: Option<crate::wecom::WecomConfig>,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -247,6 +249,7 @@ impl AppState {
             wecom_bind_codes: RwLock::new(HashMap::new()),
             wecom_last_list: RwLock::new(HashMap::new()),
             wecom: crate::wecom::WecomConfig::from_env(),
+            mp: crate::wecom::WecomConfig::mp_from_env(),
         })
     }
 

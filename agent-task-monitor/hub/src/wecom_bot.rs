@@ -24,7 +24,7 @@ pub struct CallbackQuery {
 }
 
 /// GET /monitor/wecom/callback —— 企业微信「接收消息」URL 验证。
-/// 校验签名 + 解密 echostr，明文原样返回。
+/// 企业微信：msg_signature 含 echostr，echostr 加密 → 解密后原样返回。
 pub async fn verify(
     State(state): State<SharedState>,
     Query(q): Query<CallbackQuery>,
@@ -42,17 +42,62 @@ pub async fn verify(
     }
 }
 
-/// POST /monitor/wecom/callback —— 收成员消息，同步返回被动回复（加密）。
+#[derive(Deserialize)]
+pub struct MpVerifyQuery {
+    signature: String,
+    timestamp: String,
+    nonce: String,
+    #[serde(default)]
+    echostr: String,
+}
+
+/// GET /monitor/mp/callback —— 公众号服务器 URL 验证。
+/// 公众号：signature 不含 echostr，echostr 是明文，原样返回。
+pub async fn mp_verify(
+    State(state): State<SharedState>,
+    Query(q): Query<MpVerifyQuery>,
+) -> impl IntoResponse {
+    let Some(cfg) = state.mp.clone() else {
+        return (StatusCode::NOT_FOUND, "公众号机器人未启用".to_string());
+    };
+    // signature = sha1(sort(token, timestamp, nonce))，无 echostr（公众号验证方式）
+    let expect = wecom::plain_signature(&cfg.token, &q.timestamp, &q.nonce);
+    if expect != q.signature {
+        return (StatusCode::FORBIDDEN, "签名校验失败".to_string());
+    }
+    (StatusCode::OK, q.echostr)
+}
+
+/// POST /monitor/wecom/callback —— 企业微信收消息
 pub async fn message(
     State(state): State<SharedState>,
     Query(q): Query<CallbackQuery>,
     body: String,
 ) -> impl IntoResponse {
-    let Some(cfg) = state.wecom.clone() else {
+    handle_message(&state, state.wecom.clone(), &q, &body).await
+}
+
+/// POST /monitor/mp/callback —— 公众号收消息（安全模式，密文同企业微信）
+pub async fn mp_message(
+    State(state): State<SharedState>,
+    Query(q): Query<CallbackQuery>,
+    body: String,
+) -> impl IntoResponse {
+    handle_message(&state, state.mp.clone(), &q, &body).await
+}
+
+/// 收消息共用逻辑：验签 → 解密 → 指令 → 被动回复（加密）。
+async fn handle_message(
+    state: &SharedState,
+    cfg: Option<wecom::WecomConfig>,
+    q: &CallbackQuery,
+    body: &str,
+) -> (StatusCode, String) {
+    let Some(cfg) = cfg else {
         return (StatusCode::NOT_FOUND, String::new());
     };
     // 外层 XML 取 Encrypt，验签 + 解密
-    let Some(encrypt) = wecom::xml_field(&body, "Encrypt") else {
+    let Some(encrypt) = wecom::xml_field(body, "Encrypt") else {
         return (StatusCode::BAD_REQUEST, String::new());
     };
     let sig = wecom::msg_signature(&cfg.token, &q.timestamp, &q.nonce, &encrypt);
@@ -70,7 +115,7 @@ pub async fn message(
 
     // 非文本（图片/事件等）：回一句提示，不报错
     let reply = if msg_type == "text" {
-        dispatch(&state, &from, content.trim()).await
+        dispatch(state, &from, content.trim()).await
     } else {
         "只认文字指令，发「帮助」看用法。".to_string()
     };
