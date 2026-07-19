@@ -219,15 +219,9 @@ pub struct AppState {
     pub started_at: chrono::DateTime<chrono::Local>,
     /// 会话表有未落盘变更（tick 循环定期 flush 到 sessions.json）
     pub sessions_dirty: std::sync::atomic::AtomicBool,
-    /// 企业微信绑定码：code → (用户名, 生成时刻)。前台生成、机器人凭它绑定。
-    pub wecom_bind_codes: RwLock<HashMap<String, (String, Instant)>>,
-    /// 企业微信机器人「最近一次列出的会话」：wecom userid → 有序 task_id，
+    /// 机器人「最近一次列出的会话」：用户名 → 有序 task_id，
     /// 让「暂停 3」这类按序号操作能对上会话。
-    pub wecom_last_list: RwLock<HashMap<String, Vec<String>>>,
-    /// 企业微信机器人配置（环境变量齐全才 Some，否则回调路由停用）
-    pub wecom: Option<crate::wecom::WecomConfig>,
-    /// 微信公众号机器人配置（个人订阅号即可；同一套指令）
-    pub mp: Option<crate::wecom::WecomConfig>,
+    pub bot_last_list: RwLock<HashMap<String, Vec<String>>>,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -248,10 +242,7 @@ impl AppState {
             tx,
             started_at: chrono::Local::now(),
             sessions_dirty: std::sync::atomic::AtomicBool::new(false),
-            wecom_bind_codes: RwLock::new(HashMap::new()),
-            wecom_last_list: RwLock::new(HashMap::new()),
-            wecom: crate::wecom::WecomConfig::from_env(),
-            mp: crate::wecom::WecomConfig::mp_from_env(),
+            bot_last_list: RwLock::new(HashMap::new()),
         })
     }
 

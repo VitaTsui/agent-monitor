@@ -215,45 +215,7 @@ export const disconnectShare = async (machineId: string) => {
   return await post("/monitor/share/disconnect", { machineId });
 };
 
-// ---------- 企业微信机器人 ----------
 
-/** 生成一次性绑定码（发给机器人「绑定 <码>」即可关联账号） */
-export const genWecomBindCode = async () => {
-  return await post<{ code: string; ttlSeconds: number }>(
-    "/monitor/wecom/bindcode",
-    {},
-  );
-};
-
-// ---------- 钉钉主动推送 ----------
-
-export interface DingtalkConfig {
-  webhook: string;
-  hasSecret: boolean;
-  waiting: boolean;
-  finished: boolean;
-  newSession: boolean;
-  device: boolean;
-}
-
-export const getDingtalk = async () => {
-  return await get<DingtalkConfig | null>("/monitor/dingtalk");
-};
-
-export const setDingtalk = async (data: {
-  webhook: string;
-  secret?: string;
-  waiting: boolean;
-  finished: boolean;
-  newSession: boolean;
-  device: boolean;
-}) => {
-  return await post<boolean>("/monitor/dingtalk", data);
-};
-
-export const testDingtalk = async () => {
-  return await post<boolean>("/monitor/dingtalk/test", {});
-};
 
 // ---------- 额度（5h token 上限）----------
 
@@ -290,5 +252,68 @@ export const claimPairDevice = (code: string) => {
   return post<{ machineId: string; hostname: string; platform: string }>(
     "/monitor/pair/claim",
     { code }
+  );
+};
+
+// ---------- 用户自助机器人集成 ----------
+
+export interface IntegrationsInfo {
+  dingtalkRobot: {
+    webhook: string;
+    hasSecret: boolean;
+    waiting: boolean;
+    finished: boolean;
+    newSession: boolean;
+    device: boolean;
+  } | null;
+  wecomApp: {
+    corpId: string;
+    token: string;
+    hasAesKey: boolean;
+    callbackUrl: string;
+  } | null;
+  dingtalkApp: {
+    hasSecret: boolean;
+    callbackUrl: string;
+  } | null;
+}
+
+export const getIntegrations = async () => {
+  return await get<IntegrationsInfo>("/monitor/integrations");
+};
+
+/** 钉钉群机器人（主动推送） */
+export const setDingtalkRobot = async (data: {
+  webhook: string;
+  secret?: string;
+  waiting: boolean;
+  finished: boolean;
+  newSession: boolean;
+  device: boolean;
+}) => {
+  return await post<boolean>("/monitor/integrations/dingtalk-robot", data);
+};
+
+export const testDingtalkRobot = async () => {
+  return await post<boolean>("/monitor/integrations/dingtalk-robot/test", {});
+};
+
+/** 企业微信自建应用（双向），返回专属回调地址 */
+export const setWecomApp = async (data: {
+  corpId: string;
+  token?: string;
+  aesKey?: string;
+}) => {
+  return await post<{ callbackUrl: string | null }>(
+    "/monitor/integrations/wecom-app",
+    data,
+  );
+};
+
+/** 钉钉企业应用（双向），返回专属回调地址 */
+export const setDingtalkApp = async (data: { appSecret?: string }) => {
+  return await post<{ callbackUrl: string | null }>(
+    "/monitor/integrations/dingtalk-app",
+    data,
   );
 };

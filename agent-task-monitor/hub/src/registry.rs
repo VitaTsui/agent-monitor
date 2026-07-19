@@ -43,6 +43,13 @@ fn random_token32() -> String {
         .collect()
 }
 
+/// 回调路由用的不透明 id（24 位十六进制，够抗枚举）
+fn new_channel() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..24).map(|_| format!("{:x}", rng.gen_range(0..16))).collect()
+}
+
 fn random_salt() -> String {
     rand::thread_rng()
         .sample_iter(&Alphanumeric)
@@ -136,12 +143,33 @@ struct Persisted {
     /// 超级管理员用户名（首次启动由 AM_USERNAME 种子决定）
     #[serde(default)]
     super_user: String,
-    /// 企业微信机器人绑定：wecom userid → 平台用户名
-    #[serde(default)]
-    wecom_users: HashMap<String, String>,
-    /// 钉钉推送配置：用户名 → 钉钉机器人 webhook + 事件开关
+    /// 钉钉群机器人推送配置：用户名 → webhook + 事件开关
     #[serde(default)]
     dingtalk: HashMap<String, crate::dingtalk::DingtalkNotify>,
+    /// 企业微信自建应用（双向）：用户名 → 配置
+    #[serde(default)]
+    wecom_apps: HashMap<String, WecomApp>,
+    /// 钉钉企业应用（双向）：用户名 → 配置
+    #[serde(default)]
+    dingtalk_apps: HashMap<String, DingtalkApp>,
+}
+
+/// 企业微信自建应用（用户自助接入，双向遥控）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WecomApp {
+    /// 回调 URL 里的不透明路由 id（用户专属）
+    pub channel: String,
+    pub corp_id: String,
+    pub token: String,
+    /// EncodingAESKey 原文（43 位）
+    pub aes_key: String,
+}
+
+/// 钉钉企业应用（用户自助接入，双向遥控）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DingtalkApp {
+    pub channel: String,
+    pub app_secret: String,
 }
 
 pub struct Registry {
@@ -149,8 +177,9 @@ pub struct Registry {
     users: Vec<User>,
     devices: HashMap<String, DeviceMeta>,
     super_user: String,
-    wecom_users: HashMap<String, String>,
     dingtalk: HashMap<String, crate::dingtalk::DingtalkNotify>,
+    wecom_apps: HashMap<String, WecomApp>,
+    dingtalk_apps: HashMap<String, DingtalkApp>,
 }
 
 impl Registry {
@@ -180,15 +209,16 @@ impl Registry {
             } else {
                 p.super_user
             };
-            Registry { dir, users: p.users, devices: p.devices, super_user, wecom_users: p.wecom_users, dingtalk: p.dingtalk }
+            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk: p.dingtalk, wecom_apps: p.wecom_apps, dingtalk_apps: p.dingtalk_apps }
         } else {
             Registry {
                 dir,
                 users: Vec::new(),
                 devices: HashMap::new(),
                 super_user: seed_user.to_string(),
-                wecom_users: HashMap::new(),
                 dingtalk: HashMap::new(),
+                wecom_apps: HashMap::new(),
+                dingtalk_apps: HashMap::new(),
             }
         };
         if reg.users.is_empty() {
@@ -219,8 +249,9 @@ impl Registry {
         let p = Persisted {
             users: self.users.clone(),
             devices: self.devices.clone(),
-            wecom_users: self.wecom_users.clone(),
             dingtalk: self.dingtalk.clone(),
+            wecom_apps: self.wecom_apps.clone(),
+            dingtalk_apps: self.dingtalk_apps.clone(),
             quota_limit: 0,
             super_user: self.super_user.clone(),
         };
@@ -340,25 +371,61 @@ impl Registry {
         self.users.iter().find(|u| u.username == username)
     }
 
-    // ---------- 企业微信机器人绑定 ----------
+    // ---------- 用户自助集成（企业微信 / 钉钉应用，双向） ----------
 
-    /// 绑定 wecom userid → 平台账号（覆盖旧绑定）
-    pub fn bind_wecom(&mut self, wecom_userid: &str, username: &str) {
-        self.wecom_users.insert(wecom_userid.to_string(), username.to_string());
-        self.save();
-    }
-
-    /// 解绑（预留：换绑/注销时用）
-    #[allow(dead_code)]
-    pub fn unbind_wecom(&mut self, wecom_userid: &str) {
-        if self.wecom_users.remove(wecom_userid).is_some() {
+    /// 保存企业微信自建应用配置；corp_id 为空则删除。返回该用户的回调 channel。
+    pub fn set_wecom_app(&mut self, user: &str, corp_id: &str, token: &str, aes_key: &str) -> Option<String> {
+        if corp_id.trim().is_empty() {
+            self.wecom_apps.remove(user);
             self.save();
+            return None;
         }
+        let channel = self.wecom_apps.get(user).map(|a| a.channel.clone())
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(new_channel);
+        self.wecom_apps.insert(user.to_string(), WecomApp {
+            channel: channel.clone(),
+            corp_id: corp_id.trim().to_string(),
+            token: token.trim().to_string(),
+            aes_key: aes_key.trim().to_string(),
+        });
+        self.save();
+        Some(channel)
     }
 
-    /// wecom userid 对应的平台账号（未绑定返回 None）
-    pub fn wecom_user_of(&self, wecom_userid: &str) -> Option<String> {
-        self.wecom_users.get(wecom_userid).cloned()
+    pub fn wecom_app_of(&self, user: &str) -> Option<WecomApp> {
+        self.wecom_apps.get(user).cloned()
+    }
+
+    /// 按回调 channel 反查 (用户名, 配置)
+    pub fn wecom_app_by_channel(&self, channel: &str) -> Option<(String, WecomApp)> {
+        self.wecom_apps.iter().find(|(_, a)| a.channel == channel).map(|(u, a)| (u.clone(), a.clone()))
+    }
+
+    /// 保存钉钉企业应用配置；app_secret 为空则删除。返回回调 channel。
+    pub fn set_dingtalk_app(&mut self, user: &str, app_secret: &str) -> Option<String> {
+        if app_secret.trim().is_empty() {
+            self.dingtalk_apps.remove(user);
+            self.save();
+            return None;
+        }
+        let channel = self.dingtalk_apps.get(user).map(|a| a.channel.clone())
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(new_channel);
+        self.dingtalk_apps.insert(user.to_string(), DingtalkApp {
+            channel: channel.clone(),
+            app_secret: app_secret.trim().to_string(),
+        });
+        self.save();
+        Some(channel)
+    }
+
+    pub fn dingtalk_app_of(&self, user: &str) -> Option<DingtalkApp> {
+        self.dingtalk_apps.get(user).cloned()
+    }
+
+    pub fn dingtalk_app_by_channel(&self, channel: &str) -> Option<(String, DingtalkApp)> {
+        self.dingtalk_apps.iter().find(|(_, a)| a.channel == channel).map(|(u, a)| (u.clone(), a.clone()))
     }
 
     // ---------- 钉钉推送配置 ----------
