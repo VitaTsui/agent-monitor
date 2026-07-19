@@ -186,16 +186,6 @@ const IntegrationsPanel: React.FC = () => {
       on: !!robot.webhook,
     },
     {
-      key: "wecom",
-      icon: <WechatOutlined />,
-      iconCls: styles.wecom,
-      title: "企业微信自建应用",
-      type: "双向遥控",
-      typeCls: styles.two,
-      sub: "在企业微信里发指令遥控会话",
-      on: !!wecomUrl,
-    },
-    {
       key: "ding",
       icon: <DingtalkOutlined />,
       iconCls: styles.ding,
@@ -204,6 +194,16 @@ const IntegrationsPanel: React.FC = () => {
       typeCls: styles.two,
       sub: "在钉钉里 @机器人 发指令遥控会话",
       on: !!dingUrl,
+    },
+    {
+      key: "wecom",
+      icon: <WechatOutlined />,
+      iconCls: styles.wecom,
+      title: "企业微信自建应用",
+      type: "双向遥控",
+      typeCls: styles.two,
+      sub: "在企业微信里发指令遥控会话",
+      on: !!wecomUrl,
     },
   ];
 
