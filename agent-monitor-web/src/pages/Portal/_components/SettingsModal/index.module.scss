@@ -178,11 +178,12 @@ $hover: rgba(36, 61, 66, 0.06);
   }
 
   // 窄屏（手机 / 客户端小窗）：左侧菜单变顶部横向滚动条，内容区全宽
-  @media (max-width: 640px) {
+  @media (max-width: 760px) {
     .layout {
       flex-direction: column;
-      height: auto;
-      max-height: calc(100vh - 90px);
+      // 移动端整屏设置（底部抽屉内）：固定拉高到 ~5/6 屏，内容区滚动
+      height: 84dvh;
+      max-height: 84dvh;
     }
 
     .nav {

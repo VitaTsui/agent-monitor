@@ -556,7 +556,14 @@ const Portal: React.FC = observer(() => {
         {/* 底部用户区（Claude 式） */}
         <Popover
           open={userMenuOpen}
-          onOpenChange={setUserMenuOpen}
+          onOpenChange={(o) => {
+            // 移动端：不弹菜单，直接进整屏设置（Claude App 式头像入口）
+            if (o && window.matchMedia("(max-width: 760px)").matches) {
+              openSettings("account");
+              return;
+            }
+            setUserMenuOpen(o);
+          }}
           content={userMenu}
           trigger="click"
           placement="topLeft"

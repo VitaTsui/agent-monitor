@@ -113,6 +113,15 @@ $muted: #7c9096;
   .chat {
     flex: 1;
     overflow-y: auto;
+
+    // 消息加载中的 Spin 居中（默认贴左上，观感差）
+    > :global(.ant-spin-nested-loading) {
+      min-height: 100%;
+
+      > :global(.ant-spin) {
+        max-height: none;
+      }
+    }
     // iOS 惯性滚动 + 阻断滚动传染到页面
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;

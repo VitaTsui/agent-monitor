@@ -761,6 +761,35 @@ $active-bg: rgba(36, 61, 66, 0.09);
     }
   }
 
+  // 侧栏底部用户区 → 悬浮圆头像（Claude App 式）
+  .Portal .sider .userRow {
+    margin: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    padding: 0;
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    justify-content: center;
+    background: transparent;
+
+    &:hover {
+      background: transparent;
+    }
+
+    .userAvatar {
+      width: 46px;
+      height: 46px;
+      min-width: 46px;
+      font-size: 18px;
+      box-shadow: 0 4px 14px rgba(15, 155, 173, 0.35);
+    }
+
+    .userText,
+    .userChevron,
+    :global(.ant-badge) {
+      display: none;
+    }
+  }
+
   // 桌面折叠按钮在移动端隐藏（用顶部栏汉堡）
   .Portal .sider .siderHeader .foldBtn {
     display: none;
