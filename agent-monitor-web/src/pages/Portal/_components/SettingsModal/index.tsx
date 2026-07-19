@@ -19,6 +19,7 @@ import {
   PortalDevice,
   connectShare,
   disconnectShare,
+  genWecomBindCode,
 } from "@/services/apis/portal";
 import { getUserInfo, removeToken } from "@/utils/auth";
 import { localMachineId } from "@/utils/clientAuth";
@@ -173,6 +174,23 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
       })
       .catch(() => message.error("接入失败，请检查网络"))
       .finally(() => setConnecting(false));
+  };
+
+  // 企业微信机器人绑定码
+  const [wecomCode, setWecomCode] = useState<string | null>(null);
+  const [wecomLoading, setWecomLoading] = useState(false);
+  const genWecom = () => {
+    setWecomLoading(true);
+    genWecomBindCode()
+      .then((res) => {
+        if (res.code === 0 && res.data) {
+          setWecomCode(res.data.code);
+        } else {
+          message.error(res.msg ?? "本站未启用企业微信机器人");
+        }
+      })
+      .catch(() => message.error("生成失败，请检查网络"))
+      .finally(() => setWecomLoading(false));
   };
 
   // 客户端窗口内标出「本机」
@@ -409,7 +427,25 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                   </div>
                 </div>
               </div>
-              <Button icon={<LogoutOutlined />} danger onClick={onLogout}>
+              <div className={styles.wecomSection}>
+                <div className={styles.sectionTitle}>企业微信机器人</div>
+                <div className={styles.hint}>
+                  绑定后，可在企业微信里用文字指令遥控你的会话（查看 / 暂停 / 恢复 /
+                  中断 / 发布输入）。生成绑定码，发给机器人：<code>绑定 &lt;码&gt;</code>。
+                </div>
+                {wecomCode ? (
+                  <div className={styles.wecomCode}>
+                    <span className={styles.wecomCodeLabel}>绑定码</span>
+                    <span className={styles.wecomCodeValue}>{wecomCode}</span>
+                    <span className={styles.wecomCodeHint}>10 分钟内有效 · 发送「绑定 {wecomCode}」</span>
+                  </div>
+                ) : null}
+                <Button size="small" loading={wecomLoading} onClick={genWecom}>
+                  {wecomCode ? "重新生成" : "生成绑定码"}
+                </Button>
+              </div>
+
+              <Button icon={<LogoutOutlined />} danger onClick={onLogout} style={{ marginTop: 20 }}>
                 退出登录
               </Button>
             </div>

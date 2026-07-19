@@ -215,6 +215,16 @@ export const disconnectShare = async (machineId: string) => {
   return await post("/monitor/share/disconnect", { machineId });
 };
 
+// ---------- 企业微信机器人 ----------
+
+/** 生成一次性绑定码（发给机器人「绑定 <码>」即可关联账号） */
+export const genWecomBindCode = async () => {
+  return await post<{ code: string; ttlSeconds: number }>(
+    "/monitor/wecom/bindcode",
+    {},
+  );
+};
+
 // ---------- 额度（5h token 上限）----------
 
 

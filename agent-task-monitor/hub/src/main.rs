@@ -8,6 +8,8 @@ mod oauth;
 mod registry;
 mod server;
 mod state;
+mod wecom;
+mod wecom_bot;
 
 use anyhow::{Context, Result};
 use rsa::pkcs8::DecodePrivateKey;
