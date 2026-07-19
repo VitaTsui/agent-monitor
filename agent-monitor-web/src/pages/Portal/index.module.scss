@@ -853,3 +853,12 @@ $active-bg: rgba(36, 61, 66, 0.09);
     }
   }
 }
+
+// 空态文案的桌面/移动分支：默认桌面显示、移动隐藏；≤760 反转
+.descMobile { display: none; }
+@media (max-width: 760px) {
+  .Portal {
+    .descDesktop { display: none; }
+    .descMobile { display: inline; }
+  }
+}
