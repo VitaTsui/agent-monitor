@@ -10,16 +10,23 @@ import { claimPairDevice } from "@/services/apis/portal";
 import { message as antdMessage } from "antd";
 import {
   CodeOutlined,
+  BranchesOutlined,
   ControlOutlined,
   DownOutlined,
+  EllipsisOutlined,
   LaptopOutlined,
   LogoutOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined,
   SafetyOutlined,
   SearchOutlined,
   SettingOutlined,
   SplitCellsOutlined,
+  StopOutlined,
+  SyncOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
@@ -27,6 +34,7 @@ import { getAccessToken, getUserInfo, removeToken } from "@/utils/auth";
 import { clientSilentLogin, inDesktopClient, localMachineId } from "@/utils/clientAuth";
 import PortalStore from "./PortalStore";
 import { ShareReceiveModal } from "./_hooks/useShareReceive";
+import GitDiffModal from "./_components/GitDiffModal";
 import ChatPane from "./_components/ChatPane";
 import ScrollText from "./_components/ScrollText";
 import SettingsModal from "./_components/SettingsModal";
@@ -56,6 +64,8 @@ const Portal: React.FC = observer(() => {
     loadDevices,
     stopPolling,
     select,
+    control,
+    syncMessages,
     splitOpen,
   } = PortalStore;
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -75,6 +85,9 @@ const Portal: React.FC = observer(() => {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   // 移动端：侧栏抽屉开合
   const [mobileNav, setMobileNav] = useState(false);
+  // 移动端：顶栏「⋯」操作菜单与代码改动弹窗
+  const [mobileActs, setMobileActs] = useState(false);
+  const [mobileGit, setMobileGit] = useState(false);
 
   // 移动端强制展开侧栏内容：桌面折叠态下缩窄窗口时，
   // CSS 会把抽屉撑到 84vw，但折叠态 JSX 不渲染内容 → 空白抽屉，这里在 JS 层纠正
@@ -288,11 +301,71 @@ const Portal: React.FC = observer(() => {
           <MenuUnfoldOutlined />
         </span>
         <span className={styles.mobileTitle}>
+          {openTasks[0] ? (
+            <span
+              className={`${styles.mobileStatusDot} ${
+                styles[openTasks[0].status ?? ""] ?? ""
+              }`}
+            />
+          ) : null}
           {openTasks[0]?.title ||
             openTasks[0]?.prompt ||
             openTasks[0]?.projectName ||
             "终端任务监控"}
         </span>
+        {openTasks[0] ? (
+          <Popover
+            open={mobileActs}
+            onOpenChange={setMobileActs}
+            trigger="click"
+            placement="bottomRight"
+            arrow={false}
+            overlayClassName={styles.mobileActsPop}
+            content={
+              <div className={styles.mobileActsMenu}>
+                {(() => {
+                  const t0 = openTasks[0]!;
+                  const id0 = t0.id ?? "";
+                  const paused = t0.status === "paused";
+                  const act = (fn: () => void) => () => {
+                    setMobileActs(false);
+                    fn();
+                  };
+                  return (
+                    <>
+                      <div className={styles.mobileActItem} onClick={act(() => syncMessages(id0))}>
+                        <SyncOutlined /> 重新同步
+                      </div>
+                      <div className={styles.mobileActItem} onClick={act(() => setMobileGit(true))}>
+                        <BranchesOutlined /> 代码改动
+                      </div>
+                      <div
+                        className={styles.mobileActItem}
+                        onClick={act(() => control(id0, paused ? "resume" : "pause"))}
+                      >
+                        {paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
+                        {paused ? " 恢复" : " 暂停"}
+                      </div>
+                      <div className={styles.mobileActItem} onClick={act(() => control(id0, "interrupt"))}>
+                        <ThunderboltOutlined /> 中断
+                      </div>
+                      <div
+                        className={`${styles.mobileActItem} ${styles.danger}`}
+                        onClick={act(() => control(id0, "stop"))}
+                      >
+                        <StopOutlined /> 终止进程
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+            }
+          >
+            <span className={styles.mobileMoreBtn} role="button" aria-label="会话操作">
+              <EllipsisOutlined />
+            </span>
+          </Popover>
+        ) : null}
       </div>
 
       {/* 移动端抽屉遮罩 */}
@@ -547,6 +620,12 @@ const Portal: React.FC = observer(() => {
         onClose={() => setSettingsOpen(false)}
       />
       <ShareReceiveModal />
+      <GitDiffModal
+        open={mobileGit}
+        taskId={openTasks[0]?.id ?? ""}
+        title={openTasks[0]?.projectName}
+        onClose={() => setMobileGit(false)}
+      />
     </div>
     </ConfigProvider>
   );

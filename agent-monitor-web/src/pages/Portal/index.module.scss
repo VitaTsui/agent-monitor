@@ -594,6 +594,16 @@ $active-bg: rgba(36, 61, 66, 0.09);
   }
 }
 
+@keyframes mobilePulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
 @media (max-width: 760px) {
   .Portal {
     flex-direction: column;
@@ -634,6 +644,25 @@ $active-bg: rgba(36, 61, 66, 0.09);
         }
       }
 
+      // 右上角「⋯」操作按钮（与汉堡钮同规格）
+      .mobileMoreBtn {
+        margin-left: auto;
+        margin-right: -8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        font-size: 22px;
+        color: #0f9bad;
+        border-radius: 10px;
+        cursor: pointer;
+
+        &:active {
+          background: rgba(36, 61, 66, 0.08);
+        }
+      }
+
       // 标题绝对居中（iOS 导航栏惯例），两侧按钮不挤位
       .mobileTitle {
         position: absolute;
@@ -649,6 +678,27 @@ $active-bg: rgba(36, 61, 66, 0.09);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+
+        .mobileStatusDot {
+          display: inline-block;
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+          margin-right: 7px;
+          vertical-align: middle;
+          background: #b9c4c7;
+
+          &.running {
+            background: #22b06a;
+            animation: mobilePulse 1.4s ease-in-out infinite;
+          }
+          &.idle {
+            background: #f2b234;
+          }
+          &.paused {
+            background: #8a9ba0;
+          }
+        }
       }
     }
 
@@ -720,5 +770,42 @@ $active-bg: rgba(36, 61, 66, 0.09);
     outline: 2px solid $accent;
     outline-offset: 2px;
     border-radius: 8px;
+  }
+}
+
+
+// 顶栏「⋯」下拉菜单（Popover portal 到 body，样式须顶层）
+.mobileActsMenu {
+  display: flex;
+  flex-direction: column;
+  min-width: 168px;
+  padding: 4px;
+
+  .mobileActItem {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 11px 12px;
+    border-radius: 10px;
+    font-size: 14.5px;
+    color: #243d42;
+    cursor: pointer;
+
+    &:active {
+      background: rgba(36, 61, 66, 0.07);
+    }
+
+    :global(.anticon) {
+      font-size: 16px;
+      color: #7c9096;
+    }
+
+    &.danger {
+      color: #d4380d;
+
+      :global(.anticon) {
+        color: #d4380d;
+      }
+    }
   }
 }
