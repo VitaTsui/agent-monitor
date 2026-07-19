@@ -195,7 +195,11 @@ const Composer: React.FC<ComposerProps> = (props) => {
     }
   };
 
-  const shownCommands = cmdsOpen ? commands : commands.slice(0, 6);
+  // 窄屏横向滚动能看全部，无需截断；桌面保持默认展示前 6 个 + 「+N」
+  const isNarrow =
+    typeof window !== "undefined" &&
+    window.matchMedia("(max-width: 760px)").matches;
+  const shownCommands = cmdsOpen || isNarrow ? commands : commands.slice(0, 6);
 
   return (
     <div className={styles.Composer} ref={rootRef}>
