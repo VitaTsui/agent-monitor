@@ -12,6 +12,9 @@ $active-bg: rgba(36, 61, 66, 0.09);
   height: 100vh;
   // iOS WKWebView 的 100vh 与实际可视高不一致，dvh 跟随动态视口
   height: 100dvh;
+  // 键盘弹出时 JS 把可视高度写进 --app-vh：顶栏固定、内容与输入区
+  // 一起从底部收缩到键盘上方（ChatGPT/Claude 式）
+  height: var(--app-vh, 100dvh);
   display: flex;
   background: $cream;
   color: $text;

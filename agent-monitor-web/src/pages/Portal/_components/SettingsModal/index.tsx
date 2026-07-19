@@ -9,6 +9,7 @@ import {
   LaptopOutlined,
   LinkOutlined,
   LogoutOutlined,
+  LeftOutlined,
   RightOutlined,
   RobotOutlined,
   SafetyOutlined,
@@ -388,7 +389,8 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                 }
               }}
             >
-              ‹ 设置
+              <LeftOutlined className={styles.mobileBackIcon} />
+              设置
             </span>
           ) : (
             <span className={styles.mobileHeadTitle}>设置</span>

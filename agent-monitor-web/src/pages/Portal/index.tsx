@@ -447,14 +447,16 @@ const Portal: React.FC = observer(() => {
                       }}
                       title={`${d.hostname} · ${d.platformDsr}${d.running > 0 ? ` · ${d.running} 执行中` : ""}`}
                     >
-                      <LaptopOutlined />
+                      {/* 平台有 emoji(🪟/🐧) 就只显示它；没有(如 macOS) 才用笔记本图标兜底，
+                          避免「笔记本图标 + 🪟」两个图标重复 */}
+                      {platformIcon(d.platform) ? null : <LaptopOutlined />}
                       <ScrollText
                         className={styles.deviceTabName}
                         active={d.machineId === selectedMachineId}
                         plain={d.hostname}
                         text={
                           <>
-                            {platformIcon(d.platform)} {d.hostname}
+                            {platformIcon(d.platform) ? `${platformIcon(d.platform)} ` : ""}{d.hostname}
                             {d.machineId === localId ? (
                               <span className={styles.localTag}>本机</span>
                             ) : null}
