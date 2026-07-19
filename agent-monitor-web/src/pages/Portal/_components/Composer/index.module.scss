@@ -268,3 +268,54 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     }
   }
 }
+
+// 斜杠命令下拉（输入 / 时弹出，浮在输入框上方，Claude Code 终端式）
+.Composer {
+  position: relative;
+
+  .slashMenu {
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    bottom: calc(100% + 6px);
+    max-height: 260px;
+    overflow-y: auto;
+    background: #fff;
+    border: 1px solid rgba(36, 61, 66, 0.12);
+    border-radius: 12px;
+    box-shadow: 0 8px 28px rgba(36, 61, 66, 0.16);
+    padding: 6px;
+    z-index: 20;
+    -webkit-overflow-scrolling: touch;
+
+    .slashItem {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      padding: 9px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+
+      &:hover {
+        background: rgba(15, 155, 173, 0.08);
+      }
+
+      .slashName {
+        flex: none;
+        font-family: $mono;
+        font-size: 13.5px;
+        color: #0a6b79;
+        font-weight: 600;
+      }
+
+      .slashDesc {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 12px;
+        color: #7c9096;
+      }
+    }
+  }
+}

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import { Chat, Input, Modal } from "@hsu-react/ui";
-import { Tooltip, message } from "antd";
+import { message } from "antd";
 import { PaperClipOutlined, WarningOutlined } from "@ant-design/icons";
 
 import {
@@ -31,8 +31,10 @@ interface ComposerProps {
 const Composer: React.FC<ComposerProps> = (props) => {
   const { taskId, disabled, onSend, machineId, cwd } = props;
   const [commands, setCommands] = useState<SlashCommand[]>([]);
-  const [cmdsOpen, setCmdsOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
+  // 斜杠命令：仅当输入以「/」开头且未含空格时弹出（Claude Code 终端式），
+  // null=不在命令模式，字符串=「/」之后已输入的过滤词
+  const [slashQuery, setSlashQuery] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -53,6 +55,34 @@ const Composer: React.FC<ComposerProps> = (props) => {
     setter.call(ta, next);
     ta.dispatchEvent(new Event("input", { bubbles: true }));
     ta.focus();
+  };
+
+  // 监听输入框内容：以「/xxx」（无空格）开头就进命令模式并按 xxx 过滤
+  useEffect(() => {
+    const ta = rootRef.current?.querySelector("textarea");
+    if (!ta) return;
+    const onInput = () => {
+      const v = ta.value;
+      const m = /^\/(\S*)$/.exec(v);
+      setSlashQuery(m ? m[1] : null);
+    };
+    ta.addEventListener("input", onInput);
+    ta.addEventListener("blur", () => setTimeout(() => setSlashQuery(null), 150));
+    return () => ta.removeEventListener("input", onInput);
+  }, [taskId]);
+
+  // 把某条命令填进输入框（保留在输入框，用户可继续补参数或直接回车发布）
+  const fillCommand = (name: string) => {
+    const ta = rootRef.current?.querySelector("textarea");
+    if (!ta) return;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )?.set;
+    setter?.call(ta, `${name} `);
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    ta.focus();
+    setSlashQuery(null);
   };
 
   // 选中的待上传文件 + 目录树浏览（根 = 会话所在目录，只能往下走）
@@ -195,50 +225,39 @@ const Composer: React.FC<ComposerProps> = (props) => {
     }
   };
 
-  // 窄屏横向滚动能看全部，无需截断；桌面保持默认展示前 6 个 + 「+N」
-  const isNarrow =
-    typeof window !== "undefined" &&
-    window.matchMedia("(max-width: 760px)").matches;
-  const shownCommands = cmdsOpen || isNarrow ? commands : commands.slice(0, 6);
+  // 命令模式下按「/」后的过滤词匹配（前缀 + 描述），最多 8 条
+  const matched =
+    slashQuery === null
+      ? []
+      : commands
+          .filter((c) => {
+            const q = slashQuery.toLowerCase();
+            return (
+              c.name.toLowerCase().includes("/" + q) ||
+              c.name.toLowerCase().slice(1).startsWith(q)
+            );
+          })
+          .slice(0, 8);
 
   return (
     <div className={styles.Composer} ref={rootRef}>
-      {commands.length > 0 && !disabled && (
-        <div className={styles.commands}>
-          {shownCommands.map((c) => (
-            <Tooltip key={c.name} title={c.desc}>
-              <span
-                className={styles.cmdChip}
-                role="button"
-                tabIndex={0}
-                onClick={() => guardedSend(c.name)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    guardedSend(c.name);
-                  }
-                }}
-              >
-                {c.name}
-              </span>
-            </Tooltip>
-          ))}
-          {commands.length > 6 && (
-            <span
-              className={styles.cmdMore}
+      {/* 斜杠命令下拉：仅在输入「/」时弹出（Claude Code 终端式），
+          不再常驻一排命令 chip */}
+      {matched.length > 0 && !disabled && (
+        <div className={styles.slashMenu}>
+          {matched.map((c) => (
+            <div
+              key={c.name}
+              className={styles.slashItem}
               role="button"
               tabIndex={0}
-              onClick={() => setCmdsOpen(!cmdsOpen)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  setCmdsOpen(!cmdsOpen);
-                }
-              }}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => fillCommand(c.name)}
             >
-              {cmdsOpen ? "收起" : `+${commands.length - 6}`}
-            </span>
-          )}
+              <span className={styles.slashName}>{c.name}</span>
+              {c.desc ? <span className={styles.slashDesc}>{c.desc}</span> : null}
+            </div>
+          ))}
         </div>
       )}
 

@@ -25,8 +25,7 @@
       "androidScaleType": "CENTER_INSIDE"
     },
     "Keyboard": {
-      "resize": "none",
-      "resizeOnFullScreen": true
+      "resize": "native"
     }
   }
 }
