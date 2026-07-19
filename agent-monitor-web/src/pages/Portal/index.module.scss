@@ -603,25 +603,47 @@ $active-bg: rgba(36, 61, 66, 0.09);
     // 时钟/电量压住；env() 需要 index.html 的 viewport-fit=cover 才有非 0 值。
     // 浏览器里 env() 为 0，等价于原样，不影响桌面/移动网页。
     .mobileBar {
+      // iOS 导航栏质感：毛玻璃半透明 + 细分隔线 + 居中标题
+      position: relative;
       display: flex;
       align-items: center;
-      gap: 12px;
-      height: calc(52px + env(safe-area-inset-top));
-      min-height: calc(52px + env(safe-area-inset-top));
-      padding: env(safe-area-inset-top) calc(14px + env(safe-area-inset-right)) 0
-        calc(14px + env(safe-area-inset-left));
-      background: $oat;
-      border-bottom: 1px solid $border;
+      height: calc(48px + env(safe-area-inset-top));
+      min-height: calc(48px + env(safe-area-inset-top));
+      padding: env(safe-area-inset-top) calc(12px + env(safe-area-inset-right)) 0
+        calc(12px + env(safe-area-inset-left));
+      background: rgba(244, 250, 251, 0.82);
+      backdrop-filter: saturate(180%) blur(20px);
+      -webkit-backdrop-filter: saturate(180%) blur(20px);
+      border-bottom: 0.5px solid rgba(36, 61, 66, 0.16);
+      z-index: 5;
 
       .mobileMenuBtn {
-        font-size: 20px;
-        color: $text;
+        font-size: 21px;
+        color: #0f9bad;
         cursor: pointer;
         display: flex;
         align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        margin-left: -8px;
+        border-radius: 10px;
+
+        &:active {
+          background: rgba(36, 61, 66, 0.08);
+        }
       }
+
+      // 标题绝对居中（iOS 导航栏惯例），两侧按钮不挤位
       .mobileTitle {
-        font-size: 15px;
+        position: absolute;
+        left: 50%;
+        top: env(safe-area-inset-top);
+        height: 48px;
+        line-height: 48px;
+        transform: translateX(-50%);
+        max-width: 55vw;
+        font-size: 16.5px;
         font-weight: 600;
         color: $text;
         overflow: hidden;
@@ -637,9 +659,13 @@ $active-bg: rgba(36, 61, 66, 0.09);
       left: 0;
       bottom: 0;
       z-index: 1002;
-      width: 84vw;
-      max-width: 320px;
+      width: calc(84vw + env(safe-area-inset-left));
+      max-width: calc(320px + env(safe-area-inset-left));
       min-width: 0;
+      // 状态栏/灵动岛与左侧圆角让位，内容不被系统 UI 压住
+      padding-top: env(safe-area-inset-top);
+      padding-left: env(safe-area-inset-left);
+      padding-bottom: env(safe-area-inset-bottom);
       transform: translateX(-100%);
       transition: transform 0.25s ease;
       box-shadow: 0 0 40px rgba(0, 0, 0, 0.18);

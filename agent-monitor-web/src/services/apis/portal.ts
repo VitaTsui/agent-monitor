@@ -28,6 +28,8 @@ export interface PortalMessage {
   cmdId?: string;
   /** 仍在 hub 队列排队、还没被客户端取走 */
   queued?: boolean;
+  /** 已送达终端（写入其输入队列），等待终端执行；真实消息同步回来后回显被替换 */
+  delivered?: boolean;
 }
 
 interface IPortalTaskData {
