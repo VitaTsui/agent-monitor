@@ -1,4 +1,6 @@
 import {
+  getQueuedInputs,
+  recallPortalInput,
   PortalControlAction,
   PortalDevice,
   PortalMessage,
@@ -137,11 +139,21 @@ class PortalStore {
     return out;
   }
 
+  /** 客户端窗口里由页面注入的本机 machineId（浏览器为空） */
+  private _localMachineId = "";
+
+  public setLocalMachineId = (id: string) => {
+    this._localMachineId = id;
+  };
+
   get selectedMachineId() {
-    // 未手动选择或所选设备已消失时，回退到第一个设备
+    // 未手动选择或所选设备已消失时：客户端窗口优先回退到本机，其次第一个设备
     const list = this.deviceList;
     if (this._selectedMachineId && list.some((d) => d.machineId === this._selectedMachineId)) {
       return this._selectedMachineId;
+    }
+    if (this._localMachineId && list.some((d) => d.machineId === this._localMachineId)) {
+      return this._localMachineId;
     }
     return list[0]?.machineId ?? "";
   }
@@ -490,10 +502,62 @@ class PortalStore {
     this.fetchMessages(id, true);
   };
 
+  /** 刷新「仍在排队」状态：排队中的回显被客户端取走后去掉排队标记 */
+  private refreshQueued = (id: string) => {
+    const msgs = this._messagesById[id] ?? [];
+    if (!msgs.some((m) => m.local && m.queued)) {
+      return;
+    }
+    getQueuedInputs(id)
+      .then((res) => {
+        if (res.code !== 0) {
+          return;
+        }
+        const still = new Set((res.data?.list ?? []).map((x) => x.cmdId));
+        const cur = this._messagesById[id] ?? [];
+        if (cur.some((m) => m.local && m.queued && !still.has(m.cmdId ?? ""))) {
+          this._messagesById = {
+            ...this._messagesById,
+            [id]: cur.map((m) =>
+              m.local && m.queued && !still.has(m.cmdId ?? "")
+                ? { ...m, queued: false }
+                : m,
+            ),
+          };
+        }
+      })
+      .catch(() => void 0);
+  };
+
+  /** 撤回还在排队的输入（已被终端接收则提示失败并去掉排队标记） */
+  public recallInput = (id: string, cmdId: string) => {
+    recallPortalInput(id, cmdId)
+      .then((res) => {
+        const cur = this._messagesById[id] ?? [];
+        if (res.code === 0) {
+          antdMessage.success("已撤回");
+          this._messagesById = {
+            ...this._messagesById,
+            [id]: cur.filter((m) => !(m.local && m.cmdId === cmdId)),
+          };
+        } else {
+          antdMessage.warning(res.msg ?? "已被终端接收，无法撤回");
+          this._messagesById = {
+            ...this._messagesById,
+            [id]: cur.map((m) =>
+              m.local && m.cmdId === cmdId ? { ...m, queued: false } : m,
+            ),
+          };
+        }
+      })
+      .catch(() => antdMessage.error("撤回失败，请检查网络"));
+  };
+
   public fetchMessages = (id: string, showLoading: boolean) => {
     if (!id) {
       return;
     }
+    this.refreshQueued(id);
     if (showLoading && !this._loadingIds.includes(id)) {
       this._loadingIds = [...this._loadingIds, id];
     }
@@ -507,7 +571,17 @@ class PortalStore {
           const incoming = res.data?.list ?? [];
           // 累积合并：拉取是滑动窗口会丢老消息，这里按 key 去重后只增不减，
           // 保证对话流稳定增长、不因窗口滑动丢历史。
-          const prev = this._messagesById[id] ?? [];
+          let prev = this._messagesById[id] ?? [];
+          // 终端同步回了同内容的 user 消息 → 撤下对应的本地乐观回显，
+          // 让真实消息（带终端时间戳）接管，避免同一条显示两遍。
+          const incomingUser = new Set(
+            incoming.filter((m) => m.role === "user").map((m) => m.content),
+          );
+          const withoutEcho = prev.filter(
+            (m) => !(m.local && incomingUser.has(m.content)),
+          );
+          const echoReplaced = withoutEcho.length !== prev.length;
+          prev = withoutEcho;
           // key 带上全文长度，降低同时间戳+同前缀不同消息被误判重复的概率
           const mkey = (m: PortalMessage) =>
             `${m.timestamp}|${m.role}|${m.content.length}|${m.content.slice(0, 60)}`;
@@ -522,7 +596,7 @@ class PortalStore {
           });
           // 无新消息就不换引用：轮询每 2s 一次，无条件替换会让整条对话流
           // 每 2s 白重渲染一遍（长会话下明显掉帧）。
-          if (fresh.length) {
+          if (fresh.length || echoReplaced) {
             // 单会话上限：只增不减的合并会随长会话无限涨，超出后丢最老的。
             const merged = [...prev, ...fresh];
             this._messagesById = {
@@ -568,6 +642,20 @@ class PortalStore {
     return sendPortalInput(task.id, content, task.pid).then((res) => {
       if (res.code === 0) {
         antdMessage.success(res.data?.result ?? "已发送");
+        // 乐观回显：发出的内容立即上屏为 user 气泡，
+        // 不等终端收到再同步回来（那要好几秒，体感像没发出去）。
+        const echo = {
+          role: "user",
+          content,
+          timestamp: new Date().toISOString(),
+          local: true,
+          cmdId: res.data?.cmdId,
+          queued: !!res.data?.cmdId,
+        };
+        this._messagesById = {
+          ...this._messagesById,
+          [id]: [...(this._messagesById[id] ?? []), echo],
+        };
         setTimeout(() => this.fetchMessages(id, false), 1200);
         return true;
       }

@@ -22,6 +22,12 @@ export interface PortalMessage {
   role: string;
   content: string;
   timestamp: string;
+  /** 本地乐观回显（发送后立即上屏，终端同步回同内容后被替换） */
+  local?: boolean;
+  /** 回显对应的队列指令 id（撤回用） */
+  cmdId?: string;
+  /** 仍在 hub 队列排队、还没被客户端取走 */
+  queued?: boolean;
 }
 
 interface IPortalTaskData {
@@ -121,7 +127,7 @@ export const sendPortalInput = async (
   text: string,
   pid?: number | null
 ) => {
-  return await post<{ pid: number; result: string }>(
+  return await post<{ pid: number; result: string; cmdId?: string }>(
     `/monitor/tasks/${id}/input`,
     { text, pid }
   );
@@ -316,4 +322,16 @@ export const setDingtalkApp = async (data: { appSecret?: string }) => {
     "/monitor/integrations/dingtalk-app",
     data,
   );
+};
+
+/** 仍在排队（未被客户端取走）的输入 */
+export const getQueuedInputs = async (id: string) => {
+  return await get<ListRes<{ cmdId: string; text: string }>>(
+    `/monitor/tasks/${id}/queued`,
+  );
+};
+
+/** 撤回还在排队的输入（已被终端接收则失败） */
+export const recallPortalInput = async (id: string, cmdId: string) => {
+  return await post<boolean>(`/monitor/tasks/${id}/recall`, { cmdId });
 };
