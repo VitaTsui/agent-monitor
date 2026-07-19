@@ -1,117 +1,129 @@
 .IntegrationsPanel {
+  // 外层：可点击的精简卡片行
   .card {
-    padding: 16px 18px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
     border: 1px solid rgba(36, 61, 66, 0.1);
-    border-radius: 16px;
-    margin-bottom: 14px;
+    border-radius: 14px;
+    margin-bottom: 12px;
     background: #fff;
+    cursor: pointer;
     transition: box-shadow 0.18s, border-color 0.18s;
 
     &:hover {
-      border-color: rgba(15, 155, 173, 0.28);
+      border-color: rgba(15, 155, 173, 0.32);
       box-shadow: 0 4px 16px rgba(36, 61, 66, 0.06);
+
+      .arrow {
+        color: #0f9bad;
+        transform: translateX(2px);
+      }
     }
 
-    // 卡片头：图标 + 标题/副标题 + 状态
-    .cardHead {
+    .icon {
+      flex: none;
+      width: 40px;
+      height: 40px;
+      border-radius: 11px;
       display: flex;
       align-items: center;
-      gap: 12px;
-      margin-bottom: 12px;
+      justify-content: center;
+      font-size: 21px;
+      color: #fff;
 
-      .icon {
-        flex: none;
-        width: 40px;
-        height: 40px;
-        border-radius: 11px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 21px;
-        color: #fff;
-
-        &.ding {
-          background: linear-gradient(135deg, #3a8cff 0%, #1677ff 100%);
-        }
-        &.wecom {
-          background: linear-gradient(135deg, #4ac36a 0%, #21b34a 100%);
-        }
+      &.ding {
+        background: linear-gradient(135deg, #3a8cff 0%, #1677ff 100%);
       }
-
-      .headText {
-        flex: 1;
-        min-width: 0;
-
-        .headTitle {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          font-size: 14.5px;
-          font-weight: 600;
-          color: #243d42;
-
-          .typeTag {
-            padding: 0 7px;
-            border-radius: 6px;
-            font-size: 10px;
-            font-weight: 500;
-            line-height: 17px;
-
-            &.push {
-              color: #9a6d0b;
-              background: rgba(242, 178, 52, 0.16);
-            }
-            &.two {
-              color: #0a6b79;
-              background: rgba(15, 155, 173, 0.14);
-            }
-          }
-        }
-
-        .headSub {
-          margin-top: 2px;
-          font-size: 12px;
-          color: #7c9096;
-        }
-      }
-
-      .status {
-        flex: none;
-        padding: 2px 10px;
-        border-radius: 999px;
-        font-size: 11px;
-        color: #9aa8ac;
-        background: rgba(36, 61, 66, 0.06);
-
-        &.on {
-          color: #22794a;
-          background: rgba(56, 178, 106, 0.14);
-        }
+      &.wecom {
+        background: linear-gradient(135deg, #4ac36a 0%, #21b34a 100%);
       }
     }
 
+    .headText {
+      flex: 1;
+      min-width: 0;
+
+      .headTitle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 14.5px;
+        font-weight: 600;
+        color: #243d42;
+
+        .typeTag {
+          padding: 0 7px;
+          border-radius: 6px;
+          font-size: 10px;
+          font-weight: 500;
+          line-height: 17px;
+
+          &.push {
+            color: #9a6d0b;
+            background: rgba(242, 178, 52, 0.16);
+          }
+          &.two {
+            color: #0a6b79;
+            background: rgba(15, 155, 173, 0.14);
+          }
+        }
+      }
+
+      .headSub {
+        margin-top: 2px;
+        font-size: 12px;
+        color: #7c9096;
+      }
+    }
+
+    .status {
+      flex: none;
+      padding: 2px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      color: #9aa8ac;
+      background: rgba(36, 61, 66, 0.06);
+
+      &.on {
+        color: #22794a;
+        background: rgba(56, 178, 106, 0.14);
+      }
+    }
+
+    .arrow {
+      flex: none;
+      font-size: 13px;
+      color: #b9c4c7;
+      transition: color 0.18s, transform 0.18s;
+    }
+  }
+
+  // 弹窗内的表单
+  .form {
     .desc {
       font-size: 12px;
       color: #7c9096;
       line-height: 1.7;
-      margin-bottom: 12px;
+      margin-bottom: 14px;
     }
 
     .events {
       display: flex;
       flex-wrap: wrap;
       gap: 8px 10px;
-      margin-bottom: 14px;
+      margin-bottom: 16px;
 
-      // 每个事件做成可点的胶囊
       .event {
         display: flex;
         align-items: center;
         gap: 6px;
-        padding: 5px 10px 5px 8px;
+        padding: 6px 12px 6px 8px;
         border: 1px solid rgba(36, 61, 66, 0.1);
         border-radius: 999px;
         font-size: 12.5px;
+        white-space: nowrap;
         cursor: pointer;
         user-select: none;
       }
@@ -134,7 +146,7 @@
       align-items: center;
       gap: 10px;
       padding: 10px 12px;
-      margin-bottom: 12px;
+      margin-bottom: 14px;
       border: 1px solid rgba(15, 155, 173, 0.2);
       border-radius: 12px;
       background: linear-gradient(180deg, #f2fbfc 0%, #eaf7f9 100%);
