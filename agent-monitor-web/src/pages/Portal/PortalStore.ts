@@ -186,12 +186,16 @@ class PortalStore {
         (t.status !== "finished" ||
           Date.now() - (t.mtimeMs ?? 0) < 2 * 3600 * 1000)
     );
-    // 归一化目录键：反斜杠→正斜杠、去尾斜杠、小写。同一目录下的空会话（占位任务用
-    // 进程 cwd）与真实会话（用 jsonl 里的 cwd），以及 cursor / 非 cursor 终端，常因
-    // 大小写、尾斜杠、路径分隔符的细微差异被拆成两个分组 —— 这里与后端配对键同源思路
-    // 归一后再分组，让它们并进同一个目录。
-    const normProj = (p: string) =>
-      (p ?? "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    // 归一化目录键：与后端 encode_path（core/scanner）逐字对齐 —— 去尾随分隔符后，
+    // 把每个非字母数字字符一律替换成 '-'，再小写。同一目录下的空会话（占位任务用进程
+    // cwd）与真实会话（用 jsonl 里的 cwd），以及 cursor / 非 cursor 终端，其 cwd 字符串
+    // 常在分隔符、盘符冒号、标点等处有细微差异；只做「斜杠/大小写」归一挡不住，必须与
+    // 配对键同规则，才能保证「后端认作同一目录、就分进同一个分组」。
+    const normProj = (p: string | undefined) =>
+      (p ?? "")
+        .replace(/[/\\]+$/, "")
+        .replace(/[^a-zA-Z0-9]/g, "-")
+        .toLowerCase();
     const byProject = new Map<string, TermGroup>();
     for (const t of list) {
       // 组标题只显示文件夹名，不要完整路径

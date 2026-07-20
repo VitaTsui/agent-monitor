@@ -277,6 +277,7 @@ async fn queue_command(
         action,
         text,
         id: Some(uuid::Uuid::new_v4().to_string()),
+        enqueued_ms: crate::state::now_secs() * 1000,
     });
     Ok(())
 }

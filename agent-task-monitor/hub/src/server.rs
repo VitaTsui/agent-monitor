@@ -747,6 +747,7 @@ async fn control_task(
         action: req.action,
         text: None,
         id: None,
+        enqueued_ms: crate::state::now_secs() * 1000,
     });
     tracing::info!("已向机器 {} 下发控制命令: {id}", task.machine_id);
     ok(json!({ "pid": pid, "result": "命令已下发，等待执行" }))
@@ -809,6 +810,7 @@ async fn input_task(
         action: am_core::model::ControlAction::Input,
         text: Some(text),
         id: Some(cmd_id.clone()),
+        enqueued_ms: crate::state::now_secs() * 1000,
     });
     ok(json!({ "pid": pid, "result": "已下发到目标机器", "cmdId": cmd_id }))
 }
@@ -1586,34 +1588,32 @@ async fn report(
         entry.tasks.iter().map(|t| t.id.as_str()).collect();
     entry.messages.retain(|k, _| alive.contains(k.as_str()));
     entry.git_cache.retain(|k, _| alive.contains(k.as_str()));
-    // 输入指令「按会话就绪度」下发：目标会话仍在积极产出时，先把该条输入扣在队列里，
-    // 等它停下（空闲/等待输入）能真正接收再随下一轮下发。好处有二：
+    // 输入指令「按会话就绪度」下发：目标会话仍在执行（Running）时，先把该条输入扣在
+    // 队列里，等它停下（空闲/等待输入）能真正接收再随下一轮下发。好处有二：
     //   1) 不趁 claude 跑一半把文本塞进去（那会被排到原生队尾、且立刻脱离 hub 掌控）；
-    //   2) 「正在等待执行」的任务因此始终留在 hub 队列里 —— 可被撤回。
+    //   2) 「正在等待执行」的任务因此留在 hub 队列里 —— 全程可撤回。
     // 控制类指令（中断/停止/暂停）必须即时下发，不受此约束（正是要作用于运行中的会话）。
     //
-    // 「积极产出」= 状态 Running 且会话文件最近还在写（mtime 新）。关键在于必须放行
-    // “Running 但已停笔”的会话：claude 弹交互式选择/权限确认（如计划审批）时，回合并未
-    // 结束（仍算 Running），但它正卡着等用户输入、jsonl 不再增长。此时若还扣着输入就会
-    // 死锁（claude 等输入、hub 等它空闲）。故只扣「还在写」的会话，卡在提示上的会话照常
-    // 放行，用户的选择能立刻送达。mtime 冻结、hub 时钟前进，即便时钟有偏差也终会放行，
-    // 不会永久扣留。
+    // 扣留判据只看「目标会话是否 Running」+「已扣多久」，绝不看会话 mtime：mtime 记的是
+    // claude 上次写文件的时刻，而用户往往正是在 claude 跑长命令（长时间不写文件）时发的
+    // 任务，此刻 mtime 早已很旧，用它判就会秒判为“可下发”而立刻撤不回——正是要避免的。
+    // 改以「入队至今时长」为准：Running 期间最多扣 MAX_HOLD_MS，撤回窗口就是这段时间。
+    // 上限同时兜底交互提示的死锁：claude 弹计划审批等提示时若仍算 Running（通常回合已结束
+    // 判 Idle 会直接放行，此处是保险），最多扣 MAX_HOLD_MS 后照样下发，绝不永久扣留。
     let now_ms = crate::state::now_secs() * 1000;
-    const ACTIVE_WRITE_MS: u64 = 8_000;
-    let busy: std::collections::HashSet<String> = entry
+    const MAX_HOLD_MS: u64 = 45_000;
+    let running: std::collections::HashSet<String> = entry
         .tasks
         .iter()
-        .filter(|t| {
-            t.status == TaskStatus::Running
-                && now_ms.saturating_sub(t.mtime_ms) <= ACTIVE_WRITE_MS
-        })
+        .filter(|t| t.status == TaskStatus::Running)
         .map(|t| t.id.clone())
         .collect();
     let mut held: VecDeque<ControlCmd> = VecDeque::new();
     let mut commands: Vec<ControlCmd> = Vec::new();
     for c in entry.pending.drain(..) {
         let hold = matches!(c.action, am_core::model::ControlAction::Input)
-            && busy.contains(c.task_id.as_str());
+            && running.contains(c.task_id.as_str())
+            && now_ms.saturating_sub(c.enqueued_ms) < MAX_HOLD_MS;
         if hold {
             held.push_back(c);
         } else {
