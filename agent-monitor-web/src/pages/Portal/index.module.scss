@@ -867,3 +867,10 @@ $active-bg: rgba(36, 61, 66, 0.09);
     .descMobile { display: inline; }
   }
 }
+
+// 无边框客户端：整页顶部让出标题栏高度，避免顶部内容被透明拖拽条挡住点击；
+// mac 交通灯落在左上这条里、windows 自绘按钮落在右上。box-sizing:border-box +
+// overflow:hidden 已保证不撑高溢出。浏览器里无此类名、不受影响。
+:global(html.desktop-client) .Portal {
+  padding-top: var(--titlebar-h, 30px);
+}

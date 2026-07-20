@@ -1,0 +1,53 @@
+// 无边框客户端顶栏：透明拖拽条叠在最上层，融入下方内容
+.bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--titlebar-h, 30px);
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  background: transparent;
+  // 拖拽区自身接收指针，但不遮挡下方交互（只占顶部窄条）
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+// macOS：左上是原生交通灯，这里整条留作拖拽；无需按钮
+.mac {
+  justify-content: flex-start;
+}
+
+// Windows/Linux：右上角自绘按钮
+.win {
+  justify-content: flex-end;
+}
+
+.controls {
+  display: flex;
+  height: 100%;
+  // 按钮区不参与窗口拖拽
+  -webkit-app-region: no-drag;
+}
+
+.ctrl {
+  width: 44px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(120, 140, 145, 0.9);
+  cursor: default;
+  transition: background 0.15s, color 0.15s;
+
+  &:hover {
+    background: rgba(120, 140, 145, 0.14);
+    color: #243d42;
+  }
+
+  &.close:hover {
+    background: #e53935;
+    color: #fff;
+  }
+}

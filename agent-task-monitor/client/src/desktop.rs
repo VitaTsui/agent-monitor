@@ -200,7 +200,9 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             terminals_get,
             terminal_set_excluded,
             update_status,
-            update_start
+            update_start,
+            win_minimize,
+            win_close
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -248,7 +250,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                     }
                 }
             }
-            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("终端任务监控")
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(960.0, 640.0)
@@ -259,8 +261,22 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         reveal(w.app_handle(), want_visible);
                     }
-                })
-                .build()?;
+                });
+            // 无边框融合式标题栏（对标 ChatGPT / Claude Code 客户端）：
+            // - macOS：Overlay 样式保留原生红黄绿交通灯，网页内容延伸到标题栏区域，
+            //   隐藏标题文字；网页顶部留出交通灯宽度并加 data-tauri-drag-region 供拖拽。
+            // - Windows/Linux：直接去掉系统边框，由网页自绘顶栏（拖拽区 + 最小化/关闭）。
+            #[cfg(target_os = "macos")]
+            {
+                builder = builder
+                    .title_bar_style(tauri::TitleBarStyle::Overlay)
+                    .hidden_title(true);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                builder = builder.decorations(false);
+            }
+            let win = builder.build()?;
             // 兜底：远程页面加载失败/超时也要露出主窗（白屏好过永远的启动窗）
             {
                 let h = app.handle().clone();
@@ -776,6 +792,25 @@ fn update_start(
 /// 网页端 IPC：查询开机自启状态。
 /// 客户端窗口加载的是远端前台页；页面里的「开机自启」开关经这两个命令
 /// 操作本机（浏览器里打开同一页面时没有 __TAURI__，开关不渲染）。
+/// 无边框窗口的自绘顶栏用：最小化 / 关闭当前窗口（Windows 去掉系统边框后
+/// 没有原生按钮，靠网页顶栏按钮走 IPC 调这两个命令）。关闭沿用「收进托盘」
+/// 语义（隐藏窗口而非退出进程），与点原生关闭按钮一致。
+#[tauri::command]
+fn win_minimize(window: tauri::Window) {
+    let _ = window.minimize();
+}
+
+#[tauri::command]
+fn win_close(window: tauri::Window) {
+    // 与关闭按钮/托盘一致：隐藏到托盘，保持后台上报，不退出进程
+    let _ = window.hide();
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = window.app_handle().set_activation_policy(ActivationPolicy::Accessory);
+    }
+}
+
 #[tauri::command]
 fn autostart_get() -> bool {
     autostart_enabled()

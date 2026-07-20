@@ -15,7 +15,6 @@ import {
   EllipsisOutlined,
   LaptopOutlined,
   LogoutOutlined,
-  MenuFoldOutlined,
   MenuUnfoldOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
@@ -39,6 +38,25 @@ import ScrollText from "./_components/ScrollText";
 import SettingsModal from "./_components/SettingsModal";
 import type { SettingsTab } from "./_components/SettingsModal";
 import styles from "./index.module.scss";
+
+/** 侧栏折叠图标：面板 + 左栏分隔线（对标 VS Code / ChatGPT 的侧栏切换，
+ *  取代过于「后管菜单」的汉堡折叠图标）。折叠态把分隔线挪到更左，暗示会收窄。 */
+const SidebarIcon: React.FC<{ folded?: boolean }> = ({ folded }) => (
+  <svg
+    width="17"
+    height="17"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.9"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden
+  >
+    <rect x="3" y="4.5" width="18" height="15" rx="2.6" />
+    <line x1={folded ? "8" : "9.5"} y1="4.5" x2={folded ? "8" : "9.5"} y2="19.5" />
+  </svg>
+);
 
 const STATUS_LABEL: Record<string, string> = {
   running: "执行中",
@@ -403,7 +421,7 @@ const Portal: React.FC = observer(() => {
                 }
               }}
             >
-              {siderFolded ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+              <SidebarIcon folded={siderFolded} />
             </span>
           </Tooltip>
         </div>
