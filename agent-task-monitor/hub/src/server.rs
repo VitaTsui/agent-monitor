@@ -287,8 +287,46 @@ async fn pair_status(
     ok(json!({ "claimed": false, "expired": false }))
 }
 
+/// 已就绪、可对外推送的桌面版本：downloads 里已存在 `AgentMonitor-<v>-setup.exe`
+/// 的最高版本（不超过 hub 自身版本）。
+///
+/// hub 一部署就会按自身版本推送，但对应安装包往往还要几分钟才构建/上传完；这期间
+/// 若照 hub 版本推送，客户端会去下还没传好的包、拿到旧包打转。改为只推送「安装包已
+/// 上传」的版本，上传完成后自然开始推送，彻底避免「推送早于构建完成」。
+fn ready_desktop_version(downloads_dir: &std::path::Path) -> String {
+    let hub_ver = env!("CARGO_PKG_VERSION");
+    let parse = |v: &str| -> Option<(u32, u32, u32)> {
+        let mut it = v.split('.');
+        Some((
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+        ))
+    };
+    let hub_t = parse(hub_ver);
+    let mut best: Option<((u32, u32, u32), String)> = None;
+    if let Ok(rd) = std::fs::read_dir(downloads_dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if let Some(v) = name
+                .strip_prefix("AgentMonitor-")
+                .and_then(|s| s.strip_suffix("-setup.exe"))
+            {
+                if let Some(t) = parse(v) {
+                    if hub_t.map_or(true, |h| t <= h)
+                        && best.as_ref().map_or(true, |(bt, _)| t > *bt)
+                    {
+                        best = Some((t, v.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, v)| v).unwrap_or_else(|| hub_ver.to_string())
+}
+
 /// GET /monitor/version —— 最新版本信息（客户端/移动端更新检测用，公开）。
-/// desktop = hub 自身版本（同一代码库）；android 读 downloads/manifest.json（打包时写入）。
+/// desktop = 已就绪可推送的桌面版本；android 读 downloads/manifest.json（打包时写入）。
 async fn version_info(State(state): State<SharedState>) -> Json<Value> {
     let downloads_dir = std::env::var("AM_DOWNLOADS_DIR")
         .map(std::path::PathBuf::from)
@@ -302,7 +340,7 @@ async fn version_info(State(state): State<SharedState>) -> Json<Value> {
     // minVersion = 强制更新下限：低于它的客户端必须更新才能继续使用
     // （有根本性协议/安全变更时在 manifest.json 里抬高对应字段）
     ok(json!({
-        "desktop": env!("CARGO_PKG_VERSION"),
+        "desktop": ready_desktop_version(&downloads_dir),
         "desktopMin": pick("/desktop/minVersion"),
         "android": pick("/android/version"),
         "androidMin": pick("/android/minVersion"),
@@ -1563,15 +1601,17 @@ async fn report(
 
     // 告知 agent 是否已被信任：未信任时 agent 不应再上报任何会话数据
     let trusted = state.registry.read().await.device_meta(&payload.machine_id).trusted;
-    // hubVersion：hub 与桌面客户端同一工作区发版，hub 的版本即最新客户端版本，
-    // agent 用它做更新提示（托盘「新版本可用」）
+    // hubVersion：只推「安装包已上传」的版本，避免推送早于构建/上传完成（见 ready_desktop_version）
+    let downloads_dir = std::env::var("AM_DOWNLOADS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| state.config.data_dir.join("downloads"));
     ok(json!({
         "commands": commands,
         "files": files,
         "gitQueries": git_queries,
         "dirQueries": dir_queries,
         "trusted": trusted,
-        "hubVersion": env!("CARGO_PKG_VERSION"),
+        "hubVersion": ready_desktop_version(&downloads_dir),
         // 强制更新下限：客户端低于它必须更新才能继续使用
         "minVersion": desktop_min_version(&state).await,
     }))

@@ -176,8 +176,8 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
         color: #a5f3fc;
       }
 
-      // 代码块：明显更暗的实底 + 描边，与深色卡片拉开层次；文字提亮到接近纯白，
-      // 长行横向滚动不撑破布局
+      // 无语言标记的代码块：ReactMarkdown 只输出 <pre><code>，这里自绘深底盒子——
+      // 明显更暗的实底 + 描边，与深色卡片拉开层次；文字提亮到接近纯白，长行横向滚动不撑破布局
       pre {
         background: #10201f;
         border: 1px solid rgba(255, 255, 255, 0.14);
@@ -192,6 +192,32 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           padding: 0;
           font-size: 12.5px;
           color: #e6f0ef;
+        }
+      }
+
+      // 带语言标记的代码块：hsu-ui 已自带「边框 + 顶栏复制」的盒子(div.code)，
+      // 外层 pre 若再套一层黑底描边就成了双重包裹。剥掉 pre 自身的盒子样式，
+      // 让内层 div.code 独立成盒，代码正文补回内边距与横向滚动。
+      pre:has(> div) {
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        padding: 0;
+        overflow: visible;
+
+        code {
+          display: block;
+          padding: 10px 12px;
+          overflow-x: auto;
+          color: #e6f0ef;
+        }
+
+        // 顶栏(.nav #212121)里的复制按钮(hsu-ui Copy)默认取浅色主题变量(深灰)，
+        // 落在深色顶栏上几乎看不见 → 就近把顶栏内的文字/图标主题变量提亮
+        > div > div:first-child {
+          --cf-text-2: #cfeaed;
+          --cf-text: #ffffff;
+          --cf-row-hover: rgba(255, 255, 255, 0.12);
         }
       }
 

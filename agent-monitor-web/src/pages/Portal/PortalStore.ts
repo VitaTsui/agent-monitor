@@ -593,15 +593,30 @@ class PortalStore {
           // 让真实消息（带终端时间戳）接管，避免同一条显示两遍。
           // 归一化比对：空白差异（换行/缩进/首尾）一律视为同一条
           const norm = (s: string) => s.replace(/\s+/g, " ").trim();
-          const incomingUser = new Set(
-            incoming.filter((m) => m.role === "user").map((m) => norm(m.content)),
-          );
+          const incomingUserNorms = incoming
+            .filter((m) => m.role === "user")
+            .map((m) => norm(m.content));
+          // 回显能否被某条同步回来的 user 消息接管：
+          // 除了完全相等，还接受「同步内容包含回显全文」——终端把注入的文本
+          // 记进 jsonl 时常会带上结构化前后文（工具结果、上下文块等），导致内容
+          // 比原始输入更长，只做全等比对会漏判、两条并存。长度阈值挡掉过短回显
+          // （如 “ok”）被任意长消息命中的误伤。
+          const echoTakenOver = (echoNorm: string) => {
+            if (!echoNorm) {
+              return false;
+            }
+            return incomingUserNorms.some(
+              (u) =>
+                u === echoNorm ||
+                (echoNorm.length >= 4 && u.includes(echoNorm)),
+            );
+          };
           const now = Date.now();
           const withoutEcho = prev.filter((m) => {
             if (!m.local) {
               return true;
             }
-            if (incomingUser.has(norm(m.content))) {
+            if (echoTakenOver(norm(m.content))) {
               return false;
             }
             // 自愈兜底：已送达终端超 5 分钟仍没等来同步替换（内容被终端改写等

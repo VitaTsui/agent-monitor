@@ -224,7 +224,15 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
             disabled={!controllable}
             machineId={task.machineId}
             cwd={task.process?.cwd}
-            onSend={(text) => sendInput(id, text)}
+            onSend={(text) => {
+              sendInput(id, text);
+              // 发送后强制滚到底部：即使之前上滚看历史，发出内容也应带着滚回底部
+              stickBottomRef.current = true;
+              requestAnimationFrame(() => {
+                const el = chatRef.current;
+                if (el) el.scrollTop = el.scrollHeight;
+              });
+            }}
           />
         </div>
       </div>
