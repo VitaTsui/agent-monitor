@@ -460,7 +460,8 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                     });
                 }
             }
-            // 更新监视：新版本弹确认框；低于强制下限必须更新否则退出
+            // 更新监视：常规新版本只发系统通知气泡 + 托盘置顶「点击更新」项，不弹模态；
+            // 仅当本机低于强制下限（desktopMin）时才弹必须更新的模态，否则退出。
             spawn_update_watcher(handle.clone(), state_setup.clone(), web_base.clone());
             // [test] 模拟点击更新：与托盘/设置里的真实点击走同一路径
             if std::env::var("AM_TEST_UPDATE_CLICK").ok().as_deref() == Some("1") {
@@ -919,8 +920,9 @@ fn show_main_with_pair<R: tauri::Runtime>(app: &tauri::AppHandle<R>, pair_url: O
     }
     // 从托盘重新打开：恢复 Dock 图标（macOS），再显示并聚焦窗口
     set_app_visible_in_dock(app, true);
-    // 非强制更新的确认弹窗只在重新打开 GUI 时出现（每个版本一次）
-    maybe_prompt_update(app);
+    // 非强制更新不再弹任何模态框（打开窗口也不弹）—— 只靠托盘「更新」菜单项 +
+    // 每版本一次的系统通知气泡提示，用户想更新时自己点。模态确认只保留给强制更新
+    // （低于 desktopMin，见 spawn_update_watcher）。
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
@@ -1021,40 +1023,6 @@ fn notify_new_version(v: &str) {
     let _ = v;
 }
 
-/// 窗口（重新）显示时：有待更新版本且尚未弹过窗 → 弹确认框。
-/// 非强制更新只在这里弹，平时不打断使用。
-static UPDATE_DIALOG_SHOWN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-fn maybe_prompt_update<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    let Some(ctx) = app.try_state::<std::sync::Arc<IpcCtx>>() else {
-        return;
-    };
-    let ctx = ctx.inner().clone();
-    let app = app.clone();
-    std::thread::spawn(move || {
-        let latest = tauri::async_runtime::block_on(async {
-            ctx.state.hub_latest_version.read().await.clone()
-        });
-        let Some(v) = latest else { return };
-        {
-            let mut shown = UPDATE_DIALOG_SHOWN.lock().unwrap();
-            if shown.as_deref() == Some(v.as_str()) {
-                return;
-            }
-            *shown = Some(v.clone());
-        }
-        let local = env!("CARGO_PKG_VERSION");
-        let ok = confirm_box(
-            "终端任务监控 · 发现新版本",
-            &format!("新版本 v{v} 可用（当前 v{local}）。\n更新将自动完成并重启，是否立即更新？"),
-            "立即更新",
-            "稍后",
-        );
-        if ok {
-            spawn_self_update_inner(app, ctx.web_base.clone(), false);
-        }
-    });
-}
 
 /// 更新进行中的轻量提示（不打断）：mac 系统通知 / Windows 右下角气泡
 fn notify_progress(msg: &str) {
