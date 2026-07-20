@@ -599,6 +599,24 @@ $hover: rgba(36, 61, 66, 0.06);
     }
   }
 
+  // 有新版时的「更新」按钮：实心主题色 + 白字（胶囊形），文字清晰不与底色同色
+  .updateNowBtn {
+    height: 26px;
+    border-radius: 999px;
+    padding-inline: 14px;
+    font-size: 12px;
+    color: #fff;
+    background: $accent;
+    border-color: $accent;
+
+    &:hover,
+    &:focus {
+      color: #fff;
+      background: #0d8a9a;
+      border-color: #0d8a9a;
+    }
+  }
+
   .termScope {
     margin-top: 12px;
 

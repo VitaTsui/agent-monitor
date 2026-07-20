@@ -512,7 +512,6 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                           ) : (
                             <Tag color={clientVer.latest ? "warning" : "green"}>
                               v{clientVer.current}
-                              {clientVer.latest ? ` → v${clientVer.latest} 可用` : " · 最新"}
                             </Tag>
                           )
                         ) : null}
@@ -554,7 +553,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                       <Button
                         size="small"
                         type="primary"
-                        className={styles.checkUpdateBtn}
+                        className={styles.updateNowBtn}
                         onClick={() =>
                           tauriInvoke
                             ?.("update_start")
@@ -576,7 +575,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                     )}
                   </div>
                   <div className={styles.termScope}>
-                    <div className={styles.termScopeTitle}>监控范围</div>
+                    <div className={styles.sectionTitle}>监控范围</div>
                     {terminals.length === 0 ? (
                       <div className={styles.termScopeEmpty}>
                         暂未检测到本机终端会话
