@@ -291,7 +291,7 @@ $hover: rgba(36, 61, 66, 0.06);
           background: rgba(36, 61, 66, 0.12);
         }
 
-        // 彩色圆角图标底（iOS 设置图标质感）
+        // 彩色圆角图标底（iOS 设置图标质感）—— 仅移动端上色
         .navIcon {
           flex: none;
           width: 30px;
@@ -300,6 +300,7 @@ $hover: rgba(36, 61, 66, 0.06);
           display: flex;
           align-items: center;
           justify-content: center;
+          background: var(--nav-color, #8a94a6);
           color: #fff;
 
           :global(.anticon) {
