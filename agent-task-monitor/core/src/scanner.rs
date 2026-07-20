@@ -1160,13 +1160,11 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
             }
             None
         }
-        "queue-operation" => {
-            if v.get("operation").and_then(Value::as_str) == Some("enqueue") {
-                let text = queued_user_text(v)?;
-                return Some(MessageBrief { role: "user".into(), content: text, timestamp: ts });
-            }
-            None
-        }
+        // 排队项不进对话流：它们由 Task.queued_inputs 单独上报、前端挂在对话框上方。
+        // 若还在这里产出 user 简报，重度排队的会话（如交互式选择时堆了很多待处理输入）
+        // 会用 enqueue 简报把最近 N 条窗口挤满，执行中只渲染 assistant/plan 时便显示为
+        // 「空会话」；且被接受后 claude 另写真实 user 记录，会重复。故一律不产出。
+        "queue-operation" => None,
         "assistant" => {
             let items = v.pointer("/message/content")?.as_array()?;
             let mut text_buf = String::new();
