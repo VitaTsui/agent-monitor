@@ -127,6 +127,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
         setClientVer(s);
         if (s.latest) {
           AntModal.confirm({
+            centered: true,
             title: `发现新版本 v${s.latest}`,
             content: `当前版本 v${s.current}。更新将自动完成并重启客户端。`,
             okText: "立即更新",

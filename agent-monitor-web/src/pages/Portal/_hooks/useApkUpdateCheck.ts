@@ -37,6 +37,7 @@ const apkUrl = (version?: string | null) =>
 function showForcedModal(latest: string, cap: CapacitorBridge) {
   const url = apkUrl(latest);
   Modal.confirm({
+    centered: true,
     title: `必须更新到 v${latest}`,
     content:
       "当前 App 版本已停止支持，必须更新后才能继续使用。点击「去更新」下载安装包，安装后重新打开；选择退出将关闭应用。",
@@ -101,6 +102,7 @@ export function useApkUpdateCheck() {
         }
         if (latest && newer(latest, current)) {
           Modal.confirm({
+            centered: true,
             title: `发现新版 App v${latest}`,
             content: "是否立即下载更新？安装后覆盖当前版本即可。",
             okText: "去更新",
