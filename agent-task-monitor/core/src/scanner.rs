@@ -649,22 +649,34 @@ pub fn build_tasks(
                 true
             });
 
-            // ④ 剩余进程配「最近 30min 还活跃过」的会话（mtime 新）：覆盖续跑/压缩恢复的
-            // 长会话 —— 它的会话文件创建于很久前、进程比它晚启动、命令行也无 --continue
-            // （Claude Code 自动续跑正是如此），但一直在写、mtime 很新。窗口把 8h+ 没动的
-            // 旧会话（Cursor 死进程留下的）挡在外，空白进程仍留占位。free_sess 是 mtime 降序。
+            // ④ 剩余进程配「最近 30min 还活跃过、且最后写入不早于本进程启动」的会话：
+            // 覆盖续跑/压缩恢复的长会话 —— 会话文件建于很久前、进程比它晚启动、命令行也无
+            // --continue（Claude Code 自动续跑正是如此），但进程一直在写、mtime 很新。
+            //
+            // 关键约束 s.mtime >= 进程启动：一个会话若最后一次写入发生在进程启动【之前】，
+            // 那这段内容必然是上一个进程留下的（典型：某进程 --resume 了老会话、写了几句后
+            // 退出；用户又在同目录开一个全新空白终端）。此时新空白进程绝不能凭 mtime 新就把
+            // 那条老会话抢过来一直显示旧内容 —— 它没写过那个文件。放进占位（会话尚未产生记录）
+            // 才对。进程 start_time 只精确到秒、向下取整（≤ 真实启动），对「进程启动后才写入」
+            // 的活跃会话恒成立，不会误伤；只挡住启动前就停笔的旧会话。free_sess 是 mtime 降序。
             const RECENT_MTIME_MS: u64 = 30 * 60 * 1000;
             let now = now_ms();
-            let mut it = free_sess
+            let mut free_sess: Vec<&SessionSummary> = free_sess
                 .into_iter()
-                .filter(|s| now.saturating_sub(s.mtime_ms) <= RECENT_MTIME_MS);
+                .filter(|s| now.saturating_sub(s.mtime_ms) <= RECENT_MTIME_MS)
+                .collect();
+            // 新进程优先认领新会话：按启动时间降序，避免老进程抢走更晚的会话文件
+            free_procs.sort_by(|a, b| b.start_time.cmp(&a.start_time));
             for p in free_procs {
-                match it.next() {
-                    Some(s) => {
-                        pid_of_session.insert(s.session_id.as_str(), p);
-                        paired_pids.insert(p.pid);
-                    }
-                    None => break,
+                let p_start_ms = (p.start_time as u64).saturating_mul(1000);
+                // free_sess 已按 mtime 降序：第一条满足「mtime≥启动」的即该进程可认领的最新会话
+                if let Some(pos) = free_sess
+                    .iter()
+                    .position(|s| s.mtime_ms >= p_start_ms)
+                {
+                    let s = free_sess.remove(pos);
+                    pid_of_session.insert(s.session_id.as_str(), p);
+                    paired_pids.insert(p.pid);
                 }
             }
         }
@@ -2219,6 +2231,33 @@ mod pairing_tests {
             tasks.iter().find(|t| t.id == "old").unwrap().pid,
             None,
             "8h 没动的旧会话不该被抢"
+        );
+    }
+
+    /// 回归：某进程 --resume 了老会话、写了几句后退出；用户又在同目录开一个【全新空白】
+    /// 终端（无 --resume/--continue、还没产生自己的会话）。那条老会话虽然 mtime 还很新
+    /// （5min 前刚写），但它的最后写入发生在新进程【启动之前】—— 新空白进程绝不能凭 mtime
+    /// 新就把它抢来一直显示旧内容，应留占位（pid-<pid>）。
+    #[test]
+    fn fresh_blank_process_does_not_grab_recently_closed_resumed_session() {
+        let now = now_ms();
+        // 老会话：5min 前最后写入（在 30min 窗口内、mtime 很新），2h 前创建
+        let mut resumed = sess("resumed", "2026-07-17T00:00:00Z", now - 5 * 60_000);
+        resumed.created_ms = now - 2 * 3600 * 1000;
+        // 新空白进程：1min 前才启动（晚于老会话最后写入），命令行无 --resume/--continue
+        let mut p = proc(902, now / 1000 - 60);
+        p.command = "claude".into();
+
+        let tasks =
+            build_tasks(&[resumed], &[p], &|_| false, &HashMap::new(), &HashSet::new());
+        assert_eq!(
+            tasks.iter().find(|t| t.id == "resumed").unwrap().pid,
+            None,
+            "启动前就停笔的老会话不该被新空白进程抢去"
+        );
+        assert!(
+            tasks.iter().any(|t| t.id == "pid-902"),
+            "新空白进程应留占位任务，而非顶着旧会话内容"
         );
     }
 

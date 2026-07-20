@@ -147,12 +147,12 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     color: $text;
   }
 
-  // 进行中（仅会话运行时）：方框半填充 + 脉冲，文字主题色
+  // 进行中（仅会话运行时）：整块主题色实心 + 脉冲，文字主题色。
+  // （已完成项不进清单，空框=待办、实心=进行中，语义清晰，不再用对角半填充）
   &.in_progress {
     .todoBox {
       border-color: $accent;
-      background:
-        linear-gradient(135deg, $accent 0 50%, transparent 50% 100%);
+      background: $accent;
       animation: todoPulse 1.4s ease-in-out infinite;
     }
 

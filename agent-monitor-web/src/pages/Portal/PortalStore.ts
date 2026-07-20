@@ -186,12 +186,18 @@ class PortalStore {
         (t.status !== "finished" ||
           Date.now() - (t.mtimeMs ?? 0) < 2 * 3600 * 1000)
     );
+    // 归一化目录键：反斜杠→正斜杠、去尾斜杠、小写。同一目录下的空会话（占位任务用
+    // 进程 cwd）与真实会话（用 jsonl 里的 cwd），以及 cursor / 非 cursor 终端，常因
+    // 大小写、尾斜杠、路径分隔符的细微差异被拆成两个分组 —— 这里与后端配对键同源思路
+    // 归一后再分组，让它们并进同一个目录。
+    const normProj = (p: string) =>
+      (p ?? "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
     const byProject = new Map<string, TermGroup>();
     for (const t of list) {
       // 组标题只显示文件夹名，不要完整路径
       const dirName = (t.project ?? "").split(/[\\/]/).filter(Boolean).pop() ?? "";
       const title = t.projectName || dirName || "未知项目";
-      const key = `proj-${t.project || title}`;
+      const key = `proj-${normProj(t.project) || title.toLowerCase()}`;
       const group = byProject.get(key);
       if (group) {
         group.tasks.push(t);

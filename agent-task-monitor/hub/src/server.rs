@@ -1586,7 +1586,41 @@ async fn report(
         entry.tasks.iter().map(|t| t.id.as_str()).collect();
     entry.messages.retain(|k, _| alive.contains(k.as_str()));
     entry.git_cache.retain(|k, _| alive.contains(k.as_str()));
-    let commands: Vec<ControlCmd> = entry.pending.drain(..).collect();
+    // 输入指令「按会话就绪度」下发：目标会话仍在积极产出时，先把该条输入扣在队列里，
+    // 等它停下（空闲/等待输入）能真正接收再随下一轮下发。好处有二：
+    //   1) 不趁 claude 跑一半把文本塞进去（那会被排到原生队尾、且立刻脱离 hub 掌控）；
+    //   2) 「正在等待执行」的任务因此始终留在 hub 队列里 —— 可被撤回。
+    // 控制类指令（中断/停止/暂停）必须即时下发，不受此约束（正是要作用于运行中的会话）。
+    //
+    // 「积极产出」= 状态 Running 且会话文件最近还在写（mtime 新）。关键在于必须放行
+    // “Running 但已停笔”的会话：claude 弹交互式选择/权限确认（如计划审批）时，回合并未
+    // 结束（仍算 Running），但它正卡着等用户输入、jsonl 不再增长。此时若还扣着输入就会
+    // 死锁（claude 等输入、hub 等它空闲）。故只扣「还在写」的会话，卡在提示上的会话照常
+    // 放行，用户的选择能立刻送达。mtime 冻结、hub 时钟前进，即便时钟有偏差也终会放行，
+    // 不会永久扣留。
+    let now_ms = crate::state::now_secs() * 1000;
+    const ACTIVE_WRITE_MS: u64 = 8_000;
+    let busy: std::collections::HashSet<String> = entry
+        .tasks
+        .iter()
+        .filter(|t| {
+            t.status == TaskStatus::Running
+                && now_ms.saturating_sub(t.mtime_ms) <= ACTIVE_WRITE_MS
+        })
+        .map(|t| t.id.clone())
+        .collect();
+    let mut held: VecDeque<ControlCmd> = VecDeque::new();
+    let mut commands: Vec<ControlCmd> = Vec::new();
+    for c in entry.pending.drain(..) {
+        let hold = matches!(c.action, am_core::model::ControlAction::Input)
+            && busy.contains(c.task_id.as_str());
+        if hold {
+            held.push_back(c);
+        } else {
+            commands.push(c);
+        }
+    }
+    entry.pending = held;
     let files: Vec<am_core::model::FileTransfer> = entry.pending_files.drain(..).collect();
     let git_queries: Vec<am_core::model::GitQuery> = entry.pending_git.drain(..).collect();
     let dir_queries: Vec<am_core::model::DirQuery> = entry.pending_dir.drain(..).collect();
