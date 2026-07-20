@@ -142,6 +142,27 @@ const Composer: React.FC<ComposerProps> = (props) => {
     loadDirs("");
   };
 
+  // 拖拽中高亮
+  const [dragOver, setDragOver] = useState(false);
+
+  // 粘贴图片/文件 → 直接进上传流程（图片粘贴常无文件名，补个默认名）
+  const onPaste = (e: React.ClipboardEvent) => {
+    if (disabled) return;
+    const items = Array.from(e.clipboardData?.items ?? []);
+    const fileItem = items.find((it) => it.kind === "file");
+    if (!fileItem) return;
+    const f = fileItem.getAsFile();
+    if (!f) return;
+    e.preventDefault();
+    const named =
+      f.name && f.name !== "image.png"
+        ? f
+        : new File([f], `粘贴-${Date.now()}.${(f.type.split("/")[1] || "png")}`, {
+            type: f.type,
+          });
+    onPickFile(named);
+  };
+
   /** 确认上传到当前浏览目录，成功后把相对路径填入输入框 */
   const doUpload = () => {
     const file = pendingFile;
@@ -240,7 +261,32 @@ const Composer: React.FC<ComposerProps> = (props) => {
           .slice(0, 8);
 
   return (
-    <div className={styles.Composer} ref={rootRef}>
+    <div
+      className={`${styles.Composer} ${dragOver ? styles.dragOver : ""}`}
+      ref={rootRef}
+      onPaste={onPaste}
+      onDragOver={(e) => {
+        if (disabled) return;
+        if (Array.from(e.dataTransfer?.types ?? []).includes("Files")) {
+          e.preventDefault();
+          setDragOver(true);
+        }
+      }}
+      onDragLeave={(e) => {
+        // 只在真正离开根容器时取消（子元素间移动不算）
+        if (e.currentTarget === e.target) setDragOver(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragOver(false);
+        if (disabled) return;
+        const f = e.dataTransfer?.files?.[0];
+        if (f) onPickFile(f);
+      }}
+    >
+      {dragOver ? (
+        <div className={styles.dropHint}>松开上传文件到会话目录</div>
+      ) : null}
       {/* 斜杠命令下拉：仅在输入「/」时弹出（Claude Code 终端式），
           不再常驻一排命令 chip */}
       {matched.length > 0 && !disabled && (
