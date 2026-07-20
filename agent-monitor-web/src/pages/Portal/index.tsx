@@ -395,9 +395,7 @@ const Portal: React.FC = observer(() => {
       )}
 
       <aside
-        className={`${styles.sider} ${siderFolded ? styles.folded : ""} ${
-          mobileNav ? styles.mobileOpen : ""
-        }`}
+        className={`${styles.sider} ${siderFolded ? styles.folded : ""}`}
       >
         <div className={styles.siderHeader}>
           <div className={styles.brand}>
@@ -618,7 +616,7 @@ const Portal: React.FC = observer(() => {
         </Popover>
       </aside>
 
-      <main className={styles.main}>
+      <main className={`${styles.main} ${mobileNav ? styles.mainPushed : ""}`}>
         {paneCount === 0 ? (
           <div className={styles.mainEmpty}>
             <div className={styles.greeting}>
