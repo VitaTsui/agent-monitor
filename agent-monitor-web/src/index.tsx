@@ -2,6 +2,7 @@ import "./install-object-has-own-polyfill";
 
 import { installFreshnessGuard } from "./utils/freshness";
 import { installKeyboardInset } from "./utils/keyboardInset";
+import { hideSplashWhenReady } from "./utils/splash";
 
 installFreshnessGuard();
 installKeyboardInset();
@@ -45,3 +46,6 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     </SingleRouter>
   </BrowserRouter>,
 );
+
+// 首屏挂载后关掉原生启动图（消除白屏）
+hideSplashWhenReady();

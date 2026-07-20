@@ -31,7 +31,9 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   // 窄屏：两块默认都是收起的胶囊，让它们并排一行，别各占一行；
   // 移动端顶栏只有 48px(桌面头部 62)，胶囊往上贴近顶栏
   @media (max-width: 760px) {
-    top: calc(48px + env(safe-area-inset-top) + 6px);
+    // 胶囊相对 ChatPane(已在顶栏下方)定位，直接 10px 贴近内容顶部；
+    // 不能再加顶栏高度/刘海安全区(那已由 ChatPane 的位置计入，否则双重叠加)
+    top: 10px;
     flex-direction: row;
     flex-wrap: wrap;
     justify-content: flex-end;
