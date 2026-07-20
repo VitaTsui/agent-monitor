@@ -328,11 +328,30 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
             PIN_CACHE.lock().unwrap().clone().unwrap_or_default()
         }
     };
+    // 「本轮相比上轮 mtime 有推进」的会话 = 此刻正在被写的活跃会话。用于兜底配对时
+    // 区分「正在生成输出的活跃会话」与「刚关闭、mtime 虽新但已冻结的旧会话」。
+    let active_ids: std::collections::HashSet<String> = {
+        static PREV_MTIMES: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> =
+            std::sync::Mutex::new(None);
+        let mut guard = PREV_MTIMES.lock().unwrap();
+        let prev = guard.get_or_insert_with(std::collections::HashMap::new);
+        let mut active = std::collections::HashSet::new();
+        let mut cur = std::collections::HashMap::new();
+        for s in &sessions {
+            cur.insert(s.session_id.clone(), s.mtime_ms);
+            if prev.get(&s.session_id).is_some_and(|&pm| s.mtime_ms > pm) {
+                active.insert(s.session_id.clone());
+            }
+        }
+        *prev = cur;
+        active
+    };
     let mut tasks = am_core::scanner::build_tasks(
         &sessions,
         &processes,
         &|pid| paused.contains(&pid),
         &pinned,
+        &active_ids,
     );
     // 会话文件层：无存活进程的会话若其历史 tty 被排除也一并剔除（尽力而为）
     // 这里主要保证「有进程」的会话已被上面的 retain 过滤。

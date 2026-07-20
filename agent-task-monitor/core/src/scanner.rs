@@ -500,8 +500,11 @@ pub fn build_tasks(
     processes: &[ProcessInfo],
     manual_paused: &dyn Fn(u32) -> bool,
     // pid -> session_id：由「进程打开着哪个会话文件」得出的确定配对（客户端注入）。
-    // 有它就优先按它配，剩下的再按 mtime 兜底。空表则完全走 mtime 启发式（旧行为）。
+    // 有它就优先按它配。绝大多数情况为空（claude 不持续占文件）。
     pinned: &HashMap<u32, String>,
+    // 「本轮相比上轮 mtime 有推进」的会话号集合 = 此刻正在被写的活跃会话。兜底配对只
+    // 认这些 —— 刚关闭的会话 mtime 已冻结、不在其中，不会被重启的空白进程抢去显示旧内容。
+    active_ids: &HashSet<String>,
 ) -> Vec<Task> {
     // 按 cwd 分组进程（已按启动时间升序）
     // 进程按「编码后的 cwd」分组，与会话的项目目录名对齐（会话内 cwd 会漂移，目录名不会）
@@ -624,15 +627,13 @@ pub fn build_tasks(
                 }
             }
 
-            // ③ 只把剩余进程配给「最近还在写」的会话（mtime 很新 = 正在生成输出的
-            // 活跃会话）；绝不硬配陈旧会话 —— 否则「刚开的空白/无会话的进程」会抢走一个
-            // 旧的有内容会话、显示成旧内容（实测 Windows/Cursor 正是此坑）。配不到就留作
+            // ③ 只把剩余进程配给「此刻正在被写」的会话（active_ids = 本轮 mtime 相比
+            // 上轮有推进）。刚关闭的会话 mtime 已冻结、不在 active_ids 里，绝不会被重启的
+            // 空白进程抢去显示旧内容（实测 Windows/Cursor 退出重开正是此坑）。配不到就留作
             // 空白占位（unpaired → 进程任务「会话尚未产生记录」），符合终端确实是空白的事实。
-            const ACTIVE_MTIME_MS: u64 = 15 * 60 * 1000;
-            let now = now_ms();
             let mut it = free_sess
                 .into_iter()
-                .filter(|s| now.saturating_sub(s.mtime_ms) <= ACTIVE_MTIME_MS);
+                .filter(|s| active_ids.contains(&s.session_id));
             for p in free_procs {
                 match it.next() {
                     Some(s) => {
@@ -2090,12 +2091,29 @@ mod pairing_tests {
         let mut p = proc(200, start_s);
         p.command = "claude".into();
 
-        let tasks = build_tasks(&[blank, old], &[p], &|_| false, &HashMap::new());
+        let tasks = build_tasks(&[blank, old], &[p], &|_| false, &HashMap::new(), &HashSet::new());
         let b = tasks.iter().find(|t| t.id == "blank").unwrap();
         let o = tasks.iter().find(|t| t.id == "old").unwrap();
         assert_eq!(b.pid, Some(200), "进程应配给创建时刻≈启动的空白会话");
         assert_eq!(o.pid, None, "旧会话不该抢到进程（尽管 mtime 更新）");
         assert_eq!(o.status, TaskStatus::Finished);
+    }
+
+    /// 你退出 Cursor 会话又重开：旧会话 mtime 很新（刚写过）但已冻结（本轮不再推进，
+    /// 不在 active_ids）。重启的空白进程不得靠「mtime 新」抢走它显示旧内容。
+    #[test]
+    fn just_closed_session_not_grabbed_by_restarted_process() {
+        let now = now_ms();
+        let closed = sess("closed", "2026-07-20T00:00:00Z", now - 30_000); // mtime 仅 30s
+        let mut p = proc(600, now / 1000 - 60); // 重启的进程、无 --resume
+        p.command = "claude".into();
+        // active_ids 空 = 本轮没有会话在推进（旧会话已冻结）
+        let tasks =
+            build_tasks(&[closed], &[p], &|_| false, &HashMap::new(), &HashSet::new());
+        let c = tasks.iter().find(|t| t.id == "closed").unwrap();
+        assert_eq!(c.pid, None, "刚关闭(mtime 新但已冻结)的会话不该被重启进程抢走");
+        assert_eq!(c.status, TaskStatus::Finished);
+        assert!(tasks.iter().any(|t| t.id == "pid-600"), "进程应留作空白占位");
     }
 
     /// 刚启动、无对应会话的进程（如 Cursor 里空白终端）不得抢走陈旧的有内容会话 ——
@@ -2108,7 +2126,7 @@ mod pairing_tests {
         let mut p = proc(500, now / 1000 - 300); // 5 分钟前启动、无 --resume
         p.command = "claude".into();
 
-        let tasks = build_tasks(&[old], &[p], &|_| false, &HashMap::new());
+        let tasks = build_tasks(&[old], &[p], &|_| false, &HashMap::new(), &HashSet::new());
         let o = tasks.iter().find(|t| t.id == "old").unwrap();
         assert_eq!(o.pid, None, "陈旧会话不该被抢");
         assert_eq!(o.status, TaskStatus::Finished);
@@ -2131,7 +2149,7 @@ mod pairing_tests {
         let mut p = proc(300, now / 1000 - 30);
         p.command = "claude --resume resumed-xyz".into();
 
-        let tasks = build_tasks(&[resumed], &[p], &|_| false, &HashMap::new());
+        let tasks = build_tasks(&[resumed], &[p], &|_| false, &HashMap::new(), &HashSet::new());
         assert_eq!(tasks.iter().find(|t| t.id == "resumed-xyz").unwrap().pid, Some(300));
     }
 
@@ -2149,7 +2167,7 @@ mod pairing_tests {
         let mut pinned = HashMap::new();
         pinned.insert(100u32, "cursor".to_string()); // 进程真正打开的是 cursor 会话
 
-        let tasks = build_tasks(&[closed, cursor], &[p], &|_| false, &pinned);
+        let tasks = build_tasks(&[closed, cursor], &[p], &|_| false, &pinned, &HashSet::new());
         let cur = tasks.iter().find(|t| t.id == "cursor").unwrap();
         let clo = tasks.iter().find(|t| t.id == "closed").unwrap();
         assert_eq!(cur.pid, Some(100), "活进程应配给它打开的 cursor 会话");
@@ -2174,7 +2192,7 @@ mod pairing_tests {
         p.cwd = "D:\\proj\\".into(); // 进程 cwd 带尾随反斜杠
         p.tty = String::new();
 
-        let tasks = build_tasks(&[s], &[p], &|_| false, &HashMap::new());
+        let tasks = build_tasks(&[s], &[p], &|_| false, &HashMap::new(), &HashSet::from(["live".to_string()]));
         // 配对成功 = 恰好一条任务、带 pid、状态非 Finished（不是占位进程）
         assert_eq!(tasks.len(), 1, "应配成一条，而非会话+占位进程两条");
         assert_eq!(tasks[0].pid, Some(4242));
@@ -2197,7 +2215,7 @@ mod pairing_tests {
         // 只有一个进程 → 只能有一个会话是活的
         let procs = vec![proc(3191, 1000)];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new());
+        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::from(["alive".to_string()]));
         let by_id = |id: &str| tasks.iter().find(|t| t.id == id).unwrap().clone();
 
         assert_eq!(by_id("alive").pid, Some(3191), "正在写入的会话必须拿到进程");
@@ -2220,7 +2238,7 @@ mod pairing_tests {
         ];
         let procs = vec![proc(100, 1000), proc(200, 2000)];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new());
+        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::from(["newest".to_string(), "middle".to_string()]));
         let pid = |id: &str| tasks.iter().find(|t| t.id == id).unwrap().pid;
 
         // 两个进程 → 最近活动的两个会话拿到 pid
@@ -2374,7 +2392,7 @@ mod codex_tests {
         let sessions = vec![mk("claude", "c1", "-w-app"), mk("codex", "x1", "-w-app")];
         let procs = vec![proc("claude", 11, "app"), proc("codex", 22, "app"), proc("gemini", 33, "app")];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new());
+        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::from(["c1".to_string(), "x1".to_string()]));
         let by = |id: &str| tasks.iter().find(|t| t.id == id).unwrap();
 
         assert_eq!(by("c1").pid, Some(11), "claude 会话配 claude 进程");
@@ -2413,7 +2431,7 @@ mod codex_tests {
             memory: 0,
             command: "claude".into(),
         }];
-        let tasks = build_tasks(&[], &procs, &|_| false, &HashMap::new());
+        let tasks = build_tasks(&[], &procs, &|_| false, &HashMap::new(), &HashSet::new());
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Claude Code", "空目录名不该带「 · 」尾巴");
         assert!(!tasks[0].title.contains('·'));
