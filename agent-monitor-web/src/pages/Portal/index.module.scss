@@ -767,7 +767,9 @@ $active-bg: rgba(36, 61, 66, 0.09);
 
   // 侧栏底部用户区 → 悬浮圆头像（Claude App 式）
   .Portal .sider .userRow {
-    margin: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    // 头像离左边远一点(16 + 左安全区)，不贴边
+    margin: 10px 14px calc(10px + env(safe-area-inset-bottom))
+      calc(16px + env(safe-area-inset-left));
     padding: 0;
     width: 46px;
     height: 46px;
