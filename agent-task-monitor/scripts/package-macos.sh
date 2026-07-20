@@ -16,7 +16,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 APP_NAME="终端任务监控"
-BUNDLE_ID="com.vitahsu.agentmonitor"
+# 与 client/tauri.conf.json 的 identifier 保持一致（应用身份的唯一真源）
+BUNDLE_ID="com.vitahsu.agent-monitor"
 # 可执行文件名必须与 Info.plist 的 CFBundleExecutable 一致
 EXE_NAME="agent-monitor"
 HUB_URL="${AM_HUB_URL:-https://monitor.vita-llm.com}"

@@ -453,13 +453,22 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .map_err(|e| {
             // GUI 子系统没有控制台：失败必须让用户看见，否则就是「双击没反应」
             #[cfg(windows)]
             message_box("终端任务监控", &format!("启动失败：{e}"));
             anyhow::anyhow!("Tauri 运行失败: {e}")
-        })?;
+        })?
+        .run(|_app, _event| {
+            // macOS：点 Dock 图标唤回主窗口。关闭窗口会缩到托盘（切 Accessory、Dock
+            // 图标消失），此时点 Dock 上残留/固定的图标会触发 Reopen —— Tauri 默认不处理，
+            // 缺了它就表现为「点程序坞图标没反应、界面打不开」。收到即恢复 Dock 图标并显示窗口。
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                show_main(_app);
+            }
+        });
     Ok(())
 }
 
