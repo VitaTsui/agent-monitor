@@ -1424,7 +1424,13 @@ fn count_lines_from(path: &Path, offset: u64) -> Result<u64> {
 
 /// 与 Claude Code 的项目目录命名一致：非字母数字字符替换为 '-'
 pub fn encode_path(p: &str) -> String {
-    p.chars()
+    // 先去掉尾随分隔符再编码：Windows 上 sysinfo 上报的进程 cwd 常带尾随反斜杠
+    // （D:\proj\），而 ~/.claude/projects 下的项目目录名由无尾随分隔符的 cwd
+    // 编码而来（D--proj）。不去掉，进程侧会多一个尾随 '-'（D--proj-），与会话的
+    // project_key 对不上、配不成对 —— 会话就沦为「等待输入」的占位进程、内容永不
+    // 同步。macOS 的 cwd 无尾随斜杠，故此前只在 Windows 上暴露。
+    p.trim_end_matches(['/', '\\'])
+        .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
 }
@@ -1907,6 +1913,30 @@ mod pairing_tests {
             memory: 0,
             command: "claude".into(),
         }
+    }
+
+    /// Windows：sysinfo 上报的进程 cwd 带尾随反斜杠（D:\proj\），会话目录名却是
+    /// 无尾随的 D--proj。encode_path 必须先去尾随分隔符，两者才能配成对，
+    /// 否则会话永远沦为「等待输入」的占位进程、内容不同步。
+    #[test]
+    fn windows_trailing_backslash_cwd_still_pairs() {
+        assert_eq!(encode_path("D:\\proj\\"), encode_path("D:\\proj"));
+        assert_eq!(encode_path("D:\\proj\\"), "D--proj");
+
+        let now = now_ms();
+        let mut s = sess("live", "2026-07-20T00:00:00Z", now - 30_000);
+        s.project_key = "D--proj".into(); // 会话目录名（无尾随）
+        s.cwd = "D:\\proj".into();
+        let mut p = proc(4242, now);
+        p.cwd = "D:\\proj\\".into(); // 进程 cwd 带尾随反斜杠
+        p.tty = String::new();
+
+        let tasks = build_tasks(&[s], &[p], &|_| false);
+        // 配对成功 = 恰好一条任务、带 pid、状态非 Finished（不是占位进程）
+        assert_eq!(tasks.len(), 1, "应配成一条，而非会话+占位进程两条");
+        assert_eq!(tasks[0].pid, Some(4242));
+        assert_ne!(tasks[0].status, TaskStatus::Finished);
+        assert!(!tasks[0].prompt.contains("尚未产生记录"), "不该是占位进程");
     }
 
     /// 真实踩到的坑：`claude --resume` 起来的长会话，起始时间是几周前，
