@@ -1304,7 +1304,13 @@ pub(crate) fn spawn_update_watcher<R: tauri::Runtime>(
 ) {
     std::thread::spawn(move || {
         let local = env!("CARGO_PKG_VERSION");
-        let mut prompted: Option<String> = None;
+        // 已提示过的版本持久化到文件：`prompted` 只放内存的话，客户端一重启（自更新/
+        // 自启/崩溃恢复）就重置，同一个新版本会被反复推送。从盘上读初值即可跨重启去重。
+        let notified_path = state.config.data_dir.join("notified-version");
+        let mut prompted: Option<String> = std::fs::read_to_string(&notified_path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let mut forced_prompted = false;
         loop {
             std::thread::sleep(std::time::Duration::from_secs(3));
@@ -1342,6 +1348,7 @@ pub(crate) fn spawn_update_watcher<R: tauri::Runtime>(
             if let Some(v) = latest {
                 if prompted.as_deref() != Some(v.as_str()) {
                     prompted = Some(v.clone());
+                    let _ = std::fs::write(&notified_path, &v); // 跨重启去重
                     notify_new_version(&v);
                 }
             }

@@ -292,9 +292,10 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                 }
                 for p in &processes {
                     let pstart_age = now_ms / 1000 - p.start_time;
+                    let cmd: String = p.command.chars().take(90).collect();
                     client_log(&format!(
-                        "[pair] procstart pid={} start_age={}s",
-                        p.pid, pstart_age
+                        "[pair] procstart pid={} agent={} start_age={}s cmd={}",
+                        p.pid, p.agent, pstart_age, cmd
                     ));
                 }
             }
