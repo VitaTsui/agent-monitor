@@ -16,10 +16,18 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     // 全局令牌仅在显式配置时使用（内部部署/兼容旧客户端）；
     // 普通用户走「配对绑定 → 每设备令牌」，无需任何预置密钥。
     let legacy_token = std::env::var("AM_AGENT_TOKEN").ok().filter(|s| !s.is_empty());
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .expect("构建 HTTP 客户端失败");
+    // 连接池空闲超时短一点 + TCP keepalive：休眠/唤醒后不会复用死 socket
+    // 而挂起，能尽快用新连接重连（自动恢复连接的关键）。
+    fn build_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .connect_timeout(std::time::Duration::from_secs(4))
+            .pool_idle_timeout(std::time::Duration::from_secs(15))
+            .tcp_keepalive(std::time::Duration::from_secs(20))
+            .build()
+            .expect("构建 HTTP 客户端失败")
+    }
+    let mut client = build_client();
     let mut msg_cache = MsgCache { inner: HashMap::new() };
     let mut hub_ok = false;
     // 未被 hub 信任前，只发送心跳（设备登记），绝不上报任何会话/终端数据
@@ -28,7 +36,22 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     let mut pending_git_results: Vec<am_core::model::GitResult> = Vec::new();
     let mut pending_dir_results: Vec<am_core::model::DirResult> = Vec::new();
 
+    // 上一轮循环结束的时刻：用于检测系统睡眠/唤醒（间隔远超预期即刚恢复）
+    let mut last_tick = std::time::Instant::now();
     loop {
+        // 开机/唤醒检测：距上一轮已过去远超正常 1.5s（阈值 8s），大概率系统
+        // 刚从睡眠/休眠恢复 —— 连接池里可能全是死 socket，重建客户端并强制
+        // 下一轮当作断线重连，尽快恢复连接。
+        if last_tick.elapsed() >= std::time::Duration::from_secs(8) {
+            tracing::info!("检测到系统恢复（间隔 {:?}），重建连接自动重连", last_tick.elapsed());
+            client = build_client();
+            hub_ok = false;
+            state
+                .hub_connected
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        last_tick = std::time::Instant::now();
+
         // 配对阶段：还没有设备令牌（也没配全局令牌）时，不上报，只轮询配对状态。
         // 用户在客户端窗口里登录后，网页会自动认领，这里领到令牌即转入正常上报。
         let has_device_token = state.device_token.read().await.is_some();

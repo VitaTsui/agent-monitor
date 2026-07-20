@@ -28,8 +28,10 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     pointer-events: auto;
   }
 
-  // 窄屏：两块默认都是收起的胶囊，让它们并排一行，别各占一行
+  // 窄屏：两块默认都是收起的胶囊，让它们并排一行，别各占一行；
+  // 移动端顶栏只有 48px(桌面头部 62)，胶囊往上贴近顶栏
   @media (max-width: 760px) {
+    top: calc(48px + env(safe-area-inset-top) + 6px);
     flex-direction: row;
     flex-wrap: wrap;
     justify-content: flex-end;
