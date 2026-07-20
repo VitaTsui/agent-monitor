@@ -180,9 +180,11 @@ class PortalStore {
     const list = this.filtered.filter(
       (t) =>
         (t.machineId || t.hostname || "unknown") === mid &&
-        // 只展示还开着的终端会话；已结束（终端已关闭）的不再堆在列表里。
-        // 配对已按「进程打开的会话文件」精确判定，关闭的会话会正确落 finished。
-        t.status !== "finished"
+        // 隐藏已结束会话，避免旧会话堆积；但只隐藏「很久没活动」的 ——
+        // 配对偶有误判时，最近活动过的会话即使被判 finished 也保留显示，
+        // 免得把正在用的终端会话误藏掉。
+        (t.status !== "finished" ||
+          Date.now() - (t.mtimeMs ?? 0) < 2 * 3600 * 1000)
     );
     const byProject = new Map<string, TermGroup>();
     for (const t of list) {

@@ -344,7 +344,13 @@ const Composer: React.FC<ComposerProps> = (props) => {
             ? [
                 {
                   title: "选择会话目录里的文件，插入相对路径",
-                  icon: <FileSearchOutlined className={styles.uploadIcon} />,
+                  // FileSearchOutlined 字形本身偏小，略调大与旁边回形针视觉一致
+                  icon: (
+                    <FileSearchOutlined
+                      className={styles.uploadIcon}
+                      style={{ fontSize: 18 }}
+                    />
+                  ),
                   type: "text",
                   onClick: openPicker,
                 },
