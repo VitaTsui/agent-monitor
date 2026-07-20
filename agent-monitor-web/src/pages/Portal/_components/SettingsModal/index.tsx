@@ -552,7 +552,6 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                       // 已知有新版本：直接给「更新」按钮，不用再点「检查更新」走一遍确认
                       <Button
                         size="small"
-                        type="primary"
                         className={styles.updateNowBtn}
                         onClick={() =>
                           tauriInvoke
