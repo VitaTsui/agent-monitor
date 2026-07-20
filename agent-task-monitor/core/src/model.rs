@@ -258,8 +258,12 @@ pub struct DirQuery {
 pub struct DirResult {
     pub task_id: String,
     pub rel: String,
-    /// 子目录名（仅目录，不含文件；已排序，隐藏目录靠后）
+    /// 子目录名（仅目录；已排序，隐藏目录靠后）
     pub dirs: Vec<String>,
+    /// 该目录下的文件名（已排序，隐藏文件靠后）。用于「选择文件回填相对路径」。
+    /// 旧客户端不带该字段 → 反序列化为空。
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 /// hub → agent 的待执行控制命令

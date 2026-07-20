@@ -905,8 +905,10 @@ async fn task_dirs(
         });
     }
     match cached {
-        Some(dirs) => ok(json!({ "dirs": dirs, "cwd": cwd, "pending": false })),
-        None => ok(json!({ "dirs": [], "cwd": cwd, "pending": true })),
+        Some((dirs, files)) => {
+            ok(json!({ "dirs": dirs, "files": files, "cwd": cwd, "pending": false }))
+        }
+        None => ok(json!({ "dirs": [], "files": [], "cwd": cwd, "pending": true })),
     }
 }
 
@@ -1535,7 +1537,7 @@ async fn report(
     entry.tasks = tasks;
     // 缓存 agent 回传的 git 对比结果
     for r in payload.dir_results {
-        entry.dir_cache.insert((r.task_id.clone(), r.rel.clone()), r.dirs);
+        entry.dir_cache.insert((r.task_id.clone(), r.rel.clone()), (r.dirs, r.files));
     }
     for r in payload.git_results {
         entry.git_cache.insert(r.task_id, r.overview);

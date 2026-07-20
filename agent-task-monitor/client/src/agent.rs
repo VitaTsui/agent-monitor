@@ -277,8 +277,10 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
                     for q in dir_queries {
+                        let (dirs, files) = list_entries(&q.cwd, &q.rel);
                         pending_dir_results.push(am_core::model::DirResult {
-                            dirs: list_subdirs(&q.cwd, &q.rel),
+                            dirs,
+                            files,
                             task_id: q.task_id,
                             rel: q.rel,
                         });
@@ -543,32 +545,49 @@ mod version_tests {
 
 
 /// 列出 root/rel 下的子目录名（仅目录；防越出 root；隐藏目录排后；上限 300）
-fn list_subdirs(root: &str, rel: &str) -> Vec<String> {
+/// 列出 root/rel 下的子目录与文件（各自排序，隐藏项靠后）。
+/// 越出根或读取失败时返回两个空表。
+fn list_entries(root: &str, rel: &str) -> (Vec<String>, Vec<String>) {
     use std::path::Path;
+    let empty = || (Vec::new(), Vec::new());
     // rel 已在 hub 侧拒绝 ".."，这里再兜一层
     if rel.split('/').any(|s| s == "..") {
-        return Vec::new();
+        return empty();
     }
     let base = Path::new(root).join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
     let (Ok(canon_base), Ok(canon_root)) = (base.canonicalize(), Path::new(root).canonicalize())
     else {
-        return Vec::new();
+        return empty();
     };
     if !canon_base.starts_with(&canon_root) {
-        return Vec::new();
+        return empty();
     }
     let Ok(rd) = std::fs::read_dir(&canon_base) else {
-        return Vec::new();
+        return empty();
     };
-    let mut dirs: Vec<String> = rd
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .filter_map(|e| e.file_name().into_string().ok())
-        .take(300)
-        .collect();
-    // 常规目录在前、隐藏目录在后，各自字典序
-    dirs.sort_by(|a, b| {
-        (a.starts_with('.'), a.to_lowercase()).cmp(&(b.starts_with('.'), b.to_lowercase()))
-    });
-    dirs
+    // 常规项在前、隐藏项在后，各自字典序
+    let order = |v: &mut Vec<String>| {
+        v.sort_by(|a, b| {
+            (a.starts_with('.'), a.to_lowercase()).cmp(&(b.starts_with('.'), b.to_lowercase()))
+        });
+    };
+    let mut dirs: Vec<String> = Vec::new();
+    let mut files: Vec<String> = Vec::new();
+    for e in rd.filter_map(|e| e.ok()).take(1000) {
+        let Ok(name) = e.file_name().into_string() else { continue };
+        match e.file_type() {
+            Ok(t) if t.is_dir() => dirs.push(name),
+            // 符号链接等按文件处理，够用即可
+            Ok(_) => files.push(name),
+            Err(_) => {}
+        }
+        if dirs.len() >= 300 && files.len() >= 300 {
+            break;
+        }
+    }
+    dirs.truncate(300);
+    files.truncate(300);
+    order(&mut dirs);
+    order(&mut files);
+    (dirs, files)
 }
