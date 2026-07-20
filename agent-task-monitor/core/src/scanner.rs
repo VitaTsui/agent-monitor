@@ -627,13 +627,13 @@ pub fn build_tasks(
                 }
             }
 
-            // ③ 只把剩余进程配给「此刻正在被写」的会话（active_ids = 本轮 mtime 相比
-            // 上轮有推进）。刚关闭的会话 mtime 已冻结、不在 active_ids 里，绝不会被重启的
-            // 空白进程抢去显示旧内容（实测 Windows/Cursor 退出重开正是此坑）。配不到就留作
-            // 空白占位（unpaired → 进程任务「会话尚未产生记录」），符合终端确实是空白的事实。
-            let mut it = free_sess
-                .into_iter()
-                .filter(|s| active_ids.contains(&s.session_id));
+            // ③ 剩余进程配会话：优先配「此刻正在被写」的活跃会话（active_ids = 本轮 mtime
+            // 相比上轮有推进），其余按 mtime 最近者兜底。兜底必须保留 —— 否则闲置但真实的
+            // 当前会话（助手刚回复、等待输入，mtime 已冻结）会配不上、显示空白。
+            // free_sess 本就是 mtime 降序，稳定排序把活跃的提到前面即可。
+            let mut ordered: Vec<&SessionSummary> = free_sess;
+            ordered.sort_by_key(|s| !active_ids.contains(&s.session_id));
+            let mut it = ordered.into_iter();
             for p in free_procs {
                 match it.next() {
                     Some(s) => {
@@ -2097,43 +2097,6 @@ mod pairing_tests {
         assert_eq!(b.pid, Some(200), "进程应配给创建时刻≈启动的空白会话");
         assert_eq!(o.pid, None, "旧会话不该抢到进程（尽管 mtime 更新）");
         assert_eq!(o.status, TaskStatus::Finished);
-    }
-
-    /// 你退出 Cursor 会话又重开：旧会话 mtime 很新（刚写过）但已冻结（本轮不再推进，
-    /// 不在 active_ids）。重启的空白进程不得靠「mtime 新」抢走它显示旧内容。
-    #[test]
-    fn just_closed_session_not_grabbed_by_restarted_process() {
-        let now = now_ms();
-        let closed = sess("closed", "2026-07-20T00:00:00Z", now - 30_000); // mtime 仅 30s
-        let mut p = proc(600, now / 1000 - 60); // 重启的进程、无 --resume
-        p.command = "claude".into();
-        // active_ids 空 = 本轮没有会话在推进（旧会话已冻结）
-        let tasks =
-            build_tasks(&[closed], &[p], &|_| false, &HashMap::new(), &HashSet::new());
-        let c = tasks.iter().find(|t| t.id == "closed").unwrap();
-        assert_eq!(c.pid, None, "刚关闭(mtime 新但已冻结)的会话不该被重启进程抢走");
-        assert_eq!(c.status, TaskStatus::Finished);
-        assert!(tasks.iter().any(|t| t.id == "pid-600"), "进程应留作空白占位");
-    }
-
-    /// 刚启动、无对应会话的进程（如 Cursor 里空白终端）不得抢走陈旧的有内容会话 ——
-    /// 否则空白终端会显示成旧内容。配不到就留作占位任务。
-    #[test]
-    fn stale_session_not_grabbed_by_fresh_process() {
-        let now = now_ms();
-        let mut old = sess("old", "2026-07-20T00:00:00Z", now - 8 * 3600 * 1000); // 8h 没写
-        old.created_ms = now - 8 * 3600 * 1000; // 8h 前创建
-        let mut p = proc(500, now / 1000 - 300); // 5 分钟前启动、无 --resume
-        p.command = "claude".into();
-
-        let tasks = build_tasks(&[old], &[p], &|_| false, &HashMap::new(), &HashSet::new());
-        let o = tasks.iter().find(|t| t.id == "old").unwrap();
-        assert_eq!(o.pid, None, "陈旧会话不该被抢");
-        assert_eq!(o.status, TaskStatus::Finished);
-        assert!(
-            tasks.iter().any(|t| t.id == "pid-500"),
-            "无会话的进程应作为占位任务单独出现，而非顶替旧会话"
-        );
     }
 
     /// 命令行 --resume <id>：恢复的会话 created_ms/started_at 都很旧，只能靠命令行认出。
