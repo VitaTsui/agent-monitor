@@ -178,7 +178,11 @@ class PortalStore {
   get selectedGroups(): TermGroup[] {
     const mid = this.selectedMachineId;
     const list = this.filtered.filter(
-      (t) => (t.machineId || t.hostname || "unknown") === mid
+      (t) =>
+        (t.machineId || t.hostname || "unknown") === mid &&
+        // 只展示还开着的终端会话；已结束（终端已关闭）的不再堆在列表里。
+        // 配对已按「进程打开的会话文件」精确判定，关闭的会话会正确落 finished。
+        t.status !== "finished"
     );
     const byProject = new Map<string, TermGroup>();
     for (const t of list) {

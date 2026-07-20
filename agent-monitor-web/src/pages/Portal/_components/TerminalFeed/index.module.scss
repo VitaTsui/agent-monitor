@@ -166,24 +166,32 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
         list-style-position: outside;
       }
 
+      // 行内 code：略亮的底 + 高对比青色，看得清又不刺眼
       code {
-        background: rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.14);
         border-radius: 4px;
         padding: 1px 5px;
-        font-size: 12px;
-        color: #9fe8f0;
+        font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+        font-size: 12.5px;
+        color: #a5f3fc;
       }
 
+      // 代码块：明显更暗的实底 + 描边，与深色卡片拉开层次；文字提亮到接近纯白，
+      // 长行横向滚动不撑破布局
       pre {
-        background: rgba(0, 0, 0, 0.35);
+        background: #10201f;
+        border: 1px solid rgba(255, 255, 255, 0.14);
         border-radius: 8px;
-        padding: 8px 10px;
+        padding: 10px 12px;
         overflow-x: auto;
+        font-size: 12.5px;
+        line-height: 1.55;
 
         code {
           background: none;
           padding: 0;
-          color: $term-text;
+          font-size: 12.5px;
+          color: #e6f0ef;
         }
       }
 

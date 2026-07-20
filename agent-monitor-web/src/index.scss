@@ -83,6 +83,10 @@ body,
   // 底色兜底：键盘 resize 缩放时若透明会透出 WKWebView 黑色默认背景
   background: #f4fafb;
   overflow: hidden;
+  // 关掉 iOS 自动放大文字：选中会话用 ScrollText 渲染成宽滚动块时，iOS 会判定为
+  // 「宽文本」把字号自动放大，导致「选中的终端字变大」。固定 100% 即禁用该行为。
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 // 极窄窗口布局保护：后管等桌面布局窗口过窄时横向滚动而非挤碎；
