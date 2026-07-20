@@ -147,7 +147,9 @@ class PortalStore {
   };
 
   get selectedMachineId() {
-    // 未手动选择或所选设备已消失时：客户端窗口优先回退到本机，其次第一个设备
+    // 选中优先级：手动选择 > 本机（仅客户端窗口注入了本机 id 时）。
+    // 非本机端（浏览器/远程）进来不自动选任何设备 —— 展示设备列表让用户自己挑，
+    // 不再回退到「第一个设备」。
     const list = this.deviceList;
     if (this._selectedMachineId && list.some((d) => d.machineId === this._selectedMachineId)) {
       return this._selectedMachineId;
@@ -155,7 +157,7 @@ class PortalStore {
     if (this._localMachineId && list.some((d) => d.machineId === this._localMachineId)) {
       return this._localMachineId;
     }
-    return list[0]?.machineId ?? "";
+    return "";
   }
 
   public selectMachine = (id: string) => {
@@ -163,13 +165,9 @@ class PortalStore {
       return;
     }
     this._selectedMachineId = id;
-    // 切换设备：右侧重置 —— 关掉原设备的格子，落到新设备的首个会话（没有则空态）
-    const first = this._tasks.find((t) => t.machineId === id);
-    this._openIds = first?.id ? [first.id] : [];
+    // 切换设备：右侧重置为空态 —— 不默认选中任何终端，由用户点选。
+    this._openIds = [];
     this.dropMessageCache();
-    if (first?.id) {
-      this.fetchMessages(first.id, true);
-    }
   };
 
   /**
@@ -381,16 +379,8 @@ class PortalStore {
       this._tasks = list;
     }
 
-    if (!this._openIds.length && this._tasks.length) {
-      // 默认选中限定在当前设备内，不跨设备乱跳
-      const first = this._tasks.find(
-        (t) => t.machineId === this.selectedMachineId,
-      );
-      if (first?.id) {
-        this.select(first.id);
-      }
-      return;
-    }
+    // 不再默认选中任何终端：openIds 为空就保持空态（用户自己点选）。
+    // 仅做存活清理：已消失的会话从打开列表里剔除。
     const alive = this._openIds.filter((id) =>
       this._tasks.some((t) => t.id === id)
     );
