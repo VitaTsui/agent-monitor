@@ -440,7 +440,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
               >
                 <span
                   className={styles.navIcon}
-                  style={{ backgroundColor: n.color }}
+                  style={{ ["--nav-color" as string]: n.color }}
                 >
                   {n.icon}
                 </span>
