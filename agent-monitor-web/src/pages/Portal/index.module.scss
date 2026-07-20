@@ -10,9 +10,10 @@ $active-bg: rgba(36, 61, 66, 0.09);
 
 .Portal {
   height: 100%;
-  // 键盘由 resize:none + JS 处理：webview 不动、整页不位移，仅底部让出
-  // 键盘高度 —— 底部输入框升到键盘上方、内容区收缩、顶栏纹丝不动。
-  padding-bottom: var(--kb-height, 0px);
+  // 键盘由 resize:none + JS 处理：webview 不动、整页不位移，底部让出
+  // max(键盘高, home 安全区) —— 键盘弹起时输入框贴键盘上方、收起时
+  // 让开 home 指示条；内容区收缩、顶栏纹丝不动。
+  padding-bottom: max(var(--kb-height, 0px), env(safe-area-inset-bottom));
   box-sizing: border-box;
   display: flex;
   background: $cream;

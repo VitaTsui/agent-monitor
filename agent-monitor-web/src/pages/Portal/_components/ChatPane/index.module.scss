@@ -154,9 +154,10 @@ $muted: #7c9096;
   // 底部内边距让开手势条 / Home Indicator：原生壳里窗口延伸到系统栏下，
   // 不加的话输入框会被手势条压住。浏览器里 env() 为 0，等价于原来的 14px。
   .composerWrap {
-    // 底部：安全区（home 指示条）之外只留 6px，避免 iOS 上双份留白显得空
-    padding: 6px calc(18px + env(safe-area-inset-right))
-      max(10px, calc(6px + env(safe-area-inset-bottom)))
+    // 底部扁平 10px：home 指示条安全区与键盘高度统一由 Portal 的
+    // padding-bottom 处理，这里不再叠加安全区（否则键盘弹起时输入框与
+    // 键盘间残留一段安全区空隙）
+    padding: 6px calc(18px + env(safe-area-inset-right)) 10px
       calc(18px + env(safe-area-inset-left));
   }
 }
