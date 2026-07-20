@@ -9,9 +9,11 @@ $hover: rgba(36, 61, 66, 0.06);
 $active-bg: rgba(36, 61, 66, 0.09);
 
 .Portal {
-  // 100% 精确跟随 webview 边框：Keyboard resize:native 缩放 webview 时
-  // 顶栏固定、内容区收缩、输入区贴键盘、无空隙（比 100dvh 可靠）
   height: 100%;
+  // 键盘由 resize:none + JS 处理：webview 不动、整页不位移，仅底部让出
+  // 键盘高度 —— 底部输入框升到键盘上方、内容区收缩、顶栏纹丝不动。
+  padding-bottom: var(--kb-height, 0px);
+  box-sizing: border-box;
   display: flex;
   background: $cream;
   color: $text;
