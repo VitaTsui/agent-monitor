@@ -1156,6 +1156,12 @@ impl BgTracker {
             return;
         }
         let Some(status) = tag_value(text, "status") else { return };
+        // "__orphan_summary__:*" 是会话续跑/压缩恢复时的孤儿汇总标记：语义是「此前所有
+        // 后台 shell/子代理都已不在」。它往往只枚举部分 id，漏网的若只按枚举清，会永远
+        // 卡在「运行中」（run_in_background 起的 dev server / 测试 hub 尤其常见）。
+        // 故一旦出现该标记，就把当时所有仍在跑的后台任务统一落到该终态，
+        // 只留下最近一次恢复之后新起、当前真在跑的后台任务 —— 即「实时」语义。
+        let is_orphan_summary = text.contains("__orphan_summary__");
         let mut rest = text;
         while let Some(id) = tag_value(rest, "task-id") {
             // "__orphan_summary__:*" 是内部扫描标记，不是真任务
@@ -1169,6 +1175,14 @@ impl BgTracker {
             }
             let Some(pos) = rest.find("</task-id>") else { break };
             rest = &rest[pos + "</task-id>".len()..];
+        }
+        if is_orphan_summary {
+            for t in self.items.iter_mut() {
+                if t.status == "running" {
+                    t.status = status.clone();
+                    self.dirty = true;
+                }
+            }
         }
     }
 
@@ -1613,6 +1627,43 @@ mod bg_tests {
         ));
         assert!(t.items.iter().all(|i| i.status == "stopped"));
         assert_eq!(t.items.len(), 2, "内部标记不该混进清单");
+    }
+
+    /// 孤儿汇总只枚举了部分 id 时，漏网的运行中任务也应一并落终态：
+    /// 会话续跑/压缩恢复后，此前所有后台 shell 都已不在，不能永远卡在「运行中」。
+    #[test]
+    fn orphan_summary_stops_unlisted_running_tasks() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "被枚举的"));
+        t.observe(&result("u1", "Command running in background with ID: b5eauqs4i."));
+        t.observe(&bg_use("u2", "Bash", "漏网的 dev server"));
+        t.observe(&result("u2", "Command running in background with ID: bvvgsfndf."));
+        let _ = t.take_snapshot("ts");
+
+        // 通知里只列了 b5eauqs4i，没列 bvvgsfndf，但带 __orphan_summary__ 标记
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b5eauqs4i</task-id>\n<task-id>__orphan_summary__:shell</task-id>\n<status>stopped</status>\n</task-notification>",
+        ));
+        assert!(
+            t.items.iter().all(|i| i.status == "stopped"),
+            "孤儿汇总应连同未枚举的运行中任务一起停掉"
+        );
+    }
+
+    /// 普通(非孤儿汇总)通知不得波及未点名的任务：只有被 task-id 点到的才改状态
+    #[test]
+    fn normal_notification_leaves_unlisted_tasks_running() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "甲"));
+        t.observe(&result("u1", "Command running in background with ID: b1."));
+        t.observe(&bg_use("u2", "Bash", "乙"));
+        t.observe(&result("u2", "Command running in background with ID: b2."));
+
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>",
+        ));
+        let b2 = t.items.iter().find(|i| i.id == "b2").unwrap();
+        assert_eq!(b2.status, "running", "没点名的任务不该被普通通知波及");
     }
 
     /// 非后台的普通命令不该被收进来
