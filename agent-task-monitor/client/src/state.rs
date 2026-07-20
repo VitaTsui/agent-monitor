@@ -260,8 +260,9 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
             ));
             // 配对诊断：会话与进程都在却配不上（Windows「一直等待输入、不同步」）时，
             // 打出两侧的配对键 —— 进程侧 key = encode_path(cwd)，会话侧要等于 project_key，
-            // 一眼看出是尾随分隔符 / 大小写 / 编码规则哪里对不上。
-            if !sessions.is_empty() && !processes.is_empty() {
+            // 一眼看出是尾随分隔符 / 大小写 / 编码规则哪里对不上。只在启动前 3 轮打印，
+            // 避免长期刷屏。
+            if n < 3 && !sessions.is_empty() && !processes.is_empty() {
                 for p in &processes {
                     client_log(&format!(
                         "[pair] proc agent={} key={} cwd={:?}",

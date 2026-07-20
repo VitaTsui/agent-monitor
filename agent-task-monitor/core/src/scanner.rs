@@ -655,11 +655,13 @@ pub fn build_tasks(
 // ---------- jsonl 解析 ----------
 
 fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummary> {
-    let project_key = path
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
+    // 目录名即项目 key；Windows 下统一小写，与 encode_path 的同一化对齐（大小写不敏感）
+    let project_key = normalize_key_case(
+        path.parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
+    );
     let mut cwd = String::new();
     // 会话记录里的 cwd 会跟随 shell 漂移；以「编码后等于项目目录名」的 cwd 为准
     let mut canonical_cwd = String::new();
@@ -1429,10 +1431,25 @@ pub fn encode_path(p: &str) -> String {
     // 编码而来（D--proj）。不去掉，进程侧会多一个尾随 '-'（D--proj-），与会话的
     // project_key 对不上、配不成对 —— 会话就沦为「等待输入」的占位进程、内容永不
     // 同步。macOS 的 cwd 无尾随斜杠，故此前只在 Windows 上暴露。
-    p.trim_end_matches(['/', '\\'])
+    let s: String = p
+        .trim_end_matches(['/', '\\'])
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
+        .collect();
+    normalize_key_case(s)
+}
+
+/// Windows 路径大小写不敏感：sysinfo 上报的进程 cwd 与 Claude Code 建目录时记录的
+/// 盘符/路径大小写可能不同（实测同一盘符既出现 `D--` 又出现 `d--`），不统一大小写
+/// 就会配不成对、会话永远「等待输入」。故 Windows 下把配对键统一小写；其它平台
+/// 路径大小写敏感，保持原样。project_key（目录名）也要走同一化，两侧才对得上。
+#[cfg(windows)]
+pub fn normalize_key_case(s: String) -> String {
+    s.to_ascii_lowercase()
+}
+#[cfg(not(windows))]
+pub fn normalize_key_case(s: String) -> String {
+    s
 }
 
 fn short_name(cwd: &str) -> String {
@@ -1670,6 +1687,15 @@ mod bg_tests {
         ));
         let b2 = t.items.iter().find(|i| i.id == "b2").unwrap();
         assert_eq!(b2.status, "running", "没点名的任务不该被普通通知波及");
+    }
+
+    /// Windows：路径大小写不敏感，sysinfo 报的盘符大小写可能与目录名不同
+    /// （实测同一盘符既有 D-- 又有 d--），encode_path 统一小写后才配得上。
+    #[cfg(windows)]
+    #[test]
+    fn windows_pairing_is_case_insensitive() {
+        assert_eq!(encode_path("D:\\Program\\Foo"), encode_path("d:\\program\\foo"));
+        assert_eq!(encode_path("D:\\Program\\Foo"), "d--program-foo");
     }
 
     /// 非后台的普通命令不该被收进来
