@@ -3,7 +3,7 @@
   "appName": "终端任务监控",
   "webDir": "www",
   "server": {
-    "url": "https://monitor.vita-llm.com/portal?v=2",
+    "url": "https://monitor.vita-llm.com/portal?v=3",
     "cleartext": false,
     "allowNavigation": [
       "monitor.vita-llm.com"

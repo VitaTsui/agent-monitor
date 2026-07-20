@@ -9,11 +9,9 @@ $hover: rgba(36, 61, 66, 0.06);
 $active-bg: rgba(36, 61, 66, 0.09);
 
 .Portal {
-  height: 100vh;
-  // iOS WKWebView 的 100vh 与实际可视高不一致，dvh 跟随动态视口。
-  // 键盘由 Keyboard 插件 resize:native 处理：WKWebView 缩放到键盘上方，
-  // 100dvh 即缩放后视口 —— 顶栏固定、输入区贴键盘、无空白。
-  height: 100dvh;
+  // 100% 精确跟随 webview 边框：Keyboard resize:native 缩放 webview 时
+  // 顶栏固定、内容区收缩、输入区贴键盘、无空隙（比 100dvh 可靠）
+  height: 100%;
   display: flex;
   background: $cream;
   color: $text;

@@ -319,3 +319,28 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     }
   }
 }
+
+// 拖拽文件到输入区：高亮边框 + 覆盖提示
+.Composer.dragOver {
+  .chatInput {
+    outline: 2px dashed rgba(15, 155, 173, 0.6);
+    outline-offset: -2px;
+    border-radius: 12px;
+  }
+
+  .dropHint {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 12px;
+    background: rgba(242, 251, 252, 0.92);
+    border: 2px dashed rgba(15, 155, 173, 0.6);
+    color: #0a6b79;
+    font-size: 14px;
+    font-weight: 600;
+    pointer-events: none;
+  }
+}
