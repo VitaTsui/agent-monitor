@@ -2,7 +2,11 @@ import React, { useEffect, useRef, useState } from "react";
 
 import { Chat, Input, Modal } from "@hsu-react/ui";
 import { message } from "antd";
-import { PaperClipOutlined, WarningOutlined } from "@ant-design/icons";
+import {
+  FileSearchOutlined,
+  PaperClipOutlined,
+  WarningOutlined,
+} from "@ant-design/icons";
 
 import {
   SlashCommand,
@@ -89,8 +93,11 @@ const Composer: React.FC<ComposerProps> = (props) => {
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [dirRel, setDirRel] = useState("");
   const [dirList, setDirList] = useState<string[]>([]);
+  const [dirFiles, setDirFiles] = useState<string[]>([]);
   const [dirLoading, setDirLoading] = useState(false);
   const dirPollRef = useRef(0);
+  // 「选择文件回填相对路径」模态（与上传共用目录浏览，但只读、点文件即插入路径）
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   // 拉取 rel 下的子目录；agent 异步回带，pending 时 1.2s 后重试（最多 8 次）
   const loadDirs = (rel: string, attempt = 0) => {
@@ -110,6 +117,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
           return;
         }
         setDirList(res.data?.dirs ?? []);
+        setDirFiles(res.data?.files ?? []);
         setDirLoading(false);
       })
       .catch(() => {
@@ -139,7 +147,23 @@ const Composer: React.FC<ComposerProps> = (props) => {
     setPendingFile(file);
     setDirRel("");
     setDirList([]);
+    setDirFiles([]);
     loadDirs("");
+  };
+
+  // 打开「选择文件」浏览器：根 = 会话所在目录
+  const openPicker = () => {
+    setPickerOpen(true);
+    setDirRel("");
+    setDirList([]);
+    setDirFiles([]);
+    loadDirs("");
+  };
+
+  // 选中某个文件 → 把相对会话目录的路径（正斜杠通用）插入输入框
+  const pickFileRef = (name: string) => {
+    appendToInput(`./${dirRel ? `${dirRel}/` : ""}${name}`);
+    setPickerOpen(false);
   };
 
   // 拖拽中高亮
@@ -316,15 +340,25 @@ const Composer: React.FC<ComposerProps> = (props) => {
         onSend={guardedSend}
         uploadEnabled={false}
         buttonGroup={
-          machineId && cwd && !disabled
+          cwd && !disabled
             ? [
                 {
-                  title: "传文件到会话目录（完成后自动填入路径）",
-                  icon: <PaperClipOutlined className={styles.uploadIcon} />,
+                  title: "选择会话目录里的文件，插入相对路径",
+                  icon: <FileSearchOutlined className={styles.uploadIcon} />,
                   type: "text",
-                  loading: uploading,
-                  onClick: () => fileRef.current?.click(),
+                  onClick: openPicker,
                 },
+                ...(machineId
+                  ? [
+                      {
+                        title: "传文件到会话目录（完成后自动填入路径）",
+                        icon: <PaperClipOutlined className={styles.uploadIcon} />,
+                        type: "text" as const,
+                        loading: uploading,
+                        onClick: () => fileRef.current?.click(),
+                      },
+                    ]
+                  : []),
               ]
             : undefined
         }
@@ -374,6 +408,62 @@ const Composer: React.FC<ComposerProps> = (props) => {
           </div>
           <div className={styles.uploadHint}>
             将上传到：<b>./{dirRel ? `${dirRel}/` : ""}{pendingFile?.name}</b>
+          </div>
+        </div>
+      </Modal>
+
+      {/* 选择文件：浏览会话目录，点文件即把相对路径插入输入框（不上传） */}
+      <Modal
+        title="选择文件（插入相对路径）"
+        open={pickerOpen}
+        onCancel={() => setPickerOpen(false)}
+        footer={null}
+        width={460}
+        centered
+      >
+        <div className={styles.uploadForm}>
+          <div className={styles.dirCrumb}>
+            会话目录{dirRel ? ` / ${dirRel.split("/").join(" / ")}` : ""}
+          </div>
+          <div className={styles.dirTree}>
+            {dirRel ? (
+              <div className={styles.dirItem} onClick={upDir} role="button" tabIndex={0}>
+                <span className={styles.dirIcon}>↩</span> 返回上级
+              </div>
+            ) : null}
+            {dirLoading ? (
+              <div className={styles.dirEmpty}>读取目录中…</div>
+            ) : dirList.length === 0 && dirFiles.length === 0 ? (
+              <div className={styles.dirEmpty}>该目录为空</div>
+            ) : (
+              <>
+                {dirList.map((d) => (
+                  <div
+                    key={`d-${d}`}
+                    className={styles.dirItem}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => enterDir(d)}
+                  >
+                    <span className={styles.dirIcon}>📁</span> {d}
+                  </div>
+                ))}
+                {dirFiles.map((f) => (
+                  <div
+                    key={`f-${f}`}
+                    className={styles.dirItem}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => pickFileRef(f)}
+                  >
+                    <span className={styles.dirIcon}>📄</span> {f}
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+          <div className={styles.uploadHint}>
+            点击文件即插入：<b>./{dirRel ? `${dirRel}/` : ""}文件名</b>
           </div>
         </div>
       </Modal>
