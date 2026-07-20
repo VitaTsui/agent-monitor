@@ -28,6 +28,11 @@ pub struct SessionSummary {
     pub version: Option<String>,
     pub git_branch: Option<String>,
     pub mtime_ms: u64,
+    /// 会话文件创建时间（epoch 毫秒，取不到为 0）。用于把进程配到它真正在跑的会话：
+    /// 新起/空白的会话在终端打开（=进程启动）那刻创建，created_ms≈进程 start_time；
+    /// 旧会话创建时间差很远。比 mtime/started_at 都可靠（空白会话没 started_at、
+    /// 长跑会话 mtime 不等于启动时刻）。
+    pub created_ms: u64,
     pub line_count: u64,
     /// 近 5 小时滚动窗口内的 token 用量（input+output+cache_creation 估算）
     pub used_tokens_5h: u64,
@@ -127,7 +132,14 @@ impl SessionScanner {
                 if now_ms.saturating_sub(mtime_ms) > HISTORY_WINDOW_MS {
                     continue;
                 }
-                if let Some(summary) = self.summarize(&path, meta.len(), mtime_ms) {
+                let created_ms = meta
+                    .created()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                if let Some(mut summary) = self.summarize(&path, meta.len(), mtime_ms) {
+                    summary.created_ms = created_ms;
                     out.push(summary);
                 }
             }
@@ -170,7 +182,14 @@ impl SessionScanner {
             if now_ms.saturating_sub(mtime_ms) > HISTORY_WINDOW_MS {
                 continue;
             }
-            if let Some(sum) = self.summarize_codex(&path, meta.len(), mtime_ms) {
+            let created_ms = meta
+                .created()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            if let Some(mut sum) = self.summarize_codex(&path, meta.len(), mtime_ms) {
+                sum.created_ms = created_ms;
                 out.push(sum);
             }
         }
@@ -276,6 +295,7 @@ impl SessionScanner {
             version: None,
             git_branch: None,
             mtime_ms,
+            created_ms: 0,
             line_count: 0,
             used_tokens_5h: 0,
         };
@@ -541,26 +561,76 @@ pub fn build_tasks(
         }
     }
 
-    // 兜底：pinned 没覆盖到的进程/会话，仍按同项目内 mtime 最近者配对（旧行为）。
+    // pinned 没覆盖到的（绝大多数——claude 并不持续占着会话文件，写一行开一次就关，
+    // lsof/RmGetList 抓不到），按下面几级信号在同项目内配对：
     for (key, procs) in &proc_by_key {
         if let Some(sess) = sess_by_key.get(key) {
-            // 一个项目下最多只有「进程数」个会话是活的，取最近活动的那几个；
-            // 最新的进程配最近活动的会话。zip 到较短的一方为止，
-            // 多出来的老会话拿不到进程，自然落到 Finished。跳过已被 pinned 定下的两侧。
-            // 先固定「未被 pinned 占用」的会话集合（collect 后不再持有 pid_of_session
-            // 的借用），再与空闲进程配对，避免借用冲突。
-            let free_sess: Vec<&&SessionSummary> = sess
+            let mut free_procs: Vec<&ProcessInfo> = procs
+                .iter()
+                .rev()
+                .filter(|p| !paired_pids.contains(&p.pid))
+                .map(|p| *p)
+                .collect();
+            let mut free_sess: Vec<&SessionSummary> = sess
                 .iter()
                 .filter(|s| !pid_of_session.contains_key(s.session_id.as_str()))
+                .map(|s| *s)
                 .collect();
-            let mut it = free_sess.into_iter();
-            for p in procs.iter().rev() {
-                if paired_pids.contains(&p.pid) {
-                    continue;
+
+            // ① 命令行 --resume <id>：恢复的会话 started_at 很旧，只能靠命令行认出来。
+            free_procs.retain(|p| {
+                if let Some(rid) = resume_session_id(&p.command) {
+                    if let Some(pos) = free_sess.iter().position(|s| s.session_id == rid) {
+                        let s = free_sess.remove(pos);
+                        pid_of_session.insert(s.session_id.as_str(), p);
+                        paired_pids.insert(p.pid);
+                        return false;
+                    }
                 }
+                true
+            });
+
+            // ② 会话文件创建时刻≈进程启动时刻：新起/空白的会话在终端打开（=进程启动）
+            // 那刻创建，created_ms 与进程 start_time 只差几秒；旧的有内容会话创建于
+            // 很久以前，差很远、被窗口挡在外面。这才是「空白新会话正确配上、关闭/闲置的
+            // 旧会话不再冒充活进程」的关键（空白会话没 started_at、长跑会话 mtime 也不
+            // 等于启动时刻，都不可靠，唯 created_ms 稳）。贪心取窗口内时间差最小的对。
+            const CREATE_WINDOW_MS: i64 = 30 * 60 * 1000;
+            loop {
+                let mut best: Option<(usize, usize, i64)> = None;
+                for (pi, p) in free_procs.iter().enumerate() {
+                    if p.start_time == 0 {
+                        continue;
+                    }
+                    let p_ms = (p.start_time as i64) * 1000;
+                    for (si, s) in free_sess.iter().enumerate() {
+                        if s.created_ms == 0 {
+                            continue;
+                        }
+                        let d = (s.created_ms as i64 - p_ms).abs();
+                        if d <= CREATE_WINDOW_MS && best.map_or(true, |(_, _, bd)| d < bd) {
+                            best = Some((pi, si, d));
+                        }
+                    }
+                }
+                match best {
+                    Some((pi, si, _)) => {
+                        let p = free_procs.remove(pi);
+                        let s = free_sess.remove(si);
+                        pid_of_session.insert(s.session_id.as_str(), p);
+                        paired_pids.insert(p.pid);
+                    }
+                    None => break,
+                }
+            }
+
+            // ③ 兜底：剩余（会话缺 started_at 等）按 mtime 最近者配（free_sess 仍是
+            // mtime 降序）。
+            let mut it = free_sess.into_iter();
+            for p in free_procs {
                 match it.next() {
                     Some(s) => {
-                        pid_of_session.insert(s.session_id.as_str(), *p);
+                        pid_of_session.insert(s.session_id.as_str(), p);
                         paired_pids.insert(p.pid);
                     }
                     None => break,
@@ -819,9 +889,29 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         version,
         git_branch,
         mtime_ms: 0,
+        created_ms: 0,
         line_count: 0,
         used_tokens_5h,
     })
+}
+
+/// 从 claude 进程命令行里取被 `--resume <id>` / `--resume=<id>` / `-r <id>` 指定的
+/// 会话号。恢复的会话 started_at 很旧，靠时间配不上，只能从命令行认出来。
+/// `--continue`（无显式 id）返回 None，交给 started_at/mtime 兜底。
+fn resume_session_id(command: &str) -> Option<&str> {
+    let looks_id = |s: &str| s.len() >= 8 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    let toks: Vec<&str> = command.split_whitespace().collect();
+    for (i, t) in toks.iter().enumerate() {
+        if let Some(rest) = t.strip_prefix("--resume=") {
+            if looks_id(rest) {
+                return Some(rest);
+            }
+        }
+        if (*t == "--resume" || *t == "-r") && i + 1 < toks.len() && looks_id(toks[i + 1]) {
+            return Some(toks[i + 1]);
+        }
+    }
+    None
 }
 
 /// ISO8601 → epoch 毫秒
@@ -1958,6 +2048,7 @@ mod pairing_tests {
             version: None,
             git_branch: None,
             mtime_ms,
+            created_ms: 0,
             line_count: 1,
             used_tokens_5h: 0,
         }
@@ -1976,6 +2067,46 @@ mod pairing_tests {
             memory: 0,
             command: "claude".into(),
         }
+    }
+
+    /// 真实场景（Windows/Cursor）：空白新会话创建于进程启动那刻（created_ms≈start），
+    /// 但没写内容 → mtime 旧、无 started_at；而旧的有内容会话 mtime 反而更新。
+    /// 必须按 created_ms 把进程配给空白会话，旧会话落 Finished —— 不能被 mtime 抢走。
+    #[test]
+    fn pairs_by_created_time_not_mtime() {
+        let now = now_ms();
+        let start_s = now / 1000 - 60; // 进程 60s 前启动（秒）
+        let mut blank = sess("blank", "2026-07-20T00:00:00Z", now - 55_000);
+        blank.created_ms = start_s * 1000 + 2000; // 创建≈进程启动
+        blank.started_at = None; // 空白会话没有首条用户消息
+        let mut old = sess("old", "2026-07-19T00:00:00Z", now - 1_000); // mtime 更新
+        old.created_ms = now - 6 * 3600 * 1000; // 6 小时前创建
+        let mut p = proc(200, start_s);
+        p.command = "claude".into();
+
+        let tasks = build_tasks(&[blank, old], &[p], &|_| false, &HashMap::new());
+        let b = tasks.iter().find(|t| t.id == "blank").unwrap();
+        let o = tasks.iter().find(|t| t.id == "old").unwrap();
+        assert_eq!(b.pid, Some(200), "进程应配给创建时刻≈启动的空白会话");
+        assert_eq!(o.pid, None, "旧会话不该抢到进程（尽管 mtime 更新）");
+        assert_eq!(o.status, TaskStatus::Finished);
+    }
+
+    /// 命令行 --resume <id>：恢复的会话 created_ms/started_at 都很旧，只能靠命令行认出。
+    #[test]
+    fn resume_command_pairs_old_session() {
+        assert_eq!(resume_session_id("claude --resume abc12345-ef"), Some("abc12345-ef"));
+        assert_eq!(resume_session_id("node x/claude.js -r sess-9999"), Some("sess-9999"));
+        assert_eq!(resume_session_id("claude --continue"), None);
+
+        let now = now_ms();
+        let mut resumed = sess("resumed-xyz", "2026-06-01T00:00:00Z", now - 2_000);
+        resumed.created_ms = now - 20 * 24 * 3600 * 1000; // 20 天前创建
+        let mut p = proc(300, now / 1000 - 30);
+        p.command = "claude --resume resumed-xyz".into();
+
+        let tasks = build_tasks(&[resumed], &[p], &|_| false, &HashMap::new());
+        assert_eq!(tasks.iter().find(|t| t.id == "resumed-xyz").unwrap().pid, Some(300));
     }
 
     /// 「按打开文件配对」优先于 mtime：已关闭的会话 mtime 更新，但活进程占着的是
@@ -2198,6 +2329,7 @@ mod codex_tests {
             version: None,
             git_branch: None,
             mtime_ms: now - 5_000,
+            created_ms: 0,
             line_count: 1,
             used_tokens_5h: 0,
         };

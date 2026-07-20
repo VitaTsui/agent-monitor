@@ -279,9 +279,22 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                     let id6: String = s.session_id.chars().rev().take(6).collect::<Vec<_>>()
                         .into_iter().rev().collect();
                     let age_s = now_ms.saturating_sub(s.mtime_ms) / 1000;
+                    // created=0 说明该系统取不到文件创建时间（btime），created_ms 配对会失效
+                    let created_age = if s.created_ms == 0 {
+                        "n/a".to_string()
+                    } else {
+                        format!("{}s", now_ms.saturating_sub(s.created_ms) / 1000)
+                    };
                     client_log(&format!(
-                        "[pair] sess id=..{} key={} age={}s ended={}",
-                        id6, s.project_key, age_s, s.turn_ended
+                        "[pair] sess id=..{} key={} mtime_age={}s created_age={} ended={}",
+                        id6, s.project_key, age_s, created_age, s.turn_ended
+                    ));
+                }
+                for p in &processes {
+                    let pstart_age = now_ms / 1000 - p.start_time;
+                    client_log(&format!(
+                        "[pair] procstart pid={} start_age={}s",
+                        p.pid, pstart_age
                     ));
                 }
             }
