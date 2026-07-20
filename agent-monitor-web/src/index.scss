@@ -76,10 +76,11 @@
 html,
 body,
 #root {
-  width: 100vw;
-  height: 100vh;
-  // 底色兜底：iOS 键盘 resize 缩放 webview 时，若透明会透出 WKWebView
-  // 的黑色默认背景（键盘与页面间的黑块）——铺上 App 底色消除
+  width: 100%;
+  // 100% 精确等于 webview 边框：Keyboard resize:native 缩小 webview 时
+  // 布局严丝跟随（100dvh 在部分 iOS 版本不随原生 resize 收缩，会留空隙）
+  height: 100%;
+  // 底色兜底：键盘 resize 缩放时若透明会透出 WKWebView 黑色默认背景
   background: #f4fafb;
   overflow: hidden;
 }
