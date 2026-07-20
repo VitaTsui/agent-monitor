@@ -504,8 +504,11 @@ pub fn build_tasks(
     pinned: &HashMap<u32, String>,
     // 「本轮相比上轮 mtime 有推进」的会话号集合 = 此刻正在被写的活跃会话。兜底配对只
     // 认这些 —— 刚关闭的会话 mtime 已冻结、不在其中，不会被重启的空白进程抢去显示旧内容。
+    // active_ids 曾用于「按 mtime 推进兜底」，改为「只配自己创建的会话」后不再需要，
+    // 保留形参以免动全部调用点。
     active_ids: &HashSet<String>,
 ) -> Vec<Task> {
+    let _ = active_ids;
     // 按 cwd 分组进程（已按启动时间升序）
     // 进程按「编码后的 cwd」分组，与会话的项目目录名对齐（会话内 cwd 会漂移，目录名不会）
     // 按 (provider, cwd-key) 分组：各 provider 的会话只与同类进程配对
@@ -580,7 +583,7 @@ pub fn build_tasks(
                 .map(|s| *s)
                 .collect();
 
-            // ① 命令行 --resume <id>：恢复的会话 started_at 很旧，只能靠命令行认出来。
+            // ① 命令行 --resume <id>：恢复指定会话（创建于很久前，靠命令行认出）。
             free_procs.retain(|p| {
                 if let Some(rid) = resume_session_id(&p.command) {
                     if let Some(pos) = free_sess.iter().position(|s| s.session_id == rid) {
@@ -593,12 +596,14 @@ pub fn build_tasks(
                 true
             });
 
-            // ② 会话文件创建时刻≈进程启动时刻：新起/空白的会话在终端打开（=进程启动）
-            // 那刻创建，created_ms 与进程 start_time 只差几秒；旧的有内容会话创建于
-            // 很久以前，差很远、被窗口挡在外面。这才是「空白新会话正确配上、关闭/闲置的
-            // 旧会话不再冒充活进程」的关键（空白会话没 started_at、长跑会话 mtime 也不
-            // 等于启动时刻，都不可靠，唯 created_ms 稳）。贪心取窗口内时间差最小的对。
-            const CREATE_WINDOW_MS: i64 = 30 * 60 * 1000;
+            // ② 进程只配「自己创建的会话」：进程一定是它那个会话文件的创建者，故
+            // created_ms 落在 [启动-2min, 启动+4h]（允许少许时钟偏差 + 首条消息慢一点）。
+            // 旧的有内容会话创建于进程启动之前（created 远早于 start），被挡在外，绝不会被
+            // 「刚开、还没自己会话的空白进程」抢去显示旧内容（实测 Cursor 空白终端正是此坑：
+            // 4 个进程 5min 前启动，最新会话却是 9h 前建的，全是死进程留下的旧会话）。
+            // 贪心取时间差最小的 (进程,会话) 对。
+            const CREATE_BACK_MS: i64 = 2 * 60 * 1000;
+            const CREATE_FWD_MS: i64 = 4 * 3600 * 1000;
             loop {
                 let mut best: Option<(usize, usize, i64)> = None;
                 for (pi, p) in free_procs.iter().enumerate() {
@@ -610,9 +615,12 @@ pub fn build_tasks(
                         if s.created_ms == 0 {
                             continue;
                         }
-                        let d = (s.created_ms as i64 - p_ms).abs();
-                        if d <= CREATE_WINDOW_MS && best.map_or(true, |(_, _, bd)| d < bd) {
-                            best = Some((pi, si, d));
+                        let diff = s.created_ms as i64 - p_ms; // >0 = 会话比进程晚建
+                        if diff >= -CREATE_BACK_MS && diff <= CREATE_FWD_MS {
+                            let d = diff.abs();
+                            if best.map_or(true, |(_, _, bd)| d < bd) {
+                                best = Some((pi, si, d));
+                            }
                         }
                     }
                 }
@@ -627,13 +635,29 @@ pub fn build_tasks(
                 }
             }
 
-            // ③ 剩余进程配会话：优先配「此刻正在被写」的活跃会话（active_ids = 本轮 mtime
-            // 相比上轮有推进），其余按 mtime 最近者兜底。兜底必须保留 —— 否则闲置但真实的
-            // 当前会话（助手刚回复、等待输入，mtime 已冻结）会配不上、显示空白。
-            // free_sess 本就是 mtime 降序，稳定排序把活跃的提到前面即可。
-            let mut ordered: Vec<&SessionSummary> = free_sess;
-            ordered.sort_by_key(|s| !active_ids.contains(&s.session_id));
-            let mut it = ordered.into_iter();
+            // ③ 命令行 --continue（恢复最近改动的会话，无显式 id）：配给剩余里 mtime 最近
+            // 的会话（free_sess 是 mtime 降序）。没有 --resume/--continue、也没有自己新建会话
+            // （created≈start）的进程 —— 如 Cursor 里刚开、还没发消息的空白终端 —— 就留作
+            // 空白占位（会话尚未产生记录），绝不无差别按 mtime 硬配去抢旧会话。
+            free_procs.retain(|p| {
+                if wants_continue(&p.command) && !free_sess.is_empty() {
+                    let s = free_sess.remove(0);
+                    pid_of_session.insert(s.session_id.as_str(), p);
+                    paired_pids.insert(p.pid);
+                    return false;
+                }
+                true
+            });
+
+            // ④ 剩余进程配「最近 30min 还活跃过」的会话（mtime 新）：覆盖续跑/压缩恢复的
+            // 长会话 —— 它的会话文件创建于很久前、进程比它晚启动、命令行也无 --continue
+            // （Claude Code 自动续跑正是如此），但一直在写、mtime 很新。窗口把 8h+ 没动的
+            // 旧会话（Cursor 死进程留下的）挡在外，空白进程仍留占位。free_sess 是 mtime 降序。
+            const RECENT_MTIME_MS: u64 = 30 * 60 * 1000;
+            let now = now_ms();
+            let mut it = free_sess
+                .into_iter()
+                .filter(|s| now.saturating_sub(s.mtime_ms) <= RECENT_MTIME_MS);
             for p in free_procs {
                 match it.next() {
                     Some(s) => {
@@ -919,6 +943,13 @@ fn resume_session_id(command: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// 命令行里是否带 `--continue` / `-c`（恢复最近一个会话，无显式会话号）。
+fn wants_continue(command: &str) -> bool {
+    command
+        .split_whitespace()
+        .any(|t| t == "--continue" || t == "-c")
 }
 
 /// ISO8601 → epoch 毫秒
@@ -2151,11 +2182,12 @@ mod pairing_tests {
         let mut s = sess("live", "2026-07-20T00:00:00Z", now - 30_000);
         s.project_key = "D--proj".into(); // 会话目录名（无尾随）
         s.cwd = "D:\\proj".into();
-        let mut p = proc(4242, now);
+        s.created_ms = now - 30_000; // 会话在进程启动时创建
+        let mut p = proc(4242, now / 1000 - 30); // 进程 30s 前启动
         p.cwd = "D:\\proj\\".into(); // 进程 cwd 带尾随反斜杠
         p.tty = String::new();
 
-        let tasks = build_tasks(&[s], &[p], &|_| false, &HashMap::new(), &HashSet::from(["live".to_string()]));
+        let tasks = build_tasks(&[s], &[p], &|_| false, &HashMap::new(), &HashSet::new());
         // 配对成功 = 恰好一条任务、带 pid、状态非 Finished（不是占位进程）
         assert_eq!(tasks.len(), 1, "应配成一条，而非会话+占位进程两条");
         assert_eq!(tasks[0].pid, Some(4242));
@@ -2163,22 +2195,50 @@ mod pairing_tests {
         assert!(!tasks[0].prompt.contains("尚未产生记录"), "不该是占位进程");
     }
 
-    /// 真实踩到的坑：`claude --resume` 起来的长会话，起始时间是几周前，
-    /// 但此刻正在被写入；另一个会话起始更晚却早就没人管了。
-    /// 按起始时间配对会让活着的那个配不到进程 → 判为 Finished → 从列表消失，
-    /// 死的那个反倒顶着 pid 常驻显示「等待输入」。必须按最后活动时间配。
+    /// 续跑/压缩恢复的长会话：文件很久前创建、进程比它晚启动、命令行也无 --continue
+    /// （Claude Code 自动续跑正是如此），但一直在写、mtime 很新 → 必须配上（phase ④）；
+    /// 同时 8h 没动的旧会话不该被抢。
     #[test]
-    fn alive_resumed_session_wins_over_recently_started_dead_one() {
+    fn recently_active_long_session_pairs_via_mtime() {
         let now = now_ms();
-        // 活着：起始很老（resume），但刚刚还在写
+        let mut cont = sess("cont", "2026-07-16T00:00:00Z", now - 60_000); // 1min 前还在写
+        cont.created_ms = now - 20 * 3600 * 1000; // 20h 前创建（远早于进程）
+        let mut old = sess("old", "2026-07-15T00:00:00Z", now - 8 * 3600 * 1000);
+        old.created_ms = now - 30 * 3600 * 1000;
+        let mut p = proc(700, now / 1000 - 3600); // 进程 1h 前启动、无 --continue
+        p.command = "claude".into();
+
+        let tasks =
+            build_tasks(&[cont, old], &[p], &|_| false, &HashMap::new(), &HashSet::new());
+        assert_eq!(
+            tasks.iter().find(|t| t.id == "cont").unwrap().pid,
+            Some(700),
+            "续跑的近活会话应配上"
+        );
+        assert_eq!(
+            tasks.iter().find(|t| t.id == "old").unwrap().pid,
+            None,
+            "8h 没动的旧会话不该被抢"
+        );
+    }
+
+    /// `claude --continue` 恢复最近改动的会话：该会话创建于很久前（不是本进程建的），
+    /// 只能靠命令行 --continue 认出，配给剩余里 mtime 最近的会话（alive）；另一个 4 小时
+    /// 没动静的老会话配不到、落 Finished。
+    #[test]
+    fn continue_command_pairs_most_recent_session() {
+        let now = now_ms();
+        // 活着：刚刚还在写（mtime 最新）
         let alive = sess("alive", "2026-06-26T02:29:18Z", now - 60_000);
-        // 已死：起始更晚，但 4 小时没动静了
+        // 已死：4 小时没动静了
         let dead = sess("dead", "2026-07-16T16:16:19Z", now - 4 * 3600 * 1000);
         let sessions = vec![alive, dead];
-        // 只有一个进程 → 只能有一个会话是活的
-        let procs = vec![proc(3191, 1000)];
+        // 进程用 --continue 恢复最近会话
+        let mut p = proc(3191, now / 1000 - 100);
+        p.command = "claude --continue".into();
+        let procs = vec![p];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::from(["alive".to_string()]));
+        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::new());
         let by_id = |id: &str| tasks.iter().find(|t| t.id == id).unwrap().clone();
 
         assert_eq!(by_id("alive").pid, Some(3191), "正在写入的会话必须拿到进程");
@@ -2190,24 +2250,28 @@ mod pairing_tests {
         );
     }
 
-    /// 多进程时：最新的进程配最近活动的会话，多余的老会话落到 Finished
+    /// 多进程时：各进程配「自己启动时创建」的会话（created≈start），多余的老会话
+    /// （创建于任何进程启动之前）落到 Finished。
     #[test]
-    fn pairs_most_recent_sessions_with_processes() {
+    fn pairs_by_created_close_to_start() {
         let now = now_ms();
-        let sessions = vec![
-            sess("newest", "2026-07-01T00:00:00Z", now - 10_000),
-            sess("middle", "2026-07-02T00:00:00Z", now - 20_000),
-            sess("stale", "2026-07-03T00:00:00Z", now - 3 * 3600 * 1000),
-        ];
-        let procs = vec![proc(100, 1000), proc(200, 2000)];
+        let start_a = now / 1000 - 100; // 进程 A 100s 前启动
+        let start_b = now / 1000 - 50; // 进程 B 50s 前启动
+        let mut newest = sess("newest", "2026-07-01T00:00:00Z", now - 10_000);
+        newest.created_ms = start_b * 1000 + 1000; // ≈ 进程 B 启动
+        let mut middle = sess("middle", "2026-07-02T00:00:00Z", now - 20_000);
+        middle.created_ms = start_a * 1000 + 1000; // ≈ 进程 A 启动
+        let mut stale = sess("stale", "2026-07-03T00:00:00Z", now - 3 * 3600 * 1000);
+        stale.created_ms = now - 6 * 3600 * 1000; // 远早于任何进程启动
+        let sessions = vec![newest, middle, stale];
+        let procs = vec![proc(100, start_a), proc(200, start_b)];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::from(["newest".to_string(), "middle".to_string()]));
+        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::new());
         let pid = |id: &str| tasks.iter().find(|t| t.id == id).unwrap().pid;
 
-        // 两个进程 → 最近活动的两个会话拿到 pid
-        assert_eq!(pid("newest"), Some(200), "最新进程配最近活动的会话");
+        assert_eq!(pid("newest"), Some(200), "进程配自己启动时创建的会话");
         assert_eq!(pid("middle"), Some(100));
-        assert_eq!(pid("stale"), None, "起始最晚但最久没活动的，不该拿到进程");
+        assert_eq!(pid("stale"), None, "创建于进程启动之前的旧会话不该拿到进程");
     }
 }
 
@@ -2336,7 +2400,7 @@ mod codex_tests {
             version: None,
             git_branch: None,
             mtime_ms: now - 5_000,
-            created_ms: 0,
+            created_ms: now - 60_000,
             line_count: 1,
             used_tokens_5h: 0,
         };
@@ -2347,7 +2411,7 @@ mod codex_tests {
             cwd: format!("/w/{key}"),
             ide: crate::model::IdeKind::Terminal,
             ide_name: "Terminal".into(),
-            start_time: 1000,
+            start_time: now_ms() / 1000 - 60,
             cpu_usage: 0.0,
             memory: 0,
             command: agent.into(),
