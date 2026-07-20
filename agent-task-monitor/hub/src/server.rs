@@ -158,10 +158,20 @@ pub fn router(state: SharedState) -> Router {
                 }
             }
         });
-        // 静态资源缓存策略：统一 no-cache（每次向服务器校验，未变走 304，
-        // 带 hash 的资源校验成本可忽略）。SetResponseHeader 只在响应缺该头
-        // 时补，不覆盖上面 fallback 显式设置的值。
         use tower_http::set_header::SetResponseHeaderLayer;
+        // /static/ 下是带内容 hash 的文件名（改动即换名），可长期强缓存 ——
+        // 第二次及以后启动无需重新下载 JS/CSS，直接命中缓存，秒开。
+        let static_dir = dist.join("static");
+        let static_assets = tower::ServiceBuilder::new()
+            .layer(SetResponseHeaderLayer::overriding(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("public, max-age=31536000, immutable"),
+            ))
+            .service(ServeDir::new(&static_dir));
+        router = router.nest_service("/static", static_assets);
+
+        // 其余(index.html / build-id.txt 等)统一 no-cache：每次向服务器校验，
+        // 配合前端构建号守卫，发版后能拿到指向新 hash 资源的新 index.html。
         let static_srv = tower::ServiceBuilder::new()
             .layer(SetResponseHeaderLayer::if_not_present(
                 axum::http::header::CACHE_CONTROL,
