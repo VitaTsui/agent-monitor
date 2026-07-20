@@ -747,7 +747,6 @@ async fn control_task(
         action: req.action,
         text: None,
         id: None,
-        enqueued_ms: crate::state::now_secs() * 1000,
     });
     tracing::info!("已向机器 {} 下发控制命令: {id}", task.machine_id);
     ok(json!({ "pid": pid, "result": "命令已下发，等待执行" }))
@@ -810,7 +809,6 @@ async fn input_task(
         action: am_core::model::ControlAction::Input,
         text: Some(text),
         id: Some(cmd_id.clone()),
-        enqueued_ms: crate::state::now_secs() * 1000,
     });
     ok(json!({ "pid": pid, "result": "已下发到目标机器", "cmdId": cmd_id }))
 }
@@ -1588,39 +1586,10 @@ async fn report(
         entry.tasks.iter().map(|t| t.id.as_str()).collect();
     entry.messages.retain(|k, _| alive.contains(k.as_str()));
     entry.git_cache.retain(|k, _| alive.contains(k.as_str()));
-    // 输入指令「按会话就绪度」下发：目标会话仍在执行（Running）时，先把该条输入扣在
-    // 队列里，等它停下（空闲/等待输入）能真正接收再随下一轮下发。好处有二：
-    //   1) 不趁 claude 跑一半把文本塞进去（那会被排到原生队尾、且立刻脱离 hub 掌控）；
-    //   2) 「正在等待执行」的任务因此留在 hub 队列里 —— 全程可撤回。
-    // 控制类指令（中断/停止/暂停）必须即时下发，不受此约束（正是要作用于运行中的会话）。
-    //
-    // 扣留判据只看「目标会话是否 Running」+「已扣多久」，绝不看会话 mtime：mtime 记的是
-    // claude 上次写文件的时刻，而用户往往正是在 claude 跑长命令（长时间不写文件）时发的
-    // 任务，此刻 mtime 早已很旧，用它判就会秒判为“可下发”而立刻撤不回——正是要避免的。
-    // 改以「入队至今时长」为准：Running 期间最多扣 MAX_HOLD_MS，撤回窗口就是这段时间。
-    // 上限同时兜底交互提示的死锁：claude 弹计划审批等提示时若仍算 Running（通常回合已结束
-    // 判 Idle 会直接放行，此处是保险），最多扣 MAX_HOLD_MS 后照样下发，绝不永久扣留。
-    let now_ms = crate::state::now_secs() * 1000;
-    const MAX_HOLD_MS: u64 = 45_000;
-    let running: std::collections::HashSet<String> = entry
-        .tasks
-        .iter()
-        .filter(|t| t.status == TaskStatus::Running)
-        .map(|t| t.id.clone())
-        .collect();
-    let mut held: VecDeque<ControlCmd> = VecDeque::new();
-    let mut commands: Vec<ControlCmd> = Vec::new();
-    for c in entry.pending.drain(..) {
-        let hold = matches!(c.action, am_core::model::ControlAction::Input)
-            && running.contains(c.task_id.as_str())
-            && now_ms.saturating_sub(c.enqueued_ms) < MAX_HOLD_MS;
-        if hold {
-            held.push_back(c);
-        } else {
-            commands.push(c);
-        }
-    }
-    entry.pending = held;
+    // 输入指令一律即时下发到终端：点了发送就直接键入终端会话，是否「排队」由终端里
+    // claude 自己的原生队列决定（会话跑着时新输入排在其后、被接收后才执行），hub 不再
+    // 代为扣留。（撤回按「终端队列是否已接收」判定，见前端。）
+    let commands: Vec<ControlCmd> = entry.pending.drain(..).collect();
     let files: Vec<am_core::model::FileTransfer> = entry.pending_files.drain(..).collect();
     let git_queries: Vec<am_core::model::GitQuery> = entry.pending_git.drain(..).collect();
     let dir_queries: Vec<am_core::model::DirQuery> = entry.pending_dir.drain(..).collect();

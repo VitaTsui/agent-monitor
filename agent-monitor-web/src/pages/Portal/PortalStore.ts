@@ -71,6 +71,13 @@ class PortalStore {
   private _messagesById: Record<string, PortalMessage[]> = {};
   private _loadingIds: string[] = [];
   private _keyword = "";
+  /**
+   * 撤回后把原文回填给对应会话的对话框：Composer 用 reaction 监听，命中自己的
+   * taskId 就把 text 填进输入框再消费掉。带 nonce 是为了「撤回同一段文本」也能
+   * 重新触发（否则相同对象引用不变、reaction 不响应）。
+   */
+  composerRefill: { taskId: string; text: string; nonce: number } | null = null;
+  private _refillNonce = 0;
 
   constructor() {
     // 连接管理字段是命令式状态（WS 句柄、定时器句柄、世代号、关闭标志），
@@ -556,6 +563,11 @@ class PortalStore {
       .catch(() => void 0);
   };
 
+  /** 撤回后把原文回填给对应会话的对话框（供 Composer 监听消费） */
+  public consumeComposerRefill = () => {
+    this.composerRefill = null;
+  };
+
   /** 撤回还在排队的输入（已被终端接收则提示失败并去掉排队标记） */
   public recallInput = (id: string, cmdId: string) => {
     recallPortalInput(id, cmdId)
@@ -563,10 +575,19 @@ class PortalStore {
         const cur = this._messagesById[id] ?? [];
         if (res.code === 0) {
           antdMessage.success("已撤回");
+          // 撤下排队回显，同时把原文回填进该会话的对话框，方便改完再发
+          const recalled = cur.find((m) => m.local && m.cmdId === cmdId);
           this._messagesById = {
             ...this._messagesById,
             [id]: cur.filter((m) => !(m.local && m.cmdId === cmdId)),
           };
+          if (recalled?.content) {
+            this.composerRefill = {
+              taskId: id,
+              text: recalled.content,
+              nonce: ++this._refillNonce,
+            };
+          }
         } else {
           antdMessage.warning(res.msg ?? "已被终端接收，无法撤回");
           this._messagesById = {

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 
 import { Chat, Input, Modal } from "@hsu-react/ui";
 import { message } from "antd";
+import { reaction } from "mobx";
 import {
   FileSearchOutlined,
   PaperClipOutlined,
@@ -15,6 +16,7 @@ import {
   uploadPortalFile,
 } from "@/services/apis/portal";
 import { CONFIRM_WORD, DangerHit, checkDanger } from "../../_utils/dangerCheck";
+import PortalStore from "../../PortalStore";
 import styles from "./index.module.scss";
 
 interface ComposerProps {
@@ -60,6 +62,22 @@ const Composer: React.FC<ComposerProps> = (props) => {
     ta.dispatchEvent(new Event("input", { bubbles: true }));
     ta.focus();
   };
+
+  // 撤回后把原文回填进本会话的对话框（PortalStore.composerRefill 命中自己的 taskId
+  // 才消费），方便改完再发。Composer 非 observer，用 reaction 订阅这一个字段即可。
+  useEffect(() => {
+    const dispose = reaction(
+      () => PortalStore.composerRefill,
+      (r) => {
+        if (r && r.taskId === taskId) {
+          appendToInput(r.text);
+          PortalStore.consumeComposerRefill();
+        }
+      },
+    );
+    return dispose;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId]);
 
   // 监听输入框内容：以「/xxx」（无空格）开头就进命令模式并按 xxx 过滤
   useEffect(() => {

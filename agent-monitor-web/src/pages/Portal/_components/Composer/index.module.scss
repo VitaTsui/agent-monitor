@@ -200,8 +200,10 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     word-break: break-all;
   }
 
+  // 固定高度（两个目录树弹窗共用）：目录条目多寡不一会让弹窗忽高忽低，钉死高度、
+  // 内容少留白、多了自己滚，弹窗尺寸稳定。
   .dirTree {
-    max-height: 240px;
+    height: 260px;
     overflow-y: auto;
     border: 1px solid rgba(36, 61, 66, 0.1);
     border-radius: 10px;

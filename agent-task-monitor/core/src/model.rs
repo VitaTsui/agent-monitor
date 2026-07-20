@@ -278,11 +278,6 @@ pub struct ControlCmd {
     /// 队列指令 id：网页据此查询「还在排队」与撤回（旧客户端忽略该字段）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// hub 内部字段：入队时刻（epoch ms）。只在 hub 的 pending 队列里存活，不参与
-    /// 序列化（既不下发给客户端、也不从上报里读入）。用于「输入按会话就绪度延迟
-    /// 下发」时限定最长扣留时长，防止卡在交互提示上的会话把输入永久扣住。
-    #[serde(skip)]
-    pub enqueued_ms: u64,
 }
 
 /// hub → agent 的待写入文件（传输文件到远程设备目录）
