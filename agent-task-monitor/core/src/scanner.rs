@@ -36,6 +36,10 @@ pub struct SessionSummary {
     pub line_count: u64,
     /// 近 5 小时滚动窗口内的 token 用量（input+output+cache_creation 估算）
     pub used_tokens_5h: u64,
+    /// 终端里 claude 原生排队、尚未被会话接受执行的输入（按入队顺序）。
+    /// 来自会话 jsonl 的 queue-operation 记录：enqueue 入列、remove 出列（被接受或取消），
+    /// 末态仍在列的即当前排队项。前端把它们挂在内容区底部显示。
+    pub queued_inputs: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -298,6 +302,7 @@ impl SessionScanner {
             created_ms: 0,
             line_count: 0,
             used_tokens_5h: 0,
+            queued_inputs: Vec::new(),
         };
         self.cache.insert(
             path.to_path_buf(),
@@ -733,6 +738,7 @@ pub fn build_tasks(
             git_branch: s.git_branch.clone(),
             process: proc_info,
             recent_messages: Vec::new(),
+            queued_inputs: s.queued_inputs.clone(),
         });
     }
 
@@ -786,6 +792,7 @@ pub fn build_tasks(
             git_branch: None,
             process: Some(p.clone()),
             recent_messages: Vec::new(),
+            queued_inputs: Vec::new(),
         });
     }
 
@@ -818,6 +825,8 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
     let mut prompt = String::new();
     let mut last_action = String::new();
     let mut turn_ended = false;
+    // 终端里 claude 原生排队、尚未被接受的输入（enqueue 入列 / remove 出列）
+    let mut queued_inputs: Vec<String> = Vec::new();
     let mut started_at: Option<String> = None;
     let mut last_active_at: Option<String> = None;
     let mut version: Option<String> = None;
@@ -866,15 +875,25 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                     turn_ended = false;
                 }
             }
-            "queue-operation" => {
-                if v.get("operation").and_then(Value::as_str) == Some("enqueue") {
+            "queue-operation" => match v.get("operation").and_then(Value::as_str) {
+                Some("enqueue") => {
                     if let Some(text) = queued_user_text(&v) {
+                        queued_inputs.push(text.clone());
                         prompt = text;
                         last_action = "等待助手响应".into();
                         turn_ended = false;
                     }
                 }
-            }
+                // 出列（被会话接受执行 或 取消）：从当前排队集合里移除该条
+                Some("remove") => {
+                    if let Some(text) = queued_user_text(&v) {
+                        if let Some(pos) = queued_inputs.iter().position(|q| q == &text) {
+                            queued_inputs.remove(pos);
+                        }
+                    }
+                }
+                _ => {}
+            },
             "assistant" => {
                 // 统计 5h 窗口内 token 用量（input+output+cache_creation）
                 if let Some(u) = v.pointer("/message/usage") {
@@ -935,6 +954,7 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         created_ms: 0,
         line_count: 0,
         used_tokens_5h,
+        queued_inputs,
     })
 }
 
@@ -2101,6 +2121,7 @@ mod pairing_tests {
             created_ms: 0,
             line_count: 1,
             used_tokens_5h: 0,
+            queued_inputs: Vec::new(),
         }
     }
 
@@ -2442,6 +2463,7 @@ mod codex_tests {
             created_ms: now - 60_000,
             line_count: 1,
             used_tokens_5h: 0,
+            queued_inputs: Vec::new(),
         };
         let proc = |agent: &str, pid: u32, key: &str| ProcessInfo {
             pid,

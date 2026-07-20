@@ -59,6 +59,8 @@ interface IPortalTaskData {
   version: string | null;
   gitBranch: string | null;
   process: PortalTaskProcess | null;
+  /** 终端里 claude 原生排队、尚未被接受执行的输入（按入队顺序） */
+  queuedInputs: string[];
 }
 export type PortalTaskData = Partial<IPortalTaskData>;
 

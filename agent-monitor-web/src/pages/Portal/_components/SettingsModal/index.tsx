@@ -500,20 +500,12 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                     <div className={styles.devInfo}>
                       <div className={styles.devName}>
                         客户端版本
+                        {/* 版本标签固定显示当前版本，更新中也不切成「正在下载/安装」——
+                            更新进度由下方的进度条单独呈现，标签只作版本标识 */}
                         {clientVer ? (
-                          updating ? (
-                            <Tag color="processing">
-                              {clientVer.progress?.phase === "installing"
-                                ? "正在安装…"
-                                : clientVer.progress?.phase === "restarting"
-                                  ? "即将重启…"
-                                  : "正在下载更新…"}
-                            </Tag>
-                          ) : (
-                            <Tag color={clientVer.latest ? "warning" : "green"}>
-                              v{clientVer.current}
-                            </Tag>
-                          )
+                          <Tag color={clientVer.latest ? "warning" : "green"}>
+                            v{clientVer.current}
+                          </Tag>
                         ) : null}
                       </div>
                       {updating && clientVer?.progress ? (

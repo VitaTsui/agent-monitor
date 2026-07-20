@@ -126,6 +126,9 @@ pub struct Task {
     /// 最近若干条消息摘要（agent 上报时携带，供 hub 缓存）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_messages: Vec<MessageBrief>,
+    /// 终端里 claude 原生排队、尚未被接受执行的输入（按入队顺序，供前端底部挂载显示）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_inputs: Vec<String>,
 }
 
 /// 控制动作

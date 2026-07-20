@@ -568,6 +568,35 @@ class PortalStore {
     this.composerRefill = null;
   };
 
+  /**
+   * 一起撤回底部挂载的多条排队任务，并把它们的原文合并回填进对话框。
+   * 只有仍在 hub 队列（带 cmdId、还没被终端取走）的能真正撤回；已进终端原生队列的
+   * 撤不回（claude 不开放出队），这里只负责把可撤的撤掉、并把全部文本回填供改后再发。
+   */
+  public recallAllQueued = (id: string, cmdIds: string[], allText: string) => {
+    cmdIds.forEach((cmdId) =>
+      recallPortalInput(id, cmdId)
+        .then((res) => {
+          if (res.code === 0) {
+            const cur = this._messagesById[id] ?? [];
+            this._messagesById = {
+              ...this._messagesById,
+              [id]: cur.filter((m) => !(m.local && m.cmdId === cmdId)),
+            };
+          }
+        })
+        .catch(() => void 0),
+    );
+    if (allText.trim()) {
+      this.composerRefill = {
+        taskId: id,
+        text: allText,
+        nonce: ++this._refillNonce,
+      };
+    }
+    antdMessage.success("已撤回排队任务");
+  };
+
   /** 撤回还在排队的输入（已被终端接收则提示失败并去掉排队标记） */
   public recallInput = (id: string, cmdId: string) => {
     recallPortalInput(id, cmdId)

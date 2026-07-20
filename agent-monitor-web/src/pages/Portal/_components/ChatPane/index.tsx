@@ -43,6 +43,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     closePane,
     sendInput,
     recallInput,
+    recallAllQueued,
     syncMessages,
   } = PortalStore;
   const chatRef = useRef<HTMLDivElement>(null);
@@ -52,11 +53,50 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   const id = task.id ?? "";
   const messages = messagesOf(id);
   const loading = isLoadingMessages(id);
-  // 清单与后台任务已抽到下方的状态面板，不参与对话流渲染
+  // 清单与后台任务已抽到下方的状态面板；排队中的任务（本地回显 + 终端原生队列）
+  // 也不进对话流，改挂在对话框上方（见下方 queuedStrip）。
   const feedMessages = React.useMemo(
-    () => messages.filter((m) => m.role !== "todos" && m.role !== "bgtasks"),
+    () =>
+      messages.filter(
+        (m) =>
+          m.role !== "todos" &&
+          m.role !== "bgtasks" &&
+          // 本地乐观回显（排队/待执行）不铺进内容流，改挂底部；被会话接受后由真实
+          // 同步消息接管、正常入流
+          !(m.local && (m.queued || m.delivered)),
+      ),
     [messages],
   );
+
+  // 底部「排队中」挂载项：本地回显（还在 hub 队列、可撤回）+ 终端里 claude 原生
+  // 队列（queued_inputs，已被终端接收、撤不回，仅展示）。按内容去重，本地项优先
+  // （带 cmdId 可撤回）。
+  const queuedItems = React.useMemo(() => {
+    const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+    const items: {
+      text: string;
+      cmdId?: string;
+      recallable: boolean;
+    }[] = [];
+    const seen = new Set<string>();
+    for (const m of messages) {
+      if (m.local && (m.queued || m.delivered)) {
+        const k = norm(m.content);
+        if (!seen.has(k)) {
+          seen.add(k);
+          items.push({ text: m.content, cmdId: m.cmdId, recallable: !!m.queued });
+        }
+      }
+    }
+    for (const t of task.queuedInputs ?? []) {
+      const k = norm(t);
+      if (!seen.has(k)) {
+        seen.add(k);
+        items.push({ text: t, recallable: false });
+      }
+    }
+    return items;
+  }, [messages, task.queuedInputs]);
 
   useEffect(() => {
     const el = chatRef.current;
@@ -216,6 +256,45 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
 
       {/* 清单与后台任务是「当前状态」而非时序事件：悬浮在本格右侧、可收起 */}
       <SessionPanels messages={messages} running={task.status === "running"} />
+
+      {queuedItems.length > 0 && (
+        <div className={styles.queuedStrip}>
+          <div className={styles.chatColumn}>
+            <div className={styles.queuedHead}>
+              <span className={styles.queuedTitle}>
+                <span className={styles.queuedDot} />
+                终端排队中 · {queuedItems.length}
+              </span>
+              <span
+                className={styles.recallAll}
+                role="button"
+                tabIndex={0}
+                onClick={() =>
+                  recallAllQueued(
+                    id,
+                    queuedItems
+                      .filter((q) => q.recallable && q.cmdId)
+                      .map((q) => q.cmdId as string),
+                    queuedItems.map((q) => q.text).join("\n"),
+                  )
+                }
+              >
+                全部撤回
+              </span>
+            </div>
+            <div className={styles.queuedList}>
+              {queuedItems.map((q, i) => (
+                <div key={i} className={styles.queuedItem}>
+                  <span className={styles.queuedItemText}>{q.text}</span>
+                  {!q.recallable && (
+                    <span className={styles.queuedTag}>已入终端队列</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className={styles.composerWrap}>
         <div className={styles.chatColumn}>

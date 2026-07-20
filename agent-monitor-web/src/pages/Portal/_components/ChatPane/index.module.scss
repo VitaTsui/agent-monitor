@@ -153,6 +153,81 @@ $muted: #7c9096;
 
   // 底部内边距让开手势条 / Home Indicator：原生壳里窗口延伸到系统栏下，
   // 不加的话输入框会被手势条压住。浏览器里 env() 为 0，等价于原来的 14px。
+  // 终端排队中的任务：挂在对话框上方，不进内容流
+  .queuedStrip {
+    flex: none;
+    padding: 6px calc(18px + env(safe-area-inset-right)) 0
+      calc(18px + env(safe-area-inset-left));
+
+    .queuedHead {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 4px;
+
+      .queuedTitle {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: #b7791f;
+
+        .queuedDot {
+          width: 6px;
+          height: 6px;
+          border-radius: 50%;
+          background: #d9a441;
+          animation: queuedPulse 1.4s ease-in-out infinite;
+        }
+      }
+
+      .recallAll {
+        font-size: 12px;
+        color: #0f9bad;
+        cursor: pointer;
+
+        &:hover {
+          text-decoration: underline;
+        }
+      }
+    }
+
+    .queuedList {
+      max-height: 108px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .queuedItem {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 8px;
+      background: rgba(217, 164, 65, 0.1);
+      border: 1px solid rgba(217, 164, 65, 0.28);
+      font-size: 12.5px;
+      color: #6b5628;
+
+      .queuedItemText {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .queuedTag {
+        flex: none;
+        font-size: 11px;
+        color: #9a854a;
+        opacity: 0.85;
+      }
+    }
+  }
+
   .composerWrap {
     // 底部扁平 10px：home 指示条安全区与键盘高度统一由 Portal 的
     // padding-bottom 处理，这里不再叠加安全区（否则键盘弹起时输入框与
@@ -168,4 +243,9 @@ $muted: #7c9096;
   .ChatPane .paneHeader {
     display: none;
   }
+}
+
+@keyframes queuedPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
