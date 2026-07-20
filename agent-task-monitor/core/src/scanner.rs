@@ -1170,6 +1170,8 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
             let mut text_buf = String::new();
             let mut tools = Vec::new();
             let mut plan: Option<&str> = None;
+            // 交互式选择/权限确认（AskUserQuestion）：把问题与选项整份同步给前端渲染成卡片
+            let mut select_input: Option<&Value> = None;
             for item in items {
                 match item.get("type").and_then(Value::as_str) {
                     Some("text") => {
@@ -1189,6 +1191,10 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                                 .and_then(Value::as_str);
                             continue;
                         }
+                        if name == "AskUserQuestion" {
+                            select_input = item.get("input");
+                            continue;
+                        }
                         let hint = tool_input_hint(item.get("input"));
                         tools.push(if hint.is_empty() {
                             name.to_string()
@@ -1204,6 +1210,14 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 return Some(MessageBrief {
                     role: "plan".into(),
                     content: truncate(p.trim(), 4000),
+                    timestamp: ts,
+                });
+            }
+            // 交互式选择卡片：整份 input（questions/options）序列化给前端
+            if let Some(inp) = select_input {
+                return Some(MessageBrief {
+                    role: "select".into(),
+                    content: truncate(&inp.to_string(), 4000),
                     timestamp: ts,
                 });
             }
@@ -1265,6 +1279,8 @@ struct BgTask {
     label: String,
     /// running | completed | failed | killed | stopped
     status: String,
+    /// "agent"（子代理 Task）| "bg"（后台命令）—— 前端据此拆成独立的子代理列表
+    kind: String,
 }
 
 /// 追踪会话里「在后台跑着」的任务。
@@ -1275,8 +1291,8 @@ struct BgTask {
 /// - 结束：后续某条 user 记录里的 <task-notification> 带 <task-id> 与 <status>。
 #[derive(Default)]
 struct BgTracker {
-    /// tool_use_id -> 展示名（等 tool_result 回填任务号）
-    pending: HashMap<String, String>,
+    /// tool_use_id -> (展示名, 种类 agent|bg)（等 tool_result 回填任务号）
+    pending: HashMap<String, (String, String)>,
     items: Vec<BgTask>,
     dirty: bool,
 }
@@ -1331,19 +1347,22 @@ impl BgTracker {
             .and_then(Value::as_str)
             .map(|s| truncate(s, 80))
             .unwrap_or_else(|| name.to_string());
-        self.pending.insert(use_id.to_string(), label);
+        // Task 工具 = 子代理；其余 run_in_background 的（Bash 等）= 后台命令
+        let kind = if name == "Task" { "agent" } else { "bg" };
+        self.pending
+            .insert(use_id.to_string(), (label, kind.to_string()));
     }
 
     fn on_tool_result(&mut self, item: &Value) {
         let Some(use_id) = item.get("tool_use_id").and_then(Value::as_str) else {
             return;
         };
-        let Some(label) = self.pending.remove(use_id) else {
+        let Some((label, kind)) = self.pending.remove(use_id) else {
             return;
         };
         let text = tool_result_text(item);
         let Some(id) = parse_bg_id(&text) else { return };
-        self.items.push(BgTask { id, label, status: "running".into() });
+        self.items.push(BgTask { id, label, status: "running".into(), kind });
         self.dirty = true;
     }
 

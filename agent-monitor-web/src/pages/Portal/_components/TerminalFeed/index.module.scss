@@ -483,3 +483,81 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     }
   }
 }
+
+  // 交互式选择卡片（AskUserQuestion 同步）：琥珀色调，暗示「等待输入」
+  .selectCard {
+    border: 1px solid rgba(217, 164, 65, 0.45);
+    border-radius: 8px;
+    margin: 2px 0 6px;
+    overflow: hidden;
+
+    .selectHead {
+      padding: 5px 10px;
+      background: rgba(217, 164, 65, 0.16);
+      color: #f0c674;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .selectQ {
+      padding: 8px 10px 2px;
+
+      .selectQuestion {
+        color: $term-text;
+        font-size: 12.5px;
+        margin-bottom: 6px;
+      }
+
+      .selectOpts {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .selectOpt {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 6px 8px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+
+        .selectOptIdx {
+          flex: none;
+          width: 18px;
+          height: 18px;
+          border-radius: 5px;
+          background: rgba(217, 164, 65, 0.22);
+          color: #f0c674;
+          font-size: 11px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .selectOptBody {
+          display: flex;
+          flex-direction: column;
+          min-width: 0;
+
+          .selectOptLabel {
+            color: $term-text;
+            font-size: 12.5px;
+          }
+
+          .selectOptDesc {
+            color: rgba(230, 240, 239, 0.6);
+            font-size: 11.5px;
+            margin-top: 1px;
+          }
+        }
+      }
+    }
+
+    .selectHint {
+      padding: 4px 10px 8px;
+      color: rgba(230, 240, 239, 0.5);
+      font-size: 11px;
+    }
+  }

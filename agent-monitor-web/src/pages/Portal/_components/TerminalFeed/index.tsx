@@ -65,6 +65,52 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
   };
 
   const renderItem = (m: PortalMessage, key: string) => {
+    // 交互式选择/权限确认（AskUserQuestion）：同步问题与选项，成卡片展示。
+    // 终端里需要用户在 TUI 里选；这里让远程也能看到「在等你选什么」。
+    if (m.role === "select") {
+      let data: {
+        questions?: {
+          question?: string;
+          header?: string;
+          options?: { label?: string; description?: string }[];
+        }[];
+      } = {};
+      try {
+        data = JSON.parse(m.content);
+      } catch {
+        /* 半截 JSON：忽略，按空卡片处理 */
+      }
+      return (
+        <div key={key} className={styles.selectCard}>
+          <div className={styles.selectHead}>⌨︎ 终端等待选择</div>
+          {(data.questions ?? []).map((q, qi) => (
+            <div key={qi} className={styles.selectQ}>
+              {q.question ? (
+                <div className={styles.selectQuestion}>{q.question}</div>
+              ) : null}
+              <div className={styles.selectOpts}>
+                {(q.options ?? []).map((o, oi) => (
+                  <div key={oi} className={styles.selectOpt}>
+                    <span className={styles.selectOptIdx}>{oi + 1}</span>
+                    <span className={styles.selectOptBody}>
+                      <span className={styles.selectOptLabel}>{o.label}</span>
+                      {o.description ? (
+                        <span className={styles.selectOptDesc}>
+                          {o.description}
+                        </span>
+                      ) : null}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+          <div className={styles.selectHint}>
+            在下方对话框输入序号或选项文字即可回应
+          </div>
+        </div>
+      );
+    }
     // plan 模式给出的待批准方案：正文是 markdown，单独成卡片
     if (m.role === "plan") {
       return (
@@ -154,7 +200,7 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
         // 方案是待批准的计划而非过程噪音，需随时同步显示。
         // （清单与后台任务是「当前状态」，已由 ChatPane 抽出去单独成面板。）
         const visibleItems = inProgress
-          ? keyed.filter(({ m }) => ["assistant", "plan"].includes(m.role))
+          ? keyed.filter(({ m }) => ["assistant", "plan", "select"].includes(m.role))
           : keyed;
         // 执行中时给一条「最近动作」预览（最后一条工具调用）
         const lastTool = inProgress

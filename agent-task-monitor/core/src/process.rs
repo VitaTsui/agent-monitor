@@ -339,10 +339,106 @@ pub fn send_input(pid: u32, text: &str) -> Result<&'static str> {
 
         inject_tiocsti(&tty, text)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows_send_input(pid, text)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (pid, text);
-        Err(anyhow!("当前平台暂不支持远程发布任务（仅 Unix 支持终端注入）"))
+        Err(anyhow!("当前平台暂不支持远程发布任务"))
+    }
+}
+
+/// Windows：把文本注入目标控制台进程的输入缓冲。
+/// 机制：AttachConsole(pid) 挂到 claude 所在控制台（含 Windows Terminal/VS Code 的
+/// ConPTY 伪控制台）→ WriteConsoleInput 写入按键事件 → FreeConsole 复原。经由一段临时
+/// PowerShell 脚本（Add-Type P/Invoke）执行，文本走临时文件传递以彻底避开转义问题。
+/// 多行用 bracketed paste 包裹，内部换行只当文本、不提前提交（与 Unix 路径一致）。
+#[cfg(windows)]
+fn windows_send_input(pid: u32, text: &str) -> Result<&'static str> {
+    use std::io::Write;
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    // 多行包 bracketed paste：ESC[200~ … ESC[201~，末尾 Enter 在包裹外提交整块
+    let payload = if text.contains('\n') {
+        format!("\u{1b}[200~{text}\u{1b}[201~")
+    } else {
+        text.to_string()
+    };
+
+    let dir = std::env::temp_dir();
+    let stamp = std::process::id();
+    let txt_path = dir.join(format!("am-send-{pid}-{stamp}.txt"));
+    let ps_path = dir.join(format!("am-send-{pid}-{stamp}.ps1"));
+    std::fs::write(&txt_path, payload.as_bytes())
+        .map_err(|e| anyhow!("写入临时文本失败: {e}"))?;
+
+    // 脚本：读文本 → 逐字符写 KEY_EVENT_RECORD → 末尾补一个回车提交
+    let script = r#"param([int]$TargetPid,[string]$TextFile)
+$ErrorActionPreference='Stop'
+$code=@'
+using System;
+using System.Runtime.InteropServices;
+using System.Collections.Generic;
+public class AmConIn {
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern bool AttachConsole(uint pid);
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern bool FreeConsole();
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern IntPtr GetStdHandle(int n);
+  [StructLayout(LayoutKind.Sequential)] public struct KEY_EVENT_RECORD { public int bKeyDown; public ushort wRepeatCount; public ushort wVirtualKeyCode; public ushort wVirtualScanCode; public char UnicodeChar; public uint dwControlKeyState; }
+  [StructLayout(LayoutKind.Explicit)] public struct INPUT_RECORD { [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public KEY_EVENT_RECORD Key; }
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern bool WriteConsoleInput(IntPtr h, INPUT_RECORD[] buf, uint len, out uint written);
+  static INPUT_RECORD Mk(char c, ushort vk, bool down){ var r=new INPUT_RECORD(); r.EventType=1; var k=new KEY_EVENT_RECORD(); k.bKeyDown=down?1:0; k.wRepeatCount=1; k.wVirtualKeyCode=vk; k.wVirtualScanCode=0; k.UnicodeChar=c; k.dwControlKeyState=0; r.Key=k; return r; }
+  public static bool Send(uint pid, string text){
+    FreeConsole();
+    if(!AttachConsole(pid)) return false;
+    try {
+      IntPtr h=GetStdHandle(-10);
+      var recs=new List<INPUT_RECORD>();
+      foreach(char c in text){ recs.Add(Mk(c,0,true)); recs.Add(Mk(c,0,false)); }
+      recs.Add(Mk('\r',0x0D,true)); recs.Add(Mk('\r',0x0D,false));
+      var arr=recs.ToArray(); uint w;
+      return WriteConsoleInput(h, arr, (uint)arr.Length, out w);
+    } finally { FreeConsole(); }
+  }
+}
+'@
+Add-Type -TypeDefinition $code -Language CSharp
+$t=[System.IO.File]::ReadAllText($TextFile,[System.Text.Encoding]::UTF8)
+if([AmConIn]::Send([uint32]$TargetPid,$t)){ exit 0 } else { exit 2 }
+"#;
+    std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
+
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
+        .arg(&ps_path)
+        .arg("-TargetPid")
+        .arg(pid.to_string())
+        .arg("-TextFile")
+        .arg(&txt_path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    // 尽力清理临时文件（失败无妨，系统临时目录会被回收）
+    let _ = std::fs::remove_file(&txt_path);
+    let _ = std::fs::remove_file(&ps_path);
+    let _ = std::io::stdout().flush();
+
+    match out {
+        Ok(o) if o.status.success() => Ok("已发送"),
+        Ok(o) => Err(anyhow!(
+            "注入失败：AttachConsole/WriteConsoleInput 未成功（进程可能非控制台程序或权限不足）。{}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Err(anyhow!("powershell 执行失败: {e}")),
     }
 }
 

@@ -4,6 +4,7 @@ import { Tooltip } from "antd";
 import {
   CheckSquareOutlined,
   CloseOutlined,
+  PartitionOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 
@@ -22,6 +23,8 @@ interface BgTask {
   id: string;
   label: string;
   status: string;
+  /** "agent"=子代理 Task / "bg"=后台命令（缺省按后台命令） */
+  kind?: string;
 }
 
 interface SessionPanelsProps {
@@ -142,14 +145,17 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
 
   // 只看还没做完的：做完的条目没有关注价值，全做完时整块也就不显示了
   const todos = allTodos.filter((t) => t.status !== "completed");
-  // 后台任务同理，只看还没结束的：执行中 / 等待中
-  const bgTasks = allBg.filter((t) => !BG_DONE.includes(t.status));
+  // 后台任务同理，只看还没结束的：执行中 / 等待中。再按种类拆成「子代理」与「后台命令」
+  const aliveBg = allBg.filter((t) => !BG_DONE.includes(t.status));
+  const subAgents = aliveBg.filter((t) => t.kind === "agent");
+  const bgTasks = aliveBg.filter((t) => t.kind !== "agent");
 
-  if (!todos.length && !bgTasks.length) {
+  if (!todos.length && !bgTasks.length && !subAgents.length) {
     return null;
   }
 
   const runningCount = bgTasks.filter((t) => t.status === "running").length;
+  const agentRunning = subAgents.filter((t) => t.status === "running").length;
 
   return (
     <div className={styles.SessionPanels}>
@@ -191,6 +197,31 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
           }
         >
           {bgTasks.map((t) => (
+            <div key={t.id} className={styles.bgItem}>
+              <span className={`${styles.bgDot} ${styles[t.status] ?? ""}`} />
+              <Tooltip title={t.label} placement="left">
+                <span className={styles.bgText}>{t.label}</span>
+              </Tooltip>
+              <span className={styles.bgStatus}>
+                {BG_LABEL[t.status] ?? t.status}
+              </span>
+            </div>
+          ))}
+        </Dock>
+      )}
+
+      {subAgents.length > 0 && (
+        <Dock
+          title="子代理"
+          count={agentRunning ? `${agentRunning} 执行中` : `${subAgents.length} 个`}
+          pill={
+            <>
+              <PartitionOutlined />
+              {agentRunning || subAgents.length}
+            </>
+          }
+        >
+          {subAgents.map((t) => (
             <div key={t.id} className={styles.bgItem}>
               <span className={`${styles.bgDot} ${styles[t.status] ?? ""}`} />
               <Tooltip title={t.label} placement="left">
