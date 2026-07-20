@@ -70,7 +70,9 @@ export function useClientUpdateToast() {
     };
 
     check();
-    const timer = window.setInterval(check, 60_000);
+    // 10s 轮询：与系统通知（update-watcher 3s）尽量同步，避免 GUI 提示晚一大截。
+    // update_status 只是读内存里的 hub_latest_version，开销可忽略。
+    const timer = window.setInterval(check, 10_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);

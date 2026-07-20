@@ -549,15 +549,31 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                         </div>
                       )}
                     </div>
-                    <Button
-                      size="small"
-                      className={styles.checkUpdateBtn}
-                      loading={checkingUpdate || updating}
-                      disabled={updating}
-                      onClick={checkUpdate}
-                    >
-                      {updating ? "更新中" : "检查更新"}
-                    </Button>
+                    {clientVer?.latest && !updating ? (
+                      // 已知有新版本：直接给「更新」按钮，不用再点「检查更新」走一遍确认
+                      <Button
+                        size="small"
+                        type="primary"
+                        className={styles.checkUpdateBtn}
+                        onClick={() =>
+                          tauriInvoke
+                            ?.("update_start")
+                            .catch(() => message.error("启动更新失败"))
+                        }
+                      >
+                        更新到 v{clientVer.latest}
+                      </Button>
+                    ) : (
+                      <Button
+                        size="small"
+                        className={styles.checkUpdateBtn}
+                        loading={checkingUpdate || updating}
+                        disabled={updating}
+                        onClick={checkUpdate}
+                      >
+                        {updating ? "更新中" : "检查更新"}
+                      </Button>
+                    )}
                   </div>
                   <div className={styles.termScope}>
                     <div className={styles.termScopeTitle}>监控范围</div>
