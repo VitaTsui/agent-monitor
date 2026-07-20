@@ -479,6 +479,9 @@ pub fn build_tasks(
     sessions: &[SessionSummary],
     processes: &[ProcessInfo],
     manual_paused: &dyn Fn(u32) -> bool,
+    // pid -> session_id：由「进程打开着哪个会话文件」得出的确定配对（客户端注入）。
+    // 有它就优先按它配，剩下的再按 mtime 兜底。空表则完全走 mtime 启发式（旧行为）。
+    pinned: &HashMap<u32, String>,
 ) -> Vec<Task> {
     // 按 cwd 分组进程（已按启动时间升序）
     // 进程按「编码后的 cwd」分组，与会话的项目目录名对齐（会话内 cwd 会漂移，目录名不会）
@@ -520,14 +523,48 @@ pub fn build_tasks(
 
     let mut pid_of_session: HashMap<&str, &ProcessInfo> = HashMap::new();
     let mut paired_pids: HashSet<u32> = HashSet::new();
+
+    // 第一优先：按「进程打开着哪个会话文件」得出的确定配对（pinned）。
+    // 这能解决「关闭的会话 mtime 反而更新、抢走了活进程」——因为已关闭会话的文件
+    // 没有活进程占着，压根不会出现在 pinned 里；闲置但仍开着的会话则会被正确配上。
+    if !pinned.is_empty() {
+        let proc_by_pid: HashMap<u32, &ProcessInfo> =
+            processes.iter().map(|p| (p.pid, p)).collect();
+        for (pid, sid) in pinned {
+            if let (Some(p), Some(s)) = (
+                proc_by_pid.get(pid),
+                sessions.iter().find(|s| &s.session_id == sid),
+            ) {
+                pid_of_session.insert(s.session_id.as_str(), *p);
+                paired_pids.insert(*pid);
+            }
+        }
+    }
+
+    // 兜底：pinned 没覆盖到的进程/会话，仍按同项目内 mtime 最近者配对（旧行为）。
     for (key, procs) in &proc_by_key {
         if let Some(sess) = sess_by_key.get(key) {
             // 一个项目下最多只有「进程数」个会话是活的，取最近活动的那几个；
             // 最新的进程配最近活动的会话。zip 到较短的一方为止，
-            // 多出来的老会话拿不到进程，自然落到 Finished。
-            for (p, s) in procs.iter().rev().zip(sess.iter()) {
-                pid_of_session.insert(s.session_id.as_str(), p);
-                paired_pids.insert(p.pid);
+            // 多出来的老会话拿不到进程，自然落到 Finished。跳过已被 pinned 定下的两侧。
+            // 先固定「未被 pinned 占用」的会话集合（collect 后不再持有 pid_of_session
+            // 的借用），再与空闲进程配对，避免借用冲突。
+            let free_sess: Vec<&&SessionSummary> = sess
+                .iter()
+                .filter(|s| !pid_of_session.contains_key(s.session_id.as_str()))
+                .collect();
+            let mut it = free_sess.into_iter();
+            for p in procs.iter().rev() {
+                if paired_pids.contains(&p.pid) {
+                    continue;
+                }
+                match it.next() {
+                    Some(s) => {
+                        pid_of_session.insert(s.session_id.as_str(), *p);
+                        paired_pids.insert(p.pid);
+                    }
+                    None => break,
+                }
             }
         }
     }
@@ -1941,6 +1978,29 @@ mod pairing_tests {
         }
     }
 
+    /// 「按打开文件配对」优先于 mtime：已关闭的会话 mtime 更新，但活进程占着的是
+    /// 另一个 mtime 更旧的会话（如 Cursor 里闲置的会话）。pinned 指定后应把进程配给
+    /// 它真正打开的会话，已关闭的落 Finished —— 而非被 mtime 抢走。
+    #[test]
+    fn pinned_overrides_mtime_pairing() {
+        let now = now_ms();
+        // 已关闭：mtime 更新（刚关不久）
+        let closed = sess("closed", "2026-07-20T22:00:00Z", now - 60_000);
+        // 活着但闲置：mtime 更旧
+        let cursor = sess("cursor", "2026-07-20T21:00:00Z", now - 600_000);
+        let p = proc(100, now);
+        let mut pinned = HashMap::new();
+        pinned.insert(100u32, "cursor".to_string()); // 进程真正打开的是 cursor 会话
+
+        let tasks = build_tasks(&[closed, cursor], &[p], &|_| false, &pinned);
+        let cur = tasks.iter().find(|t| t.id == "cursor").unwrap();
+        let clo = tasks.iter().find(|t| t.id == "closed").unwrap();
+        assert_eq!(cur.pid, Some(100), "活进程应配给它打开的 cursor 会话");
+        assert_ne!(cur.status, TaskStatus::Finished);
+        assert_eq!(clo.pid, None, "已关闭会话不该抢到进程");
+        assert_eq!(clo.status, TaskStatus::Finished);
+    }
+
     /// Windows：sysinfo 上报的进程 cwd 带尾随反斜杠（D:\proj\），会话目录名却是
     /// 无尾随的 D--proj。encode_path 必须先去尾随分隔符，两者才能配成对，
     /// 否则会话永远沦为「等待输入」的占位进程、内容不同步。
@@ -1957,7 +2017,7 @@ mod pairing_tests {
         p.cwd = "D:\\proj\\".into(); // 进程 cwd 带尾随反斜杠
         p.tty = String::new();
 
-        let tasks = build_tasks(&[s], &[p], &|_| false);
+        let tasks = build_tasks(&[s], &[p], &|_| false, &HashMap::new());
         // 配对成功 = 恰好一条任务、带 pid、状态非 Finished（不是占位进程）
         assert_eq!(tasks.len(), 1, "应配成一条，而非会话+占位进程两条");
         assert_eq!(tasks[0].pid, Some(4242));
@@ -1980,7 +2040,7 @@ mod pairing_tests {
         // 只有一个进程 → 只能有一个会话是活的
         let procs = vec![proc(3191, 1000)];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false);
+        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new());
         let by_id = |id: &str| tasks.iter().find(|t| t.id == id).unwrap().clone();
 
         assert_eq!(by_id("alive").pid, Some(3191), "正在写入的会话必须拿到进程");
@@ -2003,7 +2063,7 @@ mod pairing_tests {
         ];
         let procs = vec![proc(100, 1000), proc(200, 2000)];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false);
+        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new());
         let pid = |id: &str| tasks.iter().find(|t| t.id == id).unwrap().pid;
 
         // 两个进程 → 最近活动的两个会话拿到 pid
@@ -2156,7 +2216,7 @@ mod codex_tests {
         let sessions = vec![mk("claude", "c1", "-w-app"), mk("codex", "x1", "-w-app")];
         let procs = vec![proc("claude", 11, "app"), proc("codex", 22, "app"), proc("gemini", 33, "app")];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false);
+        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new());
         let by = |id: &str| tasks.iter().find(|t| t.id == id).unwrap();
 
         assert_eq!(by("c1").pid, Some(11), "claude 会话配 claude 进程");
@@ -2195,7 +2255,7 @@ mod codex_tests {
             memory: 0,
             command: "claude".into(),
         }];
-        let tasks = build_tasks(&[], &procs, &|_| false);
+        let tasks = build_tasks(&[], &procs, &|_| false, &HashMap::new());
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Claude Code", "空目录名不该带「 · 」尾巴");
         assert!(!tasks[0].title.contains('·'));

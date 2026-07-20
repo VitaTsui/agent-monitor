@@ -4,6 +4,7 @@
 
 mod agent;
 mod secrets;
+mod openfiles;
 mod state;
 #[cfg(feature = "desktop")]
 mod desktop;

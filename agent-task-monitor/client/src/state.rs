@@ -271,18 +271,55 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                         p.cwd
                     ));
                 }
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
                 for s in &sessions {
+                    let id6: String = s.session_id.chars().rev().take(6).collect::<Vec<_>>()
+                        .into_iter().rev().collect();
+                    let age_s = now_ms.saturating_sub(s.mtime_ms) / 1000;
                     client_log(&format!(
-                        "[pair] sess provider={} project_key={} cwd={:?}",
-                        s.provider, s.project_key, s.cwd
+                        "[pair] sess id=..{} key={} age={}s ended={}",
+                        id6, s.project_key, age_s, s.turn_ended
                     ));
                 }
             }
         }
     }
     let paused = state.paused.read().await.clone();
-    let mut tasks =
-        am_core::scanner::build_tasks(&sessions, &processes, &|pid| paused.contains(&pid));
+    // 按「进程打开着哪个会话文件」得出确定配对；lsof/RmGetList 有开销，节流每 4 轮算
+    // 一次、其余复用缓存（会话与文件的对应关系很稳定）。失败则空表，build_tasks 退回
+    // mtime 启发式，行为不变。
+    let pinned = {
+        use std::sync::atomic::Ordering;
+        static PIN_CACHE: std::sync::Mutex<Option<std::collections::HashMap<u32, String>>> =
+            std::sync::Mutex::new(None);
+        let tick = SCAN_TICKS.load(Ordering::Relaxed);
+        if tick % 4 == 0 {
+            let pids: Vec<u32> = processes.iter().map(|p| p.pid).collect();
+            let dirs = {
+                let scanner = state.scanner.lock().await;
+                let home = dirs::home_dir().unwrap_or_default();
+                vec![
+                    scanner.projects_dir().to_path_buf(),
+                    home.join(".codex/sessions"),
+                ]
+            };
+            let fresh =
+                tokio::task::block_in_place(|| crate::openfiles::pin_sessions(&pids, &dirs));
+            *PIN_CACHE.lock().unwrap() = Some(fresh.clone());
+            fresh
+        } else {
+            PIN_CACHE.lock().unwrap().clone().unwrap_or_default()
+        }
+    };
+    let mut tasks = am_core::scanner::build_tasks(
+        &sessions,
+        &processes,
+        &|pid| paused.contains(&pid),
+        &pinned,
+    );
     // 会话文件层：无存活进程的会话若其历史 tty 被排除也一并剔除（尽力而为）
     // 这里主要保证「有进程」的会话已被上面的 retain 过滤。
 
