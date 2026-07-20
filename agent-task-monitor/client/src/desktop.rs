@@ -68,6 +68,23 @@ fn set_app_visible_in_dock<R: tauri::Runtime>(app: &tauri::AppHandle<R>, visible
 #[cfg(not(target_os = "macos"))]
 fn set_app_visible_in_dock<R: tauri::Runtime>(_app: &tauri::AppHandle<R>, _visible: bool) {}
 
+/// 关掉 macOS App Nap。窗口关到托盘/失焦后，系统会把本进程的定时器合并到约 60s，
+/// 于是 1.5s 的扫描上报被压到一分钟一次——终端里发了任务，会话状态迟迟不更新。
+/// 持有一个 UserInitiatedAllowingIdleSystemSleep 活动令牌即可豁免节流（仍允许系统正常休眠）。
+/// 令牌需活到进程结束，故 forget 掉、永不 endActivity。
+#[cfg(target_os = "macos")]
+fn disable_app_nap() {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+    let reason = NSString::from_str("持续扫描 AI 代理会话，禁用 App Nap 定时器节流");
+    let token = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+        NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+        &reason,
+    );
+    std::mem::forget(token);
+}
+#[cfg(not(target_os = "macos"))]
+fn disable_app_nap() {}
+
 /// 把主窗口最小化到托盘：隐藏窗口 + macOS 退出 Dock（程序仍在后台跑）。
 fn minimize_to_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(w) = app.get_webview_window("main") {
@@ -187,6 +204,10 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+
+            // 后台/托盘态下必须持续以 1.5s 扫描上报会话状态，故先豁免 App Nap，
+            // 否则定时器被系统压到 ~60s，终端里发的任务要一分钟才反映到面板。
+            disable_app_nap();
 
             // 作为一般桌面应用运行：macOS 显示 Dock 图标（Regular）。
             // agent 模式启动即后台，初始就用 Accessory —— 若先 Regular 再切，

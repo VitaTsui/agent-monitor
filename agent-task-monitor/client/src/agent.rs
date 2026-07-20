@@ -36,6 +36,42 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     let mut pending_git_results: Vec<am_core::model::GitResult> = Vec::new();
     let mut pending_dir_results: Vec<am_core::model::DirResult> = Vec::new();
 
+    // 监听会话目录：文件一有写入（用户在终端里发了任务、助手产生输出）就立刻唤醒本
+    // 循环扫描上报，而不必干等 1.5s 轮询——后者在窗口关到托盘/失焦后会被 macOS
+    // 定时器节流压到约一分钟一次，导致「发了任务但面板迟迟不更新」。FSEvents/inotify
+    // 这类文件事件不受定时器节流影响，能可靠唤醒后台进程。轮询保留为兜底。
+    let file_changed = std::sync::Arc::new(tokio::sync::Notify::new());
+    let _fs_watcher = {
+        use notify::{RecursiveMode, Watcher};
+        let fc = file_changed.clone();
+        let dirs = {
+            let scanner = state.scanner.lock().await;
+            let home = dirs::home_dir().unwrap_or_default();
+            vec![scanner.projects_dir().to_path_buf(), home.join(".codex/sessions")]
+        };
+        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            // 内容有变化才唤醒（元数据/访问时间等噪声忽略），避免空转
+            if matches!(res, Ok(ev) if ev.kind.is_create() || ev.kind.is_modify() || ev.kind.is_remove()) {
+                fc.notify_one();
+            }
+        }) {
+            Ok(mut w) => {
+                for d in &dirs {
+                    if d.is_dir() {
+                        if let Err(e) = w.watch(d, RecursiveMode::Recursive) {
+                            tracing::warn!("监听会话目录失败 {}: {e}", d.display());
+                        }
+                    }
+                }
+                Some(w)
+            }
+            Err(e) => {
+                tracing::warn!("创建文件监听失败，退回纯轮询: {e}");
+                None
+            }
+        }
+    };
+
     // 上一轮循环结束的时刻：用于检测系统睡眠/唤醒（间隔远超预期即刚恢复）
     let mut last_tick = std::time::Instant::now();
     loop {
@@ -260,7 +296,14 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             }
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        // 正常等 1.5s；但会话文件一变就提前醒来立即上报。文件事件后稍等 150ms
+        // 聚合连续写入（一次编辑常触发多条事件），避免同一动作触发多轮扫描。
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(1500)) => {}
+            _ = file_changed.notified() => {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+        }
     }
 }
 
