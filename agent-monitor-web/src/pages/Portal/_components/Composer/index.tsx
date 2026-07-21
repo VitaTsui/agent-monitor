@@ -79,18 +79,31 @@ const Composer: React.FC<ComposerProps> = (props) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId]);
 
-  // 监听输入框内容：以「/xxx」（无空格）开头就进命令模式并按 xxx 过滤
+  // 监听输入框内容：以「/xxx」（无空格）开头就进命令模式并按 xxx 过滤。
+  // 关键：setSlashQuery 必须延后一帧（rAF）再调用 —— 直接在原生 input 事件里 setState 会
+  // 触发重渲染，把 hsu-ui 受控 textarea 的值回滚成本次按键前的旧值（表现为「/ 和字母都要
+  // 按两次、连打两个不同字母只留第二个、输入框里根本不显示」）。延后到下一帧时，hsu-ui 的
+  // onChange 已把值落定，此时更新 slashQuery 不会再回滚当前按键。
   useEffect(() => {
     const ta = rootRef.current?.querySelector("textarea");
     if (!ta) return;
+    let raf = 0;
     const onInput = () => {
-      const v = ta.value;
-      const m = /^\/(\S*)$/.exec(v);
-      setSlashQuery(m ? m[1] : null);
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const v = ta.value;
+        const m = /^\/(\S*)$/.exec(v);
+        setSlashQuery(m ? m[1] : null);
+      });
     };
+    const onBlur = () => setTimeout(() => setSlashQuery(null), 150);
     ta.addEventListener("input", onInput);
-    ta.addEventListener("blur", () => setTimeout(() => setSlashQuery(null), 150));
-    return () => ta.removeEventListener("input", onInput);
+    ta.addEventListener("blur", onBlur);
+    return () => {
+      cancelAnimationFrame(raf);
+      ta.removeEventListener("input", onInput);
+      ta.removeEventListener("blur", onBlur);
+    };
   }, [taskId]);
 
   // 移动端：回车换行、不发送（发送用右下角发送按钮）。hsu-ui Chat.Input 默认回车即提交，
