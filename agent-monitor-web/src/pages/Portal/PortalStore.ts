@@ -217,7 +217,19 @@ class PortalStore {
         byProject.set(key, { key, title, tasks: [t] });
       }
     }
-    return [...byProject.values()];
+    // 固定字母序：分组按标题、组内会话按标题(再退 id)稳定排序 —— 之前顺序跟随
+    // filtered 的活跃度，活跃会话一变就整列上下跳；改成字母序后位置钉死不乱跳。
+    const groups = [...byProject.values()];
+    const taskKey = (t: PortalTaskData) =>
+      t.title || t.prompt || t.projectName || t.id || "";
+    groups.sort((a, b) => a.title.localeCompare(b.title, "zh"));
+    for (const g of groups) {
+      g.tasks.sort((a, b) => {
+        const c = taskKey(a).localeCompare(taskKey(b), "zh");
+        return c !== 0 ? c : (a.id ?? "").localeCompare(b.id ?? "");
+      });
+    }
+    return groups;
   }
 
   get devices() {

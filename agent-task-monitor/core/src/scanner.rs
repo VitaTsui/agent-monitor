@@ -825,8 +825,10 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
     let mut prompt = String::new();
     let mut last_action = String::new();
     let mut turn_ended = false;
-    // 终端里 claude 原生排队、尚未被接受的输入（enqueue 入列 / remove 出列）
-    let mut queued_inputs: Vec<String> = Vec::new();
+    // 忠实回放 claude 原生输入队列：(匹配键=原始 content, 展示文本=Some 时才是真实用户
+    // 输入)。通知类（task-notification 等）也占位（展示文本 None），这样按位置的「空
+    // content 出列」能对上正确的项，最终只把「真实用户输入」拿去展示。
+    let mut queue: Vec<(String, Option<String>)> = Vec::new();
     let mut started_at: Option<String> = None;
     let mut last_active_at: Option<String> = None;
     let mut version: Option<String> = None;
@@ -877,28 +879,41 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
             }
             "queue-operation" => match v.get("operation").and_then(Value::as_str) {
                 Some("enqueue") => {
-                    if let Some(text) = queued_user_text(&v) {
-                        queued_inputs.push(text.clone());
-                        prompt = text;
+                    let key = v.get("content").and_then(Value::as_str).unwrap_or("").trim();
+                    let disp = queued_user_text(&v);
+                    if let Some(text) = &disp {
+                        prompt = text.clone();
                         last_action = "等待助手响应".into();
                         turn_ended = false;
                     }
+                    queue.push((truncate(key, 500), disp));
                 }
-                // 出列（被会话接受执行 或 按内容取消）：从当前排队集合里移除该条
+                // 出列（被会话接受执行 或 取消）：content 有值→按内容精确移除（匹配不到
+                // 再退移队首）；content 为空→移除队首（FIFO，最旧的先被接受）。空 content
+                // 的 remove 之前被 queued_user_text 滤成 None、什么都不做，已接受/撤回的项
+                // 因此卡在队列里一直显示「排队中」不消失。
                 Some("remove") => {
-                    if let Some(text) = queued_user_text(&v) {
-                        if let Some(pos) = queued_inputs.iter().position(|q| q == &text) {
-                            queued_inputs.remove(pos);
+                    let key = v.get("content").and_then(Value::as_str).unwrap_or("").trim();
+                    if !key.is_empty() {
+                        let k = truncate(key, 500);
+                        if let Some(pos) = queue.iter().position(|(c, _)| c == &k) {
+                            queue.remove(pos);
+                        } else if !queue.is_empty() {
+                            queue.remove(0);
                         }
+                    } else if !queue.is_empty() {
+                        queue.remove(0);
                     }
                 }
-                // 撤回最近一条（终端按 ↑ 把最新排队项拉回输入）：content 为空，弹出末尾一条
+                // 会话接受队首执行（content 恒空）：移除队首
                 Some("dequeue") => {
-                    queued_inputs.pop();
+                    if !queue.is_empty() {
+                        queue.remove(0);
+                    }
                 }
                 // 全部弹出（终端按 Esc 把排队全部插入会话）：清空
                 Some("popAll") => {
-                    queued_inputs.clear();
+                    queue.clear();
                 }
                 _ => {}
             },
@@ -944,6 +959,9 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
             _ => {}
         }
     }
+
+    // 只把真实用户排队输入（展示文本 Some）拿去上报；通知类占位项丢弃
+    let queued_inputs: Vec<String> = queue.into_iter().filter_map(|(_, d)| d).collect();
 
     Some(SessionSummary {
         provider: "claude".into(),
