@@ -39,6 +39,10 @@ pub struct MachineEntry {
     pub pending_git: VecDeque<am_core::model::GitQuery>,
     /// 待下发的目录列举请求（上传选目录）
     pub pending_dir: VecDeque<am_core::model::DirQuery>,
+    /// 待下发的文件夹操作（新建/删除/重命名）
+    pub pending_fsop: VecDeque<am_core::model::FsOp>,
+    /// 文件夹操作结果缓存：op_id → 结果（网页轮询后即读走）
+    pub fsop_results: HashMap<String, am_core::model::FsOpResult>,
     /// 目录列举结果缓存：(task_id, rel) → 子目录名
     /// (task_id, rel) → (子目录, 文件)。文件用于「选择文件回填相对路径」。
     pub dir_cache: HashMap<(String, String), (Vec<String>, Vec<String>)>,

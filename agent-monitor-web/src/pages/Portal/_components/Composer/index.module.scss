@@ -184,6 +184,23 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   .uploadLabel {
     font-size: 12.5px;
     color: #7c9096;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+
+    .dirNewBtn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      color: #0f9bad;
+      cursor: pointer;
+      font-weight: 500;
+
+      &:hover {
+        color: #0a6b79;
+      }
+    }
   }
 }
 
@@ -220,10 +237,45 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 
       &:hover {
         background: rgba(15, 155, 173, 0.08);
+
+        .dirItemOps {
+          opacity: 1;
+        }
       }
 
       .dirIcon {
         font-size: 14px;
+      }
+
+      // 目录名占满、可点进入；操作按钮靠右，hover 才显形
+      .dirItemName {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        word-break: break-all;
+      }
+
+      .dirItemOps {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        opacity: 0;
+        transition: opacity 0.12s;
+        color: #7c9096;
+
+        // 触屏无 hover：常驻显示
+        @media (hover: none) {
+          opacity: 1;
+        }
+
+        :global(.anticon):hover {
+          color: #0f9bad;
+        }
+        :global(.anticon):last-child:hover {
+          color: #e0564e;
+        }
       }
     }
 

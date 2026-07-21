@@ -69,6 +69,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/tasks/:id/queued", get(queued_inputs))
         .route("/monitor/tasks/:id/recall", post(recall_input))
         .route("/monitor/tasks/:id/dirs", get(task_dirs))
+        .route("/monitor/tasks/:id/fsop", post(task_fsop))
+        .route("/monitor/tasks/:id/fsop/:opid", get(task_fsop_result))
         .route("/monitor/machines", get(machines))
         .route("/monitor/agent", get(agent_status))
         .route("/monitor/ws", get(ws_handler))
@@ -1007,6 +1009,99 @@ async fn task_dirs(
     }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FsOpReq {
+    /// mkdir / delete / rename
+    op: String,
+    #[serde(default)]
+    rel: String,
+    name: String,
+    #[serde(default)]
+    new_name: String,
+}
+
+/// 单个路径段合法性：非空、无分隔符、非 . / ..
+fn valid_seg(s: &str) -> bool {
+    !s.is_empty() && !s.contains('/') && !s.contains('\\') && s != "." && s != ".."
+}
+
+/// POST /monitor/tasks/:id/fsop —— 会话目录内新建/删除/重命名文件夹（异步：下发给
+/// agent 执行，返回 opId，网页再轮询 /fsop/:opid 取结果）。
+async fn task_fsop(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<FsOpReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let rel = req.rel.trim().trim_matches('/').to_string();
+    if rel.split('/').filter(|s| !s.is_empty()).any(|seg| seg == "..") || rel.starts_with('/') {
+        return err(400, "非法目录");
+    }
+    if !matches!(req.op.as_str(), "mkdir" | "delete" | "rename") {
+        return err(400, "未知操作");
+    }
+    if !valid_seg(&req.name) {
+        return err(400, "非法名称");
+    }
+    if req.op == "rename" && !valid_seg(&req.new_name) {
+        return err(400, "非法新名称");
+    }
+    let task = {
+        let tasks = state.tasks_for(&user).await;
+        tasks.into_iter().find(|t| t.id == id)
+    };
+    let Some(task) = task else {
+        return err(404, "任务不存在");
+    };
+    let cwd = task.process.as_ref().map(|p| p.cwd.clone()).unwrap_or_default();
+    if cwd.is_empty() {
+        return err(400, "该会话没有工作目录信息");
+    }
+    let op_id = format!("{}-{}", task.machine_id, crate::state::now_secs());
+    let op_id = format!("{op_id}-{}", rel.len() + req.name.len() + req.op.len());
+    let mut machines = state.machines.write().await;
+    let Some(entry) = machines.get_mut(&task.machine_id) else {
+        return err(404, "任务所属机器已离线");
+    };
+    if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
+        return err(500, "任务所属机器已离线");
+    }
+    entry.pending_fsop.push_back(am_core::model::FsOp {
+        op_id: op_id.clone(),
+        task_id: id.clone(),
+        cwd,
+        rel: rel.clone(),
+        op: req.op,
+        name: req.name,
+        new_name: req.new_name,
+    });
+    // 该目录的列举缓存作废：操作后网页会重新拉取，须重新向 agent 查询而非返回旧缓存
+    entry.dir_cache.remove(&(id, rel));
+    ok(json!({ "opId": op_id, "pending": true }))
+}
+
+/// GET /monitor/tasks/:id/fsop/:opid —— 取某文件夹操作的执行结果（agent 回传前 pending）
+async fn task_fsop_result(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((_id, opid)): Path<(String, String)>,
+) -> Json<Value> {
+    if auth_user(&state, &headers).await.is_none() {
+        return err(401, "未登录");
+    }
+    let mut machines = state.machines.write().await;
+    for entry in machines.values_mut() {
+        if let Some(r) = entry.fsop_results.remove(&opid) {
+            return ok(json!({ "ok": r.ok, "msg": r.msg, "pending": false }));
+        }
+    }
+    ok(json!({ "pending": true }))
+}
+
 fn truncate_log(s: &str) -> String {
     s.chars().take(60).collect()
 }
@@ -1554,6 +1649,8 @@ async fn report(
                 messages: HashMap::new(),
                 pending_git: VecDeque::new(),
                 pending_dir: VecDeque::new(),
+                pending_fsop: VecDeque::new(),
+                fsop_results: HashMap::new(),
                 dir_cache: HashMap::new(),
                 git_cache: HashMap::new(),
                 notified_online: false,
@@ -1634,6 +1731,13 @@ async fn report(
     for r in payload.dir_results {
         entry.dir_cache.insert((r.task_id.clone(), r.rel.clone()), (r.dirs, r.files));
     }
+    // 文件夹操作结果：按 op_id 存起来供网页轮询（上限防止 map 无限涨）
+    for r in payload.fs_op_results {
+        entry.fsop_results.insert(r.op_id.clone(), r);
+    }
+    if entry.fsop_results.len() > 256 {
+        entry.fsop_results.clear();
+    }
     for r in payload.git_results {
         entry.git_cache.insert(r.task_id, r.overview);
     }
@@ -1650,6 +1754,7 @@ async fn report(
     let files: Vec<am_core::model::FileTransfer> = entry.pending_files.drain(..).collect();
     let git_queries: Vec<am_core::model::GitQuery> = entry.pending_git.drain(..).collect();
     let dir_queries: Vec<am_core::model::DirQuery> = entry.pending_dir.drain(..).collect();
+    let fs_ops: Vec<am_core::model::FsOp> = entry.pending_fsop.drain(..).collect();
     drop(machines);
 
     // 钉钉推送：不阻塞上报响应，后台异步发
@@ -1670,6 +1775,7 @@ async fn report(
         "files": files,
         "gitQueries": git_queries,
         "dirQueries": dir_queries,
+        "fsOps": fs_ops,
         "trusted": trusted,
         "hubVersion": ready_desktop_version(&downloads_dir),
         // 强制更新下限：客户端低于它必须更新才能继续使用

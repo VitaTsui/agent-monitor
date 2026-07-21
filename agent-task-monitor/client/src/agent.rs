@@ -35,6 +35,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     // 待随下一轮上报回传的 git 对比结果
     let mut pending_git_results: Vec<am_core::model::GitResult> = Vec::new();
     let mut pending_dir_results: Vec<am_core::model::DirResult> = Vec::new();
+    let mut pending_fs_op_results: Vec<am_core::model::FsOpResult> = Vec::new();
 
     // 监听会话目录：文件一有写入（用户在终端里发了任务、助手产生输出）就立刻唤醒本
     // 循环扫描上报，而不必干等 1.5s 轮询——后者在窗口关到托盘/失焦后会被 macOS
@@ -161,6 +162,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             tasks,
             git_results: std::mem::take(&mut pending_git_results),
             dir_results: std::mem::take(&mut pending_dir_results),
+            fs_op_results: std::mem::take(&mut pending_fs_op_results),
         };
 
         let mut req = client.post(format!("{hub}/monitor/report"));
@@ -283,6 +285,19 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                             files,
                             task_id: q.task_id,
                             rel: q.rel,
+                        });
+                    }
+                    // 文件夹操作（上传选目录弹窗里的新建/删除/重命名）
+                    let fs_ops: Vec<am_core::model::FsOp> = body
+                        .pointer("/data/fsOps")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    for op in fs_ops {
+                        let (ok, msg) = run_fs_op(&op);
+                        pending_fs_op_results.push(am_core::model::FsOpResult {
+                            op_id: op.op_id,
+                            ok,
+                            msg,
                         });
                     }
                 }
@@ -556,6 +571,83 @@ mod version_tests {
     }
 }
 
+
+/// 执行会话目录内的文件夹操作（新建/删除/重命名）。全程用 canonicalize 卡在会话根内，
+/// 越权/非法一律拒绝。返回 (成功, 提示语)。
+fn run_fs_op(op: &am_core::model::FsOp) -> (bool, String) {
+    use std::path::Path;
+    let bad = |n: &str| n.is_empty() || n.contains('/') || n.contains('\\') || n == "." || n == "..";
+    if bad(&op.name) {
+        return (false, "非法名称".into());
+    }
+    if op.rel.split('/').any(|s| s == "..") {
+        return (false, "非法路径".into());
+    }
+    let root = Path::new(&op.cwd);
+    let Ok(canon_root) = root.canonicalize() else {
+        return (false, "会话目录不可用".into());
+    };
+    // 目标所在目录（rel）必须存在且在根内
+    let base = root.join(op.rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let Ok(canon_base) = base.canonicalize() else {
+        return (false, "目录不存在".into());
+    };
+    if !canon_base.starts_with(&canon_root) {
+        return (false, "越权目录".into());
+    }
+    match op.op.as_str() {
+        "mkdir" => {
+            let target = canon_base.join(&op.name);
+            if target.exists() {
+                return (false, "同名已存在".into());
+            }
+            match std::fs::create_dir(&target) {
+                Ok(_) => (true, "已新建文件夹".into()),
+                Err(e) => (false, format!("新建失败：{e}")),
+            }
+        }
+        "delete" => {
+            let target = canon_base.join(&op.name);
+            let Ok(ct) = target.canonicalize() else {
+                return (false, "不存在".into());
+            };
+            // 不允许删根本身，且必须在根内
+            if ct == canon_root || !ct.starts_with(&canon_root) {
+                return (false, "越权目录".into());
+            }
+            let r = if ct.is_dir() {
+                std::fs::remove_dir_all(&ct)
+            } else {
+                std::fs::remove_file(&ct)
+            };
+            match r {
+                Ok(_) => (true, "已删除".into()),
+                Err(e) => (false, format!("删除失败：{e}")),
+            }
+        }
+        "rename" => {
+            if bad(&op.new_name) {
+                return (false, "非法新名称".into());
+            }
+            let target = canon_base.join(&op.name);
+            let Ok(ct) = target.canonicalize() else {
+                return (false, "不存在".into());
+            };
+            if ct == canon_root || !ct.starts_with(&canon_root) {
+                return (false, "越权目录".into());
+            }
+            let dst = canon_base.join(&op.new_name);
+            if dst.exists() {
+                return (false, "同名已存在".into());
+            }
+            match std::fs::rename(&ct, &dst) {
+                Ok(_) => (true, "已重命名".into()),
+                Err(e) => (false, format!("重命名失败：{e}")),
+            }
+        }
+        _ => (false, "未知操作".into()),
+    }
+}
 
 /// 列出 root/rel 下的子目录名（仅目录；防越出 root；隐藏目录排后；上限 300）
 /// 列出 root/rel 下的子目录与文件（各自排序，隐藏项靠后）。

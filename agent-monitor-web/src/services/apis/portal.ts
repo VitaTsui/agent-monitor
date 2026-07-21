@@ -357,3 +357,21 @@ export const getTaskDirs = async (id: string, rel: string) => {
     { params: { rel } },
   );
 };
+
+/** 会话目录内文件夹操作（新建/删除/重命名）：下发给 agent，返回 opId 后轮询结果 */
+export const fsopTask = async (
+  id: string,
+  body: { op: "mkdir" | "delete" | "rename"; rel: string; name: string; newName?: string },
+) => {
+  return await post<{ opId: string; pending: boolean }>(
+    `/monitor/tasks/${id}/fsop`,
+    body,
+  );
+};
+
+/** 取文件夹操作结果（agent 回传前 pending=true，需轮询） */
+export const getFsopResult = async (id: string, opId: string) => {
+  return await get<{ ok?: boolean; msg?: string; pending: boolean }>(
+    `/monitor/tasks/${id}/fsop/${opId}`,
+  );
+};

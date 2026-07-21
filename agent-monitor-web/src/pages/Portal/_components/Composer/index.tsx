@@ -4,13 +4,18 @@ import { Chat, Input, Modal } from "@hsu-react/ui";
 import { message } from "antd";
 import { reaction } from "mobx";
 import {
+  DeleteOutlined,
+  EditOutlined,
   FileSearchOutlined,
+  FolderAddOutlined,
   PaperClipOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
 
 import {
   SlashCommand,
+  fsopTask,
+  getFsopResult,
   getPortalSlashCommands,
   getTaskDirs,
   uploadPortalFile,
@@ -184,6 +189,74 @@ const Composer: React.FC<ComposerProps> = (props) => {
     setDirRel(next);
     setDirList([]);
     loadDirs(next);
+  };
+
+  // 文件夹操作忙标记（防连点）
+  const [fsBusy, setFsBusy] = useState(false);
+
+  /** 执行文件夹操作：下发 → 轮询结果 → 提示 → 重拉当前目录 */
+  const runFsop = async (
+    op: "mkdir" | "delete" | "rename",
+    name: string,
+    newName?: string,
+  ) => {
+    if (!taskId || fsBusy) return;
+    setFsBusy(true);
+    const hide = message.loading(
+      op === "mkdir" ? "新建中…" : op === "delete" ? "删除中…" : "重命名中…",
+      0,
+    );
+    try {
+      const res = await fsopTask(taskId, { op, rel: dirRel, name, newName });
+      if (res.code !== 0 || !res.data?.opId) {
+        message.error(res.msg ?? "操作失败");
+        return;
+      }
+      const opId = res.data.opId;
+      // agent 下一轮上报（≤1.5s）才执行，轮询取结果（最多 ~12s）
+      let done = false;
+      for (let i = 0; i < 12 && !done; i++) {
+        await new Promise((r) => window.setTimeout(r, 1000));
+        const rr = await getFsopResult(taskId, opId);
+        if (rr.code === 0 && rr.data && !rr.data.pending) {
+          done = true;
+          if (rr.data.ok) message.success(rr.data.msg || "已完成");
+          else message.error(rr.data.msg || "操作失败");
+        }
+      }
+      if (!done) message.warning("操作已下发，稍后刷新目录查看");
+    } catch {
+      message.error("操作失败，请检查网络");
+    } finally {
+      hide();
+      setFsBusy(false);
+      loadDirs(dirRel); // 无论成败都重拉，反映最新目录
+    }
+  };
+
+  const newFolder = () => {
+    const name = window.prompt("新建文件夹名称")?.trim();
+    if (!name) return;
+    if (/[\\/]/.test(name)) {
+      message.warning("名称不能包含斜杠");
+      return;
+    }
+    runFsop("mkdir", name);
+  };
+
+  const renameFolder = (name: string) => {
+    const next = window.prompt("重命名文件夹", name)?.trim();
+    if (!next || next === name) return;
+    if (/[\\/]/.test(next)) {
+      message.warning("名称不能包含斜杠");
+      return;
+    }
+    runFsop("rename", name, next);
+  };
+
+  const deleteFolder = (name: string) => {
+    if (!window.confirm(`删除文件夹「${name}」及其全部内容？此操作不可恢复。`)) return;
+    runFsop("delete", name);
   };
 
   const onPickFile = (file: File) => {
@@ -468,7 +541,17 @@ const Composer: React.FC<ComposerProps> = (props) => {
           <div className={styles.uploadFile}>
             文件：<b>{pendingFile?.name}</b>
           </div>
-          <div className={styles.uploadLabel}>目标目录（会话目录内选择）</div>
+          <div className={styles.uploadLabel}>
+            <span>目标目录（会话目录内选择）</span>
+            <span
+              className={styles.dirNewBtn}
+              role="button"
+              tabIndex={0}
+              onClick={newFolder}
+            >
+              <FolderAddOutlined /> 新建文件夹
+            </span>
+          </div>
           <div className={styles.dirCrumb}>
             会话目录{dirRel ? ` / ${dirRel.split("/").join(" / ")}` : ""}
           </div>
@@ -484,14 +567,31 @@ const Composer: React.FC<ComposerProps> = (props) => {
               <div className={styles.dirEmpty}>{dirRel ? "没有子目录" : "该目录下没有子目录"}</div>
             ) : (
               dirList.map((d) => (
-                <div
-                  key={d}
-                  className={styles.dirItem}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => enterDir(d)}
-                >
-                  <span className={styles.dirIcon}>📁</span> {d}
+                <div key={d} className={styles.dirItem}>
+                  <span
+                    className={styles.dirItemName}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => enterDir(d)}
+                  >
+                    <span className={styles.dirIcon}>📁</span> {d}
+                  </span>
+                  <span className={styles.dirItemOps}>
+                    <EditOutlined
+                      title="重命名"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        renameFolder(d);
+                      }}
+                    />
+                    <DeleteOutlined
+                      title="删除"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteFolder(d);
+                      }}
+                    />
+                  </span>
                 </div>
               ))
             )}
