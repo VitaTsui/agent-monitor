@@ -527,10 +527,15 @@ public class AmKey {{
   [DllImport("kernel32.dll",SetLastError=true)] public static extern bool AttachConsole(uint pid);
   [DllImport("kernel32.dll",SetLastError=true)] public static extern bool FreeConsole();
   [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode)] public static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
-  [StructLayout(LayoutKind.Sequential)] public struct KEY_EVENT_RECORD {{ public int bKeyDown; public ushort wRepeatCount; public ushort wVirtualKeyCode; public ushort wVirtualScanCode; public char UnicodeChar; public uint dwControlKeyState; }}
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct KEY_EVENT_RECORD {{ public int bKeyDown; public ushort wRepeatCount; public ushort wVirtualKeyCode; public ushort wVirtualScanCode; public char UnicodeChar; public uint dwControlKeyState; }}
   [StructLayout(LayoutKind.Explicit)] public struct INPUT_RECORD {{ [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public KEY_EVENT_RECORD Key; }}
-  [DllImport("kernel32.dll",SetLastError=true)] public static extern bool WriteConsoleInput(IntPtr h, INPUT_RECORD[] buf, uint len, out uint written);
+  [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode,EntryPoint="WriteConsoleInputW")] public static extern bool WriteConsoleInput(IntPtr h, INPUT_RECORD[] buf, uint len, out uint written);
   static INPUT_RECORD Mk(ushort vk, char uc, bool down){{ var r=new INPUT_RECORD(); r.EventType=1; var k=new KEY_EVENT_RECORD(); k.bKeyDown=down?1:0; k.wRepeatCount=1; k.wVirtualKeyCode=vk; k.wVirtualScanCode=0; k.UnicodeChar=uc; k.dwControlKeyState=0; r.Key=k; return r; }}
+  static bool WriteAll(IntPtr h, List<INPUT_RECORD> recs){{
+    int i=0; var arr=recs.ToArray();
+    while(i<arr.Length){{ int n=Math.Min(8, arr.Length-i); var chunk=new INPUT_RECORD[n]; Array.Copy(arr,i,chunk,0,n); uint w; if(!WriteConsoleInput(h, chunk, (uint)n, out w) || w==0) return false; i+=(int)w; }}
+    return true;
+  }}
   public static bool Send(uint pid, ushort vk, char uc, int count){{
     FreeConsole();
     if(!AttachConsole(pid)) return false;
@@ -539,8 +544,7 @@ public class AmKey {{
       if(h==(IntPtr)(-1)) return false;
       var recs=new List<INPUT_RECORD>();
       for(int i=0;i<count;i++){{ recs.Add(Mk(vk,uc,true)); recs.Add(Mk(vk,uc,false)); }}
-      var arr=recs.ToArray(); uint w;
-      return WriteConsoleInput(h, arr, (uint)arr.Length, out w);
+      return WriteAll(h, recs);
     }} finally {{ FreeConsole(); }}
   }}
 }}
@@ -610,21 +614,34 @@ public class AmConIn {
   [DllImport("kernel32.dll",SetLastError=true)] public static extern bool AttachConsole(uint pid);
   [DllImport("kernel32.dll",SetLastError=true)] public static extern bool FreeConsole();
   [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode)] public static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
-  [StructLayout(LayoutKind.Sequential)] public struct KEY_EVENT_RECORD { public int bKeyDown; public ushort wRepeatCount; public ushort wVirtualKeyCode; public ushort wVirtualScanCode; public char UnicodeChar; public uint dwControlKeyState; }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct KEY_EVENT_RECORD { public int bKeyDown; public ushort wRepeatCount; public ushort wVirtualKeyCode; public ushort wVirtualScanCode; public char UnicodeChar; public uint dwControlKeyState; }
   [StructLayout(LayoutKind.Explicit)] public struct INPUT_RECORD { [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public KEY_EVENT_RECORD Key; }
-  [DllImport("kernel32.dll",SetLastError=true)] public static extern bool WriteConsoleInput(IntPtr h, INPUT_RECORD[] buf, uint len, out uint written);
+  [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode,EntryPoint="WriteConsoleInputW")] public static extern bool WriteConsoleInput(IntPtr h, INPUT_RECORD[] buf, uint len, out uint written);
   static INPUT_RECORD Mk(char c, ushort vk, bool down){ var r=new INPUT_RECORD(); r.EventType=1; var k=new KEY_EVENT_RECORD(); k.bKeyDown=down?1:0; k.wRepeatCount=1; k.wVirtualKeyCode=vk; k.wVirtualScanCode=0; k.UnicodeChar=c; k.dwControlKeyState=0; r.Key=k; return r; }
+  // 一次写太多记录会撑爆控制台输入缓冲、报 ERROR_INSUFFICIENT_BUFFER(0x8007007A) —— 长
+  // 输入注入失败正因如此。改成每 8 条一批分次写，每批失败即回退。
+  static bool WriteAll(IntPtr h, System.Collections.Generic.List<INPUT_RECORD> recs){
+    int i=0; var arr=recs.ToArray();
+    while(i<arr.Length){
+      int n=Math.Min(8, arr.Length-i);
+      var chunk=new INPUT_RECORD[n];
+      Array.Copy(arr,i,chunk,0,n);
+      uint w;
+      if(!WriteConsoleInput(h, chunk, (uint)n, out w) || w==0) return false;
+      i+=(int)w;
+    }
+    return true;
+  }
   public static bool Send(uint pid, string text){
     FreeConsole();
     if(!AttachConsole(pid)) return false;
     try {
       IntPtr h=CreateFileW("CONIN$",0xC0000000u,3u,IntPtr.Zero,3u,0u,IntPtr.Zero);
       if(h==(IntPtr)(-1)) return false;
-      var recs=new List<INPUT_RECORD>();
+      var recs=new System.Collections.Generic.List<INPUT_RECORD>();
       foreach(char c in text){ recs.Add(Mk(c,0,true)); recs.Add(Mk(c,0,false)); }
       recs.Add(Mk('\r',0x0D,true)); recs.Add(Mk('\r',0x0D,false));
-      var arr=recs.ToArray(); uint w;
-      return WriteConsoleInput(h, arr, (uint)arr.Length, out w);
+      return WriteAll(h, recs);
     } finally { FreeConsole(); }
   }
 }
