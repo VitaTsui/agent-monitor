@@ -726,6 +726,8 @@ $active-bg: rgba(36, 61, 66, 0.09);
       z-index: 1;
       width: calc(var(--drawer-w) + env(safe-area-inset-left));
       min-width: 0;
+      // 移动端不要侧栏右侧描边：推开后它与内容之间会多出一条明显分界线
+      border-right: none;
       // 状态栏/灵动岛与左侧圆角让位，内容不被系统 UI 压住
       padding-top: env(safe-area-inset-top);
       padding-left: env(safe-area-inset-left);
@@ -748,11 +750,9 @@ $active-bg: rgba(36, 61, 66, 0.09);
 
       &.mainPushed {
         transform: translateX(var(--drawer-w));
-        // 被推开后左侧两角保持设备圆角观感（无法读系统圆角，取接近值）
+        // 被推开后左侧两角保持设备圆角观感；不加描边/阴影，靠圆角与底色差自然区隔
         border-top-left-radius: 26px;
         border-bottom-left-radius: 26px;
-        // 侧栏与内容的分界只用一条描边，不用阴影
-        border-left: 1px solid rgba(36, 61, 66, 0.18);
         overflow: hidden;
       }
     }

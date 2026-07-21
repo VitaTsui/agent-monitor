@@ -138,3 +138,14 @@ ol {
   src: url("./assets/fonts/DINAlternateBold.ttf") format("opentype");
 }
 
+
+// iOS 灵动岛/刘海让位：顶部弹出的全局提示(antd message)默认贴到 top:8px，
+// 会被灵动岛挡住。整体下移一个状态栏安全区高度。notification 同理。
+.ant-message {
+  top: calc(8px + env(safe-area-inset-top)) !important;
+}
+.ant-notification.ant-notification-top,
+.ant-notification.ant-notification-topLeft,
+.ant-notification.ant-notification-topRight {
+  top: calc(8px + env(safe-area-inset-top)) !important;
+}
