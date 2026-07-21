@@ -69,16 +69,12 @@ interface DockProps {
   children: React.ReactNode;
 }
 
-/** 与 scss 里的移动端断点保持一致 */
-const MOBILE_QUERY = "(max-width: 760px)";
 
 /** 单个可收起的悬浮面板（收起后缩成一枚胶囊） */
 const Dock: React.FC<DockProps> = ({ title, count, pill, children }) => {
-  // 窄屏默认收起：面板宽 250px，在手机上会盖掉大半个对话区。
-  // 收起态的胶囊仍带进度/数量，信息不丢，需要时点开即可。
-  const [open, setOpen] = useState(
-    () => !window.matchMedia?.(MOBILE_QUERY).matches,
-  );
+  // 默认收起（收起态胶囊仍带进度/数量，信息不丢，需要时点开即可）：面板占地大，
+  // 尤其拆分多格时会盖住对话区，默认缩成胶囊挂着更清爽。
+  const [open, setOpen] = useState(false);
 
   if (!open) {
     return (

@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import { Button } from "@hsu-react/ui";
-import { Popconfirm, Spin, Tooltip } from "antd";
+import { Dropdown, Modal, Popconfirm, Spin, Tooltip } from "antd";
 import {
   BranchesOutlined,
   CloseOutlined,
+  MoreOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
   StopOutlined,
@@ -181,67 +182,121 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
           </div>
         </div>
         <div className={styles.headActions}>
-          <Tooltip title="重新同步该终端的对话内容">
-            <Button
-              size="small"
-              type="text"
-              icon={<SyncOutlined spin={loading} />}
-              onClick={() => syncMessages(id)}
-            />
-          </Tooltip>
-          <Tooltip title="查看代码改动（git diff）">
-            <Button
-              size="small"
-              type="text"
-              icon={<BranchesOutlined />}
-              onClick={() => setGitOpen(true)}
-            />
-          </Tooltip>
-          <Tooltip title={paused ? "恢复" : "暂停"}>
-            <Button
-              size="small"
-              type="text"
-              icon={paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
-              disabled={!controllable}
-              onClick={() => control(id, paused ? "resume" : "pause")}
-            />
-          </Tooltip>
-          <Tooltip title="中断当前任务">
-            <Button
-              size="small"
-              type="text"
-              icon={<ThunderboltOutlined />}
-              disabled={!controllable}
-              onClick={() => control(id, "interrupt")}
-            />
-          </Tooltip>
-          <Popconfirm
-            title="确定终止该任务进程？"
-            okText="终止"
-            cancelText="取消"
-            onConfirm={() => control(id, "stop")}
-            disabled={!controllable}
-          >
-            <Tooltip title="终止进程">
-              <Button
-                size="small"
-                type="text"
-                danger
-                icon={<StopOutlined />}
-                disabled={!controllable}
-              />
-            </Tooltip>
-          </Popconfirm>
           {closable ? (
-            <Tooltip title="关闭此格">
-              <Button
-                size="small"
-                type="text"
-                icon={<CloseOutlined />}
-                onClick={() => closePane(id)}
-              />
-            </Tooltip>
-          ) : null}
+            // 拆分（多格）时空间窄：右上角功能收进下拉菜单（iOS 风格），只留一个 ⋯ 按钮
+            <Dropdown
+              trigger={["click"]}
+              placement="bottomRight"
+              menu={{
+                items: [
+                  {
+                    key: "sync",
+                    icon: <SyncOutlined />,
+                    label: "重新同步内容",
+                    onClick: () => syncMessages(id),
+                  },
+                  {
+                    key: "git",
+                    icon: <BranchesOutlined />,
+                    label: "代码改动（git diff）",
+                    onClick: () => setGitOpen(true),
+                  },
+                  {
+                    key: "pause",
+                    icon: paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />,
+                    label: paused ? "恢复" : "暂停",
+                    disabled: !controllable,
+                    onClick: () => control(id, paused ? "resume" : "pause"),
+                  },
+                  {
+                    key: "interrupt",
+                    icon: <ThunderboltOutlined />,
+                    label: "中断当前任务",
+                    disabled: !controllable,
+                    onClick: () => control(id, "interrupt"),
+                  },
+                  {
+                    key: "stop",
+                    icon: <StopOutlined />,
+                    label: "终止进程",
+                    danger: true,
+                    disabled: !controllable,
+                    onClick: () =>
+                      Modal.confirm({
+                        title: "确定终止该任务进程？",
+                        okText: "终止",
+                        cancelText: "取消",
+                        okButtonProps: { danger: true },
+                        onOk: () => control(id, "stop"),
+                      }),
+                  },
+                  { type: "divider" as const },
+                  {
+                    key: "close",
+                    icon: <CloseOutlined />,
+                    label: "关闭此格",
+                    onClick: () => closePane(id),
+                  },
+                ],
+              }}
+            >
+              <Button size="small" type="text" icon={<MoreOutlined />} />
+            </Dropdown>
+          ) : (
+            <>
+              <Tooltip title="重新同步该终端的对话内容">
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<SyncOutlined spin={loading} />}
+                  onClick={() => syncMessages(id)}
+                />
+              </Tooltip>
+              <Tooltip title="查看代码改动（git diff）">
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<BranchesOutlined />}
+                  onClick={() => setGitOpen(true)}
+                />
+              </Tooltip>
+              <Tooltip title={paused ? "恢复" : "暂停"}>
+                <Button
+                  size="small"
+                  type="text"
+                  icon={paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
+                  disabled={!controllable}
+                  onClick={() => control(id, paused ? "resume" : "pause")}
+                />
+              </Tooltip>
+              <Tooltip title="中断当前任务">
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<ThunderboltOutlined />}
+                  disabled={!controllable}
+                  onClick={() => control(id, "interrupt")}
+                />
+              </Tooltip>
+              <Popconfirm
+                title="确定终止该任务进程？"
+                okText="终止"
+                cancelText="取消"
+                onConfirm={() => control(id, "stop")}
+                disabled={!controllable}
+              >
+                <Tooltip title="终止进程">
+                  <Button
+                    size="small"
+                    type="text"
+                    danger
+                    icon={<StopOutlined />}
+                    disabled={!controllable}
+                  />
+                </Tooltip>
+              </Popconfirm>
+            </>
+          )}
         </div>
       </header>
 
