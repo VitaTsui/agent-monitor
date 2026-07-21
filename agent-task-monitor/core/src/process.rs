@@ -465,7 +465,9 @@ fn inject_tiocsti(tty: &str, text: &str) -> Result<&'static str> {
     } else {
         bytes.extend_from_slice(text.as_bytes());
     }
-    bytes.push(b'\n');
+    // 提交键必须是回车 CR(\r=0x0D)，不能用换行 LF(\n)：TUI（Claude Code 等）把 CR 当
+    // 「提交」、把 LF 当「输入里换一行」。之前推 \n 导致文字进了输入框却只换行、不提交。
+    bytes.push(b'\r');
     for b in bytes {
         let c = b as libc::c_char;
         let ret = unsafe { libc::ioctl(fd, libc::TIOCSTI, &c) };
@@ -500,14 +502,16 @@ fn applescript_write(tty: &str, text: &str) -> Result<&'static str> {
         esc(text)
     };
 
-    // iTerm2：write text 会自动追加回车
+    // iTerm2：先只键入文本（newline no，不让它自动补换行——那有时是 LF、只换行不提交），
+    // 再单独送一个回车 CR(character id 13) 作提交，把「粘贴内容」与「提交」拆开，最稳。
     let iterm = format!(
         r#"tell application "iTerm2"
   repeat with w in windows
     repeat with t in tabs of w
       repeat with s in sessions of t
         if (tty of s) is "{tty_e}" then
-          tell s to write text "{text_e}"
+          tell s to write text "{text_e}" newline no
+          tell s to write text (character id 13) newline no
           return "ok"
         end if
       end repeat
