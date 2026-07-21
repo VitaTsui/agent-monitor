@@ -486,7 +486,7 @@ using System.Collections.Generic;
 public class AmKey {{
   [DllImport("kernel32.dll",SetLastError=true)] public static extern bool AttachConsole(uint pid);
   [DllImport("kernel32.dll",SetLastError=true)] public static extern bool FreeConsole();
-  [DllImport("kernel32.dll",SetLastError=true)] public static extern IntPtr GetStdHandle(int n);
+  [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode)] public static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
   [StructLayout(LayoutKind.Sequential)] public struct KEY_EVENT_RECORD {{ public int bKeyDown; public ushort wRepeatCount; public ushort wVirtualKeyCode; public ushort wVirtualScanCode; public char UnicodeChar; public uint dwControlKeyState; }}
   [StructLayout(LayoutKind.Explicit)] public struct INPUT_RECORD {{ [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public KEY_EVENT_RECORD Key; }}
   [DllImport("kernel32.dll",SetLastError=true)] public static extern bool WriteConsoleInput(IntPtr h, INPUT_RECORD[] buf, uint len, out uint written);
@@ -495,7 +495,8 @@ public class AmKey {{
     FreeConsole();
     if(!AttachConsole(pid)) return false;
     try {{
-      IntPtr h=GetStdHandle(-10);
+      IntPtr h=CreateFileW("CONIN$",0xC0000000u,3u,IntPtr.Zero,3u,0u,IntPtr.Zero);
+      if(h==(IntPtr)(-1)) return false;
       var recs=new List<INPUT_RECORD>();
       for(int i=0;i<count;i++){{ recs.Add(Mk(vk,uc,true)); recs.Add(Mk(vk,uc,false)); }}
       var arr=recs.ToArray(); uint w;
@@ -568,7 +569,7 @@ using System.Collections.Generic;
 public class AmConIn {
   [DllImport("kernel32.dll",SetLastError=true)] public static extern bool AttachConsole(uint pid);
   [DllImport("kernel32.dll",SetLastError=true)] public static extern bool FreeConsole();
-  [DllImport("kernel32.dll",SetLastError=true)] public static extern IntPtr GetStdHandle(int n);
+  [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode)] public static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
   [StructLayout(LayoutKind.Sequential)] public struct KEY_EVENT_RECORD { public int bKeyDown; public ushort wRepeatCount; public ushort wVirtualKeyCode; public ushort wVirtualScanCode; public char UnicodeChar; public uint dwControlKeyState; }
   [StructLayout(LayoutKind.Explicit)] public struct INPUT_RECORD { [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public KEY_EVENT_RECORD Key; }
   [DllImport("kernel32.dll",SetLastError=true)] public static extern bool WriteConsoleInput(IntPtr h, INPUT_RECORD[] buf, uint len, out uint written);
@@ -577,7 +578,8 @@ public class AmConIn {
     FreeConsole();
     if(!AttachConsole(pid)) return false;
     try {
-      IntPtr h=GetStdHandle(-10);
+      IntPtr h=CreateFileW("CONIN$",0xC0000000u,3u,IntPtr.Zero,3u,0u,IntPtr.Zero);
+      if(h==(IntPtr)(-1)) return false;
       var recs=new List<INPUT_RECORD>();
       foreach(char c in text){ recs.Add(Mk(c,0,true)); recs.Add(Mk(c,0,false)); }
       recs.Add(Mk('\r',0x0D,true)); recs.Add(Mk('\r',0x0D,false));
