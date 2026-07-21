@@ -420,7 +420,7 @@ class PortalStore {
     // 新会话。先记下旧表里各会话的 pid，换表后把「丢了 pid 的打开会话」跟随到「现在
     // 持有该 pid 的会话」——这样 /clear 后仍能对着同一终端发任务、看内容，而不是卡在
     // 已失联（无 pid）的旧会话上，导致「下发失败、终端没这个任务」。
-    const prevPidById = new Map<string, number | undefined>();
+    const prevPidById = new Map<string, number | null | undefined>();
     for (const t of this._tasks) prevPidById.set(t.id ?? "", t.pid);
 
     // 内容没变就不换引用，否则整棵会话树白重渲染一遍。
