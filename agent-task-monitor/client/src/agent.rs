@@ -457,39 +457,53 @@ fn write_transfer(f: &am_core::model::FileTransfer) {
 /// 不无条件信任 hub 响应（响应链路若被中间人篡改，否则可对任意进程发信号）。
 async fn execute(state: &SharedState, cmd: ControlCmd, known_pids: &std::collections::HashSet<u32>) {
     let Some(pid) = cmd.pid else {
-        tracing::warn!("命令缺少 pid，跳过: {:?}", cmd);
+        // 会话没配对到进程（前端显示为「Claude Code / 等待输入」这类占位标题）时 pid 为空，
+        // 命令无处可投——网页却已提示「下发成功」。落盘让这种「发了没反应」可查。
+        crate::state::client_log(&format!(
+            "命令缺少 pid，跳过（任务 {}，会话可能尚未配对到终端进程）",
+            cmd.task_id
+        ));
         return;
     };
     if !known_pids.contains(&pid) {
-        tracing::warn!(
-            "拒绝执行：pid={pid} 不属于本机当前会话（任务 {}）",
-            cmd.task_id
-        );
+        // 落盘可见日志：GUI 应用的 stderr(tracing) 看不到，注入失败要能在 client.log 查到。
+        // 「网页提示下发成功、终端却没收到」多半就是这里——pid 不在本机本轮扫描到的会话集合
+        // （会话未配对到进程 / pid 已变 / 该会话在别的设备）。
+        crate::state::client_log(&format!(
+            "拒绝执行输入：pid={pid} 不在本机当前会话集合（任务 {}，本机已知 {} 个会话 pid）",
+            cmd.task_id,
+            known_pids.len()
+        ));
         return;
     }
     // 输入注入（发布任务）单独处理
     if matches!(cmd.action, am_core::model::ControlAction::Input) {
         let text = cmd.text.unwrap_or_default();
+        let preview: String = text.chars().take(20).collect();
         // send_input 在 macOS 上走 osascript，会遍历 Terminal/iTerm 的每个窗口与标签页，
         // 常态就要数秒，终端处于模态/无响应时还可能一直挂着 —— 绝不能占住 async worker。
         let res = tokio::task::spawn_blocking(move || am_core::process::send_input(pid, &text)).await;
         match res {
-            Ok(Ok(_)) => tracing::info!("执行 hub 输入命令: 任务 {} pid={pid}", cmd.task_id),
-            Ok(Err(e)) => tracing::warn!("执行 hub 输入命令失败: {e}"),
-            Err(e) => tracing::warn!("执行 hub 输入命令的阻塞任务异常: {e}"),
+            Ok(Ok(m)) => crate::state::client_log(&format!(
+                "注入输入成功：pid={pid} {m}（{preview}…）"
+            )),
+            Ok(Err(e)) => crate::state::client_log(&format!("注入输入失败：pid={pid} {e}")),
+            Err(e) => crate::state::client_log(&format!("注入输入阻塞任务异常：pid={pid} {e}")),
         }
         return;
     }
     // 终端按键注入（撤回排队 ↑ / 插入排队 Esc）单独处理
     if matches!(cmd.action, am_core::model::ControlAction::TermKey) {
         let spec = cmd.text.unwrap_or_default();
+        let spec_log = spec.clone();
         let res =
             tokio::task::spawn_blocking(move || am_core::process::send_terminal_keys(pid, &spec))
                 .await;
+        let spec = spec_log;
         match res {
-            Ok(Ok(_)) => tracing::info!("执行 hub 按键命令: 任务 {} pid={pid}", cmd.task_id),
-            Ok(Err(e)) => tracing::warn!("执行 hub 按键命令失败: {e}"),
-            Err(e) => tracing::warn!("执行 hub 按键命令的阻塞任务异常: {e}"),
+            Ok(Ok(m)) => crate::state::client_log(&format!("注入按键成功：pid={pid} {spec} {m}")),
+            Ok(Err(e)) => crate::state::client_log(&format!("注入按键失败：pid={pid} {spec} {e}")),
+            Err(e) => crate::state::client_log(&format!("注入按键阻塞任务异常：pid={pid} {e}")),
         }
         return;
     }
