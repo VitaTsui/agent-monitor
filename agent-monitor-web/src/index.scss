@@ -149,3 +149,9 @@ ol {
 .ant-notification.ant-notification-topRight {
   top: calc(8px + env(safe-area-inset-top)) !important;
 }
+
+// iOS Safari 点击可聚焦元素(输入框/按钮)时会闪一层半透明黑色高亮(tap highlight)，
+// 表现为「点输入框闪一下深色背景」。全局关掉，交互反馈用各自的 :active/:focus。
+* {
+  -webkit-tap-highlight-color: transparent;
+}
