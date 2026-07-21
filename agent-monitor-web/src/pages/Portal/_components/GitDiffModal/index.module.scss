@@ -4,15 +4,28 @@ $accent: #0f9bad;
 $mono: "SF Mono", Menlo, Consolas, monospace;
 
 .GitDiffModal {
+  // 固定高度：改动多寡不再让弹窗忽高忽低；内容区铺满、diff 填满剩余空间自己滚。
   :global(.ant-modal-body) {
     padding-top: 8px;
+    height: 68vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
 
   .empty {
-    padding: 40px 0;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
   }
 
   .body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
     .head {
       display: flex;
       align-items: center;
@@ -85,13 +98,14 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
       }
     }
 
-    // 统一 diff：深色终端风，加/删行高亮
+    // 统一 diff：深色终端风，加/删行高亮。flex 填满弹窗剩余高度、自己滚。
     .diff {
       margin: 0;
       background: #102a30;
       border-radius: 10px;
       padding: 12px 0;
-      max-height: 52vh;
+      flex: 1;
+      min-height: 0;
       overflow: auto;
       font-family: $mono;
       font-size: 12.5px;
