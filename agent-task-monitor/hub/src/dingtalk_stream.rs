@@ -159,6 +159,10 @@ async fn connect_once(
                     .to_string();
                 let session_webhook =
                     m.get("sessionWebhook").and_then(Value::as_str).unwrap_or("").to_string();
+                tracing::info!(
+                    "钉钉 Stream 收到机器人消息 user={user} 内容={content:?} 有回发地址={}",
+                    !session_webhook.is_empty()
+                );
 
                 // 先 ACK 该帧（钉钉据此认为已消费）
                 ack(&mut ws, &message_id).await?;
@@ -170,19 +174,29 @@ async fn connect_once(
                     let cl = client.clone();
                     tokio::spawn(async move {
                         let reply = crate::bot::dispatch(&st, &u, &content).await;
-                        let r = cl
+                        match cl
                             .post(&session_webhook)
                             .json(&json!({ "msgtype": "text", "text": { "content": reply } }))
                             .send()
-                            .await;
-                        if let Err(e) = r {
-                            tracing::warn!("钉钉 Stream 回发失败: {e}");
+                            .await
+                        {
+                            Ok(resp) => tracing::info!(
+                                "钉钉 Stream 已回发 user={u} http={}",
+                                resp.status()
+                            ),
+                            Err(e) => tracing::warn!("钉钉 Stream 回发失败: {e}"),
                         }
                     });
+                } else {
+                    tracing::warn!("钉钉 Stream 机器人消息无 sessionWebhook，无法回发");
                 }
             }
             // 其它事件帧：也 ACK 掉，避免网关重投
             _ => {
+                // 心跳(ping)已在上面单列，这里记录其它未知帧便于排查
+                if ftype != "SYSTEM" {
+                    tracing::info!("钉钉 Stream 收到未处理帧 type={ftype} topic={topic}");
+                }
                 if !message_id.is_empty() {
                     ack(&mut ws, &message_id).await?;
                 }
