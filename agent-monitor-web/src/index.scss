@@ -141,13 +141,14 @@ ol {
 
 // iOS 灵动岛/刘海让位：顶部弹出的全局提示(antd message)默认贴到 top:8px，
 // 会被灵动岛挡住。整体下移一个状态栏安全区高度。notification 同理。
+// 落到与移动端顶栏胶囊/按钮同一高度：安全区 + 顶栏按钮的垂直居中位置
 .ant-message {
-  top: calc(8px + env(safe-area-inset-top)) !important;
+  top: calc(env(safe-area-inset-top) + 22px) !important;
 }
 .ant-notification.ant-notification-top,
 .ant-notification.ant-notification-topLeft,
 .ant-notification.ant-notification-topRight {
-  top: calc(8px + env(safe-area-inset-top)) !important;
+  top: calc(env(safe-area-inset-top) + 22px) !important;
 }
 
 // iOS Safari 点击可聚焦元素(输入框/按钮)时会闪一层半透明黑色高亮(tap highlight)，
