@@ -367,7 +367,7 @@ pub fn send_terminal_keys(pid: u32, spec: &str) -> Result<&'static str> {
     }
     #[cfg(target_os = "macos")]
     {
-        iterm_send_key(pid, key, count)
+        mac_send_key(pid, key, count)
     }
     #[cfg(windows)]
     {
@@ -406,17 +406,20 @@ fn key_seq(key: &str) -> Option<&'static [u8]> {
     }
 }
 
-/// iTerm2：按 tty 匹配会话，用 write text（不追加换行）把转义序列写 count 次。
+/// macOS 终端按键注入：先试 iTerm2（write text 转义序列，无需切前台），
+/// 匹配不到再试 Terminal.app（System Events key code，需切前台 + 辅助功能权限）。
 #[cfg(target_os = "macos")]
-fn iterm_send_key(pid: u32, key: &str, count: usize) -> Result<&'static str> {
+fn mac_send_key(pid: u32, key: &str, count: usize) -> Result<&'static str> {
     let tty = tty_of(pid).ok_or_else(|| anyhow!("无法定位进程 {pid} 的终端设备"))?;
+    let tty_e = tty.replace('\\', "\\\\").replace('"', "\\\"");
+
+    // 1) iTerm2：write text 直接把转义序列写进会话，不切前台
     let seq_expr = match key {
         "up" => "(character id 27) & \"[A\"",
         "esc" => "(character id 27)",
         _ => return Err(anyhow!("未知按键: {key}")),
     };
-    let tty_e = tty.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
+    let iterm = format!(
         r#"tell application "iTerm2"
   repeat with w in windows
     repeat with t in tabs of w
@@ -433,12 +436,49 @@ fn iterm_send_key(pid: u32, key: &str, count: usize) -> Result<&'static str> {
 end tell
 return "notfound""#
     );
-    if run_osascript(&script).map(|o| o.contains("ok")).unwrap_or(false) {
+    if run_osascript(&iterm).map(|o| o.contains("ok")).unwrap_or(false) {
         return Ok("已注入按键");
     }
-    Err(anyhow!(
-        "未匹配到 iTerm2 会话：终端按键注入仅支持 iTerm2（Terminal.app 请在终端里手动按键）"
-    ))
+
+    // 2) Terminal.app：do script 送不了方向键，只能把目标标签页切到前台，再用
+    // System Events 发键码（key code 126=↑，53=Esc）。切前台不可避免；且需在
+    // 系统设置→隐私与安全性→辅助功能里允许「终端任务监控」，否则 System Events 被拒。
+    let keycode = match key {
+        "up" => 126,
+        "esc" => 53,
+        _ => return Err(anyhow!("未知按键: {key}")),
+    };
+    let terminal = format!(
+        r#"tell application "Terminal"
+  repeat with w in windows
+    repeat with t in tabs of w
+      if (tty of t) is "{tty_e}" then
+        set selected of t to true
+        set index of w to 1
+        activate
+        delay 0.2
+        tell application "System Events"
+          repeat {count} times
+            key code {keycode}
+            delay 0.04
+          end repeat
+        end tell
+        return "ok"
+      end if
+    end repeat
+  end repeat
+end tell
+return "notfound""#
+    );
+    match run_osascript(&terminal) {
+        Ok(o) if o.contains("ok") => Ok("已注入按键"),
+        Ok(o) if o.contains("notfound") => Err(anyhow!("未匹配到 iTerm2/Terminal.app 会话")),
+        Ok(_) => Ok("已注入按键"),
+        // System Events 被辅助功能权限拦截时 osascript 报错，给出可操作提示
+        Err(e) => Err(anyhow!(
+            "Terminal.app 按键注入失败（{e}）。若提示无权限，请到「系统设置→隐私与安全性→辅助功能」允许「终端任务监控」。"
+        )),
+    }
 }
 
 /// Linux：TIOCSTI 把转义序列逐字节注入 count 次。
