@@ -158,6 +158,8 @@ fn help_text() -> String {
 
 async fn list_sessions(state: &SharedState, username: &str) -> String {
     let mut tasks = state.tasks_for(username).await;
+    // 已结束的会话不列出——机器人只关心还能操作的活跃会话
+    tasks.retain(|t| t.status != TaskStatus::Finished);
     tasks.sort_by_key(|t| match t.status {
         TaskStatus::Running => 0,
         TaskStatus::Paused => 1,
@@ -165,7 +167,7 @@ async fn list_sessions(state: &SharedState, username: &str) -> String {
         TaskStatus::Finished => 3,
     });
     if tasks.is_empty() {
-        return "当前没有会话。".to_string();
+        return "当前没有活跃会话。".to_string();
     }
     let mut ids = Vec::with_capacity(tasks.len());
     let mut lines = vec![format!("共 {} 个会话：", tasks.len())];
