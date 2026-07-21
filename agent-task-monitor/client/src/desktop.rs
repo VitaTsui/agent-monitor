@@ -161,7 +161,45 @@ fn disable_app_nap() {
     );
     std::mem::forget(token);
 }
-#[cfg(not(target_os = "macos"))]
+/// Windows 11 的 EcoQoS 会把后台/最小化进程降频（CPU 降速、定时器合并），把 1.5s 的
+/// 扫描与命令轮询拉长到几十秒——表现为「网页发了任务，终端几十秒后才收到、像没送达」。
+/// 用 SetProcessInformation 关掉本进程的「执行速度节流」，后台也按正常频率跑。
+#[cfg(windows)]
+fn disable_app_nap() {
+    #[repr(C)]
+    struct ProcessPowerThrottlingState {
+        version: u32,
+        control_mask: u32,
+        state_mask: u32,
+    }
+    const PROCESS_POWER_THROTTLING_EXECUTION_SPEED: u32 = 0x1;
+    const CURRENT_VERSION: u32 = 1;
+    const PROCESS_POWER_THROTTLING: i32 = 4; // PROCESS_INFORMATION_CLASS::ProcessPowerThrottling
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn SetProcessInformation(
+            h: isize,
+            class: i32,
+            info: *const core::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+    // control_mask 指定「我要管执行速度节流」，state_mask=0 表示「关闭该节流」（始终全速）
+    let st = ProcessPowerThrottlingState {
+        version: CURRENT_VERSION,
+        control_mask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        state_mask: 0,
+    };
+    unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            PROCESS_POWER_THROTTLING,
+            &st as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<ProcessPowerThrottlingState>() as u32,
+        );
+    }
+}
+#[cfg(all(unix, not(target_os = "macos")))]
 fn disable_app_nap() {}
 
 /// 把主窗口最小化到托盘：隐藏窗口 + macOS 退出 Dock（程序仍在后台跑）。
