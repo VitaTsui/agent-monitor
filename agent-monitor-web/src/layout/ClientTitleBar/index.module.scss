@@ -7,19 +7,19 @@
   height: var(--titlebar-h, 30px);
   z-index: 3000;
   display: flex;
-  align-items: center;
+  align-items: stretch;
   background: transparent;
-  // 拖拽区自身接收指针，但不遮挡下方交互（只占顶部窄条）
   user-select: none;
   -webkit-user-select: none;
 }
 
-// macOS：左上是原生交通灯，这里整条留作拖拽；无需按钮
-.mac {
-  justify-content: flex-start;
+// 拖拽区：填满按钮以外的整条，负责移动窗口
+.dragArea {
+  flex: 1;
+  height: 100%;
 }
 
-// Windows/Linux：右上角自绘按钮
+.mac,
 .win {
   justify-content: flex-end;
 }
@@ -27,8 +27,7 @@
 .controls {
   display: flex;
   height: 100%;
-  // 按钮区不参与窗口拖拽
-  -webkit-app-region: no-drag;
+  flex: none;
 }
 
 .ctrl {

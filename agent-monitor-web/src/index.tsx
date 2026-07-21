@@ -14,7 +14,6 @@ import "./styles/antd-overload.scss";
 
 import { BrowserRouter } from "react-router-dom";
 import Internationalization from "./layout/I18n";
-import ClientTitleBar from "./layout/ClientTitleBar";
 import ReactDOM from "react-dom/client";
 import Routes from "./router/Routes";
 
@@ -40,7 +39,6 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <CacheProvider value={cache}>
         <ChakraProvider value={system}>
           <Internationalization>
-            <ClientTitleBar />
             <Routes />
           </Internationalization>
         </ChakraProvider>

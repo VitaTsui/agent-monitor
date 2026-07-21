@@ -15,7 +15,6 @@ import {
   EllipsisOutlined,
   LaptopOutlined,
   LogoutOutlined,
-  MenuUnfoldOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
   SafetyOutlined,
@@ -307,8 +306,8 @@ const Portal: React.FC = observer(() => {
           className={styles.mobileMenuBtn}
           role="button"
           tabIndex={0}
-          aria-label="打开会话列表"
-          onClick={() => setMobileNav(true)}
+          aria-label="打开/收起会话列表"
+          onClick={() => setMobileNav((v) => !v)}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
@@ -316,7 +315,7 @@ const Portal: React.FC = observer(() => {
             }
           }}
         >
-          <MenuUnfoldOutlined />
+          <SidebarIcon folded={!mobileNav} />
         </span>
         <span className={styles.mobileTitle}>
           {openTasks[0] ? (

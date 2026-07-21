@@ -10,10 +10,10 @@ $active-bg: rgba(36, 61, 66, 0.09);
 
 .Portal {
   height: 100%;
-  // 键盘由 resize:none + JS 处理：webview 不动、整页不位移，底部让出
-  // max(键盘高, home 安全区) —— 键盘弹起时输入框贴键盘上方、收起时
-  // 让开 home 指示条；内容区收缩、顶栏纹丝不动。
-  padding-bottom: max(var(--kb-height, 0px), env(safe-area-inset-bottom));
+  // 底部只让出键盘高度（键盘由 resize:none + JS 处理，webview 不动、整页不位移）。
+  // home 指示条安全区不在这里让位 —— 否则内容区会缩上去、露出下方常驻的侧栏底色
+  // 形成「底部空隙 + 配色不一致」。安全区改由对话框(composerWrap)内部消化。
+  padding-bottom: var(--kb-height, 0px);
   box-sizing: border-box;
   display: flex;
   background: $cream;

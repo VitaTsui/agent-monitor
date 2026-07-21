@@ -79,12 +79,15 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
       recallable: boolean;
     }[] = [];
     const seen = new Set<string>();
+    // 只挂「还在 hub 队列、尚未注入终端」的本地回显（可撤回）；已注入终端的排队状态
+    // 一律以 queued_inputs（终端 queue-operation 的真实队列）为准 —— 它在任务被会话
+    // 接受时随 remove 出列而清掉，不会像 delivered 回显那样卡着显示「排队中」。
     for (const m of messages) {
-      if (m.local && (m.queued || m.delivered)) {
+      if (m.local && m.queued) {
         const k = norm(m.content);
         if (!seen.has(k)) {
           seen.add(k);
-          items.push({ text: m.content, cmdId: m.cmdId, recallable: !!m.queued });
+          items.push({ text: m.content, cmdId: m.cmdId, recallable: true });
         }
       }
     }

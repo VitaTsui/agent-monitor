@@ -42,10 +42,10 @@ const ClientTitleBar: React.FC = () => {
   }
   const mac = isMac();
   return (
-    <div
-      className={`${styles.bar} ${mac ? styles.mac : styles.win}`}
-      data-tauri-drag-region
-    >
+    <div className={`${styles.bar} ${mac ? styles.mac : styles.win}`}>
+      {/* 拖拽区单独成元素：按钮不能是 data-tauri-drag-region 的子孙，否则在 Windows
+          WebView2 上按下即被判为拖窗，onClick 永不触发（表现为按钮点了没反应） */}
+      <div className={styles.dragArea} data-tauri-drag-region />
       {!mac && (
         <div className={styles.controls}>
           <span
