@@ -228,6 +228,13 @@ $muted: #7c9096;
     }
   }
 
+  .queuedHint {
+    padding: 4px 2px 2px;
+    font-size: 11px;
+    color: #9a854a;
+    opacity: 0.85;
+  }
+
   .composerWrap {
     // 底部让开 home 指示条安全区（此前由 Portal padding-bottom 统一处理，但那样
     // 会把内容整体缩上去、露出常驻侧栏底色，故安全区改在这里就近消化）；

@@ -301,6 +301,16 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
         background: rgba(15, 155, 173, 0.08);
       }
 
+      // 自定义命令「直接发送」项：底部描边区隔于列表命令
+      &.slashCustom {
+        border-bottom: 1px solid rgba(36, 61, 66, 0.08);
+        margin-bottom: 2px;
+
+        .slashName {
+          color: #0f9bad;
+        }
+      }
+
       .slashName {
         flex: none;
         font-family: $mono;

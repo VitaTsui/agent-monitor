@@ -318,6 +318,31 @@ const Composer: React.FC<ComposerProps> = (props) => {
           })
           .slice(0, 8);
 
+  // 允许输入不在列表里的自定义「/命令」：只要不是恰好命中某条命令，就在列表顶部给一个
+  // 「直接发送」项，点它把当前输入原样发出（列表只是建议、从不拦截自定义命令）。
+  const exactMatch =
+    slashQuery !== null &&
+    commands.some(
+      (c) => c.name.toLowerCase() === `/${slashQuery.toLowerCase()}`,
+    );
+  const showCustom = slashQuery !== null && slashQuery !== "" && !exactMatch;
+
+  const sendCustom = () => {
+    const ta = rootRef.current?.querySelector("textarea");
+    const v = ta?.value ?? "";
+    if (!v.trim()) return;
+    guardedSend(v);
+    if (ta) {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(ta, "");
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    setSlashQuery(null);
+  };
+
   return (
     <div
       className={`${styles.Composer} ${dragOver ? styles.dragOver : ""}`}
@@ -347,8 +372,20 @@ const Composer: React.FC<ComposerProps> = (props) => {
       ) : null}
       {/* 斜杠命令下拉：仅在输入「/」时弹出（Claude Code 终端式），
           不再常驻一排命令 chip */}
-      {matched.length > 0 && !disabled && (
+      {(matched.length > 0 || showCustom) && !disabled && (
         <div className={styles.slashMenu}>
+          {showCustom ? (
+            <div
+              className={`${styles.slashItem} ${styles.slashCustom}`}
+              role="button"
+              tabIndex={0}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={sendCustom}
+            >
+              <span className={styles.slashName}>发送 /{slashQuery}</span>
+              <span className={styles.slashDesc}>不在列表中的自定义命令，直接发出</span>
+            </div>
+          ) : null}
           {matched.map((c) => (
             <div
               key={c.name}

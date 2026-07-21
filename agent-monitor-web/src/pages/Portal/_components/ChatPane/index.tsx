@@ -268,22 +268,27 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 <span className={styles.queuedDot} />
                 终端排队中 · {queuedItems.length}
               </span>
-              <span
-                className={styles.recallAll}
-                role="button"
-                tabIndex={0}
-                onClick={() =>
-                  recallAllQueued(
-                    id,
-                    queuedItems
-                      .filter((q) => q.recallable && q.cmdId)
-                      .map((q) => q.cmdId as string),
-                    queuedItems.map((q) => q.text).join("\n"),
-                  )
-                }
-              >
-                全部撤回
-              </span>
+              {queuedItems.some((q) => q.recallable) ? (
+                <span
+                  className={styles.recallAll}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() =>
+                    recallAllQueued(
+                      id,
+                      queuedItems
+                        .filter((q) => q.recallable && q.cmdId)
+                        .map((q) => q.cmdId as string),
+                      queuedItems
+                        .filter((q) => q.recallable)
+                        .map((q) => q.text)
+                        .join("\n"),
+                    )
+                  }
+                >
+                  全部撤回
+                </span>
+              ) : null}
             </div>
             <div className={styles.queuedList}>
               {queuedItems.map((q, i) => (
@@ -295,6 +300,11 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 </div>
               ))}
             </div>
+            {queuedItems.some((q) => !q.recallable) ? (
+              <div className={styles.queuedHint}>
+                已进终端原生队列的任务，在终端里按 ↑ 键可撤回（撤回后此处自动同步移除）
+              </div>
+            ) : null}
           </div>
         </div>
       )}
