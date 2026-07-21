@@ -749,9 +749,11 @@ $active-bg: rgba(36, 61, 66, 0.09);
       &.mainPushed {
         transform: translateX(var(--drawer-w));
         // 被推开后左侧两角保持设备圆角观感（无法读系统圆角，取接近值）
-        border-top-left-radius: 34px;
-        border-bottom-left-radius: 34px;
-        box-shadow: -8px 0 40px rgba(0, 0, 0, 0.22);
+        border-top-left-radius: 26px;
+        border-bottom-left-radius: 26px;
+        // 侧栏与内容之间的明显分界：一条清晰的描边 + 一层柔和投影
+        box-shadow: -1px 0 0 0.5px rgba(36, 61, 66, 0.18),
+          -12px 0 44px rgba(0, 0, 0, 0.28);
         overflow: hidden;
       }
     }

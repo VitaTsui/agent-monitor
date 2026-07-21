@@ -42,8 +42,8 @@ import styles from "./index.module.scss";
  *  取代过于「后管菜单」的汉堡折叠图标）。折叠态把分隔线挪到更左，暗示会收窄。 */
 const SidebarIcon: React.FC<{ folded?: boolean }> = ({ folded }) => (
   <svg
-    width="17"
-    height="17"
+    width="21"
+    height="21"
     viewBox="0 0 24 24"
     fill="none"
     stroke="currentColor"
