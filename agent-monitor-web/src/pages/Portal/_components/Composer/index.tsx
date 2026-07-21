@@ -93,6 +93,22 @@ const Composer: React.FC<ComposerProps> = (props) => {
     return () => ta.removeEventListener("input", onInput);
   }, [taskId]);
 
+  // 移动端：回车换行、不发送（发送用右下角发送按钮）。hsu-ui Chat.Input 默认回车即提交，
+  // 这里在捕获阶段拦住移动端的 Enter、stopPropagation 阻止它到达 Chat.Input 的提交处理，
+  // 不 preventDefault 让 textarea 自然插入换行。
+  useEffect(() => {
+    const ta = rootRef.current?.querySelector("textarea");
+    if (!ta) return;
+    const onKeyDownCapture = (e: KeyboardEvent) => {
+      const isMobile = window.matchMedia("(max-width: 760px)").matches;
+      if (isMobile && e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+        e.stopPropagation();
+      }
+    };
+    ta.addEventListener("keydown", onKeyDownCapture, true);
+    return () => ta.removeEventListener("keydown", onKeyDownCapture, true);
+  }, [taskId]);
+
   // 把某条命令填进输入框（保留在输入框，用户可继续补参数或直接回车发布）
   const fillCommand = (name: string) => {
     const ta = rootRef.current?.querySelector("textarea");
