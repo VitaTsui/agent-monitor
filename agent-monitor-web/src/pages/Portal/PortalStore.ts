@@ -416,12 +416,34 @@ class PortalStore {
    * 落地一份会话列表快照。WS 推送与兜底轮询共用，保证两条通路行为一致。
    */
   private applyTasks = (list: PortalTaskData[]) => {
+    // /clear、compact 等会让同一终端进程换新会话（新 id/jsonl）：pid 会从旧会话挪到
+    // 新会话。先记下旧表里各会话的 pid，换表后把「丢了 pid 的打开会话」跟随到「现在
+    // 持有该 pid 的会话」——这样 /clear 后仍能对着同一终端发任务、看内容，而不是卡在
+    // 已失联（无 pid）的旧会话上，导致「下发失败、终端没这个任务」。
+    const prevPidById = new Map<string, number | undefined>();
+    for (const t of this._tasks) prevPidById.set(t.id ?? "", t.pid);
+
     // 内容没变就不换引用，否则整棵会话树白重渲染一遍。
     if (JSON.stringify(list) !== JSON.stringify(this._tasks)) {
       this._tasks = list;
     }
 
-    // 不再默认选中任何终端：openIds 为空就保持空态（用户自己点选）。
+    // pid 跟随：打开的会话若丢了 pid，切到现在持有其原 pid 的会话（同一终端的新会话）
+    const followed = this._openIds.map((id) => {
+      const cur = this._tasks.find((t) => t.id === id);
+      const prevPid = prevPidById.get(id);
+      if (cur && !cur.pid && prevPid) {
+        const succ = this._tasks.find((t) => t.pid === prevPid && t.id !== id);
+        if (succ?.id) return succ.id;
+      }
+      return id;
+    });
+    // 跟随后可能与已打开的会话撞车，去重保序
+    const deduped = Array.from(new Set(followed));
+    if (deduped.join(" ") !== this._openIds.join(" ")) {
+      this._openIds = deduped;
+    }
+
     // 仅做存活清理：已消失的会话从打开列表里剔除。
     const alive = this._openIds.filter((id) =>
       this._tasks.some((t) => t.id === id)
@@ -430,7 +452,7 @@ class PortalStore {
       this._openIds = alive;
       this.dropMessageCache();
     }
-    // 对话内容不走推送（推送只含会话列表），仍按需拉取
+    // 对话内容不走推送（推送只含会话列表），仍按需拉取（跟随后的新会话首拉即有内容）
     this._openIds.forEach((id) => this.fetchMessages(id, false));
   };
 
