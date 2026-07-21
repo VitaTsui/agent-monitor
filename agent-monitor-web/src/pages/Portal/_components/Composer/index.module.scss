@@ -51,13 +51,12 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     > div {
       border-radius: 16px !important;
       border: 1px solid rgba(36, 61, 66, 0.15) !important;
-      box-shadow: 0 2px 8px rgba(36, 61, 66, 0.05);
+      box-shadow: none !important;
       background: #fff;
-      transition: border-color 0.15s, box-shadow 0.15s;
+      transition: border-color 0.15s;
 
       &:focus-within {
         border-color: rgba(15, 155, 173, 0.5) !important;
-        box-shadow: 0 2px 10px rgba(15, 155, 173, 0.1);
       }
     }
 
