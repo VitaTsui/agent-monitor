@@ -143,12 +143,12 @@ ol {
 // 会被灵动岛挡住。整体下移一个状态栏安全区高度。notification 同理。
 // 落到与移动端顶栏胶囊/按钮同一高度：安全区 + 顶栏按钮的垂直居中位置
 .ant-message {
-  top: calc(env(safe-area-inset-top) + 22px) !important;
+  top: calc(env(safe-area-inset-top) + 40px) !important;
 }
 .ant-notification.ant-notification-top,
 .ant-notification.ant-notification-topLeft,
 .ant-notification.ant-notification-topRight {
-  top: calc(env(safe-area-inset-top) + 22px) !important;
+  top: calc(env(safe-area-inset-top) + 40px) !important;
 }
 
 // iOS Safari 点击可聚焦元素(输入框/按钮)时会闪一层半透明黑色高亮(tap highlight)，

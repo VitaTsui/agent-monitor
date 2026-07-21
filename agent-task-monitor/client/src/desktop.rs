@@ -53,6 +53,85 @@ fn write_close_behavior(state: &SharedState, b: CloseBehavior) {
     }
 }
 
+// ---- 保持电脑唤醒（防休眠/息屏）----
+fn keep_awake_pref_path(state: &SharedState) -> std::path::PathBuf {
+    state.config.data_dir.join("keepawake.pref")
+}
+fn read_keep_awake(state: &SharedState) -> bool {
+    std::fs::read_to_string(keep_awake_pref_path(state))
+        .map(|s| s.trim() == "on")
+        .unwrap_or(false)
+}
+fn write_keep_awake(state: &SharedState, on: bool) {
+    if let Err(e) = std::fs::write(keep_awake_pref_path(state), if on { "on" } else { "off" }) {
+        tracing::warn!("保持唤醒设置写入失败: {e}");
+    }
+}
+
+/// 保持电脑唤醒：mac 用 caffeinate 子进程（-w 本进程退出即自停，防遗留）；
+/// Windows 用 SetThreadExecutionState 在专线程持有 ES_CONTINUOUS。
+#[cfg(target_os = "macos")]
+mod keep_awake {
+    use std::process::Child;
+    use std::sync::Mutex;
+    static CAFFEINATE: Mutex<Option<Child>> = Mutex::new(None);
+    pub fn set(on: bool) {
+        let mut g = CAFFEINATE.lock().unwrap();
+        if on {
+            if g.is_some() {
+                return;
+            }
+            // -d 防息屏 -i 防空闲休眠 -s 防系统休眠 -u 声明用户活跃 -w 绑本进程存活
+            let pid = std::process::id().to_string();
+            match std::process::Command::new("caffeinate")
+                .args(["-disu", "-w", &pid])
+                .spawn()
+            {
+                Ok(c) => *g = Some(c),
+                Err(e) => tracing::warn!("启动 caffeinate 失败: {e}"),
+            }
+        } else if let Some(mut c) = g.take() {
+            let _ = c.kill();
+        }
+    }
+}
+#[cfg(windows)]
+mod keep_awake {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ON: AtomicBool = AtomicBool::new(false);
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    extern "system" {
+        fn SetThreadExecutionState(flags: u32) -> u32;
+    }
+    const ES_CONTINUOUS: u32 = 0x8000_0000;
+    const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
+    const ES_DISPLAY_REQUIRED: u32 = 0x0000_0002;
+    pub fn set(on: bool) {
+        ON.store(on, Ordering::SeqCst);
+        if on && !RUNNING.swap(true, Ordering::SeqCst) {
+            std::thread::spawn(|| {
+                // ES_CONTINUOUS 是线程级持续态：同一线程反复置位、关闭时清位并退出
+                while ON.load(Ordering::SeqCst) {
+                    unsafe {
+                        SetThreadExecutionState(
+                            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED,
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                }
+                unsafe {
+                    SetThreadExecutionState(ES_CONTINUOUS);
+                }
+                RUNNING.store(false, Ordering::SeqCst);
+            });
+        }
+    }
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+mod keep_awake {
+    pub fn set(_on: bool) {}
+}
+
 /// 窗口显示时：作为一般应用（macOS 显示 Dock 图标）。
 #[cfg(target_os = "macos")]
 fn set_app_visible_in_dock<R: tauri::Runtime>(app: &tauri::AppHandle<R>, visible: bool) {
@@ -210,6 +289,8 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             // 后台/托盘态下必须持续以 1.5s 扫描上报会话状态，故先豁免 App Nap，
             // 否则定时器被系统压到 ~60s，终端里发的任务要一分钟才反映到面板。
             disable_app_nap();
+            // 恢复上次「保持电脑唤醒」设置
+            keep_awake::set(read_keep_awake(&state_setup));
 
             // 作为一般桌面应用运行：macOS 显示 Dock 图标（Regular）。
             // agent 模式启动即后台，初始就用 Accessory —— 若先 Regular 再切，
@@ -349,6 +430,12 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                                 CloseBehavior::Quit => CloseBehavior::Tray,
                             };
                             write_close_behavior(&state_evt, next);
+                        }
+                        "keep_awake" => {
+                            // 切换「保持电脑唤醒」并立即生效；落盘让重启后保持
+                            let on = !read_keep_awake(&state_evt);
+                            write_keep_awake(&state_evt, on);
+                            keep_awake::set(on);
                         }
                         "quit" => app.exit(0),
                         other => {
@@ -538,6 +625,14 @@ fn build_tray_menu<R: tauri::Runtime>(
         autostart_enabled(),
         None::<&str>,
     )?;
+    let keep_awake = CheckMenuItem::with_id(
+        manager,
+        "keep_awake",
+        "保持电脑唤醒（防休眠/息屏）",
+        true,
+        read_keep_awake(state),
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(manager, "quit", "退出", true, None::<&str>)?;
 
     let menu = Menu::new(manager)?;
@@ -587,6 +682,7 @@ fn build_tray_menu<R: tauri::Runtime>(
     menu.append(&sep()?)?;
     menu.append(&close_to_tray)?;
     menu.append(&autostart)?;
+    menu.append(&keep_awake)?;
     menu.append(&sep()?)?;
     menu.append(&scope)?;
     menu.append(&sep()?)?;

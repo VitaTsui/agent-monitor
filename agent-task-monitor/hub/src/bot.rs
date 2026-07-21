@@ -303,22 +303,29 @@ async fn list_sessions(state: &SharedState, username: &str) -> String {
     let mut tasks = state.tasks_for(username).await;
     // 已结束的会话不列出——机器人只关心还能操作的活跃会话
     tasks.retain(|t| t.status != TaskStatus::Finished);
-    tasks.sort_by_key(|t| match t.status {
+    if tasks.is_empty() {
+        return "当前没有活跃会话。".to_string();
+    }
+    let rank = |s: TaskStatus| match s {
         TaskStatus::Running => 0,
         TaskStatus::Paused => 1,
         TaskStatus::Idle => 2,
         TaskStatus::Finished => 3,
-    });
-    if tasks.is_empty() {
-        return "当前没有活跃会话。".to_string();
-    }
+    };
+    // 先按设备名分组、组内按状态排；序号全局连续（与存下的 ids 顺序一致，「暂停 N」才对得上）
+    tasks.sort_by(|a, b| a.hostname.cmp(&b.hostname).then(rank(a.status).cmp(&rank(b.status))));
     let mut ids = Vec::with_capacity(tasks.len());
-    let mut lines = vec![format!("共 {} 个会话：", tasks.len())];
-    for (i, t) in tasks.iter().enumerate() {
+    let mut lines = vec![format!("共 {} 个活跃会话：", tasks.len())];
+    let mut cur_dev = String::new();
+    for t in &tasks {
+        if t.hostname != cur_dev {
+            cur_dev = t.hostname.clone();
+            lines.push(format!("—— 📱 {} ——", cur_dev));
+        }
         ids.push(t.id.clone());
         let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
         let title: String = title.chars().take(24).collect();
-        lines.push(format!("{}. [{}] {} · {}", i + 1, status_zh(t.status), title, t.project_name));
+        lines.push(format!("{}. [{}] {} · {}", ids.len(), status_zh(t.status), title, t.project_name));
     }
     state.bot_last_list.write().await.insert(username.to_string(), ids);
     lines.push("\n操作示例：暂停 1 / 发 1 继续".to_string());
