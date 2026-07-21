@@ -73,7 +73,8 @@ pub async fn wecom_message(
     let msg_type = wecom::xml_field(&inner, "MsgType").unwrap_or_default();
     let content = wecom::xml_field(&inner, "Content").unwrap_or_default();
     let reply = if msg_type == "text" {
-        dispatch(&state, &owner, content.trim()).await
+        // 企业微信走 XML 同步回复，无会话 webhook，「监控」在此渠道不可用
+        dispatch(&state, &owner, content.trim(), None).await
     } else {
         "只认文字指令，发「帮助」看用法。".to_string()
     };
@@ -107,7 +108,12 @@ pub async fn dingtalk_message(
         .unwrap_or("")
         .trim()
         .to_string();
-    let reply = dispatch(&state, &owner, &content).await;
+    // HTTP 模式的 sessionWebhook 也可用于「监控」持续推送
+    let ctx = ReplyCtx {
+        webhook: payload.get("sessionWebhook").and_then(Value::as_str).unwrap_or("").to_string(),
+        expiry_ms: payload.get("sessionWebhookExpiredTime").and_then(Value::as_u64).unwrap_or(0),
+    };
+    let reply = dispatch(&state, &owner, &content, Some(&ctx)).await;
     // 同步回复：钉钉直接把响应体当作机器人回复消息
     Json(json!({ "msgtype": "text", "text": { "content": reply } }))
 }
@@ -122,7 +128,18 @@ fn rand16() -> [u8; 16] {
 // ---------- 指令调度（渠道无关，以账号身份执行） ----------
 
 /// 指令分发，返回给用户的文字回复。username 已由回调 URL 的 channel 确定。
-pub(crate) async fn dispatch(state: &SharedState, username: &str, text: &str) -> String {
+/// 回复上下文：钉钉会话 webhook + 失效时间，供「监控」注册持续推送用（企业微信暂无）
+pub(crate) struct ReplyCtx {
+    pub webhook: String,
+    pub expiry_ms: u64,
+}
+
+pub(crate) async fn dispatch(
+    state: &SharedState,
+    username: &str,
+    text: &str,
+    reply: Option<&ReplyCtx>,
+) -> String {
     let (cmd, arg) = split_cmd(text);
     match cmd.as_str() {
         "帮助" | "help" | "?" | "？" | "菜单" | "" => help_text(),
@@ -133,7 +150,51 @@ pub(crate) async fn dispatch(state: &SharedState, username: &str, text: &str) ->
         "中断" => control(state, username, &arg, ControlAction::Interrupt, "已中断").await,
         "终止" | "停止" => control(state, username, &arg, ControlAction::Stop, "已终止").await,
         "发" | "发送" | "回复" | "输入" => send_input(state, username, &arg).await,
+        "监控" | "watch" => monitor_start(state, username, &arg, reply).await,
+        "停止监控" | "取消监控" | "结束监控" | "unwatch" => monitor_stop(state, username).await,
         _ => format!("未知指令「{cmd}」。发「帮助」看用法。"),
+    }
+}
+
+/// 「监控 N」：注册对第 N 个会话的持续监控，新内容由后台循环推到当前钉钉会话
+async fn monitor_start(
+    state: &SharedState,
+    username: &str,
+    arg: &str,
+    reply: Option<&ReplyCtx>,
+) -> String {
+    let Some(ctx) = reply else {
+        return "当前渠道暂不支持持续监控。".to_string();
+    };
+    if ctx.webhook.is_empty() {
+        return "拿不到本会话的推送地址，无法监控。".to_string();
+    }
+    let id = match resolve_task(state, username, arg).await {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    // 起点定在「当前最后一条」，避免一上来把历史全推一遍；之后只推新增
+    let msgs = state.bot_task_messages(&id).await;
+    let last_ts = msgs.last().map(|m| m.timestamp.clone()).unwrap_or_default();
+    state.bot_monitors.write().await.insert(
+        username.to_string(),
+        crate::state::BotMonitor {
+            task_id: id,
+            webhook: ctx.webhook.clone(),
+            expiry_ms: ctx.expiry_ms,
+            last_ts,
+        },
+    );
+    "已开始监控该会话，有新内容会自动推到这里（约每 20s 检查一次）。发「停止监控」结束。\n\
+     注：受钉钉会话地址时效/条数限制，长时间监控可能中断，届时再发「监控 N」即可。"
+        .to_string()
+}
+
+async fn monitor_stop(state: &SharedState, username: &str) -> String {
+    if state.bot_monitors.write().await.remove(username).is_some() {
+        "已停止监控。".to_string()
+    } else {
+        "当前没有在监控的会话。".to_string()
     }
 }
 
@@ -151,9 +212,91 @@ fn help_text() -> String {
      • 设备 —— 列出名下设备\n\
      • 暂停 N / 恢复 N / 中断 N / 终止 N —— 控制第 N 个会话\n\
      • 发 N 内容 —— 向第 N 个会话发布一条输入\n\
+     • 监控 N —— 持续把第 N 个会话的新内容推到这里\n\
+     • 停止监控 —— 结束监控\n\
      • 帮助 —— 显示本说明\n\
      （序号以最近一次「会话」列出的为准）"
         .to_string()
+}
+
+/// 机器人监控推送循环：每 20s 把各监控会话的新增消息推到其钉钉会话 webhook。
+/// 只推「起点之后」的增量、批量合一条；webhook 失效或推送被钉钉拒（限流/过期）就停掉该监控。
+pub async fn monitor_loop(state: SharedState) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        let now = crate::state::now_secs() * 1000;
+        let monitors: Vec<(String, crate::state::BotMonitor)> = state
+            .bot_monitors
+            .read()
+            .await
+            .iter()
+            .map(|(u, m)| (u.clone(), m.clone()))
+            .collect();
+        for (user, mon) in monitors {
+            if mon.expiry_ms > 0 && now >= mon.expiry_ms {
+                state.bot_monitors.write().await.remove(&user);
+                let _ = push_webhook(
+                    &mon.webhook,
+                    "监控已到期（钉钉会话地址时效结束）。如需继续，请再发「监控 N」。",
+                )
+                .await;
+                continue;
+            }
+            let msgs = state.bot_task_messages(&mon.task_id).await;
+            let fresh: Vec<&am_core::model::MessageBrief> = msgs
+                .iter()
+                .filter(|m| m.timestamp.as_str() > mon.last_ts.as_str())
+                .collect();
+            if fresh.is_empty() {
+                continue;
+            }
+            let text = render_monitor_push(&fresh);
+            match push_webhook(&mon.webhook, &text).await {
+                Ok(true) => {
+                    if let Some(m) = state.bot_monitors.write().await.get_mut(&user) {
+                        m.last_ts = fresh.last().map(|x| x.timestamp.clone()).unwrap_or_default();
+                    }
+                }
+                // 钉钉返回错误（多为会话地址限流/过期）：停掉监控，避免空转刷错误
+                Ok(false) => {
+                    state.bot_monitors.write().await.remove(&user);
+                }
+                Err(_) => { /* 网络抖动：留着下轮重试 */ }
+            }
+        }
+    }
+}
+
+/// 推到钉钉会话 webhook。返回 Ok(true)=成功、Ok(false)=钉钉判失败(errcode≠0)、Err=网络错。
+async fn push_webhook(webhook: &str, content: &str) -> Result<bool, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(webhook)
+        .json(&json!({ "msgtype": "text", "text": { "content": content } }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    Ok(body.get("errcode").and_then(Value::as_i64).unwrap_or(0) == 0)
+}
+
+/// 把一批新消息渲染成一条推送文本（限长，避免超钉钉单条上限）
+fn render_monitor_push(msgs: &[&am_core::model::MessageBrief]) -> String {
+    let mut lines = vec!["🔔 会话新动态：".to_string()];
+    for m in msgs.iter().rev().take(6).rev() {
+        let who = match m.role.as_str() {
+            "user" => "🧑 ",
+            "assistant" => "🤖 ",
+            _ => "• ",
+        };
+        let c: String = m.content.chars().take(280).collect();
+        lines.push(format!("{who}{c}"));
+    }
+    let mut out = lines.join("\n");
+    if out.chars().count() > 1800 {
+        out = out.chars().take(1800).collect::<String>() + "…";
+    }
+    out
 }
 
 async fn list_sessions(state: &SharedState, username: &str) -> String {

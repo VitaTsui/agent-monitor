@@ -159,6 +159,8 @@ async fn connect_once(
                     .to_string();
                 let session_webhook =
                     m.get("sessionWebhook").and_then(Value::as_str).unwrap_or("").to_string();
+                let webhook_expiry =
+                    m.get("sessionWebhookExpiredTime").and_then(Value::as_u64).unwrap_or(0);
                 tracing::info!(
                     "钉钉 Stream 收到机器人消息 user={user} 内容={content:?} 有回发地址={}",
                     !session_webhook.is_empty()
@@ -173,7 +175,11 @@ async fn connect_once(
                     let u = user.to_string();
                     let cl = client.clone();
                     tokio::spawn(async move {
-                        let reply = crate::bot::dispatch(&st, &u, &content).await;
+                        let ctx = crate::bot::ReplyCtx {
+                            webhook: session_webhook.clone(),
+                            expiry_ms: webhook_expiry,
+                        };
+                        let reply = crate::bot::dispatch(&st, &u, &content, Some(&ctx)).await;
                         match cl
                             .post(&session_webhook)
                             .json(&json!({ "msgtype": "text", "text": { "content": reply } }))

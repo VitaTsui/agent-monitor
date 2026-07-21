@@ -231,6 +231,20 @@ pub struct AppState {
     /// 机器人「最近一次列出的会话」：用户名 → 有序 task_id，
     /// 让「暂停 3」这类按序号操作能对上会话。
     pub bot_last_list: RwLock<HashMap<String, Vec<String>>>,
+    /// 机器人「监控中」的会话：用户名 → 监控态。后台循环据此把新内容推到钉钉会话 webhook。
+    pub bot_monitors: RwLock<HashMap<String, BotMonitor>>,
+}
+
+/// 机器人持续监控一个会话的状态（通过钉钉会话级 webhook 推送新内容）
+#[derive(Clone)]
+pub struct BotMonitor {
+    pub task_id: String,
+    /// 钉钉会话 webhook（回消息用的临时地址，可主动 POST 推送）
+    pub webhook: String,
+    /// webhook 失效时间(ms)；超过则停止监控（0=未知，不因此停）
+    pub expiry_ms: u64,
+    /// 已推送到的最后一条消息时间戳（算增量用）
+    pub last_ts: String,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -252,7 +266,19 @@ impl AppState {
             started_at: chrono::Local::now(),
             sessions_dirty: std::sync::atomic::AtomicBool::new(false),
             bot_last_list: RwLock::new(HashMap::new()),
+            bot_monitors: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// 取某会话最近缓存的消息（在各机器的 messages 缓存里找第一个命中的）
+    pub async fn bot_task_messages(&self, task_id: &str) -> Vec<am_core::model::MessageBrief> {
+        let machines = self.machines.read().await;
+        for entry in machines.values() {
+            if let Some(msgs) = entry.messages.get(task_id) {
+                return msgs.clone();
+            }
+        }
+        Vec::new()
     }
 
     /// 聚合指定用户「可见」的任务（信任 + 归属；超级管理员看全部）
