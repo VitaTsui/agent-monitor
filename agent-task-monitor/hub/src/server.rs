@@ -1210,6 +1210,8 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
         })),
         "dingtalkApp": dt_app.map(|a| json!({
             "hasSecret": !a.app_secret.is_empty(),
+            "appKey": a.app_key,
+            "stream": !a.app_key.is_empty(),
             "callbackUrl": format!("{base}/monitor/int/dingtalk/{}", a.channel),
         })),
     }))
@@ -1313,9 +1315,13 @@ async fn set_wecom_app(
 struct DingtalkAppReq {
     #[serde(default)]
     app_secret: String,
+    /// Stream 模式的 AppKey/ClientID（填了才走长连接）；空字符串=清空回 HTTP 回调模式
+    #[serde(default)]
+    app_key: String,
 }
 
-/// POST /monitor/integrations/dingtalk-app —— 保存钉钉企业应用配置，返回回调地址
+/// POST /monitor/integrations/dingtalk-app —— 保存钉钉企业应用配置。填了 appKey 则走
+/// Stream 长连接（无需公网回调地址）；否则仍是 HTTP 回调模式，返回回调地址。
 async fn set_dingtalk_app(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -1324,15 +1330,21 @@ async fn set_dingtalk_app(
     let Some(user) = auth_user(&state, &headers).await else {
         return err(401, "未登录");
     };
+    let existing = state.registry.read().await.dingtalk_app_of(&user);
+    // 密钥留空=沿用已存的（前端不回显密钥）；AppKey 是可见字段，直接以请求为准
     let secret = if req.app_secret.trim().is_empty() {
-        state.registry.read().await.dingtalk_app_of(&user).map(|a| a.app_secret).unwrap_or_default()
+        existing.as_ref().map(|a| a.app_secret.clone()).unwrap_or_default()
     } else {
         req.app_secret.trim().to_string()
     };
-    let channel = state.registry.write().await.set_dingtalk_app(&user, &secret);
+    let app_key = req.app_key.trim().to_string();
+    let channel = state.registry.write().await.set_dingtalk_app(&user, &secret, &app_key);
     match channel {
-        Some(ch) => ok(json!({ "callbackUrl": format!("{}/monitor/int/dingtalk/{ch}", public_base()) })),
-        None => ok(json!({ "callbackUrl": null })),
+        Some(ch) => ok(json!({
+            "callbackUrl": format!("{}/monitor/int/dingtalk/{ch}", public_base()),
+            "stream": !app_key.is_empty(),
+        })),
+        None => ok(json!({ "callbackUrl": null, "stream": false })),
     }
 }
 

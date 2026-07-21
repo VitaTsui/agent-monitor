@@ -122,7 +122,7 @@ fn rand16() -> [u8; 16] {
 // ---------- 指令调度（渠道无关，以账号身份执行） ----------
 
 /// 指令分发，返回给用户的文字回复。username 已由回调 URL 的 channel 确定。
-async fn dispatch(state: &SharedState, username: &str, text: &str) -> String {
+pub(crate) async fn dispatch(state: &SharedState, username: &str, text: &str) -> String {
     let (cmd, arg) = split_cmd(text);
     match cmd.as_str() {
         "帮助" | "help" | "?" | "？" | "菜单" | "" => help_text(),

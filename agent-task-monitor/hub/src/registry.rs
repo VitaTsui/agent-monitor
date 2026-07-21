@@ -170,6 +170,10 @@ pub struct WecomApp {
 pub struct DingtalkApp {
     pub channel: String,
     pub app_secret: String,
+    /// Stream 模式的 clientId（钉钉应用 AppKey / ClientID）。填了它就走 Stream
+    /// 长连接（hub 主动连钉钉，免公网入站回调），绕开中国→海外服务器可达性问题。
+    #[serde(default)]
+    pub app_key: String,
 }
 
 pub struct Registry {
@@ -402,8 +406,9 @@ impl Registry {
         self.wecom_apps.iter().find(|(_, a)| a.channel == channel).map(|(u, a)| (u.clone(), a.clone()))
     }
 
-    /// 保存钉钉企业应用配置；app_secret 为空则删除。返回回调 channel。
-    pub fn set_dingtalk_app(&mut self, user: &str, app_secret: &str) -> Option<String> {
+    /// 保存钉钉企业应用配置；app_secret 为空则删除。app_key 填了则走 Stream 长连接。
+    /// 返回回调 channel（HTTP 回调模式用；Stream 模式用不到但保留兼容）。
+    pub fn set_dingtalk_app(&mut self, user: &str, app_secret: &str, app_key: &str) -> Option<String> {
         if app_secret.trim().is_empty() {
             self.dingtalk_apps.remove(user);
             self.save();
@@ -415,9 +420,19 @@ impl Registry {
         self.dingtalk_apps.insert(user.to_string(), DingtalkApp {
             channel: channel.clone(),
             app_secret: app_secret.trim().to_string(),
+            app_key: app_key.trim().to_string(),
         });
         self.save();
         Some(channel)
+    }
+
+    /// 所有配了 Stream（app_key+app_secret 都非空）的钉钉应用：(user, app_key, app_secret)
+    pub fn dingtalk_stream_apps(&self) -> Vec<(String, String, String)> {
+        self.dingtalk_apps
+            .iter()
+            .filter(|(_, a)| !a.app_key.is_empty() && !a.app_secret.is_empty())
+            .map(|(u, a)| (u.clone(), a.app_key.clone(), a.app_secret.clone()))
+            .collect()
     }
 
     pub fn dingtalk_app_of(&self, user: &str) -> Option<DingtalkApp> {

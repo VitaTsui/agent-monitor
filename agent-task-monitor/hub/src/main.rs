@@ -5,6 +5,7 @@ mod admin;
 mod commands;
 mod crypto;
 mod dingtalk;
+mod dingtalk_stream;
 mod oauth;
 mod registry;
 mod server;
@@ -129,6 +130,8 @@ fn main() -> Result<()> {
 async fn run_hub(state: SharedState) -> Result<()> {
     let port = state.config.port;
     tokio::spawn(state::tick_loop(state.clone()));
+    // 钉钉 Stream 长连接管理器：为配了 AppKey+AppSecret 的用户维持收消息长连接
+    tokio::spawn(dingtalk_stream::run(state.clone()));
 
     let app = server::router(state);
     let addr = format!("0.0.0.0:{port}");

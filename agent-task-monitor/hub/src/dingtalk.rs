@@ -64,7 +64,7 @@ pub fn verify_app_sign(app_secret: &str, timestamp: &str, sign: &str) -> bool {
 }
 
 /// 最小 URL 编码（只处理 base64 里会出现的 + / = 和空格）
-fn urlencode(s: &str) -> String {
+pub(crate) fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         match b {

@@ -284,6 +284,8 @@ export interface IntegrationsInfo {
   } | null;
   dingtalkApp: {
     hasSecret: boolean;
+    appKey?: string;
+    stream?: boolean;
     callbackUrl: string;
   } | null;
 }
@@ -321,8 +323,12 @@ export const setWecomApp = async (data: {
 };
 
 /** 钉钉企业应用（双向），返回专属回调地址 */
-export const setDingtalkApp = async (data: { appSecret?: string }) => {
-  return await post<{ callbackUrl: string | null }>(
+export const setDingtalkApp = async (data: {
+  appSecret?: string;
+  /** 填了 AppKey 走 Stream 长连接（免公网回调）；传 "" 清空回 HTTP 回调模式 */
+  appKey?: string;
+}) => {
+  return await post<{ callbackUrl: string | null; stream?: boolean }>(
     "/monitor/integrations/dingtalk-app",
     data,
   );
