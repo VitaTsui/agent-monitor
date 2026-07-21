@@ -104,12 +104,16 @@ const Portal: React.FC = observer(() => {
   // 移动端：顶栏「⋯」操作菜单与代码改动弹窗
   const [mobileActs, setMobileActs] = useState(false);
   const [mobileGit, setMobileGit] = useState(false);
+  const [isMobile, setIsMobile] = useState(
+    () => window.matchMedia("(max-width: 760px)").matches,
+  );
 
   // 移动端强制展开侧栏内容：桌面折叠态下缩窄窗口时，
   // CSS 会把抽屉撑到 84vw，但折叠态 JSX 不渲染内容 → 空白抽屉，这里在 JS 层纠正
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 760px)");
     const sync = () => {
+      setIsMobile(mq.matches);
       if (mq.matches) {
         setSiderFolded(false);
       }
@@ -542,15 +546,18 @@ const Portal: React.FC = observer(() => {
                                   </span>
                                 </div>
                               </div>
-                              <Tooltip title="拆分显示">
-                                <SplitCellsOutlined
-                                  className={styles.splitBtn}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    splitOpen(t.id ?? "");
-                                  }}
-                                />
-                              </Tooltip>
+                              {/* 移动端窄屏不支持拆分并排，去掉拆分按钮，只单会话查看 */}
+                              {!isMobile && (
+                                <Tooltip title="拆分显示">
+                                  <SplitCellsOutlined
+                                    className={styles.splitBtn}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      splitOpen(t.id ?? "");
+                                    }}
+                                  />
+                                </Tooltip>
+                              )}
                             </div>
                           ))}
                       </div>

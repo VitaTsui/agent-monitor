@@ -182,6 +182,20 @@ class PortalStore {
     }
     this._selectedMachineId = id;
     this._openIds = this._openIdsByDevice[id] ?? [];
+    // 该设备没有记忆的打开项时，自动打开一个最近活跃的会话，保证内容区「继续显示着」、
+    // 不因切设备而空白。
+    if (this._openIds.length === 0) {
+      const first = this._tasks
+        .filter(
+          (t) =>
+            (t.machineId || t.hostname || "unknown") === id &&
+            t.status !== "finished",
+        )
+        .sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0))[0];
+      if (first?.id) {
+        this._openIds = [first.id];
+      }
+    }
   };
 
   /**
