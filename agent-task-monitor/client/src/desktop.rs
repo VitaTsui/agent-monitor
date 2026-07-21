@@ -1105,29 +1105,34 @@ fn alert_box(title: &str, text: &str) {
 /// 不来数据」，整体超时要干等 5 分钟且全程无反馈（实际用户日志：三次
 /// 「开始自更新」后连下载完成都没有）——停滞必须快速可见地失败。
 fn download_to(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
-    // 弱网环境（跨境链路）单次失败很常见：自动重试一次，两次都挂才报错
-    match download_to_once(url, dest) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            ulog(&format!("[update] 首次下载失败（{e}），3s 后重试一次"));
-            std::thread::sleep(std::time::Duration::from_secs(3));
-            download_to_once(url, dest)
+    // 跨境链路（中国→海外 Vultr）慢且易抖：多试几次，指数退避，最后一次挂了才报错。
+    let mut last = String::new();
+    for attempt in 1..=4 {
+        match download_to_once(url, dest) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = format!("{e}");
+                let wait = attempt * 3;
+                ulog(&format!("[update] 第{attempt}次下载失败（{e}），{wait}s 后重试"));
+                std::thread::sleep(std::time::Duration::from_secs(wait as u64));
+            }
         }
     }
+    anyhow::bail!("多次下载均失败：{last}")
 }
 
 fn download_to_once(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let bytes = rt.block_on(async {
         let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(15))
+            .connect_timeout(std::time::Duration::from_secs(30))
             .build()?;
         let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(60),
             client.get(url).send(),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("连接更新服务器超时（30s）"))??;
+        .map_err(|_| anyhow::anyhow!("连接更新服务器超时（60s）"))??;
         if !resp.status().is_success() {
             anyhow::bail!("下载失败 HTTP {}", resp.status());
         }
@@ -1138,13 +1143,13 @@ fn download_to_once(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
         let mut last_mark = 0usize;
         loop {
             let chunk = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
+                std::time::Duration::from_secs(120),
                 resp.chunk(),
             )
             .await
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "下载停滞（30s 无数据，已收 {}/{} 字节），请稍后重试或到官网手动下载",
+                    "下载停滞（120s 无数据，已收 {}/{} 字节），请稍后重试或到官网手动下载",
                     out.len(),
                     total
                 )

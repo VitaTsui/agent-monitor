@@ -69,6 +69,8 @@ class PortalStore {
   private _selectedMachineId = "";
   /** 拆分视图中打开的会话（有序） */
   private _openIds: string[] = [];
+  /** 各设备各自打开的会话：切设备时不清空、切回来能恢复，避免切设备重置内容界面 */
+  private _openIdsByDevice: Record<string, string[]> = {};
   private _messagesById: Record<string, PortalMessage[]> = {};
   private _loadingIds: string[] = [];
   private _keyword = "";
@@ -169,13 +171,17 @@ class PortalStore {
   }
 
   public selectMachine = (id: string) => {
-    if (id === this.selectedMachineId) {
+    const prev = this.selectedMachineId;
+    if (id === prev) {
       return;
     }
+    // 切设备不重置内容界面：先存下当前设备打开的会话，切到目标设备时恢复它上次打开的
+    // （首次进入则空态）。内容缓存也不清——切回来立即有内容，无需重新拉取白屏一下。
+    if (prev) {
+      this._openIdsByDevice[prev] = this._openIds;
+    }
     this._selectedMachineId = id;
-    // 切换设备：右侧重置为空态 —— 不默认选中任何终端，由用户点选。
-    this._openIds = [];
-    this.dropMessageCache();
+    this._openIds = this._openIdsByDevice[id] ?? [];
   };
 
   /**
