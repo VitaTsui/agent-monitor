@@ -351,6 +351,18 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                 .title_bar_style(tauri::TitleBarStyle::Overlay)
                 .hidden_title(true);
             let win = builder.build()?;
+            // 默认「网页授权跳转登录」：未配对时自动在系统浏览器打开授权页。浏览器有完整
+            // 能力（第三方登录/密码管理器/已有登录态），用户在浏览器登录并授权本机后，客户端
+            // 轮询拿到 device_token，内嵌 webview 随即自动重载并静默登录（见后台线程
+            // reload-on-token）。内嵌页仍保留登录入口作兜底。
+            if need_onboard {
+                let u = portal_url.clone();
+                // 稍延后：先让主窗露出来，再弹浏览器，避免一上来就抢焦点
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    open_external(&u);
+                });
+            }
             // 兜底：远程页面加载失败/超时也要露出主窗（白屏好过永远的启动窗）
             {
                 let h = app.handle().clone();
@@ -470,8 +482,21 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             let state_bg = state_setup.clone();
             std::thread::spawn(move || {
                 let mut last_sig = String::new();
+                // 记住上轮是否已配对：从「未配对」跳到「已配对」（浏览器授权完成、拿到
+                // device_token）时重载 webview，让页面 client_auth 静默登录接管、直接进
+                // 已授权门户，无需用户在客户端里再登一次。
+                let mut was_paired = tauri::async_runtime::block_on(async {
+                    state_bg.device_token.read().await.is_some()
+                });
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(3));
+                    let paired_now = tauri::async_runtime::block_on(async {
+                        state_bg.device_token.read().await.is_some()
+                    });
+                    if paired_now && !was_paired {
+                        was_paired = true;
+                        reload_main(&handle_bg);
+                    }
                     let (terminals, excluded, hub_err, upd) = tauri::async_runtime::block_on(async {
                         let t = state_bg.terminals.read().await.clone();
                         let e = state_bg.excludes.read().await.list();
