@@ -346,11 +346,3 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     pointer-events: none;
   }
 }
-
-// 移动端：对话框做成更悬浮的圆角输入条（对标 Claude App）——更大圆角 + 更明显投影
-@media (max-width: 760px) {
-  .Composer .chatInput > div {
-    border-radius: 24px !important;
-    box-shadow: 0 6px 22px rgba(36, 61, 66, 0.14) !important;
-  }
-}
