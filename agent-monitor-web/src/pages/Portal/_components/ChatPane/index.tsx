@@ -166,6 +166,10 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
             </span>
           </div>
           <div className={styles.headMeta}>
+            {/* 拆分可同时看多设备的会话：标题下标明本会话所属设备 */}
+            {task.hostname ? (
+              <span className={styles.deviceChip}>💻 {task.hostname}</span>
+            ) : null}
             <span>{task.projectName}</span>
             {task.usedTokens5h ? (
               <Tooltip title="近 5 小时 token 用量（输入 + 输出 + 缓存创建）">

@@ -100,6 +100,15 @@ $muted: #7c9096;
           font-family: "SF Mono", Menlo, Consolas, monospace;
         }
 
+        .deviceChip {
+          padding: 0 8px;
+          border-radius: 999px;
+          font-size: 11px;
+          line-height: 18px;
+          background: rgba(36, 61, 66, 0.06);
+          color: #3a5560;
+          font-weight: 500;
+        }
       }
     }
 
