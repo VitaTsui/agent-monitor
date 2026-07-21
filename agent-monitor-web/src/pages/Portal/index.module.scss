@@ -751,9 +751,8 @@ $active-bg: rgba(36, 61, 66, 0.09);
         // 被推开后左侧两角保持设备圆角观感（无法读系统圆角，取接近值）
         border-top-left-radius: 26px;
         border-bottom-left-radius: 26px;
-        // 侧栏与内容之间的明显分界：一条清晰的描边 + 一层柔和投影
-        box-shadow: -1px 0 0 0.5px rgba(36, 61, 66, 0.18),
-          -12px 0 44px rgba(0, 0, 0, 0.28);
+        // 侧栏与内容的分界只用一条描边，不用阴影
+        border-left: 1px solid rgba(36, 61, 66, 0.18);
         overflow: hidden;
       }
     }
