@@ -44,6 +44,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     sendInput,
     recallInput,
     recallAllQueued,
+    termKey,
     syncMessages,
   } = PortalStore;
   const chatRef = useRef<HTMLDivElement>(null);
@@ -269,27 +270,46 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 <span className={styles.queuedDot} />
                 终端排队中 · {queuedItems.length}
               </span>
-              {queuedItems.some((q) => q.recallable) ? (
+              <span className={styles.queuedActions}>
                 <span
                   className={styles.recallAll}
                   role="button"
                   tabIndex={0}
-                  onClick={() =>
-                    recallAllQueued(
-                      id,
-                      queuedItems
-                        .filter((q) => q.recallable && q.cmdId)
-                        .map((q) => q.cmdId as string),
-                      queuedItems
-                        .filter((q) => q.recallable)
-                        .map((q) => q.text)
-                        .join("\n"),
-                    )
-                  }
+                  onClick={() => {
+                    const cmds = queuedItems
+                      .filter((q) => q.recallable && q.cmdId)
+                      .map((q) => q.cmdId as string);
+                    const nativeCount = queuedItems.filter(
+                      (q) => !q.recallable,
+                    ).length;
+                    // hub 队列里的（还没注入终端）走撤回 + 回填对话框
+                    if (cmds.length) {
+                      recallAllQueued(
+                        id,
+                        cmds,
+                        queuedItems
+                          .filter((q) => q.recallable)
+                          .map((q) => q.text)
+                          .join("\n"),
+                      );
+                    }
+                    // 已进终端原生队列的，注入 ↑ 键逐条撤回（iTerm2/Windows）
+                    if (nativeCount > 0) {
+                      termKey(id, "up", nativeCount);
+                    }
+                  }}
                 >
                   全部撤回
                 </span>
-              ) : null}
+                <span
+                  className={styles.recallAll}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => termKey(id, "esc")}
+                >
+                  插入会话
+                </span>
+              </span>
             </div>
             <div className={styles.queuedList}>
               {queuedItems.map((q, i) => (
@@ -303,7 +323,8 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
             </div>
             {queuedItems.some((q) => !q.recallable) ? (
               <div className={styles.queuedHint}>
-                已进终端原生队列的任务，在终端里按 ↑ 键可撤回（撤回后此处自动同步移除）
+                「全部撤回」注入 ↑、「插入会话」注入 Esc（仅 iTerm2 / Windows）；
+                Terminal.app 请在终端里手动按 ↑ / Esc（操作后此处自动同步）
               </div>
             ) : null}
           </div>

@@ -340,6 +340,16 @@ export const recallPortalInput = async (id: string, cmdId: string) => {
   return await post<boolean>(`/monitor/tasks/${id}/recall`, { cmdId });
 };
 
+/** 向终端注入按键：撤回终端原生排队(up，按 count 次) / 插入排队到会话(esc)。
+ *  仅 iTerm2(mac) 与 Windows 控制台可干净注入。 */
+export const termKeyTask = async (
+  id: string,
+  key: "up" | "esc",
+  count = 1,
+) => {
+  return await post<boolean>(`/monitor/tasks/${id}/termkey`, { key, count });
+};
+
 /** 会话目录下的子目录与文件（异步：pending=true 时轮询重试） */
 export const getTaskDirs = async (id: string, rel: string) => {
   return await get<{ dirs: string[]; files: string[]; cwd: string; pending: boolean }>(

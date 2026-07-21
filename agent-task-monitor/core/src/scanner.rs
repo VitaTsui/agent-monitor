@@ -884,13 +884,21 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                         turn_ended = false;
                     }
                 }
-                // 出列（被会话接受执行 或 取消）：从当前排队集合里移除该条
+                // 出列（被会话接受执行 或 按内容取消）：从当前排队集合里移除该条
                 Some("remove") => {
                     if let Some(text) = queued_user_text(&v) {
                         if let Some(pos) = queued_inputs.iter().position(|q| q == &text) {
                             queued_inputs.remove(pos);
                         }
                     }
+                }
+                // 撤回最近一条（终端按 ↑ 把最新排队项拉回输入）：content 为空，弹出末尾一条
+                Some("dequeue") => {
+                    queued_inputs.pop();
+                }
+                // 全部弹出（终端按 Esc 把排队全部插入会话）：清空
+                Some("popAll") => {
+                    queued_inputs.clear();
                 }
                 _ => {}
             },

@@ -465,6 +465,19 @@ async fn execute(state: &SharedState, cmd: ControlCmd, known_pids: &std::collect
         }
         return;
     }
+    // 终端按键注入（撤回排队 ↑ / 插入排队 Esc）单独处理
+    if matches!(cmd.action, am_core::model::ControlAction::TermKey) {
+        let spec = cmd.text.unwrap_or_default();
+        let res =
+            tokio::task::spawn_blocking(move || am_core::process::send_terminal_keys(pid, &spec))
+                .await;
+        match res {
+            Ok(Ok(_)) => tracing::info!("执行 hub 按键命令: 任务 {} pid={pid}", cmd.task_id),
+            Ok(Err(e)) => tracing::warn!("执行 hub 按键命令失败: {e}"),
+            Err(e) => tracing::warn!("执行 hub 按键命令的阻塞任务异常: {e}"),
+        }
+        return;
+    }
     match am_core::process::control(pid, cmd.action) {
         Ok(label) => {
             // 加锁顺序须与 enforce_quota 一致（auto_paused → paused），反序会死锁。

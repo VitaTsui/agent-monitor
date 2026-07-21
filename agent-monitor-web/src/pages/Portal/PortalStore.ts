@@ -1,6 +1,7 @@
 import {
   getQueuedInputs,
   recallPortalInput,
+  termKeyTask,
   PortalControlAction,
   PortalDevice,
   PortalMessage,
@@ -566,6 +567,22 @@ class PortalStore {
   /** 撤回后把原文回填给对应会话的对话框（供 Composer 监听消费） */
   public consumeComposerRefill = () => {
     this.composerRefill = null;
+  };
+
+  /**
+   * 向终端注入按键：撤回终端原生排队（up，按 count 次）/ 插入排队到会话（esc）。
+   * 仅 iTerm2(mac) 与 Windows 控制台可干净注入；Terminal.app 会失败并提示手动按键。
+   */
+  public termKey = (id: string, key: "up" | "esc", count = 1) => {
+    termKeyTask(id, key, count)
+      .then((res) => {
+        if (res.code === 0) {
+          antdMessage.success(key === "up" ? "已撤回终端排队" : "已插入排队到会话");
+        } else {
+          antdMessage.warning(res.msg ?? "按键注入失败");
+        }
+      })
+      .catch(() => antdMessage.error("操作失败，请检查网络"));
   };
 
   /**

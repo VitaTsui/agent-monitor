@@ -147,6 +147,9 @@ pub enum ControlAction {
     Kill,
     /// 向会话注入输入（发布任务）
     Input,
+    /// 向终端注入按键（不提交）：text 形如 "up:3"（按 3 次上键撤回排队）/ "esc"（插入排队）。
+    /// 仅 iTerm2(mac) 与 Windows 控制台可干净注入；Terminal.app 不支持（前端走提示）。
+    TermKey,
 }
 
 #[derive(Debug, Deserialize)]

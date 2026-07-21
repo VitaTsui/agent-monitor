@@ -283,6 +283,9 @@ pub fn control(pid: u32, action: ControlAction) -> Result<&'static str> {
             ControlAction::Stop => libc::SIGTERM,
             ControlAction::Kill => libc::SIGKILL,
             ControlAction::Input => return Err(anyhow!("Input 动作需走 send_input")),
+            ControlAction::TermKey => {
+                return Err(anyhow!("TermKey 动作需走 send_terminal_keys"))
+            }
         };
         let ret = unsafe { libc::kill(pid as i32, sig) };
         if ret != 0 {
@@ -313,6 +316,7 @@ pub fn control(pid: u32, action: ControlAction) -> Result<&'static str> {
                 Err(anyhow!("Windows 平台暂不支持暂停/恢复"))
             }
             ControlAction::Input => Err(anyhow!("Input 动作需走 send_input")),
+            ControlAction::TermKey => Err(anyhow!("TermKey 动作需走 send_terminal_keys")),
         }
     }
     #[cfg(not(any(unix, windows)))]
@@ -347,6 +351,185 @@ pub fn send_input(pid: u32, text: &str) -> Result<&'static str> {
     {
         let _ = (pid, text);
         Err(anyhow!("当前平台暂不支持远程发布任务"))
+    }
+}
+
+/// 向终端注入按键（不提交），用于「撤回排队(↑)」「插入排队(Esc)」。
+/// spec："up:3" = 按 3 次上键；"esc" = 按 1 次 Esc。仅 iTerm2(mac) 与 Windows 控制台
+/// 可干净注入；Terminal.app 无法在不切前台的前提下注入方向键 → 返回错误（前端走提示）。
+pub fn send_terminal_keys(pid: u32, spec: &str) -> Result<&'static str> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(anyhow!("非法 pid: {pid}"));
+    }
+    let (key, count) = parse_key_spec(spec);
+    if count == 0 {
+        return Ok("无按键");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        iterm_send_key(pid, key, count)
+    }
+    #[cfg(windows)]
+    {
+        windows_send_key(pid, key, count)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let tty = tty_of(pid).ok_or_else(|| anyhow!("无法定位进程 {pid} 的终端设备"))?;
+        tiocsti_send_key(&tty, key, count)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (key, count);
+        Err(anyhow!("当前平台不支持按键注入"))
+    }
+}
+
+/// 解析 "up:3" / "esc" → (键名, 次数)。次数封顶 50 防误触发风暴。
+fn parse_key_spec(spec: &str) -> (&str, usize) {
+    let mut it = spec.splitn(2, ':');
+    let key = it.next().unwrap_or("").trim();
+    let count = it
+        .next()
+        .and_then(|c| c.trim().parse::<usize>().ok())
+        .unwrap_or(1);
+    (key, count.min(50))
+}
+
+/// 键名 → 终端转义字节序列。↑ 用普通光标模式 ESC[A；Esc 单字节。
+#[cfg(all(unix, not(target_os = "macos")))]
+fn key_seq(key: &str) -> Option<&'static [u8]> {
+    match key {
+        "up" => Some(b"\x1b[A"),
+        "esc" => Some(b"\x1b"),
+        _ => None,
+    }
+}
+
+/// iTerm2：按 tty 匹配会话，用 write text（不追加换行）把转义序列写 count 次。
+#[cfg(target_os = "macos")]
+fn iterm_send_key(pid: u32, key: &str, count: usize) -> Result<&'static str> {
+    let tty = tty_of(pid).ok_or_else(|| anyhow!("无法定位进程 {pid} 的终端设备"))?;
+    let seq_expr = match key {
+        "up" => "(character id 27) & \"[A\"",
+        "esc" => "(character id 27)",
+        _ => return Err(anyhow!("未知按键: {key}")),
+    };
+    let tty_e = tty.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        r#"tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if (tty of s) is "{tty_e}" then
+          repeat {count} times
+            tell s to write text ({seq_expr}) newline no
+          end repeat
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell
+return "notfound""#
+    );
+    if run_osascript(&script).map(|o| o.contains("ok")).unwrap_or(false) {
+        return Ok("已注入按键");
+    }
+    Err(anyhow!(
+        "未匹配到 iTerm2 会话：终端按键注入仅支持 iTerm2（Terminal.app 请在终端里手动按键）"
+    ))
+}
+
+/// Linux：TIOCSTI 把转义序列逐字节注入 count 次。
+#[cfg(all(unix, not(target_os = "macos")))]
+fn tiocsti_send_key(tty: &str, key: &str, count: usize) -> Result<&'static str> {
+    use std::os::unix::io::AsRawFd;
+    let seq = key_seq(key).ok_or_else(|| anyhow!("未知按键: {key}"))?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(tty)
+        .map_err(|e| anyhow!("注入失败：无法打开终端 {tty}（{e}）"))?;
+    let fd = file.as_raw_fd();
+    for _ in 0..count {
+        for &b in seq {
+            let c = b as libc::c_char;
+            let ret = unsafe { libc::ioctl(fd, libc::TIOCSTI, &c) };
+            if ret != 0 {
+                return Err(anyhow!("注入失败：TIOCSTI 被系统禁用或权限不足"));
+            }
+        }
+    }
+    Ok("已注入按键")
+}
+
+/// Windows：AttachConsole + WriteConsoleInput 发虚拟键（按下+抬起）count 次。
+#[cfg(windows)]
+fn windows_send_key(pid: u32, key: &str, count: usize) -> Result<&'static str> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let (vk, uch): (u16, u16) = match key {
+        "up" => (0x26, 0),   // VK_UP，非可打印字符 → UnicodeChar 0
+        "esc" => (0x1B, 27), // VK_ESCAPE，UnicodeChar = ESC
+        _ => return Err(anyhow!("未知按键: {key}")),
+    };
+    let dir = std::env::temp_dir();
+    let ps_path = dir.join(format!("am-key-{pid}-{}.ps1", std::process::id()));
+    let script = format!(
+        r#"param([int]$TargetPid,[int]$Vk,[int]$Uch,[int]$Count)
+$ErrorActionPreference='Stop'
+$code=@'
+using System;
+using System.Runtime.InteropServices;
+using System.Collections.Generic;
+public class AmKey {{
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern bool AttachConsole(uint pid);
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern bool FreeConsole();
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern IntPtr GetStdHandle(int n);
+  [StructLayout(LayoutKind.Sequential)] public struct KEY_EVENT_RECORD {{ public int bKeyDown; public ushort wRepeatCount; public ushort wVirtualKeyCode; public ushort wVirtualScanCode; public char UnicodeChar; public uint dwControlKeyState; }}
+  [StructLayout(LayoutKind.Explicit)] public struct INPUT_RECORD {{ [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public KEY_EVENT_RECORD Key; }}
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern bool WriteConsoleInput(IntPtr h, INPUT_RECORD[] buf, uint len, out uint written);
+  static INPUT_RECORD Mk(ushort vk, char uc, bool down){{ var r=new INPUT_RECORD(); r.EventType=1; var k=new KEY_EVENT_RECORD(); k.bKeyDown=down?1:0; k.wRepeatCount=1; k.wVirtualKeyCode=vk; k.wVirtualScanCode=0; k.UnicodeChar=uc; k.dwControlKeyState=0; r.Key=k; return r; }}
+  public static bool Send(uint pid, ushort vk, char uc, int count){{
+    FreeConsole();
+    if(!AttachConsole(pid)) return false;
+    try {{
+      IntPtr h=GetStdHandle(-10);
+      var recs=new List<INPUT_RECORD>();
+      for(int i=0;i<count;i++){{ recs.Add(Mk(vk,uc,true)); recs.Add(Mk(vk,uc,false)); }}
+      var arr=recs.ToArray(); uint w;
+      return WriteConsoleInput(h, arr, (uint)arr.Length, out w);
+    }} finally {{ FreeConsole(); }}
+  }}
+}}
+'@
+Add-Type -TypeDefinition $code -Language CSharp
+if([AmKey]::Send([uint32]$TargetPid,[uint16]$Vk,[char]$Uch,$Count)){{ exit 0 }} else {{ exit 2 }}
+"#
+    );
+    std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
+        .arg(&ps_path)
+        .arg("-TargetPid")
+        .arg(pid.to_string())
+        .arg("-Vk")
+        .arg(vk.to_string())
+        .arg("-Uch")
+        .arg(uch.to_string())
+        .arg("-Count")
+        .arg(count.to_string())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let _ = std::fs::remove_file(&ps_path);
+    match out {
+        Ok(o) if o.status.success() => Ok("已注入按键"),
+        Ok(o) => Err(anyhow!(
+            "按键注入失败（进程可能非控制台程序或权限不足）。{}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Err(anyhow!("powershell 执行失败: {e}")),
     }
 }
 
@@ -503,7 +686,10 @@ fn applescript_write(tty: &str, text: &str) -> Result<&'static str> {
     };
 
     // iTerm2：先只键入文本（newline no，不让它自动补换行——那有时是 LF、只换行不提交），
-    // 再单独送一个回车 CR(character id 13) 作提交，把「粘贴内容」与「提交」拆开，最稳。
+    // 停一下再单独送回车 CR(character id 13) 作提交。停顿关键在长/多行内容：claude 会进
+    // 粘贴态，紧跟的回车会被并进粘贴而不提交（表现为「只换行」）；等它把粘贴吃完再回车才稳。
+    // 停顿按内容长度递增：0.12s 起步、封顶 1s。
+    let submit_delay = (0.12 + text.chars().count() as f64 / 3000.0).min(1.0);
     let iterm = format!(
         r#"tell application "iTerm2"
   repeat with w in windows
@@ -511,6 +697,7 @@ fn applescript_write(tty: &str, text: &str) -> Result<&'static str> {
       repeat with s in sessions of t
         if (tty of s) is "{tty_e}" then
           tell s to write text "{text_e}" newline no
+          delay {submit_delay:.2}
           tell s to write text (character id 13) newline no
           return "ok"
         end if
@@ -628,6 +815,7 @@ fn action_label(action: ControlAction) -> &'static str {
         ControlAction::Stop => "已终止",
         ControlAction::Kill => "已强制终止",
         ControlAction::Input => "已发送",
+        ControlAction::TermKey => "已注入按键",
     }
 }
 

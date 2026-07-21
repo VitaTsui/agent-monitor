@@ -181,6 +181,11 @@ $muted: #7c9096;
         }
       }
 
+      .queuedActions {
+        display: flex;
+        gap: 14px;
+      }
+
       .recallAll {
         font-size: 12px;
         color: #0f9bad;

@@ -65,6 +65,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/tasks/:id/slash-commands", get(task_slash_commands))
         .route("/monitor/tasks/:id/control", post(control_task))
         .route("/monitor/tasks/:id/input", post(input_task))
+        .route("/monitor/tasks/:id/termkey", post(termkey_task))
         .route("/monitor/tasks/:id/queued", get(queued_inputs))
         .route("/monitor/tasks/:id/recall", post(recall_input))
         .route("/monitor/tasks/:id/dirs", get(task_dirs))
@@ -811,6 +812,62 @@ async fn input_task(
         id: Some(cmd_id.clone()),
     });
     ok(json!({ "pid": pid, "result": "已下发到目标机器", "cmdId": cmd_id }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TermKeyReq {
+    /// "up"（撤回排队，按 count 次上键）| "esc"（插入排队，按一次 Esc）
+    key: String,
+    #[serde(default)]
+    count: u32,
+    #[serde(default)]
+    pid: Option<u32>,
+}
+
+/// POST /monitor/tasks/:id/termkey —— 向终端注入按键：撤回排队(↑) / 插入排队(Esc)。
+/// 仅 iTerm2(mac) 与 Windows 控制台可干净注入；Terminal.app 由前端走提示、不会走到这里。
+async fn termkey_task(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<TermKeyReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let spec = match req.key.as_str() {
+        "up" => format!("up:{}", req.count.clamp(1, 50)),
+        "esc" => "esc".to_string(),
+        _ => return err(400, "未知按键"),
+    };
+    let task = {
+        let tasks = state.tasks_for(&user).await;
+        tasks.into_iter().find(|t| t.id == id)
+    };
+    let Some(task) = task else {
+        return err(404, "任务不存在");
+    };
+    let pid = match (req.pid, task.pid) {
+        (Some(p), Some(tp)) if p != tp => return err(403, "pid 与任务不符"),
+        (Some(_), None) => return err(403, "该任务没有关联进程"),
+        _ => task.pid,
+    };
+    let mut machines = state.machines.write().await;
+    let Some(entry) = machines.get_mut(&task.machine_id) else {
+        return err(404, "任务所属机器已离线");
+    };
+    if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
+        return err(500, "任务所属机器已离线，无法下发");
+    }
+    entry.pending.push_back(ControlCmd {
+        task_id: id.clone(),
+        pid,
+        action: am_core::model::ControlAction::TermKey,
+        text: Some(spec),
+        id: None,
+    });
+    ok(json!({ "result": "已下发按键" }))
 }
 
 /// GET /monitor/tasks/:id/queued —— 该会话仍在 hub 队列里、还没被客户端
