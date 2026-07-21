@@ -250,7 +250,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                     }
                 }
             }
-            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("终端任务监控")
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(960.0, 640.0)
@@ -261,8 +261,15 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         reveal(w.app_handle(), want_visible);
                     }
-                })
-                .build()?;
+                });
+            // 仅 macOS 用 Overlay 融合式标题栏：保留原生红黄绿交通灯、隐藏标题文字，
+            // 网页内容延伸到标题栏区域（对标 Claude / Codex 桌面端）。Windows/Linux 保持
+            // 系统原生边框不动 —— 之前 Windows 去边框自绘按钮点不动、无法关闭缩小。
+            #[cfg(target_os = "macos")]
+            let builder = builder
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true);
+            let win = builder.build()?;
             // 兜底：远程页面加载失败/超时也要露出主窗（白屏好过永远的启动窗）
             {
                 let h = app.handle().clone();
