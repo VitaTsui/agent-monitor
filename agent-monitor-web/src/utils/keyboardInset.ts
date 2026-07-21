@@ -30,21 +30,30 @@ export function installKeyboardInset() {
   window.addEventListener("keyboardDidHide", () => set(0));
 
   // 浏览器：把 #root 高度钉成可视视口高（仅非原生壳，避免与原生 resize 打架）
+  // 仅触摸设备（有软键盘）才接管：桌面客户端/桌面浏览器的 webview 也有 visualViewport，
+  // 之前无差别接管会在桌面客户端里改 #root 尺寸/触发 reflow，把首个键入字符吞掉
+  // （表现为「输入 / 得连按两次才显示」）。桌面无软键盘，直接不接管。
+  const isTouch =
+    "ontouchstart" in window || (navigator.maxTouchPoints ?? 0) > 0;
   const vv = window.visualViewport;
   const rootEl = document.getElementById("root");
-  if (vv && rootEl && !inCapacitor) {
+  if (vv && rootEl && !inCapacitor && isTouch) {
+    let lastH = 0;
     const apply = () => {
-      // 可视视口被键盘/地址栏顶偏移时，连带把 #root 往下挪同样距离，视觉上背景不动
-      rootEl.style.height = `${Math.round(vv.height)}px`;
-      rootEl.style.transform =
-        vv.offsetTop > 0 ? `translateY(${Math.round(vv.offsetTop)}px)` : "";
-      // 顺手把布局视口滚回顶部，杜绝 iOS 残留的整页滚动
-      if (window.scrollY !== 0) window.scrollTo(0, 0);
+      // 只在高度真变化时改 #root（键盘弹起/收起）；不监听 scroll、不做 transform，
+      // 避免打字过程中频繁 reflow 吞掉输入。键盘弹起 → #root 缩到可视视口高 → 内容与
+      // 对话框整体压到键盘上方。
+      const h = Math.round(vv.height);
+      if (h === lastH) return;
+      lastH = h;
+      rootEl.style.height = `${h}px`;
     };
     vv.addEventListener("resize", apply);
-    vv.addEventListener("scroll", apply);
     window.addEventListener("orientationchange", () =>
-      window.setTimeout(apply, 300),
+      window.setTimeout(() => {
+        lastH = 0;
+        apply();
+      }, 300),
     );
     apply();
   }
