@@ -238,10 +238,18 @@ $muted: #7c9096;
 }
 
 
-// 移动端：标题与操作已上移到全局顶栏，本格头部整行隐藏
+// 移动端：标题与操作已改为顶部悬浮胶囊，本格头部整行隐藏；
+// 顶栏是 fixed 悬浮层，内容全屏延伸到其后，故内容区顶部让出胶囊高度，
+// 首屏第一条消息不被胶囊压住（继续上滚时内容从胶囊下的渐隐里穿过）。
 @media (max-width: 760px) {
   .ChatPane .paneHeader {
     display: none;
+  }
+  .ChatPane .chat {
+    padding-top: calc(60px + env(safe-area-inset-top));
+  }
+  .ChatPane .chatEmpty {
+    padding-top: calc(60px + env(safe-area-inset-top));
   }
 }
 
