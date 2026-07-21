@@ -251,6 +251,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 running={task.status === "running"}
                 providerDsr={task.providerDsr}
                 onRecall={(cmdId) => recallInput(id, cmdId)}
+                onAnswer={(text) => sendInput(id, text)}
               />
             </div>
           )}

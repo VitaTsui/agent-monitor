@@ -14,6 +14,8 @@ interface TerminalFeedProps {
   providerDsr?: string;
   /** 撤回仍在排队的输入（排队气泡上的撤回按钮） */
   onRecall?: (cmdId: string) => void;
+  /** 回应终端里的交互式选择（点选项 = 发送对应序号到终端） */
+  onAnswer?: (text: string) => void;
 }
 
 /** 一轮对话：一条用户消息 + 其后的助手/工具活动 */
@@ -55,7 +57,7 @@ const fmtTime = (ts?: string) => (ts ? dayjs(ts).format("MM-DD HH:mm") : "");
 const RESULT_CLAMP_LINES = 4;
 
 const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
-  const { messages, running, providerDsr, onRecall } = props;
+  const { messages, running, providerDsr, onRecall, onAnswer } = props;
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   const turns = toTurns(messages);
@@ -90,7 +92,25 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
               ) : null}
               <div className={styles.selectOpts}>
                 {(q.options ?? []).map((o, oi) => (
-                  <div key={oi} className={styles.selectOpt}>
+                  <div
+                    key={oi}
+                    className={`${styles.selectOpt} ${onAnswer ? styles.clickable : ""}`}
+                    role={onAnswer ? "button" : undefined}
+                    tabIndex={onAnswer ? 0 : undefined}
+                    onClick={
+                      onAnswer ? () => onAnswer(String(oi + 1)) : undefined
+                    }
+                    onKeyDown={
+                      onAnswer
+                        ? (e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              onAnswer(String(oi + 1));
+                            }
+                          }
+                        : undefined
+                    }
+                  >
                     <span className={styles.selectOptIdx}>{oi + 1}</span>
                     <span className={styles.selectOptBody}>
                       <span className={styles.selectOptLabel}>{o.label}</span>
@@ -106,7 +126,7 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
             </div>
           ))}
           <div className={styles.selectHint}>
-            在下方对话框输入序号或选项文字即可回应
+            点选项直接回应；或在下方对话框输入序号 / 自定义答案
           </div>
         </div>
       );

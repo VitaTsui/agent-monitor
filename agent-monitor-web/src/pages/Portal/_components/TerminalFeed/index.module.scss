@@ -523,6 +523,16 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
         background: rgba(255, 255, 255, 0.04);
         border: 1px solid rgba(255, 255, 255, 0.08);
 
+        &.clickable {
+          cursor: pointer;
+          transition: background 0.12s, border-color 0.12s;
+
+          &:hover {
+            background: rgba(217, 164, 65, 0.16);
+            border-color: rgba(217, 164, 65, 0.5);
+          }
+        }
+
         .selectOptIdx {
           flex: none;
           width: 18px;
