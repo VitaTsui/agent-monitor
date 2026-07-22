@@ -46,8 +46,13 @@ const Composer: React.FC<ComposerProps> = (props) => {
   // 斜杠命令：仅当输入以「/」开头且未含空格时弹出（Claude Code 终端式），
   // null=不在命令模式，字符串=「/」之后已输入的过滤词
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
+  // 命令菜单里方向键高亮的项索引
+  const [slashActive, setSlashActive] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // 供原生 keydown 捕获处理器读取当前菜单项/高亮（避免闭包拿到旧值）
+  const slashItemsRef = useRef<Array<{ key: string; run: () => void }>>([]);
+  const slashActiveRef = useRef(0);
 
   /**
    * 把文本追加进 Chat.Input 的输入框。
@@ -118,6 +123,29 @@ const Composer: React.FC<ComposerProps> = (props) => {
     const ta = rootRef.current?.querySelector("textarea");
     if (!ta) return;
     const onKeyDownCapture = (e: KeyboardEvent) => {
+      // 命令菜单开着时：↑↓ 移高亮、回车选中当前项（选中后自动聚焦回输入框）
+      const items = slashItemsRef.current;
+      if (items.length > 0 && !e.isComposing) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          e.stopPropagation();
+          setSlashActive((i) => (i + 1) % items.length);
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          e.stopPropagation();
+          setSlashActive((i) => (i - 1 + items.length) % items.length);
+          return;
+        }
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          e.stopPropagation();
+          items[slashActiveRef.current]?.run();
+          rootRef.current?.querySelector("textarea")?.focus();
+          return;
+        }
+      }
       const isMobile = window.matchMedia("(max-width: 760px)").matches;
       if (isMobile && e.key === "Enter" && !e.shiftKey && !e.isComposing) {
         e.stopPropagation();
@@ -425,9 +453,23 @@ const Composer: React.FC<ComposerProps> = (props) => {
       )?.set;
       setter?.call(ta, "");
       ta.dispatchEvent(new Event("input", { bubbles: true }));
+      ta.focus();
     }
     setSlashQuery(null);
   };
+
+  // 命令菜单项（含顶部「发送自定义」项）：方向键/回车导航与渲染共用同一份顺序。
+  // 期间用 ref 暴露给原生 keydown 处理器，避免闭包读到旧值。
+  const slashItems: Array<{ key: string; run: () => void }> = [];
+  if (showCustom) slashItems.push({ key: "__custom", run: sendCustom });
+  matched.forEach((c) => slashItems.push({ key: c.name, run: () => fillCommand(c.name) }));
+  slashItemsRef.current = slashItems;
+  slashActiveRef.current = Math.min(slashActive, Math.max(0, slashItems.length - 1));
+
+  // 菜单重开 / 换过滤词 / 集合变化时，高亮回到第一项
+  useEffect(() => {
+    setSlashActive(0);
+  }, [slashQuery]);
 
   return (
     <div
@@ -462,29 +504,44 @@ const Composer: React.FC<ComposerProps> = (props) => {
         <div className={styles.slashMenu}>
           {showCustom ? (
             <div
-              className={`${styles.slashItem} ${styles.slashCustom}`}
+              className={`${styles.slashItem} ${styles.slashCustom} ${
+                slashActive === 0 ? styles.slashActiveItem : ""
+              }`}
               role="button"
               tabIndex={0}
+              onMouseEnter={() => setSlashActive(0)}
               onMouseDown={(e) => e.preventDefault()}
-              onClick={sendCustom}
+              onClick={() => {
+                sendCustom();
+                rootRef.current?.querySelector("textarea")?.focus();
+              }}
             >
               <span className={styles.slashName}>发送 /{slashQuery}</span>
               <span className={styles.slashDesc}>不在列表中的自定义命令，直接发出</span>
             </div>
           ) : null}
-          {matched.map((c) => (
-            <div
-              key={c.name}
-              className={styles.slashItem}
-              role="button"
-              tabIndex={0}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => fillCommand(c.name)}
-            >
-              <span className={styles.slashName}>{c.name}</span>
-              {c.desc ? <span className={styles.slashDesc}>{c.desc}</span> : null}
-            </div>
-          ))}
+          {matched.map((c, i) => {
+            const idx = showCustom ? i + 1 : i;
+            return (
+              <div
+                key={c.name}
+                className={`${styles.slashItem} ${
+                  slashActive === idx ? styles.slashActiveItem : ""
+                }`}
+                role="button"
+                tabIndex={0}
+                onMouseEnter={() => setSlashActive(idx)}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  fillCommand(c.name);
+                  rootRef.current?.querySelector("textarea")?.focus();
+                }}
+              >
+                <span className={styles.slashName}>{c.name}</span>
+                {c.desc ? <span className={styles.slashDesc}>{c.desc}</span> : null}
+              </div>
+            );
+          })}
         </div>
       )}
 

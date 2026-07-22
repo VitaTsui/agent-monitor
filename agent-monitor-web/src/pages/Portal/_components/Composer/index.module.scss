@@ -349,8 +349,10 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
       border-radius: 8px;
       cursor: pointer;
 
-      &:hover {
-        background: rgba(15, 155, 173, 0.08);
+      &:hover,
+      // 方向键高亮项：和 hover 同一视觉
+      &.slashActiveItem {
+        background: rgba(15, 155, 173, 0.12);
       }
 
       // 自定义命令「直接发送」项：底部描边区隔于列表命令
