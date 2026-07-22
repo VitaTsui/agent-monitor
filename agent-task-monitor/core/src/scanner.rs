@@ -604,45 +604,61 @@ pub fn build_tasks(
                 true
             });
 
-            // ② 进程只配「自己创建的会话」：进程一定是它那个会话文件的创建者，故
-            // created_ms 落在 [启动-2s, 启动+4h]（进程一定先于它创建的会话，start_time 又是
-            // 向下取整 ≤ 真实启动，故 created≥start 恒成立；2s 只兜文件系统/时钟抖动）。
-            // 关键：回看窗口必须极小。曾用 2min，结果几乎同时开的多个终端会互相错配 ——
-            // 贪心取 |created-start| 最小，会把进程 P2 配到「在 P2 启动前几秒创建」的 P1 的会话
-            // （实测 Cursor 4 个终端 6~7s 内先后开，就这样张冠李戴、/clear 发错终端）。收紧到
-            // 2s 后，早于本进程启动创建的会话被排除，各进程只会配到自己启动后创建的那条。
-            const CREATE_BACK_MS: i64 = 2 * 1000;
+            // ② 进程只配「自己创建的会话」：进程一定先于它创建的会话，且 start_time 向下取整
+            // ≤ 真实启动，故「会话 created_ms ≥ 进程 start」恒成立。回看窗口必须≈0，只留 0.5s
+            // 兜文件系统时间戳粒度。曾用 2min→仍错配，2s→仍不够：若会话在进程启动后几秒才落盘
+            // （首条消息略慢），另一个晚 2s 内启动的进程会把它抢走（diff 落在 -2s 内），贪心取
+            // |diff| 最小就张冠李戴（实测 Cursor 多终端 /clear 发到「上一个会话」的终端）。收到
+            // 0.5s 后，早于本进程启动创建的会话被彻底排除，各进程只配自己启动后创建的那条。
+            const CREATE_BACK_MS: i64 = 500;
             const CREATE_FWD_MS: i64 = 4 * 3600 * 1000;
-            loop {
-                let mut best: Option<(usize, usize, i64)> = None;
-                for (pi, p) in free_procs.iter().enumerate() {
-                    if p.start_time == 0 {
+            // 进程按启动升序，逐个认领「创建时间 ≥ 自身启动(容 0.5s)、且尚未被认领的最早
+            // 会话」。为什么不用「|diff| 最小贪心」：那会让晚启动的进程把早启动进程的会话抢走
+            // ——只要那条会话的创建时间恰好离晚进程更近（会话首条消息略慢落盘时常发生），就
+            // 张冠李戴，表现为「当前会话下发到上一个会话的终端」。按启动序 + 认领最早后继会话，
+            // 早开的进程先挑走它自己那条（最早创建的后继），晚开的进程只能拿更晚的，天然不串。
+            let mut proc_order: Vec<usize> = (0..free_procs.len())
+                .filter(|&i| free_procs[i].start_time != 0)
+                .collect();
+            proc_order.sort_by_key(|&i| free_procs[i].start_time);
+            let mut used_sess = vec![false; free_sess.len()];
+            let mut used_proc = vec![false; free_procs.len()];
+            for &pi in &proc_order {
+                let p_ms = (free_procs[pi].start_time as i64) * 1000;
+                let mut best: Option<usize> = None;
+                let mut best_created = i64::MAX;
+                for (si, s) in free_sess.iter().enumerate() {
+                    if used_sess[si] || s.created_ms == 0 {
                         continue;
                     }
-                    let p_ms = (p.start_time as i64) * 1000;
-                    for (si, s) in free_sess.iter().enumerate() {
-                        if s.created_ms == 0 {
-                            continue;
-                        }
-                        let diff = s.created_ms as i64 - p_ms; // >0 = 会话比进程晚建
-                        if diff >= -CREATE_BACK_MS && diff <= CREATE_FWD_MS {
-                            let d = diff.abs();
-                            if best.map_or(true, |(_, _, bd)| d < bd) {
-                                best = Some((pi, si, d));
-                            }
-                        }
+                    let diff = s.created_ms as i64 - p_ms;
+                    if diff >= -CREATE_BACK_MS
+                        && diff <= CREATE_FWD_MS
+                        && (s.created_ms as i64) < best_created
+                    {
+                        best_created = s.created_ms as i64;
+                        best = Some(si);
                     }
                 }
-                match best {
-                    Some((pi, si, _)) => {
-                        let p = free_procs.remove(pi);
-                        let s = free_sess.remove(si);
-                        pid_of_session.insert(s.session_id.as_str(), p);
-                        paired_pids.insert(p.pid);
-                    }
-                    None => break,
+                if let Some(si) = best {
+                    used_sess[si] = true;
+                    used_proc[pi] = true;
+                    pid_of_session.insert(free_sess[si].session_id.as_str(), free_procs[pi]);
+                    paired_pids.insert(free_procs[pi].pid);
                 }
             }
+            free_procs = free_procs
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !used_proc[*i])
+                .map(|(_, p)| *p)
+                .collect();
+            free_sess = free_sess
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !used_sess[*i])
+                .map(|(_, s)| *s)
+                .collect();
 
             // ③ 命令行 --continue（恢复最近改动的会话，无显式 id）：配给剩余里 mtime 最近
             // 的会话（free_sess 是 mtime 降序）。没有 --resume/--continue、也没有自己新建会话
