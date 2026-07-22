@@ -329,6 +329,15 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             disable_app_nap();
             // 恢复上次「保持电脑唤醒」设置
             keep_awake::set(read_keep_awake(&state_setup));
+            // 默认装上 Cursor/VSCode 桥接扩展（内嵌终端下发靠它）：后台 best-effort，
+            // 每个扩展版本只装一次；未装编辑器 / CLI 不在 PATH 就静默跳过。
+            {
+                let hub = web_base.clone();
+                let dd = state_setup.config.data_dir.clone();
+                std::thread::spawn(move || {
+                    let _ = ensure_bridge_extension(&hub, &dd, false);
+                });
+            }
 
             // 作为一般桌面应用运行：macOS 显示 Dock 图标（Regular）。
             // agent 模式启动即后台，初始就用 Accessory —— 若先 Regular 再切，
@@ -486,6 +495,19 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                             let on = !read_keep_awake(&state_evt);
                             write_keep_awake(&state_evt, on);
                             keep_awake::set(on);
+                        }
+                        "install_ext" => {
+                            // 手动强制重装 Cursor/VSCode 桥接扩展，装完弹提示
+                            let hub = web_base_menu.clone();
+                            let dd = state_evt.config.data_dir.clone();
+                            std::thread::spawn(move || {
+                                let n = ensure_bridge_extension(&hub, &dd, true);
+                                notify_progress(&if n > 0 {
+                                    format!("已把桥接扩展安装到 {n} 个编辑器（Cursor/VSCode），重载窗口即生效")
+                                } else {
+                                    "未检测到 Cursor/VSCode 的命令行（code/cursor 未加入 PATH）。请在编辑器里执行「Shell Command: Install 'code'/'cursor' command in PATH」后重试".to_string()
+                                });
+                            });
                         }
                         "quit" => app.exit(0),
                         other => {
@@ -696,6 +718,13 @@ fn build_tray_menu<R: tauri::Runtime>(
         read_keep_awake(state),
         None::<&str>,
     )?;
+    let install_ext = MenuItem::with_id(
+        manager,
+        "install_ext",
+        "安装 Cursor/VSCode 桥接扩展",
+        true,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(manager, "quit", "退出", true, None::<&str>)?;
 
     let menu = Menu::new(manager)?;
@@ -746,6 +775,7 @@ fn build_tray_menu<R: tauri::Runtime>(
     menu.append(&close_to_tray)?;
     menu.append(&autostart)?;
     menu.append(&keep_awake)?;
+    menu.append(&install_ext)?;
     menu.append(&sep()?)?;
     menu.append(&scope)?;
     menu.append(&sep()?)?;
@@ -1345,6 +1375,62 @@ pub fn self_update_probe(hub: &str) {
             std::process::exit(1);
         }
     }
+}
+
+/// 桥接扩展版本：随扩展 package.json 的 version 走；变更时改这里，客户端会重装一次。
+const BRIDGE_EXT_VERSION: &str = "0.1.0";
+
+/// 默认把 Cursor/VSCode 桥接扩展装上：从 hub 下 vsix → 检测 cursor/code CLI → 安装。
+/// 每个扩展版本只装一次（标记文件）。装不上（未装编辑器/CLI 不在 PATH）静默跳过。
+/// `force` 为真时忽略标记、强制重装（托盘手动触发用）。
+fn ensure_bridge_extension(hub: &str, data_dir: &std::path::Path, force: bool) -> u32 {
+    let marker = data_dir.join(format!("bridge-ext-{BRIDGE_EXT_VERSION}.done"));
+    if !force && marker.exists() {
+        return 0;
+    }
+    let vsix = data_dir.join("agent-monitor-bridge.vsix");
+    if let Err(e) = download_to(&format!("{hub}/downloads/agent-monitor-bridge.vsix"), &vsix) {
+        ulog(&format!("[bridge] 扩展 vsix 下载失败: {e}"));
+        return 0;
+    }
+    let mut installed = 0u32;
+    for cli in ["cursor", "code"] {
+        if install_vsix(cli, &vsix) {
+            installed += 1;
+            ulog(&format!("[bridge] 已安装桥接扩展到 {cli}"));
+        }
+    }
+    // 只要装成功过一个就打标记（避免每次启动重复下载/安装）
+    if installed > 0 {
+        let _ = std::fs::write(&marker, BRIDGE_EXT_VERSION);
+    }
+    installed
+}
+
+/// 调 `<cli> --install-extension <vsix> --force`。CLI 不在 PATH / 未装编辑器 → 返回 false。
+#[cfg(windows)]
+fn install_vsix(cli: &str, vsix: &std::path::Path) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // cursor/code 是 .cmd 批处理，需经 cmd 调用；CREATE_NO_WINDOW 不闪黑窗
+    std::process::Command::new("cmd")
+        .args(["/C", cli, "--install-extension"])
+        .arg(vsix)
+        .arg("--force")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+#[cfg(not(windows))]
+fn install_vsix(cli: &str, vsix: &std::path::Path) -> bool {
+    std::process::Command::new(cli)
+        .arg("--install-extension")
+        .arg(vsix)
+        .arg("--force")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "macos")]
