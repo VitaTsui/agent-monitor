@@ -589,6 +589,13 @@ fn windows_send_input(pid: u32, text: &str) -> Result<&'static str> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+    // Windows Terminal（ConPTY）：WriteConsoleInput 对伪控制台不可靠（可能报错、也可能
+    // 「成功却没送达」），故先判定——父链里有 WindowsTerminal.exe 就直接走聚焦粘贴，不再
+    // 尝试 WriteConsoleInput。传统 conhost 控制台父链里没有它，继续走下面的 WriteConsoleInput。
+    if let Some(wt_pid) = windows_wt_pid(pid) {
+        return windows_paste_send(wt_pid, text);
+    }
+
     // 多行包 bracketed paste：ESC[200~ … ESC[201~，末尾 Enter 在包裹外提交整块
     let payload = if text.contains('\n') {
         format!("\u{1b}[200~{text}\u{1b}[201~")
@@ -675,9 +682,161 @@ if([AmConIn]::Send([uint32]$TargetPid,$t)){ exit 0 } else { exit 2 }
     let _ = std::io::stdout().flush();
 
     match out {
-        Ok(o) if o.status.success() => Ok("已发送"),
+        Ok(o) if o.status.success() => Ok("已发送（WriteConsoleInput）"),
+        Ok(o) => {
+            // WriteConsoleInput 失败：传统 conhost 控制台一般能成功，失败多半是 Windows
+            // Terminal（ConPTY）——伪控制台的输入管道由宿主持有，外部写不进去。退回
+            // 「聚焦该 Windows Terminal 窗口 + 剪贴板粘贴 + 回车」模拟输入。
+            let primary = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            match windows_wt_pid(pid) {
+                Some(wt_pid) => windows_paste_send(wt_pid, text).map_err(|e| {
+                    anyhow!("WriteConsoleInput 失败；Windows Terminal 粘贴回退也失败：{e}（原始：{primary}）")
+                }),
+                None => Err(anyhow!(
+                    "注入失败：AttachConsole/WriteConsoleInput 未成功（进程可能非控制台程序或权限不足）。{primary}"
+                )),
+            }
+        }
+        Err(e) => Err(anyhow!("powershell 执行失败: {e}")),
+    }
+}
+
+/// 沿父进程链找 Cursor/VSCode 内嵌终端：若父链里出现 Cursor.exe/Code.exe，返回其「之下最近
+/// 的 shell pid」——即该内嵌终端在扩展里 `terminal.processId` 的值，客户端据此把任务经文件桥
+/// 交给扩展用 `terminal.sendText` 送达（ConPTY 内嵌终端无法用 WriteConsoleInput 注入）。
+/// 不是 IDE 内嵌终端则返回 None。
+#[cfg(windows)]
+pub fn windows_ide_shell_pid(claude_pid: u32) -> Option<u32> {
+    use sysinfo::{Pid, System};
+    let mut sys = System::new();
+    sys.refresh_processes();
+    let mut cur = claude_pid;
+    let mut last_shell: Option<u32> = None;
+    for _ in 0..24 {
+        let p = sys.process(Pid::from_u32(cur))?;
+        let name = p.name().to_lowercase();
+        if matches!(
+            name.as_str(),
+            "powershell.exe" | "pwsh.exe" | "cmd.exe" | "bash.exe" | "nu.exe" | "wsl.exe"
+        ) {
+            last_shell = Some(cur);
+        }
+        if name.contains("cursor") || name == "code.exe" {
+            return last_shell;
+        }
+        match p.parent().map(|pp| pp.as_u32()) {
+            Some(pp) if pp != cur && pp > 4 => cur = pp,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// 沿父进程链找 WindowsTerminal.exe（Windows Terminal 宿主），找到返回其 pid（用于定位
+/// 它的窗口做聚焦粘贴）；传统 conhost 控制台的父链里没有它 → 返回 None，仍走 WriteConsoleInput。
+#[cfg(windows)]
+fn windows_wt_pid(claude_pid: u32) -> Option<u32> {
+    use sysinfo::{Pid, System};
+    let mut sys = System::new();
+    sys.refresh_processes();
+    let mut cur = claude_pid;
+    for _ in 0..24 {
+        let p = sys.process(Pid::from_u32(cur))?;
+        if p.name().to_lowercase().contains("windowsterminal") {
+            return Some(cur);
+        }
+        match p.parent().map(|pp| pp.as_u32()) {
+            Some(pp) if pp != cur && pp > 4 => cur = pp,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Windows Terminal 回退：把文本放剪贴板 → 聚焦 wt_pid 的可见窗口 → 发 Ctrl+V + 回车。
+/// 局限：会抢前台焦点；多标签页时粘到「当前活动标签」，claude 不在活动标签则会送错——
+/// 这是已有 WT 标签页对外注入的固有限制（见 CreatePseudoConsole 文档）。
+#[cfg(windows)]
+fn windows_paste_send(wt_pid: u32, text: &str) -> Result<&'static str> {
+    use std::io::Write;
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let dir = std::env::temp_dir();
+    let stamp = std::process::id();
+    let txt_path = dir.join(format!("am-paste-{wt_pid}-{stamp}.txt"));
+    let ps_path = dir.join(format!("am-paste-{wt_pid}-{stamp}.ps1"));
+    std::fs::write(&txt_path, text.as_bytes()).map_err(|e| anyhow!("写入临时文本失败: {e}"))?;
+
+    // 找到该进程的可见顶层窗口 → SetForegroundWindow → keybd_event 发 Ctrl+V、回车。
+    // 剪贴板用 PowerShell 的 Set-Clipboard/Get-Clipboard 存取并复原，省去 C# 剪贴板 P/Invoke。
+    let script = r#"param([int]$WtPid,[string]$TextFile)
+$ErrorActionPreference='Stop'
+$code=@'
+using System;
+using System.Runtime.InteropServices;
+public class AmPaste {
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  public delegate bool EnumProc(IntPtr h, IntPtr p);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
+  const uint KEYUP=2; const byte VK_CTRL=0x11, VK_V=0x56, VK_RET=0x0D;
+  static IntPtr FindWin(uint target){
+    IntPtr found=IntPtr.Zero;
+    EnumWindows((h,p)=>{ uint wp; GetWindowThreadProcessId(h,out wp); if(wp==target && IsWindowVisible(h)){ found=h; return false; } return true; }, IntPtr.Zero);
+    return found;
+  }
+  public static bool Run(uint pid){
+    IntPtr h=FindWin(pid);
+    if(h==IntPtr.Zero) return false;
+    ShowWindow(h,9); SetForegroundWindow(h);
+    System.Threading.Thread.Sleep(180);
+    keybd_event(VK_CTRL,0,0,IntPtr.Zero); keybd_event(VK_V,0,0,IntPtr.Zero);
+    keybd_event(VK_V,0,KEYUP,IntPtr.Zero); keybd_event(VK_CTRL,0,KEYUP,IntPtr.Zero);
+    System.Threading.Thread.Sleep(140);
+    keybd_event(VK_RET,0,0,IntPtr.Zero); keybd_event(VK_RET,0,KEYUP,IntPtr.Zero);
+    return true;
+  }
+}
+'@
+Add-Type -TypeDefinition $code -Language CSharp
+$t=[System.IO.File]::ReadAllText($TextFile,[System.Text.Encoding]::UTF8)
+$old=''
+try { $old=Get-Clipboard -Raw } catch {}
+Set-Clipboard -Value $t
+$ok=[AmPaste]::Run([uint32]$WtPid)
+Start-Sleep -Milliseconds 250
+try { if($old -ne $null){ Set-Clipboard -Value $old } } catch {}
+if($ok){ exit 0 } else { exit 4 }
+"#;
+    std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
+
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
+        .arg(&ps_path)
+        .arg("-WtPid")
+        .arg(wt_pid.to_string())
+        .arg("-TextFile")
+        .arg(&txt_path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let _ = std::fs::remove_file(&txt_path);
+    let _ = std::fs::remove_file(&ps_path);
+    let _ = std::io::stdout().flush();
+    match out {
+        Ok(o) if o.status.success() => Ok("已发送（Windows Terminal 聚焦粘贴）"),
         Ok(o) => Err(anyhow!(
-            "注入失败：AttachConsole/WriteConsoleInput 未成功（进程可能非控制台程序或权限不足）。{}",
+            "找不到 Windows Terminal 窗口或粘贴失败。{}",
             String::from_utf8_lossy(&o.stderr).trim()
         )),
         Err(e) => Err(anyhow!("powershell 执行失败: {e}")),

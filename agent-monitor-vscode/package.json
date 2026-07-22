@@ -1,0 +1,36 @@
+{
+  "name": "agent-monitor-bridge",
+  "displayName": "终端任务监控 · 桥接",
+  "description": "让「终端任务监控」向 Cursor / VSCode 的内嵌终端下发任务（内嵌终端走 ConPTY，无法用 WriteConsoleInput 注入，改由本扩展 terminal.sendText 直接送达）。",
+  "version": "0.1.0",
+  "publisher": "vitahsu",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentMonitorBridge.status",
+        "title": "终端任务监控：桥接状态"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "npx --yes @vscode/vsce package --no-dependencies -o agent-monitor-bridge.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.4.0"
+  }
+}
