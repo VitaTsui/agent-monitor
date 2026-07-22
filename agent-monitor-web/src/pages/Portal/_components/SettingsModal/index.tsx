@@ -542,9 +542,9 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                         </div>
                       )}
                     </div>
-                    {clientVer?.latest ? (
-                      // 有新版本就给「更新」按钮，始终可点（即便遗留进度让 updating 为真，
-                      // 也要能重新触发，不被卡住）
+                    {clientVer?.latest && !updating ? (
+                      // 有新版本且尚未在更新：给「更新到 vX」按钮。更新中则落到下面显示
+                      // 「更新中」+进度（updating 已排除了「已是最新却有遗留进度」的误判）。
                       <Button
                         size="small"
                         className={styles.updateNowBtn}
