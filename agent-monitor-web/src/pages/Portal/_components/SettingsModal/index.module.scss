@@ -363,22 +363,22 @@ $hover: rgba(36, 61, 66, 0.06);
       .devActions {
         flex-wrap: wrap;
         justify-content: flex-end;
-        gap: 8px;
+        gap: 6px;
         margin-top: 6px;
 
-        // 按钮收小一点（之前 34px 偏大），保持触控可用
+        // 收小胶囊：之前偏大、和「删除」文字按钮不协调；紧凑些更均衡，仍够触控
         .actBtn,
         .shareBtn,
         .trustBtn {
-          height: 30px;
-          padding-inline: 14px;
-          font-size: 12.5px;
+          height: 26px;
+          padding-inline: 10px;
+          font-size: 12px;
         }
 
         .delBtn {
-          height: 30px;
-          padding-inline: 10px;
-          font-size: 12.5px;
+          height: 26px;
+          padding-inline: 8px;
+          font-size: 12px;
         }
       }
     }

@@ -51,26 +51,10 @@
     }
   }
 
-  // 关闭钮：iOS 风格灰底圆钮，右上角，加大触控区。
-  // content 是 flex 列，后面的 body 会形成层叠上下文盖住绝对定位的
-  // close —— 必须给 z-index 抬到 body 之上，否则真实触摸打在 body 上、
-  // ✕ 点不动（编程 click 能过是因绕过了命中检测）。
+  // 移动端不显示右上角关闭钮，改为「下滑收起」（见 utils/sheetSwipe）。仍保留在 DOM 里，
+  // 供下滑关闭时编程 click 触发 onCancel。display:none 不影响 .click()。
   .ant-modal-root .ant-modal .ant-modal-close {
-    top: 12px;
-    inset-inline-end: 12px;
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    background: rgba(36, 61, 66, 0.08);
-    z-index: 20;
-
-    .ant-modal-close-x {
-      width: 40px;
-      height: 40px;
-      line-height: 40px;
-      font-size: 14px;
-      color: rgba(36, 61, 66, 0.65);
-    }
+    display: none;
   }
 
   // 弹窗内控件：44px 触控高度 + 大圆角（Apple HIG）

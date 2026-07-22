@@ -2,10 +2,12 @@ import "./install-object-has-own-polyfill";
 
 import { installFreshnessGuard } from "./utils/freshness";
 import { installKeyboardInset } from "./utils/keyboardInset";
+import { installSheetSwipe } from "./utils/sheetSwipe";
 import { hideSplashWhenReady } from "./utils/splash";
 
 installFreshnessGuard();
 installKeyboardInset();
+installSheetSwipe();
 
 import "./index.scss";
 // hsu-ui 全局样式（antd 观感覆盖），项目特有增量在本地 styles/antd-overload.scss
