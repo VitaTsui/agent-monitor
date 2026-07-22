@@ -346,13 +346,33 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         *prev = cur;
         active
     };
+    // 稳定配对缓存：pid → session_id。喂给 build_tasks 做兜底，让长时间闲置的会话保持配对、
+    // 不掉成「等待输入」占位；本轮配完再用真实配对刷新缓存。
+    static PREV_PAIRS: std::sync::Mutex<Option<std::collections::HashMap<u32, String>>> =
+        std::sync::Mutex::new(None);
+    let cached: std::collections::HashMap<u32, String> = {
+        PREV_PAIRS.lock().unwrap().clone().unwrap_or_default()
+    };
     let mut tasks = am_core::scanner::build_tasks(
         &sessions,
         &processes,
         &|pid| paused.contains(&pid),
         &pinned,
         &active_ids,
+        &cached,
     );
+    // 用本轮真实配对（有 pid、且不是 pid- 占位）刷新缓存，供下一轮兜底
+    {
+        let mut new_pairs = std::collections::HashMap::new();
+        for t in &tasks {
+            if let Some(pid) = t.pid {
+                if !t.id.starts_with("pid-") {
+                    new_pairs.insert(pid, t.id.clone());
+                }
+            }
+        }
+        *PREV_PAIRS.lock().unwrap() = Some(new_pairs);
+    }
     // 会话文件层：无存活进程的会话若其历史 tty 被排除也一并剔除（尽力而为）
     // 这里主要保证「有进程」的会话已被上面的 retain 过滤。
 

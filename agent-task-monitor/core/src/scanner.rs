@@ -512,6 +512,9 @@ pub fn build_tasks(
     // active_ids 曾用于「按 mtime 推进兜底」，改为「只配自己创建的会话」后不再需要，
     // 保留形参以免动全部调用点。
     active_ids: &HashSet<String>,
+    // 上一轮的稳定配对（pid → session_id）：让长时间闲置的会话保持配对、不掉成
+    // 「等待输入」占位。仅在本轮没有更强信号（①②③④）配上该进程时兜底沿用。
+    cached: &HashMap<u32, String>,
 ) -> Vec<Task> {
     let _ = active_ids;
     // 按 cwd 分组进程（已按启动时间升序）
@@ -683,6 +686,33 @@ pub fn build_tasks(
                     pid_of_session.insert(s.session_id.as_str(), p);
                     paired_pids.insert(p.pid);
                 }
+            }
+        }
+    }
+
+    // ⑤ 缓存兜底：仍没配上会话的存活进程，若上一轮它配过某会话、该会话还在（7 天内）、
+    // 且本轮没被更强信号（①-④）配给别的进程 —— 就沿用上一轮的配对。专治「长时间闲置的
+    // 会话（>30min 够不着 phase④，命令行又无 --resume）掉成『等待输入』占位、唤醒后又冒出
+    // 一条新会话」：配对一旦建立就粘住，只要进程活着、会话还在，就不再翻来覆去。
+    if !cached.is_empty() {
+        let proc_by_pid: HashMap<u32, &ProcessInfo> =
+            processes.iter().map(|p| (p.pid, p)).collect();
+        for (pid, sid) in cached {
+            if paired_pids.contains(pid) {
+                continue;
+            }
+            if pid_of_session.contains_key(sid.as_str()) {
+                continue; // 该会话本轮已被别的进程配走（如 /clear 后进程改配新会话）
+            }
+            if let (Some(p), Some(s)) = (
+                proc_by_pid.get(pid),
+                sessions.iter().find(|s| {
+                    &s.session_id == sid
+                        && now.saturating_sub(s.mtime_ms) < 7 * 24 * 3600 * 1000
+                }),
+            ) {
+                pid_of_session.insert(s.session_id.as_str(), *p);
+                paired_pids.insert(*pid);
             }
         }
     }
@@ -2198,7 +2228,7 @@ mod pairing_tests {
         let mut p = proc(200, start_s);
         p.command = "claude".into();
 
-        let tasks = build_tasks(&[blank, old], &[p], &|_| false, &HashMap::new(), &HashSet::new());
+        let tasks = build_tasks(&[blank, old], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         let b = tasks.iter().find(|t| t.id == "blank").unwrap();
         let o = tasks.iter().find(|t| t.id == "old").unwrap();
         assert_eq!(b.pid, Some(200), "进程应配给创建时刻≈启动的空白会话");
@@ -2219,7 +2249,7 @@ mod pairing_tests {
         let mut p = proc(300, now / 1000 - 30);
         p.command = "claude --resume resumed-xyz".into();
 
-        let tasks = build_tasks(&[resumed], &[p], &|_| false, &HashMap::new(), &HashSet::new());
+        let tasks = build_tasks(&[resumed], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         assert_eq!(tasks.iter().find(|t| t.id == "resumed-xyz").unwrap().pid, Some(300));
     }
 
@@ -2237,7 +2267,7 @@ mod pairing_tests {
         let mut pinned = HashMap::new();
         pinned.insert(100u32, "cursor".to_string()); // 进程真正打开的是 cursor 会话
 
-        let tasks = build_tasks(&[closed, cursor], &[p], &|_| false, &pinned, &HashSet::new());
+        let tasks = build_tasks(&[closed, cursor], &[p], &|_| false, &pinned, &HashSet::new(), &HashMap::new());
         let cur = tasks.iter().find(|t| t.id == "cursor").unwrap();
         let clo = tasks.iter().find(|t| t.id == "closed").unwrap();
         assert_eq!(cur.pid, Some(100), "活进程应配给它打开的 cursor 会话");
@@ -2263,7 +2293,7 @@ mod pairing_tests {
         p.cwd = "D:\\proj\\".into(); // 进程 cwd 带尾随反斜杠
         p.tty = String::new();
 
-        let tasks = build_tasks(&[s], &[p], &|_| false, &HashMap::new(), &HashSet::new());
+        let tasks = build_tasks(&[s], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         // 配对成功 = 恰好一条任务、带 pid、状态非 Finished（不是占位进程）
         assert_eq!(tasks.len(), 1, "应配成一条，而非会话+占位进程两条");
         assert_eq!(tasks[0].pid, Some(4242));
@@ -2285,7 +2315,7 @@ mod pairing_tests {
         p.command = "claude".into();
 
         let tasks =
-            build_tasks(&[cont, old], &[p], &|_| false, &HashMap::new(), &HashSet::new());
+            build_tasks(&[cont, old], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         assert_eq!(
             tasks.iter().find(|t| t.id == "cont").unwrap().pid,
             Some(700),
@@ -2313,7 +2343,7 @@ mod pairing_tests {
         p.command = "claude".into();
 
         let tasks =
-            build_tasks(&[resumed], &[p], &|_| false, &HashMap::new(), &HashSet::new());
+            build_tasks(&[resumed], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         assert_eq!(
             tasks.iter().find(|t| t.id == "resumed").unwrap().pid,
             None,
@@ -2341,7 +2371,7 @@ mod pairing_tests {
         p.command = "claude --continue".into();
         let procs = vec![p];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::new());
+        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         let by_id = |id: &str| tasks.iter().find(|t| t.id == id).unwrap().clone();
 
         assert_eq!(by_id("alive").pid, Some(3191), "正在写入的会话必须拿到进程");
@@ -2369,7 +2399,7 @@ mod pairing_tests {
         let sessions = vec![newest, middle, stale];
         let procs = vec![proc(100, start_a), proc(200, start_b)];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::new());
+        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         let pid = |id: &str| tasks.iter().find(|t| t.id == id).unwrap().pid;
 
         assert_eq!(pid("newest"), Some(200), "进程配自己启动时创建的会话");
@@ -2523,7 +2553,7 @@ mod codex_tests {
         let sessions = vec![mk("claude", "c1", "-w-app"), mk("codex", "x1", "-w-app")];
         let procs = vec![proc("claude", 11, "app"), proc("codex", 22, "app"), proc("gemini", 33, "app")];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::from(["c1".to_string(), "x1".to_string()]));
+        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::from(["c1".to_string(), "x1".to_string()]), &HashMap::new());
         let by = |id: &str| tasks.iter().find(|t| t.id == id).unwrap();
 
         assert_eq!(by("c1").pid, Some(11), "claude 会话配 claude 进程");
@@ -2562,7 +2592,7 @@ mod codex_tests {
             memory: 0,
             command: "claude".into(),
         }];
-        let tasks = build_tasks(&[], &procs, &|_| false, &HashMap::new(), &HashSet::new());
+        let tasks = build_tasks(&[], &procs, &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Claude Code", "空目录名不该带「 · 」尾巴");
         assert!(!tasks[0].title.contains('·'));

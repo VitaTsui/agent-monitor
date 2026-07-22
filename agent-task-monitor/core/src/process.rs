@@ -928,6 +928,10 @@ fn applescript_write(tty: &str, text: &str) -> Result<&'static str> {
           tell s to write text "{text_e}" newline no
           delay {submit_delay:.2}
           tell s to write text (character id 13) newline no
+          delay 0.35
+          -- 兜底二次回车：若上面的回车被粘贴态吞掉（任务只换行没提交），这一下把它提交；
+          -- 若已提交则此时输入为空，claude 对空回车无动作，安全。
+          tell s to write text (character id 13) newline no
           return "ok"
         end if
       end repeat
@@ -947,6 +951,9 @@ return "notfound""#
     repeat with t in tabs of w
       if (tty of t) is "{tty_e}" then
         do script "{text_e}" in t
+        delay 0.35
+        -- 兜底二次回车（同 iTerm2）：长/多行内容被粘贴态吞掉回车时补一下提交
+        do script "" in t
         return "ok"
       end if
     end repeat
