@@ -65,7 +65,10 @@ fn pin_unix(pids: &[u32]) -> HashMap<u32, String> {
 /// 近期活跃窗口：只对最近改动过的会话文件做 Restart Manager 查询，避免对上百个
 /// 历史 .jsonl 全查。已关闭很久的会话本就该判 Finished，无需精确配对。
 #[cfg(windows)]
-const RECENT_MS: u64 = 6 * 3600 * 1000;
+// 窗口要覆盖「进程还活着但会话闲置很久」的情形：闲置数天的会话若其 claude 进程仍在、
+// 仍持有文件句柄，就该被 RmGetList 抓到并精确配对。6h 太窄会把它们排除在检查之外，
+// 于是 pinned 恒为 0、只能退回易错位的时间戳启发式。8 天对齐配对候选窗口。
+const RECENT_MS: u64 = 8 * 24 * 3600 * 1000;
 
 #[cfg(windows)]
 fn pin_windows(pids: &[u32], projects_dirs: &[PathBuf]) -> HashMap<u32, String> {

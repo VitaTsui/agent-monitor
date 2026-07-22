@@ -310,7 +310,9 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         static PIN_CACHE: std::sync::Mutex<Option<std::collections::HashMap<u32, String>>> =
             std::sync::Mutex::new(None);
         let tick = SCAN_TICKS.load(Ordering::Relaxed);
-        if tick % 4 == 0 {
+        // 窗口放宽到 8 天后要检查的 jsonl 变多、RmGetList 有开销，把频率从每 4 轮降到
+        // 每 20 轮（约 30s）算一次，其余复用缓存；会话↔文件对应关系很稳定，够用。
+        if tick % 20 == 0 {
             let pids: Vec<u32> = processes.iter().map(|p| p.pid).collect();
             let dirs = {
                 let scanner = state.scanner.lock().await;
