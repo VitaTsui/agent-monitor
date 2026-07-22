@@ -190,10 +190,15 @@ $hover: rgba(36, 61, 66, 0.06);
   // 移动端：iOS 设置式两级界面 —— 一级=菜单列表，二级=分区内容（固定
   // 头部：返回 + 标题 + 关闭，内容区单独滚动，关闭钮永远可达）
   @media (max-width: 760px) {
+    // 弹窗 body 自身不滚动：否则会连着头部一起滚（antd-overload 给移动端 body 挂了
+    // overflow-y:auto）。改为 body 不滚、只让内部 .content 单独滚，头部才能真正钉住。
+    :global(.ant-modal-body) {
+      overflow: hidden !important;
+    }
+
     .layout {
       flex-direction: column;
-      height: 84dvh;
-      max-height: 84dvh;
+      height: 100%;
       overflow: hidden;
     }
 
