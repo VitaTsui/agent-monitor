@@ -1293,11 +1293,14 @@ fn alert_box(title: &str, text: &str) {
 /// 流式下载 + 进度日志 + 30s 无数据即报错：跨境网络常见「连上了但一直
 /// 不来数据」，整体超时要干等 5 分钟且全程无反馈（实际用户日志：三次
 /// 「开始自更新」后连下载完成都没有）——停滞必须快速可见地失败。
-fn download_to(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
+/// 下载文件。`report`=true 才把进度写进「更新进度」通道（自更新用；扩展 vsix 等辅助
+/// 下载传 false，别污染更新 UI）。`min_bytes` 是最小合法大小（安装包用 1MB 挡半包，
+/// 小文件如 vsix 传更小）。
+fn download_to(url: &str, dest: &std::path::Path, report: bool, min_bytes: usize) -> anyhow::Result<()> {
     // 跨境链路（中国→海外 Vultr）慢且易抖：多试几次，指数退避，最后一次挂了才报错。
     let mut last = String::new();
     for attempt in 1..=4 {
-        match download_to_once(url, dest) {
+        match download_to_once(url, dest, report, min_bytes) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 last = format!("{e}");
@@ -1310,7 +1313,7 @@ fn download_to(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
     anyhow::bail!("多次下载均失败：{last}")
 }
 
-fn download_to_once(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
+fn download_to_once(url: &str, dest: &std::path::Path, report: bool, min_bytes: usize) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let bytes = rt.block_on(async {
         let client = reqwest::Client::builder()
@@ -1345,7 +1348,9 @@ fn download_to_once(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
             })??;
             let Some(chunk) = chunk else { break };
             out.extend_from_slice(&chunk);
-            set_update_progress("downloading", out.len() as u64, total);
+            if report {
+                set_update_progress("downloading", out.len() as u64, total);
+            }
             // 每 2MB 记一次进度，网络问题可从日志直接定位
             if out.len() - last_mark >= 2 * 1024 * 1024 {
                 last_mark = out.len();
@@ -1354,8 +1359,8 @@ fn download_to_once(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
         }
         Ok::<_, anyhow::Error>(out)
     })?;
-    if bytes.len() < 1024 * 1024 {
-        anyhow::bail!("更新包异常（{} 字节），已取消", bytes.len());
+    if bytes.len() < min_bytes {
+        anyhow::bail!("下载内容异常（{} 字节），已取消", bytes.len());
     }
     std::fs::write(dest, &bytes)?;
     Ok(())
@@ -1389,7 +1394,13 @@ fn ensure_bridge_extension(hub: &str, data_dir: &std::path::Path, force: bool) -
         return 0;
     }
     let vsix = data_dir.join("agent-monitor-bridge.vsix");
-    if let Err(e) = download_to(&format!("{hub}/downloads/agent-monitor-bridge.vsix"), &vsix) {
+    // 静默下载（report=false，不动更新进度 UB）、最小 1KB（vsix 才几 KB）
+    if let Err(e) = download_to(
+        &format!("{hub}/downloads/agent-monitor-bridge.vsix"),
+        &vsix,
+        false,
+        1024,
+    ) {
         ulog(&format!("[bridge] 扩展 vsix 下载失败: {e}"));
         return 0;
     }
@@ -1449,7 +1460,7 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
     let zip = tmp.join("update.zip");
-    download_to(&format!("{hub}/downloads/agent-monitor-mac.zip"), &zip)?;
+    download_to(&format!("{hub}/downloads/agent-monitor-mac.zip"), &zip, true, 1024 * 1024)?;
     ulog("[update] 下载完成");
     set_update_progress("installing", 0, 0);
 
@@ -1505,7 +1516,7 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let tmp = std::env::temp_dir();
     let installer = tmp.join("agent-monitor-setup.exe");
-    download_to(&format!("{hub}/downloads/agent-monitor-setup.exe"), &installer)?;
+    download_to(&format!("{hub}/downloads/agent-monitor-setup.exe"), &installer, true, 1024 * 1024)?;
     ulog("[update] 安装器下载完成，静默安装");
     set_update_progress("installing", 0, 0);
     // 全静默更新，不出安装向导：NSIS /S 静默安装（沿用上次安装目录与组件选择，

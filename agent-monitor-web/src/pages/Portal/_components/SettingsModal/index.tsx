@@ -107,7 +107,9 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
       )
       .catch(() => setClientVer(null));
   };
-  const updating = !!clientVer?.progress;
+  // 「更新中」必须是「确有新版本 + 有进度」才算——否则辅助下载（如桥接扩展 vsix）
+  // 遗留的进度状态会把按钮卡在「更新中」不可点（客户端已是最新却显示更新中）。
+  const updating = !!clientVer?.progress && !!clientVer?.latest;
 
   // 打开设置期间轮询版本/进度（更新中每 1.5s 刷新进度条）
   useEffect(() => {
@@ -540,8 +542,9 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                         </div>
                       )}
                     </div>
-                    {clientVer?.latest && !updating ? (
-                      // 已知有新版本：直接给「更新」按钮，不用再点「检查更新」走一遍确认
+                    {clientVer?.latest ? (
+                      // 有新版本就给「更新」按钮，始终可点（即便遗留进度让 updating 为真，
+                      // 也要能重新触发，不被卡住）
                       <Button
                         size="small"
                         className={styles.updateNowBtn}

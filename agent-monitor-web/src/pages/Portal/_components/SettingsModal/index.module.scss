@@ -366,19 +366,23 @@ $hover: rgba(36, 61, 66, 0.06);
         gap: 6px;
         margin-top: 6px;
 
-        // 收小胶囊：之前偏大、和「删除」文字按钮不协调；紧凑些更均衡，仍够触控
+        // 收小胶囊：之前偏大、和「删除」文字按钮不协调；紧凑些更均衡，仍够触控。
+        // 注意要用 !important 盖过 antd-overload 里移动端弹窗按钮的 min-height:42px。
         .actBtn,
         .shareBtn,
         .trustBtn {
-          height: 26px;
-          padding-inline: 10px;
-          font-size: 12px;
+          height: 28px !important;
+          min-height: 28px !important;
+          padding-inline: 12px !important;
+          font-size: 12px !important;
+          border-radius: 999px !important;
         }
 
         .delBtn {
-          height: 26px;
-          padding-inline: 8px;
-          font-size: 12px;
+          height: 28px !important;
+          min-height: 28px !important;
+          padding-inline: 8px !important;
+          font-size: 12px !important;
         }
       }
     }

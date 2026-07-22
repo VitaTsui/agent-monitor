@@ -574,9 +574,10 @@ const Portal: React.FC = observer(() => {
         <Popover
           open={userMenuOpen}
           onOpenChange={(o) => {
-            // 移动端：不弹菜单，直接进整屏设置（Claude App 式头像入口）
+            // 移动端：不弹菜单，直接进整屏设置（Claude App 式头像入口）。
+            // 不再顺手收起侧栏——点头像只是开设置，设置浮在上层，关掉后侧栏仍在，
+            // 避免「点头像侧栏莫名收起」的观感。
             if (o && window.matchMedia("(max-width: 760px)").matches) {
-              setMobileNav(false);
               openSettings("account");
               return;
             }
