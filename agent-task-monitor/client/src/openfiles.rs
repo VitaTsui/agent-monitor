@@ -89,11 +89,15 @@ fn pin_windows(pids: &[u32], projects_dirs: &[PathBuf]) -> HashMap<u32, String> 
     }
 
     for file in &candidates {
-        if let Some(pid) = holder_pid(file) {
+        // RmGetList 会列出所有占用该文件的进程（claude 之外，Cursor/索引器/杀软也可能
+        // 各持一个句柄）。只取「第一个」会漏掉排在后面的 claude —— 这里遍历全部，挑出
+        // 属于本机 claude 会话进程集合的那个，才是这条会话文件的真正主人。
+        for pid in holder_pids(file) {
             if pidset.contains(&pid) {
                 if let Some(stem) = file.file_stem().and_then(|s| s.to_str()) {
                     out.entry(pid).or_insert_with(|| stem.to_string());
                 }
+                break;
             }
         }
     }
@@ -130,7 +134,7 @@ fn collect_recent_jsonl(dir: &std::path::Path, now_ms: u64, out: &mut Vec<PathBu
 
 /// Restart Manager：返回占用该文件的、第一个 agent 候选进程 pid（失败返回 None）。
 #[cfg(windows)]
-fn holder_pid(file: &std::path::Path) -> Option<u32> {
+fn holder_pids(file: &std::path::Path) -> Vec<u32> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::System::RestartManager::{
         RmEndSession, RmGetList, RmRegisterResources, RmStartSession, RM_PROCESS_INFO,
@@ -141,7 +145,7 @@ fn holder_pid(file: &std::path::Path) -> Option<u32> {
     let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
     // SAFETY: 传入符合 API 约定的缓冲区；失败即早退
     if unsafe { RmStartSession(&mut session, 0, key.as_mut_ptr()) } != 0 {
-        return None;
+        return Vec::new();
     }
     let wide: Vec<u16> = file.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
     let files = [wide.as_ptr()];
@@ -156,7 +160,7 @@ fn holder_pid(file: &std::path::Path) -> Option<u32> {
             std::ptr::null(),
         )
     };
-    let result = if reg == 0 {
+    let result: Vec<u32> = if reg == 0 {
         let mut needed: u32 = 0;
         let mut count: u32 = 0;
         let mut reason: u32 = 0;
@@ -165,7 +169,7 @@ fn holder_pid(file: &std::path::Path) -> Option<u32> {
             RmGetList(session, &mut needed, &mut count, std::ptr::null_mut(), &mut reason)
         };
         if needed == 0 {
-            None
+            Vec::new()
         } else {
             let mut infos: Vec<RM_PROCESS_INFO> =
                 vec![unsafe { std::mem::zeroed() }; needed as usize];
@@ -178,13 +182,13 @@ fn holder_pid(file: &std::path::Path) -> Option<u32> {
                     .iter()
                     .take(count as usize)
                     .map(|i| i.Process.dwProcessId)
-                    .next()
+                    .collect()
             } else {
-                None
+                Vec::new()
             }
         }
     } else {
-        None
+        Vec::new()
     };
     unsafe { RmEndSession(session) };
     result

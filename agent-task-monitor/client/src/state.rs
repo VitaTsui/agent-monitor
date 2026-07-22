@@ -322,6 +322,25 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
             };
             let fresh =
                 tokio::task::block_in_place(|| crate::openfiles::pin_sessions(&pids, &dirs));
+            // 诊断：pinned 是最可靠的配对来源。每 ~30s 记一次它是否命中，判断「claude 是否
+            // 持有会话文件句柄」——若长期为空，说明得靠启发式（易错位），需另想办法。
+            {
+                static LAST_LOG: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let mut l = LAST_LOG.lock().unwrap();
+                if now.saturating_sub(*l) > 30 {
+                    *l = now;
+                    client_log(&format!(
+                        "配对来源 pinned={} 条：{:?}（进程数 {}）",
+                        fresh.len(),
+                        fresh,
+                        pids.len()
+                    ));
+                }
+            }
             *PIN_CACHE.lock().unwrap() = Some(fresh.clone());
             fresh
         } else {
