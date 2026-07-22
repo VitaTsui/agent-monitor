@@ -1383,7 +1383,7 @@ pub fn self_update_probe(hub: &str) {
 }
 
 /// 桥接扩展版本：随扩展 package.json 的 version 走；变更时改这里，客户端会重装一次。
-const BRIDGE_EXT_VERSION: &str = "0.1.0";
+const BRIDGE_EXT_VERSION: &str = "0.1.1";
 
 /// 默认把 Cursor/VSCode 桥接扩展装上：从 hub 下 vsix → 检测 cursor/code CLI → 安装。
 /// 每个扩展版本只装一次（标记文件）。装不上（未装编辑器/CLI 不在 PATH）静默跳过。

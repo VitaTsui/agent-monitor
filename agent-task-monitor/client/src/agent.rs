@@ -480,19 +480,19 @@ async fn execute(state: &SharedState, cmd: ControlCmd, known_pids: &std::collect
     if matches!(cmd.action, am_core::model::ControlAction::Input) {
         let text = cmd.text.unwrap_or_default();
         let preview: String = text.chars().take(20).collect();
-        // Windows：若目标是 Cursor/VSCode 内嵌终端（ConPTY，注入不进去），且有活着的桥接
-        // 扩展在管这个终端，就把任务写进文件桥交给扩展 terminal.sendText 送达。
-        #[cfg(windows)]
-        {
-            if let Some(shell_pid) = am_core::process::windows_ide_shell_pid(pid) {
-                if crate::bridge::has_live_terminal(&state.config.data_dir, shell_pid)
-                    && crate::bridge::send_via_extension(&state.config.data_dir, shell_pid, &text)
-                {
-                    crate::state::client_log(&format!(
-                        "注入输入：经 Cursor/VSCode 扩展桥接（终端 pid={shell_pid}，{preview}…）"
-                    ));
-                    return;
-                }
+        // 目标是 Cursor/VSCode 内嵌终端（ConPTY/编辑器内置，注入不进去）、且有活着的桥接
+        // 扩展在管这个终端，就把任务写进文件桥交给扩展 terminal.sendText 送达（全平台）。
+        if let Some(shell_pid) = am_core::process::ide_shell_pid(pid) {
+            let live = crate::bridge::has_live_terminal(&state.config.data_dir, shell_pid);
+            crate::state::client_log(&format!(
+                "桥接判定：会话 {} claude pid={pid} → 内嵌终端 shell pid={shell_pid}，扩展在管={live}",
+                cmd.task_id
+            ));
+            if live && crate::bridge::send_via_extension(&state.config.data_dir, shell_pid, &text) {
+                crate::state::client_log(&format!(
+                    "注入输入：经 Cursor/VSCode 扩展桥接（终端 pid={shell_pid}，{preview}…）"
+                ));
+                return;
             }
         }
         // send_input 在 macOS 上走 osascript，会遍历 Terminal/iTerm 的每个窗口与标签页，

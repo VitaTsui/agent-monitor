@@ -705,9 +705,23 @@ if([AmConIn]::Send([uint32]$TargetPid,$t)){ exit 0 } else { exit 2 }
 /// 的 shell pid」——即该内嵌终端在扩展里 `terminal.processId` 的值，客户端据此把任务经文件桥
 /// 交给扩展用 `terminal.sendText` 送达（ConPTY 内嵌终端无法用 WriteConsoleInput 注入）。
 /// 不是 IDE 内嵌终端则返回 None。
-#[cfg(windows)]
-pub fn windows_ide_shell_pid(claude_pid: u32) -> Option<u32> {
+pub fn ide_shell_pid(claude_pid: u32) -> Option<u32> {
     use sysinfo::{Pid, System};
+    let is_shell = |n: &str| {
+        matches!(
+            n,
+            "powershell.exe" | "pwsh.exe" | "cmd.exe" | "bash.exe" | "nu.exe" | "wsl.exe"
+                | "bash" | "zsh" | "sh" | "fish" | "nu" | "pwsh" | "powershell" | "-zsh" | "-bash"
+        )
+    };
+    // 命中 Cursor/VSCode 宿主（含 mac 的 helper/electron 命名，与 detect_ide 一致）
+    let is_ide = |n: &str| {
+        n.contains("cursor")
+            || n == "code.exe"
+            || n == "code"
+            || n.contains("code helper")
+            || n.contains("code - ")
+    };
     let mut sys = System::new();
     sys.refresh_processes();
     let mut cur = claude_pid;
@@ -715,17 +729,14 @@ pub fn windows_ide_shell_pid(claude_pid: u32) -> Option<u32> {
     for _ in 0..24 {
         let p = sys.process(Pid::from_u32(cur))?;
         let name = p.name().to_lowercase();
-        if matches!(
-            name.as_str(),
-            "powershell.exe" | "pwsh.exe" | "cmd.exe" | "bash.exe" | "nu.exe" | "wsl.exe"
-        ) {
+        if is_shell(&name) {
             last_shell = Some(cur);
         }
-        if name.contains("cursor") || name == "code.exe" {
+        if is_ide(&name) {
             return last_shell;
         }
         match p.parent().map(|pp| pp.as_u32()) {
-            Some(pp) if pp != cur && pp > 4 => cur = pp,
+            Some(pp) if pp != cur && pp > 1 => cur = pp,
             _ => return None,
         }
     }

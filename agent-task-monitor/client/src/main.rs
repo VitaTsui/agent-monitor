@@ -3,8 +3,7 @@
 #![cfg_attr(all(windows, feature = "desktop"), windows_subsystem = "windows")]
 
 mod agent;
-/// Cursor/VSCode 扩展桥接（文件 IPC）目前只在 Windows 路由启用
-#[cfg(windows)]
+/// Cursor/VSCode 扩展桥接（文件 IPC）——全平台内嵌终端都靠它下发
 mod bridge;
 mod secrets;
 mod openfiles;

@@ -96,8 +96,21 @@ export function activate(context: vscode.ExtensionContext) {
         term.show(false);
         term.sendText(String(cmd.text ?? ""), cmd.submit !== false);
         safeUnlink(fp);
+        // 诊断：记录命中的终端，便于排查「下发到错误终端」
+        appendLog(
+          `sendText → 终端「${term.name}」processId=${cmd.pid}：${String(cmd.text ?? "").slice(0, 40)}`,
+        );
       }
       // 不是本窗口的终端就留着，交给拥有该终端的窗口处理（TTL 兜底清理）
+    }
+  };
+
+  const appendLog = (line: string) => {
+    try {
+      const ts = new Date().toISOString();
+      fs.appendFileSync(path.join(base, "ext.log"), `[${ts}] win-${winId} ${line}\n`);
+    } catch {
+      /* ignore */
     }
   };
 
