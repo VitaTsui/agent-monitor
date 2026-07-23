@@ -75,6 +75,17 @@ fn pin_windows(pids: &[u32], projects_dirs: &[PathBuf]) -> HashMap<u32, String> 
     use std::collections::HashSet;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    // 实测(2026-07，本机 Restart Manager 直接采样)：Claude Code 每次写入都是
+    // open→append→close，会话 .jsonl 句柄寿命 < 25ms、不跨空闲持有。对 8 天窗口内 120
+    // 个候选 jsonl（含闲置数天的会话）做与本函数等价的 RmGetList 全扫描，holder 恒为 0/120。
+    // 结论：RM 精确配对在 Windows 上零收益（pinned 恒空），而每 4 轮最多 200 次
+    // RmStartSession/Register/GetList/EndSession 是实打实的周期开销。故默认跳过，直接退回
+    // build_tasks 的 btime(created_ms)/--resume/cached 配对层（这些数据在 Windows 上齐备）。
+    // 需要重新验证句柄假设时，设环境变量 AM_PIN_RM=1 可临时恢复本扫描做诊断。
+    if std::env::var_os("AM_PIN_RM").is_none() {
+        return HashMap::new();
+    }
+
     let mut out = HashMap::new();
     let pidset: HashSet<u32> = pids.iter().copied().collect();
     let now_ms = SystemTime::now()

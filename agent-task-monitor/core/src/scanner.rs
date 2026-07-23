@@ -2299,11 +2299,13 @@ mod pairing_tests {
     #[test]
     fn windows_trailing_backslash_cwd_still_pairs() {
         assert_eq!(encode_path("D:\\proj\\"), encode_path("D:\\proj"));
-        assert_eq!(encode_path("D:\\proj\\"), "D--proj");
+        // 期望值随平台大小写策略走：Windows 统一小写（d--proj），其它平台保持原样（D--proj）
+        assert_eq!(encode_path("D:\\proj\\"), normalize_key_case("D--proj".to_string()));
 
         let now = now_ms();
         let mut s = sess("live", "2026-07-20T00:00:00Z", now - 30_000);
-        s.project_key = "D--proj".into(); // 会话目录名（无尾随）
+        // 会话目录名由 encode_path(cwd) 而来，与生产一致（含平台大小写同一化）
+        s.project_key = encode_path("D:\\proj");
         s.cwd = "D:\\proj".into();
         s.created_ms = now - 30_000; // 会话在进程启动时创建
         let mut p = proc(4242, now / 1000 - 30); // 进程 30s 前启动
