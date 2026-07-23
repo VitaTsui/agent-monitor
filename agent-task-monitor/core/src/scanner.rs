@@ -590,7 +590,23 @@ pub fn build_tasks(
     // mtime 最新」挑最可能刚清空的那个，至少不会更差。被迁走的旧会话记入 released，本轮不
     // 再被其它 tier 抢配（它已结束）。
     let mut released: HashSet<&str> = HashSet::new();
-    // 先收集本轮全新清空会话；没有就整层跳过，额外开销只落在真有 /clear 的轮次
+    // clear-follow (a) 保持：上一轮已迁到 cleared 空会话的进程，本轮继续粘住它，抢在 tier②
+    // 之前。否则——缓存本轮已指向新会话、(b) 不会再迁，空闲的进程会被 tier② 按「created 最早」
+    // 又拽回旧会话；下一轮缓存又变回旧会话、(b) 再迁到新…… 于是进程在 旧↔新 间每轮抖动，
+    // 表现为卡片标题/内容闪烁（旧会话有标题 ↔ 新空会话只剩项目名）。粘住即止住抖动。
+    for (pid, sid) in cached {
+        if paired_pids.contains(pid) || pid_of_session.contains_key(sid.as_str()) {
+            continue;
+        }
+        let Some(s) = sid_index.get(sid.as_str()).copied() else { continue };
+        if s.cleared {
+            if let Some(p) = proc_by_pid.get(pid) {
+                pid_of_session.insert(s.session_id.as_str(), *p);
+                paired_pids.insert(*pid);
+            }
+        }
+    }
+    // clear-follow (b) 迁移：收集本轮全新清空会话；没有就整层跳过，额外开销只落在真有 /clear 的轮次
     let mut fresh: Vec<&SessionSummary> = sessions
         .iter()
         .filter(|s| s.cleared && !pid_of_session.contains_key(s.session_id.as_str()))
@@ -2354,6 +2370,31 @@ mod pairing_tests {
         assert_eq!(f.pid, Some(200), "clear-follow 应把进程迁到刚清空的新会话");
         assert_eq!(o.pid, None, "被清空取代的旧会话不该再占着进程");
         assert_eq!(o.status, TaskStatus::Finished);
+    }
+
+    /// 闪烁回归：/clear 迁移后，下一轮缓存已指向新会话，进程必须**继续粘在新会话**，
+    /// 不能被 tier② 按「created 最早」又拽回旧会话——否则 旧↔新 每轮抖动 = 卡片闪烁。
+    /// 模拟第二轮：cached={200: fresh}，fresh 仍 cleared（用户还没输入）。
+    #[test]
+    fn clear_follow_stable_no_flicker_next_round() {
+        let now = now_ms();
+        let start_s = now / 1000 - 3600;
+        let mut old = sess("old", "2026-07-23T00:00:00Z", now - 3000);
+        old.created_ms = start_s * 1000 + 1000; // 旧会话 created 最早（tier② 会想抢它）
+        old.cleared = false;
+        let mut fresh = sess("fresh", "2026-07-23T09:00:00Z", now - 500);
+        fresh.title = String::new();
+        fresh.prompt = String::new();
+        fresh.created_ms = now - 2000;
+        fresh.cleared = true; // 用户还没输入，仍是空会话
+        let p = proc(200, start_s);
+        let mut cached = HashMap::new();
+        cached.insert(200u32, "fresh".to_string()); // 上一轮已迁到 fresh
+        let tasks = build_tasks(&[old, fresh], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &cached);
+        let f = tasks.iter().find(|t| t.id == "fresh").unwrap();
+        let o = tasks.iter().find(|t| t.id == "old").unwrap();
+        assert_eq!(f.pid, Some(200), "进程应继续粘在新会话（不回抖）");
+        assert_eq!(o.pid, None, "旧会话不该被 tier② 又抢回进程");
     }
 
     /// clear-follow 不误伤：没有 /clear（无 cleared 会话）时，配对行为与既有一致。

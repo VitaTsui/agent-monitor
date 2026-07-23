@@ -2,7 +2,7 @@
   "name": "agent-monitor-bridge",
   "displayName": "终端任务监控 · 桥接",
   "description": "让「终端任务监控」向 Cursor / VSCode 的内嵌终端下发任务（内嵌终端走 ConPTY，无法用 WriteConsoleInput 注入，改由本扩展 terminal.sendText 直接送达）。",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "vitahsu",
   "engines": {
     "vscode": "^1.75.0"

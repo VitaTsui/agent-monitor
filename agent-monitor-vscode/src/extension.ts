@@ -94,11 +94,27 @@ export function activate(context: vscode.ExtensionContext) {
       const term = findTerminal(cmd.pid);
       if (term) {
         term.show(false);
-        term.sendText(String(cmd.text ?? ""), cmd.submit !== false);
+        const text = String(cmd.text ?? "");
+        const submit = cmd.submit !== false;
+        term.sendText(text, submit);
+        // 兜底二次回车（对齐 mac osascript 的 inject_applescript）：长/多行内容会让 claude
+        // 进入粘贴态，sendText 补的那个提交回车被并进粘贴而只换行没提交（表现为「任务贴进去
+        // 了但没发出」）。等粘贴态吃完后再补一个空回车提交；若首次已提交，此时输入为空，
+        // claude 对空回车无动作，安全。延时按内容长度递增（300ms 起，封顶 1.2s）。
+        if (submit) {
+          const delay = Math.min(1200, 300 + text.length / 3);
+          setTimeout(() => {
+            try {
+              term.sendText("", true);
+            } catch {
+              /* 终端可能已关闭，忽略 */
+            }
+          }, delay);
+        }
         safeUnlink(fp);
         // 诊断：记录命中的终端，便于排查「下发到错误终端」
         appendLog(
-          `sendText → 终端「${term.name}」processId=${cmd.pid}：${String(cmd.text ?? "").slice(0, 40)}`,
+          `sendText → 终端「${term.name}」processId=${cmd.pid}：${text.slice(0, 40)}`,
         );
       }
       // 不是本窗口的终端就留着，交给拥有该终端的窗口处理（TTL 兜底清理）
