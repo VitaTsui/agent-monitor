@@ -93,8 +93,19 @@ impl ProcessScanner {
         self.sys.refresh_processes_specifics(
             ProcessRefreshKind::new().with_environ(UpdateKind::Always),
         );
-        let mut out = std::collections::HashMap::new();
-        for proc_ in self.sys.processes().values() {
+        // 采集候选：谁（reporter）在 env 里声称「CLAUDE_PID → session_id」，同时建进程图
+        // （父链 + 存活 claude 集合），供 resolve_session_pins 做「存活祖先」校验。
+        let mut candidates: Vec<(u32, u32, String)> = Vec::new();
+        let mut parent_of: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let mut alive_claude: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for (pid, proc_) in self.sys.processes() {
+            let pid = pid.as_u32();
+            if let Some(pp) = proc_.parent().map(|p| p.as_u32()) {
+                parent_of.insert(pid, pp);
+            }
+            if proc_.name().to_lowercase().contains("claude") {
+                alive_claude.insert(pid);
+            }
             let (mut claude_pid, mut session_id) = (None, None);
             for kv in proc_.environ() {
                 if let Some(v) = kv.strip_prefix("CLAUDE_PID=") {
@@ -105,12 +116,11 @@ impl ProcessScanner {
                     }
                 }
             }
-            if let (Some(pid), Some(sid)) = (claude_pid, session_id) {
-                // 同一 claude 的多个子进程给出同一 (pid, session)，去重取其一即可
-                out.entry(pid).or_insert(sid);
+            if let (Some(cp), Some(sid)) = (claude_pid, session_id) {
+                candidates.push((pid, cp, sid));
             }
         }
-        out
+        resolve_session_pins(&candidates, &parent_of, &alive_claude)
     }
 
     /// Windows：父链里是否存在 shell（终端会话的标志）。
@@ -222,6 +232,58 @@ impl ProcessScanner {
 
         (IdeKind::Other, "Unknown".into())
     }
+}
+
+/// 从 env 候选里挑出**可信**的「claude pid → session id」权威配对。
+///
+/// 病灶：`run_in_background` 派生的后台任务（及其它子进程）会**继承** `CLAUDE_PID` /
+/// `CLAUDE_CODE_SESSION_ID`。当拥有它的 claude 退出（用户 `/clear`、会话重启）后，这些子进程
+/// 常常**孤儿化并继续存活**，其 env 里仍带着**已死的旧 CLAUDE_PID**。若照单全收，就会把会话
+/// 配到一个不存在的 pid（build_tasks 里被丢弃 → 该会话退回 mtime 启发式，串终端），更危险的是
+/// Windows 会**重用 PID**：旧 pid 一旦被无关新进程占用，就会把该会话错配过去（= cursor 终端
+/// 会话获取错误）。
+///
+/// 过滤规则（两条都要满足才采信）：
+/// 1. `CLAUDE_PID` 必须是**当前存活的 claude 进程**（排除已死孤儿 / 被非 claude 重用的 pid）；
+/// 2. 该 `CLAUDE_PID` 必须是上报进程的**祖先**（顺父链上溯能走到）——真正的子孙进程满足，
+///    父链已断的孤儿走不到，进一步防 PID 重用后的张冠李戴。
+///
+/// 同一 claude 的多个子孙给出同一 (pid, session)，去重取其一即可。
+fn resolve_session_pins(
+    candidates: &[(u32, u32, String)],
+    parent_of: &std::collections::HashMap<u32, u32>,
+    alive_claude: &std::collections::HashSet<u32>,
+) -> std::collections::HashMap<u32, String> {
+    let mut out = std::collections::HashMap::new();
+    for (reporter, claude_pid, sid) in candidates {
+        if !alive_claude.contains(claude_pid) {
+            continue; // CLAUDE_PID 已死（孤儿）或被非 claude 进程重用
+        }
+        if !is_ancestor(*claude_pid, *reporter, parent_of) {
+            continue; // 父链走不到该 claude → 不是它的子孙，多半是孤儿/重用
+        }
+        out.entry(*claude_pid).or_insert_with(|| sid.clone());
+    }
+    out
+}
+
+/// 顺 `parent_of` 父链从 `from` 上溯（最多 24 跳），判断 `ancestor` 是否为其祖先。
+fn is_ancestor(
+    ancestor: u32,
+    from: u32,
+    parent_of: &std::collections::HashMap<u32, u32>,
+) -> bool {
+    let mut cur = from;
+    for _ in 0..24 {
+        if cur == ancestor {
+            return true;
+        }
+        match parent_of.get(&cur) {
+            Some(&pp) if pp != cur && pp > 1 => cur = pp,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// macOS 上 sysinfo 拿不到 root 进程（如 login）的父子关系，用 ps 兜底
@@ -1129,5 +1191,96 @@ mod agent_kind_tests {
         );
         assert_eq!(agent_kind("Cursor Helper", &s(&["/Applications/Cursor.app/x"])), None);
         assert_eq!(agent_kind("claude-backup-tool", &s(&["claude-backup-tool"])), None);
+    }
+}
+
+#[cfg(test)]
+mod session_pins_tests {
+    use super::resolve_session_pins;
+    use std::collections::{HashMap, HashSet};
+
+    fn parents(pairs: &[(u32, u32)]) -> HashMap<u32, u32> {
+        pairs.iter().copied().collect()
+    }
+    fn alive(pids: &[u32]) -> HashSet<u32> {
+        pids.iter().copied().collect()
+    }
+
+    /// 直接子进程报出存活 claude 的会话 → 采信。
+    #[test]
+    fn accepts_live_child() {
+        // 100(claude) → 200(bash 后台任务，reporter)
+        let cands = vec![(200, 100, "sess-A".to_string())];
+        let got = resolve_session_pins(&cands, &parents(&[(200, 100)]), &alive(&[100]));
+        assert_eq!(got.get(&100), Some(&"sess-A".to_string()));
+    }
+
+    /// 孙进程也能顺父链走到 claude → 采信。
+    #[test]
+    fn accepts_live_grandchild() {
+        // 100(claude) → 200(bash) → 300(node，reporter)
+        let cands = vec![(300, 100, "sess-A".to_string())];
+        let got = resolve_session_pins(&cands, &parents(&[(300, 200), (200, 100)]), &alive(&[100]));
+        assert_eq!(got.get(&100), Some(&"sess-A".to_string()));
+    }
+
+    /// 核心回归：claude 已退出、后台任务孤儿化仍带着已死 CLAUDE_PID → 丢弃，
+    /// 不再产生指向不存在 pid 的假配对（旧行为会把 {17548: fc8e9621} 这类塞进去）。
+    #[test]
+    fn rejects_orphan_with_dead_claude_pid() {
+        // 17548(claude) 已死，孤儿 200 仍报它；200 被系统重挂到 1
+        let cands = vec![(200, 17548, "fc8e9621".to_string())];
+        let got = resolve_session_pins(&cands, &parents(&[(200, 1)]), &alive(&[8968, 42640]));
+        assert!(got.is_empty(), "已死 CLAUDE_PID 的孤儿配对必须被丢弃");
+    }
+
+    /// PID 重用：旧 pid 被无关的**非 claude** 新进程占用 → 不在 alive_claude 里 → 丢弃。
+    #[test]
+    fn rejects_reused_pid_by_non_claude() {
+        let cands = vec![(200, 17548, "fc8e9621".to_string())];
+        // 17548 现在活着，但不是 claude（不在集合里）
+        let got = resolve_session_pins(&cands, &parents(&[(200, 17548)]), &alive(&[8968]));
+        assert!(got.is_empty());
+    }
+
+    /// 存活 claude 但不是上报进程的祖先（父链走不到）→ 丢弃，防止张冠李戴。
+    #[test]
+    fn rejects_when_not_ancestor() {
+        // 100 是存活 claude，但 reporter 200 的父链是 200→300→1，够不到 100
+        let cands = vec![(200, 100, "sess-A".to_string())];
+        let got = resolve_session_pins(&cands, &parents(&[(200, 300), (300, 1)]), &alive(&[100, 300]));
+        assert!(got.is_empty());
+    }
+
+    /// 同一 claude 的多个子孙报同一会话 → 去重为一条。
+    #[test]
+    fn dedups_same_claude() {
+        let cands = vec![
+            (200, 100, "sess-A".to_string()),
+            (201, 100, "sess-A".to_string()),
+        ];
+        let got = resolve_session_pins(
+            &cands,
+            &parents(&[(200, 100), (201, 100)]),
+            &alive(&[100]),
+        );
+        assert_eq!(got.len(), 1);
+        assert_eq!(got.get(&100), Some(&"sess-A".to_string()));
+    }
+
+    /// 多个不同 claude 各自的子进程 → 各配各的。
+    #[test]
+    fn multiple_distinct_claudes() {
+        let cands = vec![
+            (200, 100, "sess-A".to_string()),
+            (300, 101, "sess-B".to_string()),
+        ];
+        let got = resolve_session_pins(
+            &cands,
+            &parents(&[(200, 100), (300, 101)]),
+            &alive(&[100, 101]),
+        );
+        assert_eq!(got.get(&100), Some(&"sess-A".to_string()));
+        assert_eq!(got.get(&101), Some(&"sess-B".to_string()));
     }
 }
