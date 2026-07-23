@@ -410,6 +410,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
           role="button"
           tabIndex={0}
           aria-label="关闭设置"
+          data-sheet-close
           onClick={onClose}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
@@ -422,6 +423,31 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
         </span>
         <aside className={styles.nav}>
           <div className={styles.navTitle}>设置</div>
+          {/* Claude sheet 顶部的身份 pill（仅移动端，见 scss）：点按进账户 */}
+          <div
+            className={styles.identityPill}
+            role="button"
+            tabIndex={0}
+            onClick={() => {
+              setTab("account");
+              setMobileView("content");
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setTab("account");
+                setMobileView("content");
+              }
+            }}
+          >
+            <span className={styles.identityAvatar}>
+              {(user.nickname ?? user.username ?? "U").slice(0, 1)}
+            </span>
+            <span className={styles.identityName}>
+              {user.nickname ?? user.username}
+            </span>
+            <RightOutlined className={styles.identityArrow} />
+          </div>
           <div className={styles.navList} role="tablist" aria-label="设置分类">
             {navItems.map((n) => (
               <div
