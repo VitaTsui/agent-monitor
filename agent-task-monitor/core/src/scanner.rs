@@ -563,18 +563,19 @@ pub fn build_tasks(
 
     let mut pid_of_session: HashMap<&str, &ProcessInfo> = HashMap::new();
     let mut paired_pids: HashSet<u32> = HashSet::new();
+    // pid→进程、session_id→会话：全函数各建一份，供各配对层共用，避免每层重建映射或线性 find
+    let proc_by_pid: HashMap<u32, &ProcessInfo> =
+        processes.iter().map(|p| (p.pid, p)).collect();
+    let sid_index: HashMap<&str, &SessionSummary> =
+        sessions.iter().map(|s| (s.session_id.as_str(), s)).collect();
 
     // 第一优先：按「进程打开着哪个会话文件」得出的确定配对（pinned）。
     // 这能解决「关闭的会话 mtime 反而更新、抢走了活进程」——因为已关闭会话的文件
     // 没有活进程占着，压根不会出现在 pinned 里；闲置但仍开着的会话则会被正确配上。
     if !pinned.is_empty() {
-        let proc_by_pid: HashMap<u32, &ProcessInfo> =
-            processes.iter().map(|p| (p.pid, p)).collect();
         for (pid, sid) in pinned {
-            if let (Some(p), Some(s)) = (
-                proc_by_pid.get(pid),
-                sessions.iter().find(|s| &s.session_id == sid),
-            ) {
+            if let (Some(p), Some(s)) = (proc_by_pid.get(pid), sid_index.get(sid.as_str()).copied())
+            {
                 pid_of_session.insert(s.session_id.as_str(), *p);
                 paired_pids.insert(*pid);
             }
@@ -589,18 +590,16 @@ pub fn build_tasks(
     // mtime 最新」挑最可能刚清空的那个，至少不会更差。被迁走的旧会话记入 released，本轮不
     // 再被其它 tier 抢配（它已结束）。
     let mut released: HashSet<&str> = HashSet::new();
-    if !cached.is_empty() {
-        let proc_by_pid: HashMap<u32, &ProcessInfo> =
-            processes.iter().map(|p| (p.pid, p)).collect();
-        // 收集本轮全新清空会话，按 created 升序稳定处理
-        let mut fresh: Vec<&SessionSummary> = sessions
-            .iter()
-            .filter(|s| s.cleared && !pid_of_session.contains_key(s.session_id.as_str()))
-            .collect();
-        fresh.sort_by_key(|s| s.created_ms);
+    // 先收集本轮全新清空会话；没有就整层跳过，额外开销只落在真有 /clear 的轮次
+    let mut fresh: Vec<&SessionSummary> = sessions
+        .iter()
+        .filter(|s| s.cleared && !pid_of_session.contains_key(s.session_id.as_str()))
+        .collect();
+    if !fresh.is_empty() {
+        fresh.sort_by_key(|s| s.created_ms); // 按 created 升序稳定处理
         for s_new in fresh {
             // 候选：缓存里配在「同项目、更旧会话」的存活且未配对进程
-            let mut best: Option<(u32, u64)> = None; // (pid, 旧会话 mtime)
+            let mut best: Option<(u32, &SessionSummary)> = None; // (pid, 被取代的旧会话)
             for (pid, old_sid) in cached {
                 if old_sid == &s_new.session_id || paired_pids.contains(pid) {
                     continue;
@@ -610,25 +609,19 @@ pub fn build_tasks(
                     continue;
                 }
                 // 旧会话须存在、且比新会话更早创建（确是被取代的前身）
-                let Some(old) = sessions.iter().find(|s| &s.session_id == old_sid) else {
-                    continue;
-                };
+                let Some(old) = sid_index.get(old_sid.as_str()).copied() else { continue };
                 if old.created_ms >= s_new.created_ms {
                     continue;
                 }
-                if best.map(|(_, m)| old.mtime_ms > m).unwrap_or(true) {
-                    best = Some((*pid, old.mtime_ms));
+                if best.is_none_or(|(_, b)| old.mtime_ms > b.mtime_ms) {
+                    best = Some((*pid, old));
                 }
             }
-            if let Some((pid, _)) = best {
+            if let Some((pid, old)) = best {
                 pid_of_session.insert(s_new.session_id.as_str(), proc_by_pid[&pid]);
                 paired_pids.insert(pid);
                 // 该 pid 的旧会话已被取代 → 释放，避免其它 tier 又把它配给别的进程
-                if let Some(old_sid) = cached.get(&pid) {
-                    if let Some(old) = sessions.iter().find(|s| &s.session_id == old_sid) {
-                        released.insert(old.session_id.as_str());
-                    }
-                }
+                released.insert(old.session_id.as_str());
             }
         }
     }
@@ -773,8 +766,6 @@ pub fn build_tasks(
     // 会话（>30min 够不着 phase④，命令行又无 --resume）掉成『等待输入』占位、唤醒后又冒出
     // 一条新会话」：配对一旦建立就粘住，只要进程活着、会话还在，就不再翻来覆去。
     if !cached.is_empty() {
-        let proc_by_pid: HashMap<u32, &ProcessInfo> =
-            processes.iter().map(|p| (p.pid, p)).collect();
         for (pid, sid) in cached {
             if paired_pids.contains(pid) {
                 continue;
@@ -784,10 +775,10 @@ pub fn build_tasks(
             }
             if let (Some(p), Some(s)) = (
                 proc_by_pid.get(pid),
-                sessions.iter().find(|s| {
-                    &s.session_id == sid
-                        && now.saturating_sub(s.mtime_ms) < 7 * 24 * 3600 * 1000
-                }),
+                sid_index
+                    .get(sid.as_str())
+                    .copied()
+                    .filter(|s| now.saturating_sub(s.mtime_ms) < 7 * 24 * 3600 * 1000),
             ) {
                 pid_of_session.insert(s.session_id.as_str(), *p);
                 paired_pids.insert(*pid);
@@ -1081,6 +1072,8 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
 
     // 只把真实用户排队输入（展示文本 Some）拿去上报；通知类占位项丢弃
     let queued_inputs: Vec<String> = queue.into_iter().filter_map(|(_, d)| d).collect();
+    // 刚清空、未输入的空会话：见过 /clear 且没有真实 prompt
+    let cleared = saw_clear && prompt.is_empty();
 
     Some(SessionSummary {
         provider: "claude".into(),
@@ -1088,11 +1081,11 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         project_key,
         cwd: if canonical_cwd.is_empty() { cwd } else { canonical_cwd },
         title: String::new(),
-        prompt: prompt.clone(),
+        prompt,
         last_action,
-        // 刚清空、未输入的空会话没有进行中的回合 → 视为回合结束（显示 Idle 而非 Running）
-        turn_ended: turn_ended || (saw_clear && prompt.is_empty()),
-        cleared: saw_clear && prompt.is_empty(),
+        // cleared 会话没有进行中的回合 → 视为回合结束（显示 Idle 而非 Running）
+        turn_ended: turn_ended || cleared,
+        cleared,
         started_at,
         last_active_at,
         version,

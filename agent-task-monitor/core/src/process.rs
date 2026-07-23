@@ -103,7 +103,9 @@ impl ProcessScanner {
             if let Some(pp) = proc_.parent().map(|p| p.as_u32()) {
                 parent_of.insert(pid, pp);
             }
-            if proc_.name().to_lowercase().contains("claude") {
+            // 精确识别 claude（agent_kind 会挡掉 claude-backup-tool 之类子串误判），
+            // 不用松散的 name.contains("claude")
+            if agent_kind(proc_.name(), proc_.cmd()) == Some("claude") {
                 alive_claude.insert(pid);
             }
             let (mut claude_pid, mut session_id) = (None, None);
