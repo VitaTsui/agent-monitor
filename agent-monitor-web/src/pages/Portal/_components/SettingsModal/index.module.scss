@@ -199,6 +199,21 @@ $hover: rgba(36, 61, 66, 0.06);
   // 移动端：iOS 设置式两级界面 —— 一级=菜单列表，二级=分区内容（固定
   // 头部：返回 + 标题 + 关闭，内容区单独滚动，关闭钮永远可达）
   @media (max-width: 760px) {
+    // 固定全屏：不同分栏内容高度不同会让抽屉式 sheet「高高低低变来变去」，
+    // 这里锁死为整屏高度，切换分栏时高度不再跳动，也不再露出顶部背景间隙。
+    :global(.ant-modal-content) {
+      height: 100dvh !important;
+      max-height: 100dvh !important;
+      min-height: 100dvh !important;
+      border-radius: 0 !important;
+      padding-top: env(safe-area-inset-top) !important;
+
+      // 全屏页不需要底部抽屉的顶部抓手条
+      &::before {
+        display: none !important;
+      }
+    }
+
     // 弹窗 body 自身不滚动：否则会连着头部一起滚（antd-overload 给移动端 body 挂了
     // overflow-y:auto）。改为 body 不滚、只让内部 .content 单独滚，头部才能真正钉住。
     :global(.ant-modal-body) {
