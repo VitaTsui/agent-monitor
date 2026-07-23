@@ -23,6 +23,11 @@ pub struct SessionSummary {
     pub last_action: String,
     /// 最后一条有效条目是否表示「回合结束」（助手纯文本收尾）
     pub turn_ended: bool,
+    /// 本会话是刚 `/clear` 出来、还没输入的「全新空会话」：内容只有 /clear 命令块、无真实
+    /// prompt。claude 执行 /clear 会另起这样一个会话，同一进程从旧会话转到它。build_tasks
+    /// 据此把进程从「被清空取代的旧会话」迁到本会话（clear-follow），否则进程会被 tier②
+    /// 「认领 created 最早的会话」粘回旧会话 → 网页内容/标题定格在清空前。
+    pub cleared: bool,
     pub started_at: Option<String>,
     pub last_active_at: Option<String>,
     pub version: Option<String>,
@@ -294,6 +299,7 @@ impl SessionScanner {
             prompt,
             last_action,
             turn_ended,
+            cleared: false,
             started_at,
             last_active_at: last_active,
             version: None,
@@ -575,6 +581,58 @@ pub fn build_tasks(
         }
     }
 
+    // clear-follow：claude 执行 /clear 会另起一个「只含 /clear 命令、还没输入」的全新会话
+    // （cleared=true），同一进程从旧会话转到它。但下面 tier② 会按「created 最早」把进程粘回
+    // 它启动时创建的旧会话 → 网页内容/标题定格在清空前。这里据配对缓存把「上一轮配在同项目、
+    // 现被清空取代」的进程迁到新会话（进程还是同一个，只是会话号变了）。缓存是权威信号
+    //（上一轮该 pid 确实配在旧会话），单会话场景下无歧义；多进程同时 /clear 时按「旧会话
+    // mtime 最新」挑最可能刚清空的那个，至少不会更差。被迁走的旧会话记入 released，本轮不
+    // 再被其它 tier 抢配（它已结束）。
+    let mut released: HashSet<&str> = HashSet::new();
+    if !cached.is_empty() {
+        let proc_by_pid: HashMap<u32, &ProcessInfo> =
+            processes.iter().map(|p| (p.pid, p)).collect();
+        // 收集本轮全新清空会话，按 created 升序稳定处理
+        let mut fresh: Vec<&SessionSummary> = sessions
+            .iter()
+            .filter(|s| s.cleared && !pid_of_session.contains_key(s.session_id.as_str()))
+            .collect();
+        fresh.sort_by_key(|s| s.created_ms);
+        for s_new in fresh {
+            // 候选：缓存里配在「同项目、更旧会话」的存活且未配对进程
+            let mut best: Option<(u32, u64)> = None; // (pid, 旧会话 mtime)
+            for (pid, old_sid) in cached {
+                if old_sid == &s_new.session_id || paired_pids.contains(pid) {
+                    continue;
+                }
+                let Some(p) = proc_by_pid.get(pid) else { continue };
+                if p.agent != s_new.provider || encode_path(&p.cwd) != s_new.project_key {
+                    continue;
+                }
+                // 旧会话须存在、且比新会话更早创建（确是被取代的前身）
+                let Some(old) = sessions.iter().find(|s| &s.session_id == old_sid) else {
+                    continue;
+                };
+                if old.created_ms >= s_new.created_ms {
+                    continue;
+                }
+                if best.map(|(_, m)| old.mtime_ms > m).unwrap_or(true) {
+                    best = Some((*pid, old.mtime_ms));
+                }
+            }
+            if let Some((pid, _)) = best {
+                pid_of_session.insert(s_new.session_id.as_str(), proc_by_pid[&pid]);
+                paired_pids.insert(pid);
+                // 该 pid 的旧会话已被取代 → 释放，避免其它 tier 又把它配给别的进程
+                if let Some(old_sid) = cached.get(&pid) {
+                    if let Some(old) = sessions.iter().find(|s| &s.session_id == old_sid) {
+                        released.insert(old.session_id.as_str());
+                    }
+                }
+            }
+        }
+    }
+
     // pinned 没覆盖到的（绝大多数——claude 并不持续占着会话文件，写一行开一次就关，
     // lsof/RmGetList 抓不到），按下面几级信号在同项目内配对：
     for (key, procs) in &proc_by_key {
@@ -587,7 +645,10 @@ pub fn build_tasks(
                 .collect();
             let mut free_sess: Vec<&SessionSummary> = sess
                 .iter()
-                .filter(|s| !pid_of_session.contains_key(s.session_id.as_str()))
+                .filter(|s| {
+                    !pid_of_session.contains_key(s.session_id.as_str())
+                        && !released.contains(s.session_id.as_str())
+                })
                 .map(|s| *s)
                 .collect();
 
@@ -872,6 +933,8 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
     let mut prompt = String::new();
     let mut last_action = String::new();
     let mut turn_ended = false;
+    // 是否见过 /clear 命令块（尾窗内）。与「无真实 prompt」合起来 → cleared：刚清空、未输入。
+    let mut saw_clear = false;
     // 忠实回放 claude 原生输入队列：(匹配键=原始 content, 展示文本=Some 时才是真实用户
     // 输入)。通知类（task-notification 等）也占位（展示文本 None），这样按位置的「空
     // content 出列」能对上正确的项，最终只把「真实用户输入」拿去展示。
@@ -916,10 +979,19 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                     continue;
                 }
                 let content = v.pointer("/message/content");
+                // /clear 命令：内容形如 "<command-name>/clear</command-name>..."。清空后
+                // claude 另起的新会话开头就是它。标记见过，配合「无真实 prompt」判 cleared。
+                if content
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| s.contains("<command-name>/clear</command-name>"))
+                {
+                    saw_clear = true;
+                }
                 if let Some(text) = user_text(content) {
                     prompt = text;
                     last_action = "等待助手响应".into();
                     turn_ended = false;
+                    saw_clear = false; // 清空后又有真实输入 → 不再是「刚清空的空会话」
                 } else if content_has_tool_result(content) {
                     turn_ended = false;
                 }
@@ -1016,9 +1088,11 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         project_key,
         cwd: if canonical_cwd.is_empty() { cwd } else { canonical_cwd },
         title: String::new(),
-        prompt,
+        prompt: prompt.clone(),
         last_action,
-        turn_ended,
+        // 刚清空、未输入的空会话没有进行中的回合 → 视为回合结束（显示 Idle 而非 Running）
+        turn_ended: turn_ended || (saw_clear && prompt.is_empty()),
+        cleared: saw_clear && prompt.is_empty(),
         started_at,
         last_active_at,
         version,
@@ -2203,6 +2277,7 @@ mod pairing_tests {
             prompt: String::new(),
             last_action: String::new(),
             turn_ended: true,
+            cleared: false,
             started_at: Some(started.into()),
             last_active_at: None,
             version: None,
@@ -2228,6 +2303,85 @@ mod pairing_tests {
             memory: 0,
             command: "claude".into(),
         }
+    }
+
+    /// parse_tail 应把「只含 /clear 命令、未输入」的新会话标记 cleared=true、prompt 空。
+    /// 用真实 /clear 会话的行结构（mode/snapshot/caveat/command-name/local_command）验证。
+    #[test]
+    fn parse_tail_flags_cleared_session() {
+        let tail = concat!(
+            r#"{"type":"mode","mode":"normal","sessionId":"s1"}"#, "\n",
+            r#"{"type":"file-history-snapshot","messageId":"m1"}"#, "\n",
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"<local-command-caveat>Caveat: local command</local-command-caveat>"}}"#, "\n",
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"<command-name>/clear</command-name>\n<command-args></command-args>"}}"#, "\n",
+            r#"{"type":"system","subtype":"local_command","content":"<local-command-stdout></local-command-stdout>"}"#, "\n",
+        );
+        let s = parse_tail("s1", std::path::Path::new("/x/-proj/s1.jsonl"), tail).unwrap();
+        assert!(s.cleared, "只含 /clear 的新会话应标记 cleared");
+        assert!(s.prompt.is_empty(), "cleared 会话不该有真实 prompt");
+        assert!(s.turn_ended, "cleared 会话视为回合结束（Idle）");
+    }
+
+    /// 反例：清空后又输入了真实内容 → 不再是空会话，cleared=false。
+    #[test]
+    fn parse_tail_cleared_reset_after_real_input() {
+        let tail = concat!(
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"<command-name>/clear</command-name>"}}"#, "\n",
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"hello world"}}"#, "\n",
+        );
+        let s = parse_tail("s2", std::path::Path::new("/x/-proj/s2.jsonl"), tail).unwrap();
+        assert!(!s.cleared, "清空后有真实输入 → 不再 cleared");
+        assert_eq!(s.prompt, "hello world");
+    }
+
+    /// /clear 回归：进程 P 在启动时创建了旧会话 old（created≈start），运行中执行 /clear，
+    /// claude 另起一个「只含 /clear、未输入」的新会话 fresh（cleared=true，created=现在）。
+    /// P 实际已转到 fresh，但 tier② 会按「created 最早」把 P 粘回 old → 网页定格清空前内容。
+    /// clear-follow 据缓存（上一轮 P 配的是 old）把 P 迁到 fresh，old 落 Finished。
+    #[test]
+    fn clear_follow_moves_process_to_fresh_session() {
+        let now = now_ms();
+        let start_s = now / 1000 - 3600; // 进程 1h 前启动
+        let mut old = sess("old", "2026-07-23T00:00:00Z", now - 1000);
+        old.created_ms = start_s * 1000 + 1000; // 旧会话创建≈进程启动
+        old.cleared = false;
+        let mut fresh = sess("fresh", "2026-07-23T09:00:00Z", now - 500);
+        fresh.title = String::new();
+        fresh.prompt = String::new();
+        fresh.created_ms = now - 2000; // 刚 /clear 出来
+        fresh.cleared = true;
+        let p = proc(200, start_s);
+        // 缓存：上一轮 P 配在 old
+        let mut cached = HashMap::new();
+        cached.insert(200u32, "old".to_string());
+
+        let tasks = build_tasks(&[old, fresh], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &cached);
+        let f = tasks.iter().find(|t| t.id == "fresh").unwrap();
+        let o = tasks.iter().find(|t| t.id == "old").unwrap();
+        assert_eq!(f.pid, Some(200), "clear-follow 应把进程迁到刚清空的新会话");
+        assert_eq!(o.pid, None, "被清空取代的旧会话不该再占着进程");
+        assert_eq!(o.status, TaskStatus::Finished);
+    }
+
+    /// clear-follow 不误伤：没有 /clear（无 cleared 会话）时，配对行为与既有一致。
+    /// 两个进程各自的旧会话都不该因缓存被搬走。
+    #[test]
+    fn clear_follow_noop_without_cleared_session() {
+        let now = now_ms();
+        let start_s = now / 1000 - 3600;
+        let mut a = sess("a", "2026-07-23T00:00:00Z", now - 1000);
+        a.created_ms = start_s * 1000 + 1000;
+        let mut b = sess("b", "2026-07-23T00:10:00Z", now - 800);
+        b.created_ms = start_s * 1000 + 2000;
+        let pa = proc(201, start_s);
+        let pb = proc(202, start_s + 1);
+        let mut cached = HashMap::new();
+        cached.insert(201u32, "a".to_string());
+        cached.insert(202u32, "b".to_string());
+        let tasks = build_tasks(&[a, b], &[pa, pb], &|_| false, &HashMap::new(), &HashSet::new(), &cached);
+        // 两条会话各自保住自己的进程，没有互串
+        assert!(tasks.iter().any(|t| t.id == "a" && t.pid.is_some()));
+        assert!(tasks.iter().any(|t| t.id == "b" && t.pid.is_some()));
     }
 
     /// 真实场景（Windows/Cursor）：空白新会话创建于进程启动那刻（created_ms≈start），
@@ -2547,6 +2701,7 @@ mod codex_tests {
             prompt: String::new(),
             last_action: String::new(),
             turn_ended: true,
+            cleared: false,
             started_at: None,
             last_active_at: None,
             version: None,
