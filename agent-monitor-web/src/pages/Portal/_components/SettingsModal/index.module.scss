@@ -97,6 +97,15 @@ $hover: rgba(36, 61, 66, 0.06);
     display: none;
   }
 
+  // 身份 pill / 头部信息钮：仅移动端 sheet 用（桌面隐藏）
+  .identityPill {
+    display: none;
+  }
+
+  .mobileInfo {
+    display: none;
+  }
+
   // 右上角关闭按钮（弹窗无标题栏，需要显式的关闭入口）
   .closeBtn {
     position: absolute;
@@ -213,9 +222,27 @@ $hover: rgba(36, 61, 66, 0.06);
       border-bottom: 0.5px solid rgba(36, 61, 66, 0.14);
 
       .mobileHeadTitle {
-        font-size: 17px;
-        font-weight: 600;
+        font-size: 18px;
+        font-weight: 650;
         color: $text;
+      }
+
+      // Claude sheet 头部右上角圆形信息钮（对称左上角的圆形关闭钮）
+      .mobileInfo {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: absolute;
+        right: 12px;
+        top: 7px;
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        background: #fff;
+        color: $text;
+        font-size: 16px;
+        box-shadow: 0 1px 4px rgba(36, 61, 66, 0.16);
+        cursor: pointer;
       }
 
       .mobileBack {
@@ -243,14 +270,30 @@ $hover: rgba(36, 61, 66, 0.06);
       }
     }
 
+    // Claude 设置 sheet：关闭钮是左上角的白色圆形按钮（不是右上角灰块）
     .closeBtn {
-      top: 9px;
-      right: 12px;
-      width: 32px;
-      height: 32px;
+      top: 7px;
+      left: 12px;
+      right: auto;
+      width: 34px;
+      height: 34px;
       border-radius: 50%;
-      background: rgba(36, 61, 66, 0.07);
+      background: #fff;
+      color: $text;
+      font-size: 15px;
+      box-shadow: 0 1px 4px rgba(36, 61, 66, 0.16);
       z-index: 3;
+
+      &:hover {
+        background: #fff;
+        color: $text;
+      }
+    }
+
+    // 二级内容页：左上角让位给「返回」，此页不再显示关闭钮
+    // （返回到一级即可关闭，或直接下滑收起）
+    .layout.mobileContent .closeBtn {
+      display: none;
     }
 
     // 一级：iOS 设置式分组列表（灰底页面 + 白色圆角分组卡 + 彩色图标 + 分隔线）
@@ -265,6 +308,53 @@ $hover: rgba(36, 61, 66, 0.06);
 
       .navTitle {
         display: none;
+      }
+
+      // Claude sheet 顶部身份 pill：白色圆角行，头像 + 名字 + chevron
+      .identityPill {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 14px;
+        margin-bottom: 18px;
+        background: #fff;
+        border-radius: 14px;
+        cursor: pointer;
+
+        .identityAvatar {
+          flex: none;
+          width: 34px;
+          height: 34px;
+          border-radius: 50%;
+          background: $accent;
+          color: #fff;
+          font-size: 15px;
+          font-weight: 600;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .identityName {
+          flex: 1;
+          min-width: 0;
+          font-size: 16px;
+          font-weight: 600;
+          color: $text;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .identityArrow {
+          flex: none;
+          color: #c2c8cf;
+          font-size: 15px;
+        }
+
+        &:active {
+          background: #f7f7f5;
+        }
       }
 
       // 整组做成一张白色圆角卡
@@ -289,28 +379,27 @@ $hover: rgba(36, 61, 66, 0.06);
         &:not(:last-child)::after {
           content: "";
           position: absolute;
-          left: 56px;
+          left: 52px;
           right: 0;
           bottom: 0;
           height: 0.5px;
           background: rgba(36, 61, 66, 0.12);
         }
 
-        // 彩色圆角图标底（iOS 设置图标质感）—— 仅移动端上色
+        // Claude 风格：单色细线图标（不是 iOS 的彩色圆角块）
         .navIcon {
           flex: none;
-          width: 30px;
-          height: 30px;
-          border-radius: 8px;
+          width: 26px;
+          height: 26px;
           display: flex;
           align-items: center;
           justify-content: center;
-          background: var(--nav-color, #8a94a6);
-          color: #fff;
+          background: transparent;
+          color: #5b6b70;
 
           :global(.anticon) {
-            font-size: 17px;
-            color: #fff;
+            font-size: 21px;
+            color: #5b6b70;
           }
         }
 
@@ -337,7 +426,7 @@ $hover: rgba(36, 61, 66, 0.06);
           }
 
           .navIcon :global(.anticon) {
-            color: #fff;
+            color: #5b6b70;
           }
         }
 

@@ -64,9 +64,12 @@ export function installSheetSwipe() {
     const shouldClose = dy > 130 || (dy > 60 && velocity > 0.5);
     if (shouldClose) {
       content.style.transform = "translateY(100%)";
-      const close = content
-        .closest(".ant-modal")
-        ?.querySelector(".ant-modal-close") as HTMLElement | null;
+      // 优先点 antd 自带关闭钮；`closable={false}` 的弹窗没有它，退回业务自定义的
+      // 关闭入口（约定挂 data-sheet-close）—— 否则下滑动画播完却触发不了 onCancel，
+      // 弹窗又弹回来（表现为「下滑无法关闭」）。
+      const modal = content.closest(".ant-modal");
+      const close = (modal?.querySelector(".ant-modal-close") ||
+        modal?.querySelector("[data-sheet-close]")) as HTMLElement | null;
       window.setTimeout(() => {
         close?.click();
         // 复位，供该 DOM 复用（antd 复用 wrap）
