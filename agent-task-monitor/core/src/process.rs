@@ -76,6 +76,43 @@ impl ProcessScanner {
         result
     }
 
+    /// 权威配对：claude 进程 pid → 它正在跑的会话 id。
+    ///
+    /// Claude Code 给它派生的每个子进程注入两个环境变量 `CLAUDE_PID`（拥有该子进程的
+    /// claude 进程 pid）与 `CLAUDE_CODE_SESSION_ID`（= 会话 jsonl 文件名）。据此可得
+    /// 「会话 ↔ claude 进程」的**权威链**，不依赖文件句柄（Windows 上 claude 写一行开一次
+    /// 就关，句柄扫描抓不到）或时间戳启发式（并发同项目会话本质歧义）。
+    ///
+    /// 覆盖面：仅当会话**当前有活着的子进程**（正在跑工具/命令）时能取到；空闲会话没有
+    /// 子进程 → 取不到，交回 build_tasks 的配对缓存（tier⑤）与 mtime 兜底。一旦活跃时
+    /// 拿到过一次，缓存就把它粘住。环境块须单独刷新，开销较大，调用方应节流。
+    ///
+    /// 平台：environ 由 sysinfo 提供（Windows 读 PEB、Linux 读 /proc/<pid>/environ、
+    /// macOS 读自有进程），无需自写 unsafe。取不到 environ 的进程被安全跳过 → 空表。
+    pub fn session_pins(&mut self) -> std::collections::HashMap<u32, String> {
+        self.sys.refresh_processes_specifics(
+            ProcessRefreshKind::new().with_environ(UpdateKind::Always),
+        );
+        let mut out = std::collections::HashMap::new();
+        for proc_ in self.sys.processes().values() {
+            let (mut claude_pid, mut session_id) = (None, None);
+            for kv in proc_.environ() {
+                if let Some(v) = kv.strip_prefix("CLAUDE_PID=") {
+                    claude_pid = v.trim().parse::<u32>().ok();
+                } else if let Some(v) = kv.strip_prefix("CLAUDE_CODE_SESSION_ID=") {
+                    if !v.is_empty() {
+                        session_id = Some(v.to_string());
+                    }
+                }
+            }
+            if let (Some(pid), Some(sid)) = (claude_pid, session_id) {
+                // 同一 claude 的多个子进程给出同一 (pid, session)，去重取其一即可
+                out.entry(pid).or_insert(sid);
+            }
+        }
+        out
+    }
+
     /// Windows：父链里是否存在 shell（终端会话的标志）。
     /// IDE 插件/后台服务由扩展宿主直接拉起，父链没有 shell。
     #[cfg(windows)]

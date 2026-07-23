@@ -310,9 +310,10 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         static PIN_CACHE: std::sync::Mutex<Option<std::collections::HashMap<u32, String>>> =
             std::sync::Mutex::new(None);
         let tick = SCAN_TICKS.load(Ordering::Relaxed);
-        // 窗口放宽到 8 天后要检查的 jsonl 变多、RmGetList 有开销，把频率从每 4 轮降到
-        // 每 20 轮（约 30s）算一次，其余复用缓存；会话↔文件对应关系很稳定，够用。
-        if tick % 20 == 0 {
+        // 每 20 轮（约 30s）算一次，其余复用缓存；会话↔进程对应关系很稳定，够用。
+        // 但启动头两轮也要算：否则要等 ~80s 才有 pinned，其间只能靠 mtime（易错位），
+        // 正是「刚开客户端就下发」时最容易配错的窗口。
+        if tick <= 1 || tick % 20 == 0 {
             let pids: Vec<u32> = processes.iter().map(|p| p.pid).collect();
             let dirs = {
                 let scanner = state.scanner.lock().await;
@@ -322,10 +323,23 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                     home.join(".codex/sessions"),
                 ]
             };
-            let fresh =
+            // 权威来源：claude 派生子进程的 env 里带 CLAUDE_PID + CLAUDE_CODE_SESSION_ID，
+            // 直接给出「会话 ↔ claude pid」（见 ProcessScanner::session_pins）。这是 Windows
+            // 上唯一可靠的 pinned 来源——claude 写一行开一次就关，句柄扫描（RmGetList/lsof）
+            // 抓不到。openfiles::pin_sessions 留作补充（Unix lsof；Windows 已默认空），env 优先。
+            let env_pins = {
+                let mut procs = state.procs.lock().await;
+                tokio::task::block_in_place(|| procs.session_pins())
+            };
+            let env_n = env_pins.len();
+            let mut fresh =
                 tokio::task::block_in_place(|| crate::openfiles::pin_sessions(&pids, &dirs));
-            // 诊断：pinned 是最可靠的配对来源。每 ~30s 记一次它是否命中，判断「claude 是否
-            // 持有会话文件句柄」——若长期为空，说明得靠启发式（易错位），需另想办法。
+            let file_n = fresh.len();
+            for (pid, sid) in env_pins {
+                fresh.insert(pid, sid); // env 权威，覆盖句柄扫描结果
+            }
+            // 诊断：pinned 是最可靠的配对来源。每 ~30s 记一次命中情况（env 权威 / 文件句柄
+            // 各多少），长期 env=0 说明会话都没有活子进程、只能靠缓存+mtime 兜底。
             {
                 static LAST_LOG: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
                 let now = std::time::SystemTime::now()
@@ -336,8 +350,10 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                 if now.saturating_sub(*l) > 30 {
                     *l = now;
                     client_log(&format!(
-                        "配对来源 pinned={} 条：{:?}（进程数 {}）",
+                        "配对来源 pinned={} 条（env权威={} 文件句柄={}）：{:?}（进程数 {}）",
                         fresh.len(),
+                        env_n,
+                        file_n,
                         fresh,
                         pids.len()
                     ));

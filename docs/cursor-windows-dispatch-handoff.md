@@ -45,8 +45,12 @@ Windows 上，网页里对某个 **Cursor/VSCode 内嵌终端会话** 下发任�
 
 - **① 命令行 `--resume <id>`**：命令行带会话 id → 精确。但用户的 claude 是
   `claude.exe --dangerously-skip-permissions`（无 --resume），**用不上**。
-- **pinned（最可靠）**：`client/src/openfiles.rs::pin_windows` 用 Restart Manager `RmGetList`
-  查「哪个进程持有这个 jsonl 文件句柄」。**实测 `pinned=0`（见下）。**
+- **pinned（最可靠）**：会话 ↔ claude 进程的**权威链**。
+  - ~~旧法：`openfiles.rs::pin_windows` 用 Restart Manager `RmGetList` 查文件句柄持有者~~
+    —— **实测无效**（见 §4/§5，已默认禁用）。
+  - **新法（2026-07-23 落地）**：`core/src/process.rs::ProcessScanner::session_pins` 从 claude
+    **派生子进程的环境变量** `CLAUDE_PID` + `CLAUDE_CODE_SESSION_ID` 直接取「claude pid ↔ 会话 id」。
+    `state.rs` 把它喂进 `pinned`（env 优先，句柄扫描作补充）。`build_tasks` 已优先用 pinned。
 - **② created≈start**：进程一定先于它创建的会话，故会话 `created_ms ≥ 进程 start_time`。
   0.7.41 已把「回看窗口」收到 **500ms**（`CREATE_BACK_MS`，`scanner.rs:613`），并改成
   **按进程启动升序、各认领最早的后继会话**（不再用 |diff| 最小贪心，那会让晚开进程抢走早开
@@ -75,34 +79,49 @@ Windows 上，网页里对某个 **Cursor/VSCode 内嵌终端会话** 下发任�
 - 会话都是 **resumed/闲置约 2.2 天**（`mtime_age≈192000s`，`created_age` 更早），并非当前进程新建。
 - **`pinned` 一直是 0**。
 
-**0.7.42 刚做的事（待验证）**：`openfiles.rs::RECENT_MS` 从 6h 放宽到 **8 天**
-（`pin_windows` 原来只检查「6h 内改过的 jsonl」，把 2 天闲置的会话文件排除在外，压根没查 holder
-→ 自然 pinned=0）；同时 pin 频率从每 4 轮降到 **每 20 轮**（`state.rs:315`，约 30s）省开销。
+**已验证（2026-07-23，真机）**：放宽 `RECENT_MS` 到 8 天后再全量扫描，holder 仍 0 —— 确认
+「闲置会话被 claude 持有句柄」这个前提**为假**，句柄扫描此路不通（见 §5）。已改走环境变量方案。
 
-## 5. 下一步决策树（**从这里继续**）
+## 5. 决策树（已解决 —— 2026-07-23，在真机 Windows 上直接实证）
 
-让用户升级到 **0.7.42**，让某个 Cursor 会话**正在生成输出时**看 `client.log` 的 `配对来源 pinned=?`：
+> 上一手在 mac 上测不了 Windows；这一手在 Windows 本机装了 MSVC，直接 build/run/实测，决策树已跑到底。
 
-### 分支 A：`pinned ≥ 1`（claude 确实持有闲置会话文件句柄）
-→ pinned 现在能命中。**修法**：让配对优先用 pinned（`build_tasks` 已有 pinned 优先级，只要
-`pin_windows` 现在能返回非空即可），配对缓存（PREV_PAIRS）会把正确配对粘住。基本就修好了。
-可能还要：确认 `pin_windows` 检查的是「有活进程的项目」的 jsonl（见性能注意）。
+**分支判断结果 = 分支 B（且比原判更彻底）。** 用 Restart Manager 直接采样实证：
+- 30s × 25ms 对 10 个 jsonl 采样约 12000 次，任意时刻「被占用」= 0；
+- 8 天窗口 120 个候选 jsonl 全量 RmGetList 扫描，holder 恒 **0 / 120**；
+- 唯一捕获的写入瞬间，排他 open(FileShare.None) 仍成功。
 
-### 分支 B：仍 `pinned = 0`（即使正在生成）
-→ claude 在 Windows 上**写一行开一次、写完就关**，Restart Manager 抓不到任何持有者。
-时间戳无解。需要**更重的开放句柄扫描**：
-- `NtQuerySystemInformation(SystemHandleInformation)` 枚举**全系统句柄** → 找 file 类型句柄 →
-  `DuplicateHandle`（从目标进程 dup 到本进程，需 `PROCESS_DUP_HANDLE`）→ `GetFinalPathNameByHandleW`
-  解析路径 → 匹配 jsonl → 得 pid↔session。
-- **坑**：`NtQueryObject` 对某些同步句柄会**挂起**，需另起线程加超时；要按 ObjectTypeIndex 过滤
-  file 句柄；开销大，要节流 + 只查有活进程的项目的 jsonl。
-- 若开放句柄扫描也找不到（claude 真的不持有），则**文件层面无解**，只能考虑：
-  让扩展在 Node 里枚举每个终端 shell 的子进程树拿到 claude pid（给出可靠的 **claude_pid↔terminal**），
-  但**仍缺 session↔claude_pid** —— 除非能从 claude 进程读到它的 session id（命令行没有；
-  可能得读进程环境变量 PEB / 或 claude 是否在某处落 session 标记，需调研 claude Code 行为）。
+→ **claude 写一行开一次就关，句柄寿命 < 25ms、不跨空闲持有。**
 
-**优先做分支判断，别在 B 上盲写不可测的 unsafe。** 我（上一手）一直没能在本机（mac）测 Windows 代码，
-所以每次都靠日志验证——请沿用「改一点 → 出诊断日志 → 让用户回传 → 再定」的节奏。
+### 原分支 A（pinned≥1 靠句柄）——不成立
+RM 永远抓不到。已把 `pin_windows` 默认早退（`AM_PIN_RM=1` 可恢复做诊断），省掉每轮最多 200 次
+RmGetList 的空转开销。
+
+### 原分支 B 的「开放句柄扫描」——**也是死路，别做**
+`NtQuerySystemInformation(SystemHandleInformation)` 枚举的是**当前打开**的句柄，同样抓不到 <25ms
+的瞬态句柄；还有 `NtQueryObject` 挂起风险 + 大开销。做了也修不了配对。
+
+### ✅ 真正的解法（已落地）：环境变量给出权威链
+实测发现 Claude Code 给它**派生的每个子进程**注入两个环境变量：
+```
+CLAUDE_PID = <拥有该子进程的 claude 进程 pid>
+CLAUDE_CODE_SESSION_ID = <会话 jsonl 文件名>
+```
+（claude 自身 env 里没有这两个，只有 `CLAUDE_CODE_SSE_PORT`/`CLAUDE_CODE_ENTRYPOINT`；所以要读的是
+**子进程**的 env，不是 claude 进程自己的。）据此得「会话 ↔ claude pid」的**权威链**，不靠句柄、不靠时间戳，
+从根上消除并发同项目会话的歧义。
+
+落地：`ProcessScanner::session_pins`（`core/src/process.rs`）用 sysinfo 的 `environ()` 扫全部进程，
+抽出 `CLAUDE_PID→CLAUDE_CODE_SESSION_ID` → `state.rs` 喂进 `pinned`（每 20 轮节流，env 优先于句柄扫描）
+→ `build_tasks` 优先用 pinned，tier⑤ 缓存把它粘住。**无需 unsafe**（sysinfo 内部读 PEB）。
+
+**已知覆盖限制**：`session_pins` 只在会话**有活着的子进程**（正在跑工具/命令）时能取到；空闲会话没有
+子进程 → 取不到，交回配对缓存（tier⑤）+ mtime 兜底。好在：① 用户下发/会话活跃时正是有子进程的时刻；
+② 活跃时拿到过一次，缓存就粘住。若要覆盖「从头到尾空闲、且没缓存」的会话，未来可让 bridge 扩展在
+Node 侧上报 `terminal.processId ↔ CLAUDE_CODE_SESSION_ID`（扩展能读到自己终端子进程的 env）。
+
+**验证**（真机，2026-07-23）：`cargo test -p am-core` 34/34 绿；client 实跑 `配对来源 pinned=… env权威=…`
+诊断行确认 env 链命中（如 `CLAUDE_PID=3744 → 1e71cdfa…`）。诊断读法：`Get-Content client.log -Encoding UTF8`。
 
 ## 6. 构建 / 部署 / 验证（务必照做，踩过坑）
 
@@ -145,6 +164,7 @@ cargo test -p am-core --lib                                           # 33 个�
 | 下发分发（IDE桥/WT/conhost） | `client/src/agent.rs::execute()` Input 分支 |
 | 内嵌终端 shell pid | `core/src/process.rs::ide_shell_pid` |
 | 会话↔进程配对（核心病灶） | `core/src/scanner.rs::build_tasks` 阶段①-⑤ |
-| pinned（RmGetList） | `client/src/openfiles.rs::pin_windows / holder_pids`，`RECENT_MS` |
-| pin 频率 + 配对缓存 + pinned 诊断日志 | `client/src/state.rs`（`tick % 20`、`PREV_PAIRS`、`配对来源`） |
+| pinned（**env 权威链**，主力） | `core/src/process.rs::ProcessScanner::session_pins`（CLAUDE_PID/CLAUDE_CODE_SESSION_ID） |
+| pinned（句柄扫描，已默认禁用） | `client/src/openfiles.rs::pin_windows / holder_pids`（`AM_PIN_RM=1` 可恢复诊断） |
+| pin 频率 + 配对缓存 + pinned 诊断日志 | `client/src/state.rs`（`tick<=1 \|\| tick%20`、env 优先合并、`配对来源 … env权威=…`） |
 | 文件桥 | `client/src/bridge.rs` + `agent-monitor-vscode/src/extension.ts` |
