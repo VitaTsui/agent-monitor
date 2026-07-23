@@ -403,28 +403,6 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
               {navItems.find((n) => n.key === tab)?.label}
             </span>
           ) : null}
-          {/* Claude sheet 头部右上角的圆形信息钮：跳到「关于」 */}
-          {mobileView === "menu" ? (
-            <span
-              className={styles.mobileInfo}
-              role="button"
-              tabIndex={0}
-              aria-label="关于"
-              onClick={() => {
-                setTab("about");
-                setMobileView("content");
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  setTab("about");
-                  setMobileView("content");
-                }
-              }}
-            >
-              <InfoCircleOutlined />
-            </span>
-          ) : null}
         </div>
         <span
           className={styles.closeBtn}

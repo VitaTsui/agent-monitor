@@ -97,12 +97,8 @@ $hover: rgba(36, 61, 66, 0.06);
     display: none;
   }
 
-  // 身份 pill / 头部信息钮：仅移动端 sheet 用（桌面隐藏）
+  // 身份 pill：仅移动端 sheet 用（桌面隐藏）
   .identityPill {
-    display: none;
-  }
-
-  .mobileInfo {
     display: none;
   }
 
@@ -242,24 +238,6 @@ $hover: rgba(36, 61, 66, 0.06);
         color: $text;
       }
 
-      // Claude sheet 头部右上角圆形信息钮（对称左上角的圆形关闭钮）
-      .mobileInfo {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        position: absolute;
-        right: 12px;
-        top: 7px;
-        width: 34px;
-        height: 34px;
-        border-radius: 50%;
-        background: #fff;
-        color: $text;
-        font-size: 16px;
-        box-shadow: 0 1px 4px rgba(36, 61, 66, 0.16);
-        cursor: pointer;
-      }
-
       .mobileBack {
         position: absolute;
         left: 6px;
@@ -285,11 +263,11 @@ $hover: rgba(36, 61, 66, 0.06);
       }
     }
 
-    // Claude 设置 sheet：关闭钮是左上角的白色圆形按钮（不是右上角灰块）
+    // 关闭钮：右上角白色圆形按钮（左上角留给二级页的「返回」，互不冲突）
     .closeBtn {
       top: 7px;
-      left: 12px;
-      right: auto;
+      right: 12px;
+      left: auto;
       width: 34px;
       height: 34px;
       border-radius: 50%;
@@ -303,12 +281,6 @@ $hover: rgba(36, 61, 66, 0.06);
         background: #fff;
         color: $text;
       }
-    }
-
-    // 二级内容页：左上角让位给「返回」，此页不再显示关闭钮
-    // （返回到一级即可关闭，或直接下滑收起）
-    .layout.mobileContent .closeBtn {
-      display: none;
     }
 
     // 一级：iOS 设置式分组列表（灰底页面 + 白色圆角分组卡 + 彩色图标 + 分隔线）
