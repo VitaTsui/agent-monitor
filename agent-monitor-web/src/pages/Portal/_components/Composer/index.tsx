@@ -221,6 +221,13 @@ const Composer: React.FC<ComposerProps> = (props) => {
 
   // 文件夹操作忙标记（防连点）
   const [fsBusy, setFsBusy] = useState(false);
+  // 新建/重命名文件夹弹窗（应用内居中 Modal，替代原生 window.prompt）
+  const [folderModal, setFolderModal] = useState<{ mode: "mkdir" | "rename"; orig: string } | null>(
+    null,
+  );
+  const [folderInput, setFolderInput] = useState("");
+  // 删除文件夹确认弹窗（替代原生 window.confirm）
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   /** 执行文件夹操作：下发 → 轮询结果 → 提示 → 重拉当前目录 */
   const runFsop = async (
@@ -263,28 +270,40 @@ const Composer: React.FC<ComposerProps> = (props) => {
   };
 
   const newFolder = () => {
-    const name = window.prompt("新建文件夹名称")?.trim();
-    if (!name) return;
-    if (/[\\/]/.test(name)) {
-      message.warning("名称不能包含斜杠");
-      return;
-    }
-    runFsop("mkdir", name);
+    setFolderInput("");
+    setFolderModal({ mode: "mkdir", orig: "" });
   };
 
   const renameFolder = (name: string) => {
-    const next = window.prompt("重命名文件夹", name)?.trim();
-    if (!next || next === name) return;
+    setFolderInput(name);
+    setFolderModal({ mode: "rename", orig: name });
+  };
+
+  const deleteFolder = (name: string) => setDeleteTarget(name);
+
+  // 新建/重命名弹窗的确定：校验后下发，成功即关弹窗
+  const submitFolder = () => {
+    if (!folderModal) return;
+    const next = folderInput.trim();
+    if (!next) {
+      message.warning("名称不能为空");
+      return;
+    }
     if (/[\\/]/.test(next)) {
       message.warning("名称不能包含斜杠");
       return;
     }
-    runFsop("rename", name, next);
+    if (folderModal.mode === "rename") {
+      if (next !== folderModal.orig) runFsop("rename", folderModal.orig, next);
+    } else {
+      runFsop("mkdir", next);
+    }
+    setFolderModal(null);
   };
 
-  const deleteFolder = (name: string) => {
-    if (!window.confirm(`删除文件夹「${name}」及其全部内容？此操作不可恢复。`)) return;
-    runFsop("delete", name);
+  const confirmDelete = () => {
+    if (deleteTarget) runFsop("delete", deleteTarget);
+    setDeleteTarget(null);
   };
 
   const onPickFile = (file: File) => {
@@ -728,6 +747,43 @@ const Composer: React.FC<ComposerProps> = (props) => {
         }}
       />
 
+      {/* 新建 / 重命名文件夹（应用内居中弹窗，替代原生 window.prompt） */}
+      <Modal
+        title={folderModal?.mode === "rename" ? "重命名文件夹" : "新建文件夹"}
+        open={!!folderModal}
+        onCancel={() => setFolderModal(null)}
+        onOk={submitFolder}
+        okText="确定"
+        cancelText="取消"
+        okButtonProps={{ disabled: !folderInput.trim() }}
+        width={400}
+        centered
+      >
+        <Input
+          value={folderInput}
+          onChange={(value) => setFolderInput(value)}
+          placeholder="文件夹名称"
+          onPressEnter={submitFolder}
+        />
+      </Modal>
+
+      {/* 删除文件夹确认（应用内居中弹窗，替代原生 window.confirm） */}
+      <Modal
+        title="删除文件夹"
+        open={!!deleteTarget}
+        onCancel={() => setDeleteTarget(null)}
+        onOk={confirmDelete}
+        okText="删除"
+        cancelText="取消"
+        okButtonProps={{ danger: true }}
+        width={400}
+        centered
+      >
+        <div>
+          删除文件夹「{deleteTarget}」及其全部内容？此操作不可恢复。
+        </div>
+      </Modal>
+
       {/* 危险输入多重确认（类 Claude Code bypass 权限等需特别管理） */}
       <Modal
         className={styles.dangerModal}
@@ -746,6 +802,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
           disabled: dangerStep === 2 && confirmInput.trim() !== CONFIRM_WORD,
         }}
         width={480}
+        centered
       >
         <div className={styles.dangerBody}>
           <div className={styles.dangerText}>

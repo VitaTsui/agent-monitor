@@ -371,6 +371,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
       width={920}
       title={null}
       closable={false}
+      centered
     >
       <div
         className={`${styles.layout} ${

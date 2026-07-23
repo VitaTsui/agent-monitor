@@ -214,6 +214,7 @@ const Version: React.FC = () => {
         okText="保存"
         cancelText="取消"
         confirmLoading={adding}
+        centered
       >
         <div className={styles.formRow}>
           <div className={styles.formLabel}>版本号</div>
