@@ -164,6 +164,7 @@ pub(crate) async fn dispatch(
         "发" | "发送" | "回复" | "输入" => send_input(state, username, &arg).await,
         "监控" | "watch" => monitor_start(state, username, &arg, reply).await,
         "停止监控" | "取消监控" | "结束监控" | "unwatch" => monitor_stop(state, username).await,
+        "撤回" | "recall" => recall_last(state, username, &arg).await,
         "绑定" | "bind" => bind_recipient(state, username, reply).await,
         "解绑" | "unbind" => unbind_recipient(state, username).await,
         _ => format!("未知指令「{cmd}」。发「帮助」看用法。"),
@@ -227,6 +228,43 @@ async fn monitor_start(
         .to_string()
 }
 
+/// 「撤回 N」：撤回第 N 个会话最近一条排队中的任务。还在 hub 队列就直接出队；
+/// 已进终端原生队列就注入 ↑ 让终端撤回（与网页「撤回」同一套语义）。
+async fn recall_last(state: &SharedState, username: &str, arg: &str) -> String {
+    let task_id = match resolve_task(state, username, arg).await {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    let task = {
+        let tasks = state.tasks_for(username).await;
+        tasks.into_iter().find(|t| t.id == task_id)
+    };
+    let Some(task) = task else {
+        return "会话不存在（可能已结束）。".to_string();
+    };
+    let mut machines = state.machines.write().await;
+    let Some(entry) = machines.get_mut(&task.machine_id) else {
+        return "会话所属设备已离线。".to_string();
+    };
+    // 先撤 hub 队列里最后一条该会话的输入（还没下发给客户端，可直接撤）
+    let pos = entry.pending.iter().rposition(|c| {
+        c.task_id == task_id && matches!(c.action, am_core::model::ControlAction::Input)
+    });
+    if let Some(i) = pos {
+        entry.pending.remove(i);
+        return format!("已撤回排队中的任务（会话 {arg}）。");
+    }
+    // hub 队列里没有 → 已进终端原生队列，注入 ↑ 撤回
+    entry.pending.push_back(ControlCmd {
+        task_id: task_id.clone(),
+        pid: task.pid,
+        action: am_core::model::ControlAction::TermKey,
+        text: Some("up:1".to_string()),
+        id: None,
+    });
+    format!("已注入撤回 ↑（会话 {arg}）。Terminal.app 需在终端手动按 ↑。")
+}
+
 async fn monitor_stop(state: &SharedState, username: &str) -> String {
     if state.bot_monitors.write().await.remove(username).is_some() {
         "已停止监控。".to_string()
@@ -249,6 +287,7 @@ fn help_text() -> String {
      • 设备 —— 列出名下设备\n\
      • 暂停 N / 恢复 N / 中断 N / 终止 N —— 控制第 N 个会话\n\
      • 发 N 内容 —— 向第 N 个会话发布一条输入\n\
+     • 撤回 N —— 撤回第 N 个会话最近一条排队中的任务\n\
      • 监控 N —— 持续把第 N 个会话的新内容推到这里\n\
      • 停止监控 —— 结束监控\n\
      • 绑定 / 解绑 —— 设为/取消「任务完成·会话结束」主动私聊推送的接收人\n\

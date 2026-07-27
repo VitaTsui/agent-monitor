@@ -198,6 +198,8 @@ pub enum EventKind {
     Finished,
     NewSession,
     Device,
+    /// 非钉钉来源（网页）下发的任务：同步告知，让钉钉侧也知道刚发了什么
+    Dispatch,
 }
 
 impl DingtalkNotify {
@@ -207,6 +209,8 @@ impl DingtalkNotify {
             EventKind::Finished => self.finished,
             EventKind::NewSession => self.new_session,
             EventKind::Device => self.device,
+            // 群 webhook 复用「等待输入」开关；企业应用 OTO 一律推（见 deliver）
+            EventKind::Dispatch => self.waiting,
         }
     }
 }
@@ -236,7 +240,10 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
         //    设备上线不推（避免噪音）；需已配 Stream 应用且已捕获 staffId。
         if matches!(
             ev.kind,
-            EventKind::NewSession | EventKind::Waiting | EventKind::Finished
+            EventKind::NewSession
+                | EventKind::Waiting
+                | EventKind::Finished
+                | EventKind::Dispatch
         ) {
             let app = state.registry.read().await.dingtalk_app_of(&ev.owner);
             if let Some(app) = app {
