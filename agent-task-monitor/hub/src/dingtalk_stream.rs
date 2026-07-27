@@ -198,6 +198,8 @@ async fn connect_once(
                         let ctx = crate::bot::ReplyCtx {
                             webhook: session_webhook.clone(),
                             expiry_ms: webhook_expiry,
+                            staff_id: staff_id.clone(),
+                            robot_code: robot_code.clone(),
                         };
                         let reply = crate::bot::dispatch(&st, &u, &content, Some(&ctx)).await;
                         match cl

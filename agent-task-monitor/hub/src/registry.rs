@@ -436,11 +436,13 @@ impl Registry {
     }
 
     /// 收到 Stream 机器人消息时，捕获发信人 staffId 与 robotCode（主动 OTO 推送要用）。
-    /// 仅在有变化时落盘，避免每条消息都写文件。返回是否发生了变更。
+    /// staffId「首次捕获即绑定」，之后不因别的发信人自动改绑（防止他人私聊机器人把推送劫持走）；
+    /// 要改绑用 `bind_dingtalk_staff` 显式覆盖。robotCode 是机器人自身编码、与发信人无关，可随时更新。
+    /// 仅在有变化时落盘。返回是否发生了变更。
     pub fn set_dingtalk_identity(&mut self, user: &str, staff_id: &str, robot_code: &str) -> bool {
         let Some(app) = self.dingtalk_apps.get_mut(user) else { return false };
         let mut changed = false;
-        if !staff_id.is_empty() && app.staff_id != staff_id {
+        if !staff_id.is_empty() && app.staff_id.is_empty() {
             app.staff_id = staff_id.to_string();
             changed = true;
         }
@@ -452,6 +454,31 @@ impl Registry {
             self.save();
         }
         changed
+    }
+
+    /// 显式（重新）绑定推送接收人：把发信人 staffId 强制绑到该账号（「绑定」指令用）。
+    pub fn bind_dingtalk_staff(&mut self, user: &str, staff_id: &str, robot_code: &str) -> bool {
+        let Some(app) = self.dingtalk_apps.get_mut(user) else { return false };
+        if staff_id.is_empty() {
+            return false;
+        }
+        app.staff_id = staff_id.to_string();
+        if !robot_code.is_empty() {
+            app.robot_code = robot_code.to_string();
+        }
+        self.save();
+        true
+    }
+
+    /// 解绑推送接收人（「解绑」指令用）。返回原本是否有绑定。
+    pub fn unbind_dingtalk_staff(&mut self, user: &str) -> bool {
+        let Some(app) = self.dingtalk_apps.get_mut(user) else { return false };
+        if app.staff_id.is_empty() {
+            return false;
+        }
+        app.staff_id.clear();
+        self.save();
+        true
     }
 
     /// 所有配了 Stream（app_key+app_secret 都非空）的钉钉应用：(user, app_key, app_secret)

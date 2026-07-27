@@ -112,6 +112,13 @@ pub async fn dingtalk_message(
     let ctx = ReplyCtx {
         webhook: payload.get("sessionWebhook").and_then(Value::as_str).unwrap_or("").to_string(),
         expiry_ms: payload.get("sessionWebhookExpiredTime").and_then(Value::as_u64).unwrap_or(0),
+        staff_id: payload.get("senderStaffId").and_then(Value::as_str).unwrap_or("").to_string(),
+        robot_code: payload
+            .get("robotCode")
+            .or_else(|| payload.get("chatbotUserId"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
     };
     let reply = dispatch(&state, &owner, &content, Some(&ctx)).await;
     // 同步回复：钉钉直接把响应体当作机器人回复消息
@@ -132,6 +139,11 @@ fn rand16() -> [u8; 16] {
 pub(crate) struct ReplyCtx {
     pub webhook: String,
     pub expiry_ms: u64,
+    /// 发信人 staffId / 机器人 robotCode（Stream 渠道带；HTTP 回调可能为空）——「绑定」指令用
+    #[allow(dead_code)]
+    pub staff_id: String,
+    #[allow(dead_code)]
+    pub robot_code: String,
 }
 
 pub(crate) async fn dispatch(
@@ -152,7 +164,32 @@ pub(crate) async fn dispatch(
         "发" | "发送" | "回复" | "输入" => send_input(state, username, &arg).await,
         "监控" | "watch" => monitor_start(state, username, &arg, reply).await,
         "停止监控" | "取消监控" | "结束监控" | "unwatch" => monitor_stop(state, username).await,
+        "绑定" | "bind" => bind_recipient(state, username, reply).await,
+        "解绑" | "unbind" => unbind_recipient(state, username).await,
         _ => format!("未知指令「{cmd}」。发「帮助」看用法。"),
+    }
+}
+
+/// 「绑定」：把当前发信人设为本账号主动推送（任务完成/会话结束）的接收人。
+async fn bind_recipient(state: &SharedState, username: &str, reply: Option<&ReplyCtx>) -> String {
+    let staff = reply.map(|c| c.staff_id.as_str()).unwrap_or("");
+    if staff.is_empty() {
+        return "拿不到你的 staffId，无法绑定（请在钉钉里私聊本企业应用机器人再发「绑定」）。".to_string();
+    }
+    let robot = reply.map(|c| c.robot_code.as_str()).unwrap_or("");
+    if state.registry.write().await.bind_dingtalk_staff(username, staff, robot) {
+        format!("✅ 已把你（staffId {staff}）绑定为推送接收人。\n任务完成 / 会话结束会私聊推给你。发「解绑」取消。")
+    } else {
+        "绑定失败：未找到本账号的钉钉应用配置。".to_string()
+    }
+}
+
+/// 「解绑」：取消主动推送接收人。
+async fn unbind_recipient(state: &SharedState, username: &str) -> String {
+    if state.registry.write().await.unbind_dingtalk_staff(username) {
+        "已解绑，不再主动私聊推送。需要时再发「绑定」。".to_string()
+    } else {
+        "当前没有绑定推送接收人。".to_string()
     }
 }
 
@@ -214,6 +251,7 @@ fn help_text() -> String {
      • 发 N 内容 —— 向第 N 个会话发布一条输入\n\
      • 监控 N —— 持续把第 N 个会话的新内容推到这里\n\
      • 停止监控 —— 结束监控\n\
+     • 绑定 / 解绑 —— 设为/取消「任务完成·会话结束」主动私聊推送的接收人\n\
      • 帮助 —— 显示本说明\n\
      （序号以最近一次「会话」列出的为准）"
         .to_string()
