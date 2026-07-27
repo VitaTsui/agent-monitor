@@ -222,8 +222,9 @@ impl DingtalkNotify {
 /// now_ms 由调用方给（tick/report 里取一次系统时间）。
 pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>, now_ms: u64) {
     for ev in events {
-        // 占位换成「发 N」编号（与 resolve_task 同源）：`{{NO}}` → 视觉标签「#N 」；
-        // `{{N}}` → 纯数字（用在「发 N / 撤回 N」这类指令语法里）。查不到编号就退化。
+        // 占位换成「发 N」编号（与 resolve_task 同源）：`{NO}` → 视觉标签「#N 」；
+        // `{N}` → 纯数字（用在「发 N / 撤回 N」这类指令语法里）。查不到编号就退化。
+        // 注意占位是单花括号 —— server 那边是 format! 里的 `{{NO}}`，编译后就是 `{NO}`。
         let no = match &ev.task_id {
             Some(id) => crate::bot::session_number(state, &ev.owner, id).await,
             None => None,
@@ -231,9 +232,9 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
         let text = match no {
             Some(n) => ev
                 .text
-                .replace("{{NO}}", &format!("#{n} "))
-                .replace("{{N}}", &n.to_string()),
-            None => ev.text.replace("{{NO}}", "").replace("{{N}}", "N"),
+                .replace("{NO}", &format!("#{n} "))
+                .replace("{N}", &n.to_string()),
+            None => ev.text.replace("{NO}", "").replace("{N}", "N"),
         };
         // 1) 群自定义机器人 Webhook（按用户逐事件开关，原有行为）
         let cfg = state.registry.read().await.dingtalk_of(&ev.owner);
