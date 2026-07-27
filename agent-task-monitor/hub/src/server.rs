@@ -856,7 +856,7 @@ async fn input_task(
                 .map(|x| format!("  \n回复「撤回 {x}」可撤回"))
                 .unwrap_or_default();
             let body = format!(
-                "#### 📤 已下发任务（网页）\n\n**设备**：{host}  \n**终端**：{prov}  \n**项目**：{proj}  \n**会话**：{no_tag}{sess}  \n**内容**：{snippet}{recall}"
+                "###### 📤 已下发任务（网页）\n\n**设备**：{host}  \n**终端**：{prov}  \n**项目**：{proj}  \n**会话**：{no_tag}{sess}  \n**内容**：{snippet}{recall}"
             );
             let ev = crate::dingtalk::NotifyEvent {
                 owner,
@@ -1785,7 +1785,7 @@ async fn report(
                             owner: owner.clone(),
                             kind: EventKind::NewSession,
                             task_id: Some(t.id.clone()),
-                            text: format!("#### 🆕 会话开始\n\n{}", body(t)),
+                            text: format!("###### 🆕 会话开始\n\n{}", body(t)),
                         });
                     }
                 }
@@ -1796,7 +1796,7 @@ async fn report(
                             kind: EventKind::Waiting,
                             task_id: Some(t.id.clone()),
                             text: format!(
-                                "#### 🔔 任务完成 · 等待你的操作\n\n{}{}",
+                                "###### 🔔 任务完成 · 等待你的操作\n\n{}{}",
                                 body(t),
                                 result(&t.id)
                             ),
@@ -1806,7 +1806,7 @@ async fn report(
                             owner: owner.clone(),
                             kind: EventKind::Finished,
                             task_id: Some(t.id.clone()),
-                            text: format!("#### ✅ 会话已结束\n\n{}{}", body(t), result(&t.id)),
+                            text: format!("###### ✅ 会话已结束\n\n{}{}", body(t), result(&t.id)),
                         });
                     }
                 }
@@ -1820,7 +1820,7 @@ async fn report(
                     owner: owner.clone(),
                     kind: EventKind::Finished,
                     task_id: Some(t.id.clone()),
-                    text: format!("#### ✅ 会话已结束\n\n{}{}", body(t), result(&t.id)),
+                    text: format!("###### ✅ 会话已结束\n\n{}{}", body(t), result(&t.id)),
                 });
             }
         }
@@ -1830,7 +1830,7 @@ async fn report(
                 owner: owner.clone(),
                 kind: EventKind::Device,
                 task_id: None,
-                text: format!("#### 🟢 设备上线\n\n**设备**：{dev}"),
+                text: format!("###### 🟢 设备上线\n\n**设备**：{dev}"),
             });
         }
         // 交互式选择提醒：会话最新消息是 select（AskUserQuestion / 权限确认）时，
@@ -1858,7 +1858,7 @@ async fn report(
                     kind: EventKind::Select,
                     task_id: Some(t.id.clone()),
                     text: format!(
-                        "#### ⌨️ 需要你选择\n\n{}\n\n{}\n\n回复「发 {{N}} 序号」作答",
+                        "###### ⌨️ 需要你选择\n\n{}\n\n{}\n\n回复「发 {{N}} 序号」作答",
                         body(t),
                         opts
                     ),
