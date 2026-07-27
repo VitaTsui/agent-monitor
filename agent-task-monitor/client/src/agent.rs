@@ -146,6 +146,15 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
         // 本轮本机真实存在的会话 pid：hub 下发的命令只允许作用于这些 pid
         let known_pids: std::collections::HashSet<u32> =
             scanned.iter().filter_map(|t| t.pid).collect();
+        // 活跃会话的项目目录：文件上传允许写进这些目录（项目常不在家目录下，
+        // 见 safe_upload_dir_within）
+        let session_dirs: Vec<std::path::PathBuf> = scanned
+            .iter()
+            .filter_map(|t| t.process.as_ref())
+            .map(|p| p.cwd.clone())
+            .filter(|c| !c.is_empty())
+            .map(std::path::PathBuf::from)
+            .collect();
         let tasks = if trusted {
             attach_messages(&state, &mut scanned, &mut msg_cache).await;
             scanned
@@ -252,7 +261,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
                     for f in files {
-                        write_transfer(&f);
+                        write_transfer(&f, &session_dirs);
                     }
                     // git 对比请求：本机跑 git，结果随下一轮上报回传
                     let git_queries: Vec<am_core::model::GitQuery> = body
@@ -422,7 +431,7 @@ async fn attach_messages(state: &SharedState, tasks: &mut [Task], cache: &mut Ms
 }
 
 /// 写入 hub 下发的文件到本机目标目录
-fn write_transfer(f: &am_core::model::FileTransfer) {
+fn write_transfer(f: &am_core::model::FileTransfer, session_dirs: &[std::path::PathBuf]) {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     let Ok(bytes) = B64.decode(f.content_b64.as_bytes()) else {
         tracing::warn!("文件内容解码失败: {}", f.filename);
@@ -430,7 +439,8 @@ fn write_transfer(f: &am_core::model::FileTransfer) {
     };
     // 目标目录按本机的允许范围复验：不能只信 hub 校验过——
     // hub 的 upload_root 是另一台机器的，且响应链路一旦被篡改就等于本机任意写。
-    let dir = match crate::state::safe_upload_dir(&f.dir) {
+    // 允许写进家目录，或任一活跃会话的项目目录（项目常不在家目录下）。
+    let dir = match crate::state::safe_upload_dir_within(&f.dir, session_dirs) {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!("拒绝写入下发文件 {}: {e}", f.filename);

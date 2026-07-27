@@ -73,6 +73,17 @@ pub fn upload_root() -> std::path::PathBuf {
 /// 之类的目录写文件（文件名虽已过滤穿越，但目录本身就足够拿下机器）。
 /// 因此目标目录必须落在 `upload_root()` 之内。
 pub fn safe_upload_dir(dir: &str) -> Result<std::path::PathBuf, String> {
+    safe_upload_dir_within(dir, &[])
+}
+
+/// 同 `safe_upload_dir`，但除了 `upload_root()`，还额外允许写进 `extra_roots` 里的任一目录
+/// （传入本机活跃会话的项目 cwd）。原因：文件选目录弹窗是**相对会话 cwd**浏览的，项目常不在
+/// 家目录下；只按家目录校验会把「浏览进项目子目录再上传」这种合法操作误拒——表现为网页提示
+/// 上传成功、终端里却找不到文件。会话 cwd 是本机已在监控的合法目录，放行是安全的。
+pub fn safe_upload_dir_within(
+    dir: &str,
+    extra_roots: &[std::path::PathBuf],
+) -> Result<std::path::PathBuf, String> {
     let dir = dir.trim();
     if dir.is_empty() {
         return Err("缺少目标目录".into());
@@ -98,8 +109,15 @@ pub fn safe_upload_dir(dir: &str) -> Result<std::path::PathBuf, String> {
             other => out.push(other.as_os_str()),
         }
     }
-    if !out.starts_with(&root) {
-        return Err(format!("目标目录超出允许范围（仅允许 {} 之内）", root.display()));
+    let allowed = out.starts_with(&root)
+        || extra_roots
+            .iter()
+            .any(|r| !r.as_os_str().is_empty() && out.starts_with(r));
+    if !allowed {
+        return Err(format!(
+            "目标目录超出允许范围（仅允许 {} 或活跃会话的项目目录之内）",
+            root.display()
+        ));
     }
     Ok(out)
 }

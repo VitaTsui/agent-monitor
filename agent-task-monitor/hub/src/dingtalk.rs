@@ -220,9 +220,12 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
                 }
             }
         }
-        // 2) 企业应用 OTO 主动推：任务完成 / 需要手动操作，直接私聊给用户本人。
-        //    仅这两类（避免新会话/上线噪音）；需已配 Stream 应用且已捕获 staffId。
-        if matches!(ev.kind, EventKind::Waiting | EventKind::Finished) {
+        // 2) 企业应用 OTO 主动推：会话开始 / 任务完成 / 会话结束，直接私聊给用户本人。
+        //    设备上线不推（避免噪音）；需已配 Stream 应用且已捕获 staffId。
+        if matches!(
+            ev.kind,
+            EventKind::NewSession | EventKind::Waiting | EventKind::Finished
+        ) {
             let app = state.registry.read().await.dingtalk_app_of(&ev.owner);
             if let Some(app) = app {
                 if !app.app_key.is_empty()
