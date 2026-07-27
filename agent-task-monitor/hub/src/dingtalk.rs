@@ -100,6 +100,87 @@ pub async fn push_text(cfg: &DingtalkNotify, text: &str, now_ms: u64) -> Result<
     }
 }
 
+// ---------- 企业应用 OTO 主动推送（Stream 用户，无需群机器人 webhook） ----------
+
+/// access_token 缓存：app_key -> (token, 过期 epoch 秒)。钉钉 token 2h 有效，缓存复用。
+fn token_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, (String, u64)>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (String, u64)>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// 用 appKey/appSecret 换 access_token（带缓存，提前 60s 过期刷新）。
+async fn access_token(app_key: &str, app_secret: &str, now_ms: u64) -> Result<String, String> {
+    let now = now_ms / 1000;
+    if let Some((tok, exp)) = token_cache().lock().unwrap().get(app_key) {
+        if *exp > now + 60 {
+            return Ok(tok.clone());
+        }
+    }
+    let resp = http_client()?
+        .post("https://api.dingtalk.com/v1.0/oauth2/accessToken")
+        .json(&serde_json::json!({ "appKey": app_key, "appSecret": app_secret }))
+        .send()
+        .await
+        .map_err(|e| format!("取 token 请求失败: {e}"))?;
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let tok = v
+        .get("accessToken")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| format!("取 token 失败: {v}"))?
+        .to_string();
+    let expire = v.get("expireIn").and_then(|t| t.as_u64()).unwrap_or(7200);
+    token_cache()
+        .lock()
+        .unwrap()
+        .insert(app_key.to_string(), (tok.clone(), now + expire));
+    Ok(tok)
+}
+
+/// 通过企业应用机器人 OTO 接口，主动把一条文本发给某个用户（staffId）。
+pub async fn push_oto(
+    app: &crate::registry::DingtalkApp,
+    text: &str,
+    now_ms: u64,
+) -> Result<(), String> {
+    if app.staff_id.is_empty() {
+        return Err("未捕获 staffId（先给机器人发一条消息以登记身份）".into());
+    }
+    // Stream 机器人 robotCode 一般 == app_key；捕获到就用捕获的
+    let robot_code = if app.robot_code.is_empty() { &app.app_key } else { &app.robot_code };
+    let token = access_token(&app.app_key, &app.app_secret, now_ms).await?;
+    // msgParam 是 JSON 字符串（钉钉要求）
+    let msg_param = serde_json::to_string(&serde_json::json!({ "content": text }))
+        .map_err(|e| e.to_string())?;
+    let body = serde_json::json!({
+        "robotCode": robot_code,
+        "userIds": [app.staff_id],
+        "msgKey": "sampleText",
+        "msgParam": msg_param,
+    });
+    let resp = http_client()?
+        .post("https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend")
+        .header("x-acs-dingtalk-access-token", token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("OTO 请求失败: {e}"))?;
+    let status = resp.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        Err(format!("钉钉 OTO 拒绝（HTTP {status}）: {v}"))
+    }
+}
+
 /// 一条待推送事件（已格式化为文本 + 归属用户 + 事件类别）
 pub struct NotifyEvent {
     pub owner: String,
@@ -130,13 +211,29 @@ impl DingtalkNotify {
 /// now_ms 由调用方给（tick/report 里取一次系统时间）。
 pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>, now_ms: u64) {
     for ev in events {
+        // 1) 群自定义机器人 Webhook（按用户逐事件开关，原有行为）
         let cfg = state.registry.read().await.dingtalk_of(&ev.owner);
-        let Some(cfg) = cfg else { continue };
-        if !cfg.enabled() || !cfg.wants(ev.kind) {
-            continue;
+        if let Some(cfg) = cfg {
+            if cfg.enabled() && cfg.wants(ev.kind) {
+                if let Err(e) = push_text(&cfg, &ev.text, now_ms).await {
+                    tracing::warn!("钉钉 Webhook 推送失败（{}）: {e}", ev.owner);
+                }
+            }
         }
-        if let Err(e) = push_text(&cfg, &ev.text, now_ms).await {
-            tracing::warn!("钉钉推送失败（{}）: {e}", ev.owner);
+        // 2) 企业应用 OTO 主动推：任务完成 / 需要手动操作，直接私聊给用户本人。
+        //    仅这两类（避免新会话/上线噪音）；需已配 Stream 应用且已捕获 staffId。
+        if matches!(ev.kind, EventKind::Waiting | EventKind::Finished) {
+            let app = state.registry.read().await.dingtalk_app_of(&ev.owner);
+            if let Some(app) = app {
+                if !app.app_key.is_empty()
+                    && !app.app_secret.is_empty()
+                    && !app.staff_id.is_empty()
+                {
+                    if let Err(e) = push_oto(&app, &ev.text, now_ms).await {
+                        tracing::warn!("钉钉 OTO 主动推送失败（{}）: {e}", ev.owner);
+                    }
+                }
+            }
         }
     }
 }

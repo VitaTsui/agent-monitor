@@ -174,6 +174,13 @@ pub struct DingtalkApp {
     /// 长连接（hub 主动连钉钉，免公网入站回调），绕开中国→海外服务器可达性问题。
     #[serde(default)]
     pub app_key: String,
+    /// 机器人 robotCode（收到消息时捕获；主动 OTO 推送用）。Stream 机器人一般 == app_key，
+    /// 但以消息里带的为准。
+    #[serde(default)]
+    pub robot_code: String,
+    /// 用户本人的 staffId（收到消息时捕获）。主动推送就发给这个人。
+    #[serde(default)]
+    pub staff_id: String,
 }
 
 pub struct Registry {
@@ -414,16 +421,37 @@ impl Registry {
             self.save();
             return None;
         }
-        let channel = self.dingtalk_apps.get(user).map(|a| a.channel.clone())
-            .filter(|c| !c.is_empty())
-            .unwrap_or_else(new_channel);
+        // 保留已捕获的身份（robot_code/staff_id）与 channel：重存凭据不该清掉它们
+        let prev = self.dingtalk_apps.get(user).cloned().unwrap_or_default();
+        let channel = if prev.channel.is_empty() { new_channel() } else { prev.channel.clone() };
         self.dingtalk_apps.insert(user.to_string(), DingtalkApp {
             channel: channel.clone(),
             app_secret: app_secret.trim().to_string(),
             app_key: app_key.trim().to_string(),
+            robot_code: prev.robot_code,
+            staff_id: prev.staff_id,
         });
         self.save();
         Some(channel)
+    }
+
+    /// 收到 Stream 机器人消息时，捕获发信人 staffId 与 robotCode（主动 OTO 推送要用）。
+    /// 仅在有变化时落盘，避免每条消息都写文件。返回是否发生了变更。
+    pub fn set_dingtalk_identity(&mut self, user: &str, staff_id: &str, robot_code: &str) -> bool {
+        let Some(app) = self.dingtalk_apps.get_mut(user) else { return false };
+        let mut changed = false;
+        if !staff_id.is_empty() && app.staff_id != staff_id {
+            app.staff_id = staff_id.to_string();
+            changed = true;
+        }
+        if !robot_code.is_empty() && app.robot_code != robot_code {
+            app.robot_code = robot_code.to_string();
+            changed = true;
+        }
+        if changed {
+            self.save();
+        }
+        changed
     }
 
     /// 所有配了 Stream（app_key+app_secret 都非空）的钉钉应用：(user, app_key, app_secret)

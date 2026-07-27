@@ -1687,27 +1687,34 @@ async fn report(
         let old: std::collections::HashMap<&str, TaskStatus> =
             entry.tasks.iter().map(|t| (t.id.as_str(), t.status)).collect();
         let dev = &entry.hostname;
-        for t in &tasks {
+        // 统一的上下文块：设备 / 终端(代理类型) / 项目 / 会话，主动推送里一眼能定位。
+        let ctx = |t: &am_core::model::Task| -> String {
             let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
-            let title: String = title.chars().take(24).collect();
+            let title: String = title.chars().take(40).collect();
+            format!(
+                "设备：{dev}\n终端：{}\n项目：{}\n会话：{title}",
+                t.provider_dsr, t.project_name
+            )
+        };
+        for t in &tasks {
             match old.get(t.id.as_str()) {
                 None => events.push(NotifyEvent {
                     owner: owner.clone(),
                     kind: EventKind::NewSession,
-                    text: format!("🆕 新会话 · {dev}\n{title}（{}）", t.project_name),
+                    text: format!("🆕 新会话\n{}", ctx(t)),
                 }),
                 Some(&prev) => {
                     if prev == TaskStatus::Running && t.status == TaskStatus::Idle {
                         events.push(NotifyEvent {
                             owner: owner.clone(),
                             kind: EventKind::Waiting,
-                            text: format!("⏸ 等待输入 · {dev}\n{title}（{}）", t.project_name),
+                            text: format!("🔔 任务完成 · 等待你的操作\n{}", ctx(t)),
                         });
                     } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
                         events.push(NotifyEvent {
                             owner: owner.clone(),
                             kind: EventKind::Finished,
-                            text: format!("✅ 会话结束 · {dev}\n{title}（{}）", t.project_name),
+                            text: format!("✅ 会话已结束\n{}", ctx(t)),
                         });
                     }
                 }
@@ -1717,12 +1724,10 @@ async fn report(
         let new_ids: std::collections::HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
         for t in &entry.tasks {
             if !new_ids.contains(t.id.as_str()) && t.status != TaskStatus::Finished {
-                let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
-                let title: String = title.chars().take(24).collect();
                 events.push(NotifyEvent {
                     owner: owner.clone(),
                     kind: EventKind::Finished,
-                    text: format!("✅ 会话结束 · {dev}\n{title}", ),
+                    text: format!("✅ 会话已结束\n{}", ctx(t)),
                 });
             }
         }

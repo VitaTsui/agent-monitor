@@ -161,6 +161,26 @@ async fn connect_once(
                     m.get("sessionWebhook").and_then(Value::as_str).unwrap_or("").to_string();
                 let webhook_expiry =
                     m.get("sessionWebhookExpiredTime").and_then(Value::as_u64).unwrap_or(0);
+                // 捕获发信人身份：主动推送（任务完成/需要操作）靠 OTO 发给这个人。
+                // robotCode 缺省回落到 app_key（Stream 机器人一般二者一致）。
+                let staff_id =
+                    m.get("senderStaffId").and_then(Value::as_str).unwrap_or("").to_string();
+                let robot_code = m
+                    .get("robotCode")
+                    .or_else(|| m.get("chatbotUserId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if !staff_id.is_empty() {
+                    let changed = state
+                        .registry
+                        .write()
+                        .await
+                        .set_dingtalk_identity(user, &staff_id, &robot_code);
+                    if changed {
+                        tracing::info!("钉钉 Stream 捕获推送身份 user={user} staffId={staff_id}");
+                    }
+                }
                 tracing::info!(
                     "钉钉 Stream 收到机器人消息 user={user} 内容={content:?} 有回发地址={}",
                     !session_webhook.is_empty()
