@@ -1687,21 +1687,18 @@ async fn report(
         let old: std::collections::HashMap<&str, TaskStatus> =
             entry.tasks.iter().map(|t| (t.id.as_str(), t.status)).collect();
         let dev = &entry.hostname;
-        // 统一的上下文块：设备 / 终端(代理类型) / 项目 / 会话，主动推送里一眼能定位。
-        let ctx = |t: &am_core::model::Task| -> String {
+        // markdown 正文：设备 / 终端(代理类型) / 项目 / 会话；`{{NO}}` 占位由 deliver 换成编号。
+        let body_md = |t: &am_core::model::Task| -> String {
             let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
             let title: String = title.chars().take(40).collect();
             format!(
-                "设备：{dev}\n终端：{}\n项目：{}\n会话：{title}",
+                "- **设备**：{dev}\n- **终端**：{}\n- **项目**：{}\n- **会话**：{{NO}}{title}",
                 t.provider_dsr, t.project_name
             )
         };
-        // 「最后结果」：取该会话最近一条 assistant 文本，截断附到推送末尾，
-        // 让人不点开也能看到这轮到底产出/回了什么。
+        // 「最后结果」：取该会话最近一条 assistant 文本（本身就是 markdown），截断后附到末尾。
         let msgs_map = &entry.messages;
-        let result = |id: &str| -> String {
-            // 上限放宽到 1500 字（钉钉文本消息容得下；上游简报本身最多 2000 字）——
-            // 之前 280 字太小，多要点的结果会被从中间截断，只剩第一点。
+        let result_md = |id: &str| -> String {
             const LIMIT: usize = 1500;
             msgs_map
                 .get(id)
@@ -1714,32 +1711,45 @@ async fn report(
                     if s.is_empty() {
                         String::new()
                     } else if cut {
-                        format!("\n—— 最后结果 ——\n{s}…（内容较长，已截断）")
+                        format!("\n\n---\n**最后结果**\n\n{s}\n\n…（内容较长，已截断）")
                     } else {
-                        format!("\n—— 最后结果 ——\n{s}")
+                        format!("\n\n---\n**最后结果**\n\n{s}")
                     }
                 })
                 .unwrap_or_default()
         };
         for t in &tasks {
             match old.get(t.id.as_str()) {
-                None => events.push(NotifyEvent {
-                    owner: owner.clone(),
-                    kind: EventKind::NewSession,
-                    text: format!("🆕 新会话\n{}", ctx(t)),
-                }),
+                // 会话开始只在「设备已稳定在线」时推：设备刚（重）连上（含 hub 重启后首报）
+                // 时它名下所有会话都会显示为「新」，那不是真的新开会话，别刷屏。
+                None => {
+                    if !was_offline {
+                        events.push(NotifyEvent {
+                            owner: owner.clone(),
+                            kind: EventKind::NewSession,
+                            task_id: Some(t.id.clone()),
+                            text: format!("### 🆕 会话开始\n{}", body_md(t)),
+                        });
+                    }
+                }
                 Some(&prev) => {
                     if prev == TaskStatus::Running && t.status == TaskStatus::Idle {
                         events.push(NotifyEvent {
                             owner: owner.clone(),
                             kind: EventKind::Waiting,
-                            text: format!("🔔 任务完成 · 等待你的操作\n{}{}", ctx(t), result(&t.id)),
+                            task_id: Some(t.id.clone()),
+                            text: format!(
+                                "### 🔔 任务完成 · 等待你的操作\n{}{}",
+                                body_md(t),
+                                result_md(&t.id)
+                            ),
                         });
                     } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
                         events.push(NotifyEvent {
                             owner: owner.clone(),
                             kind: EventKind::Finished,
-                            text: format!("✅ 会话已结束\n{}{}", ctx(t), result(&t.id)),
+                            task_id: Some(t.id.clone()),
+                            text: format!("### ✅ 会话已结束\n{}{}", body_md(t), result_md(&t.id)),
                         });
                     }
                 }
@@ -1752,7 +1762,8 @@ async fn report(
                 events.push(NotifyEvent {
                     owner: owner.clone(),
                     kind: EventKind::Finished,
-                    text: format!("✅ 会话已结束\n{}{}", ctx(t), result(&t.id)),
+                    task_id: Some(t.id.clone()),
+                    text: format!("### ✅ 会话已结束\n{}{}", body_md(t), result_md(&t.id)),
                 });
             }
         }
@@ -1761,7 +1772,8 @@ async fn report(
             events.push(NotifyEvent {
                 owner: owner.clone(),
                 kind: EventKind::Device,
-                text: format!("🟢 设备上线 · {dev}"),
+                task_id: None,
+                text: format!("### 🟢 设备上线\n- **设备**：{dev}"),
             });
         }
     }

@@ -446,7 +446,8 @@ pub async fn tick_loop(state: SharedState) {
                             offline_events.push(crate::dingtalk::NotifyEvent {
                                 owner,
                                 kind: crate::dingtalk::EventKind::Device,
-                                text: format!("🔴 设备离线 · {}", m.hostname),
+                                task_id: None,
+                                text: format!("### 🔴 设备离线\n- **设备**：{}", m.hostname),
                             });
                         }
                     }

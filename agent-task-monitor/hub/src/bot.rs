@@ -337,6 +337,25 @@ fn render_monitor_push(msgs: &[&am_core::model::MessageBrief]) -> String {
     out
 }
 
+/// 会话在「发 N / 暂停 N」里的序号：与 resolve_task 同源 —— 优先用最近「会话」列出的顺序，
+/// 没有就即时按同排序补一份。用于钉钉推送里带上编号，让人能直接「发 N」回应。
+pub(crate) async fn session_number(
+    state: &SharedState,
+    username: &str,
+    task_id: &str,
+) -> Option<usize> {
+    if let Some(ids) = state.bot_last_list.read().await.get(username) {
+        if let Some(i) = ids.iter().position(|x| x == task_id) {
+            return Some(i + 1);
+        }
+    }
+    sorted_active_tasks(state, username)
+        .await
+        .iter()
+        .position(|t| t.id == task_id)
+        .map(|i| i + 1)
+}
+
 /// 活跃会话按「设备名 → 状态」稳定排序。「会话」列表顺序、以及「发 N / 暂停 N …」的序号
 /// 都以它为准 —— 两处共用同一份排序，序号才不会对不上。
 async fn sorted_active_tasks(state: &SharedState, username: &str) -> Vec<am_core::model::Task> {

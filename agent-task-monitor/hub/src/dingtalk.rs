@@ -77,10 +77,20 @@ pub(crate) fn urlencode(s: &str) -> String {
     out
 }
 
-/// 推送一条文本到钉钉机器人。now_ms 由调用方给（便于测试）。
+/// markdown 标题：取正文首行、去掉 #/*/空格，截断——钉钉 markdown 消息要一个纯文本 title。
+fn md_title(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("终端通知");
+    let t: String = line.trim_matches(|c| c == '#' || c == '*' || c == ' ').chars().take(24).collect();
+    if t.is_empty() { "终端通知".to_string() } else { t }
+}
+
+/// 推送一条 markdown 到钉钉群机器人 Webhook。now_ms 由调用方给（便于测试）。
 pub async fn push_text(cfg: &DingtalkNotify, text: &str, now_ms: u64) -> Result<(), String> {
     let url = signed_url(&cfg.webhook, &cfg.secret, now_ms);
-    let body = serde_json::json!({ "msgtype": "text", "text": { "content": text } });
+    let body = serde_json::json!({
+        "msgtype": "markdown",
+        "markdown": { "title": md_title(text), "text": text }
+    });
     let resp = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
@@ -156,13 +166,16 @@ pub async fn push_oto(
     // Stream 机器人 robotCode 一般 == app_key；捕获到就用捕获的
     let robot_code = if app.robot_code.is_empty() { &app.app_key } else { &app.robot_code };
     let token = access_token(&app.app_key, &app.app_secret, now_ms).await?;
-    // msgParam 是 JSON 字符串（钉钉要求）
-    let msg_param = serde_json::to_string(&serde_json::json!({ "content": text }))
-        .map_err(|e| e.to_string())?;
+    // msgParam 是 JSON 字符串（钉钉要求）；用 markdown 卡片，结果里的 md 才能正常渲染。
+    let msg_param = serde_json::to_string(&serde_json::json!({
+        "title": md_title(text),
+        "text": text,
+    }))
+    .map_err(|e| e.to_string())?;
     let body = serde_json::json!({
         "robotCode": robot_code,
         "userIds": [app.staff_id],
-        "msgKey": "sampleText",
+        "msgKey": "sampleMarkdown",
         "msgParam": msg_param,
     });
     let resp = http_client()?
@@ -181,10 +194,13 @@ pub async fn push_oto(
     }
 }
 
-/// 一条待推送事件（已格式化为文本 + 归属用户 + 事件类别）
+/// 一条待推送事件（已格式化为 markdown 文本 + 归属用户 + 事件类别）
 pub struct NotifyEvent {
     pub owner: String,
     pub kind: EventKind,
+    /// 关联会话（用于查「发 N」编号；设备类事件为 None）
+    pub task_id: Option<String>,
+    /// markdown 正文，可含 `{{NO}}` 占位符，由 deliver 换成会话编号
     pub text: String,
 }
 
@@ -211,11 +227,19 @@ impl DingtalkNotify {
 /// now_ms 由调用方给（tick/report 里取一次系统时间）。
 pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>, now_ms: u64) {
     for ev in events {
+        // 把正文里的 `{{NO}}` 占位换成「发 N」编号（与 resolve_task 同源）；查不到就去掉占位。
+        let text = match &ev.task_id {
+            Some(id) => match crate::bot::session_number(state, &ev.owner, id).await {
+                Some(n) => ev.text.replace("{{NO}}", &format!("#{n} ")),
+                None => ev.text.replace("{{NO}}", ""),
+            },
+            None => ev.text.replace("{{NO}}", ""),
+        };
         // 1) 群自定义机器人 Webhook（按用户逐事件开关，原有行为）
         let cfg = state.registry.read().await.dingtalk_of(&ev.owner);
         if let Some(cfg) = cfg {
             if cfg.enabled() && cfg.wants(ev.kind) {
-                if let Err(e) = push_text(&cfg, &ev.text, now_ms).await {
+                if let Err(e) = push_text(&cfg, &text, now_ms).await {
                     tracing::warn!("钉钉 Webhook 推送失败（{}）: {e}", ev.owner);
                 }
             }
@@ -232,7 +256,7 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
                     && !app.app_secret.is_empty()
                     && !app.staff_id.is_empty()
                 {
-                    if let Err(e) = push_oto(&app, &ev.text, now_ms).await {
+                    if let Err(e) = push_oto(&app, &text, now_ms).await {
                         tracing::warn!("钉钉 OTO 主动推送失败（{}）: {e}", ev.owner);
                     }
                 }
