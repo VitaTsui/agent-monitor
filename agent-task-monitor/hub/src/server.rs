@@ -761,6 +761,30 @@ struct InputReq {
     pid: Option<u32>,
 }
 
+/// 把 select 消息（AskUserQuestion 的整份 input JSON）里的问题+选项转成一段可读文本，
+/// 供钉钉「等待选择」提醒展示。解析失败返回空串。
+fn select_options_text(content: &str) -> String {
+    let Ok(v) = serde_json::from_str::<Value>(content) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    if let Some(qs) = v.get("questions").and_then(|q| q.as_array()) {
+        for q in qs {
+            if let Some(question) = q.get("question").and_then(|x| x.as_str()) {
+                out.push_str(question);
+                out.push('\n');
+            }
+            if let Some(opts) = q.get("options").and_then(|o| o.as_array()) {
+                for (i, o) in opts.iter().enumerate() {
+                    let label = o.get("label").and_then(|x| x.as_str()).unwrap_or("");
+                    out.push_str(&format!("{}. {}\n", i + 1, label));
+                }
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
 /// POST /monitor/tasks/:id/input —— 向会话注入一行输入（前台发布任务）
 /// 本机直接 TTY 注入；远程机器进命令队列由该机 agent 执行。
 async fn input_task(
@@ -1697,6 +1721,7 @@ async fn report(
                 dir_cache: HashMap::new(),
                 git_cache: HashMap::new(),
                 notified_online: false,
+                select_notified: std::collections::HashSet::new(),
             }
         });
     // 设备上线边沿：新登记 或 之前已判离线（超阈值）
@@ -1808,6 +1833,39 @@ async fn report(
                 text: format!("🟢 设备上线 · {dev}"),
             });
         }
+        // 交互式选择提醒：会话最新消息是 select（AskUserQuestion / 权限确认）时，
+        // 进入该状态推一次（边沿触发，靠 select_notified 去重），提示去作答。
+        let now_selecting: std::collections::HashSet<String> = tasks
+            .iter()
+            .filter(|t| {
+                msgs_map
+                    .get(&t.id)
+                    .and_then(|ms| ms.last())
+                    .map(|m| m.role.as_str() == "select")
+                    .unwrap_or(false)
+            })
+            .map(|t| t.id.clone())
+            .collect();
+        for t in &tasks {
+            if now_selecting.contains(&t.id) && !entry.select_notified.contains(&t.id) {
+                let opts = msgs_map
+                    .get(&t.id)
+                    .and_then(|ms| ms.last())
+                    .map(|m| select_options_text(&m.content))
+                    .unwrap_or_default();
+                events.push(NotifyEvent {
+                    owner: owner.clone(),
+                    kind: EventKind::Select,
+                    task_id: Some(t.id.clone()),
+                    text: format!(
+                        "⌨️ 需要你选择\n{}\n{}\n—— 回复「发 {{N}} 序号」作答 ——",
+                        body(t),
+                        opts
+                    ),
+                });
+            }
+        }
+        entry.select_notified = now_selecting;
     }
     if notify_owner.is_some() {
         entry.notified_online = true;

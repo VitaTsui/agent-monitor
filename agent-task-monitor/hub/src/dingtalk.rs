@@ -200,6 +200,8 @@ pub enum EventKind {
     Device,
     /// 非钉钉来源（网页）下发的任务：同步告知，让钉钉侧也知道刚发了什么
     Dispatch,
+    /// 会话进入「等待选择」（交互式选择/权限确认）：提醒去作答
+    Select,
 }
 
 impl DingtalkNotify {
@@ -211,6 +213,7 @@ impl DingtalkNotify {
             EventKind::Device => self.device,
             // 群 webhook 复用「等待输入」开关；企业应用 OTO 一律推（见 deliver）
             EventKind::Dispatch => self.waiting,
+            EventKind::Select => self.waiting,
         }
     }
 }
@@ -219,13 +222,18 @@ impl DingtalkNotify {
 /// now_ms 由调用方给（tick/report 里取一次系统时间）。
 pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>, now_ms: u64) {
     for ev in events {
-        // 把正文里的 `{{NO}}` 占位换成「发 N」编号（与 resolve_task 同源）；查不到就去掉占位。
-        let text = match &ev.task_id {
-            Some(id) => match crate::bot::session_number(state, &ev.owner, id).await {
-                Some(n) => ev.text.replace("{{NO}}", &format!("#{n} ")),
-                None => ev.text.replace("{{NO}}", ""),
-            },
-            None => ev.text.replace("{{NO}}", ""),
+        // 占位换成「发 N」编号（与 resolve_task 同源）：`{{NO}}` → 视觉标签「#N 」；
+        // `{{N}}` → 纯数字（用在「发 N / 撤回 N」这类指令语法里）。查不到编号就退化。
+        let no = match &ev.task_id {
+            Some(id) => crate::bot::session_number(state, &ev.owner, id).await,
+            None => None,
+        };
+        let text = match no {
+            Some(n) => ev
+                .text
+                .replace("{{NO}}", &format!("#{n} "))
+                .replace("{{N}}", &n.to_string()),
+            None => ev.text.replace("{{NO}}", "").replace("{{N}}", "N"),
         };
         // 1) 群自定义机器人 Webhook（按用户逐事件开关，原有行为）
         let cfg = state.registry.read().await.dingtalk_of(&ev.owner);
@@ -244,6 +252,7 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
                 | EventKind::Waiting
                 | EventKind::Finished
                 | EventKind::Dispatch
+                | EventKind::Select
         ) {
             let app = state.registry.read().await.dingtalk_app_of(&ev.owner);
             if let Some(app) = app {

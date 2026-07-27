@@ -50,6 +50,8 @@ pub struct MachineEntry {
     pub git_cache: HashMap<String, am_core::model::GitOverview>,
     /// 上次通知过的在线状态（钉钉推送用，边沿触发上线/离线，避免重复）
     pub notified_online: bool,
+    /// 已推过「等待选择」提醒的会话 ID（边沿触发：进入 select 推一次，离开清除）
+    pub select_notified: std::collections::HashSet<String>,
 }
 
 /// 机器离线判定阈值
