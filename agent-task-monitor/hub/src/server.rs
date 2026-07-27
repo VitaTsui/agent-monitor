@@ -306,7 +306,11 @@ fn ready_desktop_version(downloads_dir: &std::path::Path) -> String {
             it.next()?.parse().ok()?,
         ))
     };
-    let hub_t = parse(hub_ver);
+    // 「最新桌面版」= downloads 里已就绪的最高版本安装包 AgentMonitor-<ver>-setup.exe。
+    // 不再拿 hub 自身编译版本（env!CARGO_PKG_VERSION）当上限：客户端自更新下载的是固定名
+    // agent-monitor-setup.exe，与 hub 版本无关；而版本化安装包「最后上传」本就是该版发布完成
+    // 的信号。若还卡 hub 版本，只要部署的 hub 二进制落后于已发布客户端，检查更新就会报旧版本
+    // （= 用户遇到的「检测到的最新版落后于实际最新版」）。hub_ver 仅作 downloads 为空时的兜底。
     let mut best: Option<((u32, u32, u32), String)> = None;
     if let Ok(rd) = std::fs::read_dir(downloads_dir) {
         for e in rd.flatten() {
@@ -316,9 +320,7 @@ fn ready_desktop_version(downloads_dir: &std::path::Path) -> String {
                 .and_then(|s| s.strip_suffix("-setup.exe"))
             {
                 if let Some(t) = parse(v) {
-                    if hub_t.map_or(true, |h| t <= h)
-                        && best.as_ref().map_or(true, |(bt, _)| t > *bt)
-                    {
+                    if best.as_ref().map_or(true, |(bt, _)| t > *bt) {
                         best = Some((t, v.to_string()));
                     }
                 }
