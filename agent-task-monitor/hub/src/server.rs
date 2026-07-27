@@ -761,6 +761,9 @@ async fn control_task(
 struct InputReq {
     text: String,
     pid: Option<u32>,
+    /// 下发来源："client"（桌面客户端）/ "web"（浏览器）。缺省（旧客户端）按网页处理。
+    #[serde(default)]
+    source: Option<String>,
 }
 
 /// 把 select 消息（AskUserQuestion 的整份 input JSON）里的问题+选项转成一段可读文本，
@@ -841,7 +844,7 @@ async fn input_task(
         id: Some(cmd_id.clone()),
     });
     drop(machines); // 释放锁：下面 deliver → session_number 会再读 machines
-    // 同步推钉钉：网页（非钉钉）下发的任务，让钉钉侧也知道刚发了什么、还能撤回。
+    // 同步推钉钉：非钉钉来源（网页/客户端）下发的任务，让钉钉侧也知道刚发了什么、还能撤回。
     {
         let st = state.clone();
         let owner = user.clone();
@@ -851,6 +854,8 @@ async fn input_task(
         let proj = task.project_name.clone();
         let sess = if task.title.is_empty() { task.provider_dsr.clone() } else { task.title.clone() };
         let sess: String = sess.chars().take(40).collect();
+        // 来源标注：客户端 vs 网页（缺省按网页——旧客户端不带 source）
+        let src_label = if req.source.as_deref() == Some("client") { "客户端" } else { "网页" };
         tokio::spawn(async move {
             let n = crate::bot::session_number(&st, &owner, &tid).await;
             let no_tag = n.map(|x| format!("#{x} ")).unwrap_or_default();
@@ -858,7 +863,7 @@ async fn input_task(
                 .map(|x| format!("  \n回复「撤回 {x}」可撤回"))
                 .unwrap_or_default();
             let body = format!(
-                "###### 📤 已下发任务（网页）\n\n**设备**：{host}  \n**终端**：{prov}  \n**项目**：{proj}  \n**会话**：{no_tag}{sess}  \n**内容**：{snippet}{recall}"
+                "###### 📤 已下发任务（{src_label}）\n\n**设备**：{host}  \n**终端**：{prov}  \n**项目**：{proj}  \n**会话**：{no_tag}{sess}  \n**内容**：{snippet}{recall}"
             );
             let ev = crate::dingtalk::NotifyEvent {
                 owner,

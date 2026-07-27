@@ -6,6 +6,8 @@ import { get, post, del } from "@/services/Axios";
 
 import { ListRes } from "@/services/ResType";
 
+import { inDesktopClient } from "@/utils/clientAuth";
+
 export interface PortalTaskProcess {
   pid: number;
   agent: string;
@@ -133,7 +135,8 @@ export const sendPortalInput = async (
 ) => {
   return await post<{ pid: number; result: string; cmdId?: string }>(
     `/monitor/tasks/${id}/input`,
-    { text, pid }
+    // source 让 hub 区分「客户端 / 网页」下发来源，用于钉钉推送正文标注
+    { text, pid, source: inDesktopClient() ? "client" : "web" }
   );
 };
 
