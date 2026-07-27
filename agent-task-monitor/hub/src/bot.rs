@@ -337,21 +337,27 @@ fn render_monitor_push(msgs: &[&am_core::model::MessageBrief]) -> String {
     out
 }
 
-async fn list_sessions(state: &SharedState, username: &str) -> String {
+/// 活跃会话按「设备名 → 状态」稳定排序。「会话」列表顺序、以及「发 N / 暂停 N …」的序号
+/// 都以它为准 —— 两处共用同一份排序，序号才不会对不上。
+async fn sorted_active_tasks(state: &SharedState, username: &str) -> Vec<am_core::model::Task> {
     let mut tasks = state.tasks_for(username).await;
     // 已结束的会话不列出——机器人只关心还能操作的活跃会话
     tasks.retain(|t| t.status != TaskStatus::Finished);
-    if tasks.is_empty() {
-        return "当前没有活跃会话。".to_string();
-    }
     let rank = |s: TaskStatus| match s {
         TaskStatus::Running => 0,
         TaskStatus::Paused => 1,
         TaskStatus::Idle => 2,
         TaskStatus::Finished => 3,
     };
-    // 先按设备名分组、组内按状态排；序号全局连续（与存下的 ids 顺序一致，「暂停 N」才对得上）
     tasks.sort_by(|a, b| a.hostname.cmp(&b.hostname).then(rank(a.status).cmp(&rank(b.status))));
+    tasks
+}
+
+async fn list_sessions(state: &SharedState, username: &str) -> String {
+    let tasks = sorted_active_tasks(state, username).await;
+    if tasks.is_empty() {
+        return "当前没有活跃会话。".to_string();
+    }
     let mut ids = Vec::with_capacity(tasks.len());
     let mut lines = vec![format!("共 {} 个活跃会话：", tasks.len())];
     let mut cur_dev = String::new();
@@ -400,12 +406,19 @@ async fn resolve_task(state: &SharedState, username: &str, arg: &str) -> Result<
     let n: usize = arg
         .trim()
         .parse()
-        .map_err(|_| "请给会话序号，如「暂停 1」。先发「会话」看序号。".to_string())?;
+        .map_err(|_| "请给会话序号，如「暂停 1」。发「会话」看序号。".to_string())?;
+    // 序号表还没建（从没发过「会话」，或 hub 重启清空了它）时即时补一份：
+    // 用与「会话」完全相同的排序，让「发 N / 暂停 N」不必先发「会话」也能用。
+    if !state.bot_last_list.read().await.contains_key(username) {
+        let ids: Vec<String> =
+            sorted_active_tasks(state, username).await.into_iter().map(|t| t.id).collect();
+        state.bot_last_list.write().await.insert(username.to_string(), ids);
+    }
     let list = state.bot_last_list.read().await;
-    let ids = list.get(username).ok_or("请先发「会话」列出序号。".to_string())?;
+    let ids = list.get(username).ok_or("当前没有活跃会话。".to_string())?;
     ids.get(n.wrapping_sub(1))
         .cloned()
-        .ok_or(format!("没有第 {n} 个会话，先发「会话」看最新列表。"))
+        .ok_or(format!("没有第 {n} 个会话，发「会话」看最新列表。"))
 }
 
 async fn control(

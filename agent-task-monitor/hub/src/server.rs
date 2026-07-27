@@ -1696,6 +1696,20 @@ async fn report(
                 t.provider_dsr, t.project_name
             )
         };
+        // 「最后结果」：取该会话最近一条 assistant 文本，截断附到推送末尾，
+        // 让人不点开也能看到这轮到底产出/回了什么。
+        let msgs_map = &entry.messages;
+        let result = |id: &str| -> String {
+            msgs_map
+                .get(id)
+                .and_then(|ms| ms.iter().rev().find(|m| m.role.as_str() == "assistant"))
+                .map(|m| {
+                    let s: String = m.content.chars().take(280).collect();
+                    let s = s.trim();
+                    if s.is_empty() { String::new() } else { format!("\n—— 最后结果 ——\n{s}") }
+                })
+                .unwrap_or_default()
+        };
         for t in &tasks {
             match old.get(t.id.as_str()) {
                 None => events.push(NotifyEvent {
@@ -1708,13 +1722,13 @@ async fn report(
                         events.push(NotifyEvent {
                             owner: owner.clone(),
                             kind: EventKind::Waiting,
-                            text: format!("🔔 任务完成 · 等待你的操作\n{}", ctx(t)),
+                            text: format!("🔔 任务完成 · 等待你的操作\n{}{}", ctx(t), result(&t.id)),
                         });
                     } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
                         events.push(NotifyEvent {
                             owner: owner.clone(),
                             kind: EventKind::Finished,
-                            text: format!("✅ 会话已结束\n{}", ctx(t)),
+                            text: format!("✅ 会话已结束\n{}{}", ctx(t), result(&t.id)),
                         });
                     }
                 }
@@ -1727,7 +1741,7 @@ async fn report(
                 events.push(NotifyEvent {
                     owner: owner.clone(),
                     kind: EventKind::Finished,
-                    text: format!("✅ 会话已结束\n{}", ctx(t)),
+                    text: format!("✅ 会话已结束\n{}{}", ctx(t), result(&t.id)),
                 });
             }
         }
