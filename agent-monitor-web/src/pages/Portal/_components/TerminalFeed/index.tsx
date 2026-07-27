@@ -14,6 +14,8 @@ interface TerminalFeedProps {
   providerDsr?: string;
   /** 撤回仍在排队的输入（排队气泡上的撤回按钮） */
   onRecall?: (cmdId: string) => void;
+  /** 撤回「已入终端队列」的输入（注入 ↑ 到终端） */
+  onRecallDelivered?: () => void;
   /** 回应终端里的交互式选择（点选项 = 发送对应序号到终端） */
   onAnswer?: (text: string) => void;
 }
@@ -169,7 +171,7 @@ const SelectCard: React.FC<{
 const RESULT_CLAMP_LINES = 4;
 
 const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
-  const { messages, running, providerDsr, onRecall, onAnswer } = props;
+  const { messages, running, providerDsr, onRecall, onRecallDelivered, onAnswer } = props;
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   const turns = toTurns(messages);
@@ -309,6 +311,21 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
                             onRecall(turn.user!.cmdId!);
+                          }
+                        }}
+                      >
+                        撤回
+                      </span>
+                    ) : turn.user.delivered && onRecallDelivered ? (
+                      <span
+                        className={styles.recallBtn}
+                        role="button"
+                        tabIndex={0}
+                        onClick={onRecallDelivered}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            onRecallDelivered();
                           }
                         }}
                       >

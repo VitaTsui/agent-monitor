@@ -83,6 +83,13 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
       recallable: boolean;
     }[] = [];
     const seen = new Set<string>();
+    // 已作为「已入终端队列」气泡显示在正文里的本地回显：不要在底部排队条再重复一遍
+    // （否则同一条任务正文 + 排队条各出现一次，见「出现了这种情况」）。
+    const deliveredInFeed = new Set(
+      messages
+        .filter((m) => m.local && m.delivered)
+        .map((m) => norm(m.content)),
+    );
     // 顺序即终端队列的真实先后：先铺 queued_inputs（终端 queue-operation 的真实 FIFO，
     // 最旧在上、最新在下），再把「还在 hub 队列、尚未注入终端」的本地回显（可撤回）挂在
     // 最下（它们是刚发出、最新的）。这样一条任务从「本地回显（挂底）」过渡到「终端原生
@@ -91,6 +98,9 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     // 时随 remove 出列而清掉。
     for (const t of task.queuedInputs ?? []) {
       const k = norm(t);
+      if (deliveredInFeed.has(k)) {
+        continue; // 正文里已作为送达气泡显示，跳过
+      }
       if (!seen.has(k)) {
         seen.add(k);
         items.push({ text: t, recallable: false });
@@ -316,6 +326,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 running={task.status === "running"}
                 providerDsr={task.providerDsr}
                 onRecall={(cmdId) => recallInput(id, cmdId)}
+                onRecallDelivered={() => termKey(id, "up", 1)}
                 onAnswer={(text) => sendInput(id, text)}
               />
             </div>
