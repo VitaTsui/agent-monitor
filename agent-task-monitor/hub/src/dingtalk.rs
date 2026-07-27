@@ -77,20 +77,10 @@ pub(crate) fn urlencode(s: &str) -> String {
     out
 }
 
-/// markdown 标题：取正文首行、去掉 #/*/空格，截断——钉钉 markdown 消息要一个纯文本 title。
-fn md_title(text: &str) -> String {
-    let line = text.lines().next().unwrap_or("终端通知");
-    let t: String = line.trim_matches(|c| c == '#' || c == '*' || c == ' ').chars().take(24).collect();
-    if t.is_empty() { "终端通知".to_string() } else { t }
-}
-
-/// 推送一条 markdown 到钉钉群机器人 Webhook。now_ms 由调用方给（便于测试）。
+/// 推送一条纯文本到钉钉群机器人 Webhook。now_ms 由调用方给（便于测试）。
 pub async fn push_text(cfg: &DingtalkNotify, text: &str, now_ms: u64) -> Result<(), String> {
     let url = signed_url(&cfg.webhook, &cfg.secret, now_ms);
-    let body = serde_json::json!({
-        "msgtype": "markdown",
-        "markdown": { "title": md_title(text), "text": text }
-    });
+    let body = serde_json::json!({ "msgtype": "text", "text": { "content": text } });
     let resp = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
@@ -166,16 +156,14 @@ pub async fn push_oto(
     // Stream 机器人 robotCode 一般 == app_key；捕获到就用捕获的
     let robot_code = if app.robot_code.is_empty() { &app.app_key } else { &app.robot_code };
     let token = access_token(&app.app_key, &app.app_secret, now_ms).await?;
-    // msgParam 是 JSON 字符串（钉钉要求）；用 markdown 卡片，结果里的 md 才能正常渲染。
-    let msg_param = serde_json::to_string(&serde_json::json!({
-        "title": md_title(text),
-        "text": text,
-    }))
-    .map_err(|e| e.to_string())?;
+    // msgParam 是 JSON 字符串（钉钉要求）。OTO 私聊的 sampleMarkdown 在客户端里会整段渲染成
+    // 代码块，反而更难看；用 sampleText 纯文本最干净。
+    let msg_param = serde_json::to_string(&serde_json::json!({ "content": text }))
+        .map_err(|e| e.to_string())?;
     let body = serde_json::json!({
         "robotCode": robot_code,
         "userIds": [app.staff_id],
-        "msgKey": "sampleMarkdown",
+        "msgKey": "sampleText",
         "msgParam": msg_param,
     });
     let resp = http_client()?

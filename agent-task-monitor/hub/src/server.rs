@@ -1687,18 +1687,19 @@ async fn report(
         let old: std::collections::HashMap<&str, TaskStatus> =
             entry.tasks.iter().map(|t| (t.id.as_str(), t.status)).collect();
         let dev = &entry.hostname;
-        // markdown 正文：设备 / 终端(代理类型) / 项目 / 会话；`{{NO}}` 占位由 deliver 换成编号。
-        let body_md = |t: &am_core::model::Task| -> String {
+        // 纯文本正文（OTO 私聊不渲染 markdown，会整段变代码块）：设备/终端/项目/会话。
+        // `{{NO}}` 占位由 deliver 换成会话编号。
+        let body = |t: &am_core::model::Task| -> String {
             let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
             let title: String = title.chars().take(40).collect();
             format!(
-                "- **设备**：{dev}\n- **终端**：{}\n- **项目**：{}\n- **会话**：{{NO}}{title}",
+                "设备：{dev}\n终端：{}\n项目：{}\n会话：{{NO}}{title}",
                 t.provider_dsr, t.project_name
             )
         };
-        // 「最后结果」：取该会话最近一条 assistant 文本（本身就是 markdown），截断后附到末尾。
+        // 「最后结果」：取该会话最近一条 assistant 文本，截断后附到末尾（纯文本）。
         let msgs_map = &entry.messages;
-        let result_md = |id: &str| -> String {
+        let result = |id: &str| -> String {
             const LIMIT: usize = 1500;
             msgs_map
                 .get(id)
@@ -1711,9 +1712,9 @@ async fn report(
                     if s.is_empty() {
                         String::new()
                     } else if cut {
-                        format!("\n\n---\n**最后结果**\n\n{s}\n\n…（内容较长，已截断）")
+                        format!("\n—— 最后结果 ——\n{s}…（内容较长，已截断）")
                     } else {
-                        format!("\n\n---\n**最后结果**\n\n{s}")
+                        format!("\n—— 最后结果 ——\n{s}")
                     }
                 })
                 .unwrap_or_default()
@@ -1728,7 +1729,7 @@ async fn report(
                             owner: owner.clone(),
                             kind: EventKind::NewSession,
                             task_id: Some(t.id.clone()),
-                            text: format!("### 🆕 会话开始\n{}", body_md(t)),
+                            text: format!("🆕 会话开始\n{}", body(t)),
                         });
                     }
                 }
@@ -1739,9 +1740,9 @@ async fn report(
                             kind: EventKind::Waiting,
                             task_id: Some(t.id.clone()),
                             text: format!(
-                                "### 🔔 任务完成 · 等待你的操作\n{}{}",
-                                body_md(t),
-                                result_md(&t.id)
+                                "🔔 任务完成 · 等待你的操作\n{}{}",
+                                body(t),
+                                result(&t.id)
                             ),
                         });
                     } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
@@ -1749,7 +1750,7 @@ async fn report(
                             owner: owner.clone(),
                             kind: EventKind::Finished,
                             task_id: Some(t.id.clone()),
-                            text: format!("### ✅ 会话已结束\n{}{}", body_md(t), result_md(&t.id)),
+                            text: format!("✅ 会话已结束\n{}{}", body(t), result(&t.id)),
                         });
                     }
                 }
@@ -1763,7 +1764,7 @@ async fn report(
                     owner: owner.clone(),
                     kind: EventKind::Finished,
                     task_id: Some(t.id.clone()),
-                    text: format!("### ✅ 会话已结束\n{}{}", body_md(t), result_md(&t.id)),
+                    text: format!("✅ 会话已结束\n{}{}", body(t), result(&t.id)),
                 });
             }
         }
@@ -1773,7 +1774,7 @@ async fn report(
                 owner: owner.clone(),
                 kind: EventKind::Device,
                 task_id: None,
-                text: format!("### 🟢 设备上线\n- **设备**：{dev}"),
+                text: format!("🟢 设备上线 · {dev}"),
             });
         }
     }
