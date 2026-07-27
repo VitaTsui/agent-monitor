@@ -63,9 +63,11 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
         (m) =>
           m.role !== "todos" &&
           m.role !== "bgtasks" &&
-          // 本地乐观回显（排队/待执行）不铺进内容流，改挂底部；被会话接受后由真实
-          // 同步消息接管、正常入流
-          !(m.local && (m.queued || m.delivered)),
+          // 「排队中」的本地回显（还在 hub 队列、可撤回）不铺进内容流，改挂底部排队条；
+          // 但「已下发到终端」（delivered）的必须留在正文里当用户气泡 —— 否则任务被终端
+          // 接受后、真实同步消息还没回来（注入输入常常压根等不到那条 user 记录）这段时间
+          // 里，这条任务在正文中彻底消失。留着它，等真实消息回来时 store 会按内容接管去重。
+          !(m.local && m.queued),
       ),
     [messages],
   );

@@ -562,6 +562,64 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
             margin-top: 1px;
           }
         }
+
+        // 自行输入行：body 改横向（输入框 + 发送钮）
+        &.selectOptCustom {
+          align-items: center;
+
+          .selectOptBody {
+            flex: 1;
+            flex-direction: row;
+            align-items: center;
+            gap: 6px;
+          }
+
+          .selectCustomInput {
+            flex: 1;
+            min-width: 0;
+            padding: 4px 8px;
+            border-radius: 5px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            background: rgba(0, 0, 0, 0.22);
+            color: $term-text;
+            font-size: 12.5px;
+            outline: none;
+
+            &::placeholder {
+              color: rgba(230, 240, 239, 0.4);
+            }
+
+            &:focus {
+              border-color: rgba(217, 164, 65, 0.5);
+            }
+
+            &:disabled {
+              opacity: 0.5;
+            }
+          }
+
+          .selectCustomSend {
+            flex: none;
+            padding: 3px 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            background: rgba(217, 164, 65, 0.22);
+            color: #f0c674;
+
+            &.clickable {
+              cursor: pointer;
+
+              &:hover {
+                background: rgba(217, 164, 65, 0.36);
+              }
+            }
+
+            &.disabled {
+              opacity: 0.4;
+              pointer-events: none;
+            }
+          }
+        }
       }
     }
 

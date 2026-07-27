@@ -53,6 +53,118 @@ function toTurns(messages: PortalMessage[]): Turn[] {
 
 const fmtTime = (ts?: string) => (ts ? dayjs(ts).format("MM-DD HH:mm") : "");
 
+/**
+ * 交互式选择卡（AskUserQuestion）。除了同步预设选项，补上一条「自行输入」——
+ * AskUserQuestion 始终隐含一个「其它/自定义」项，终端里能自己敲答案，远端也要能。
+ * 输入即走 onAnswer（等价在对话框里发一行自定义答案）。
+ */
+const SelectCard: React.FC<{
+  content: string;
+  onAnswer?: (text: string) => void;
+}> = ({ content, onAnswer }) => {
+  const [custom, setCustom] = useState("");
+  let data: {
+    questions?: {
+      question?: string;
+      header?: string;
+      options?: { label?: string; description?: string }[];
+    }[];
+  } = {};
+  try {
+    data = JSON.parse(content);
+  } catch {
+    /* 半截 JSON：忽略，按空卡片处理 */
+  }
+
+  const submitCustom = () => {
+    const t = custom.trim();
+    if (t && onAnswer) {
+      onAnswer(t);
+      setCustom("");
+    }
+  };
+
+  return (
+    <div className={styles.selectCard}>
+      <div className={styles.selectHead}>⌨︎ 终端等待选择</div>
+      {(data.questions ?? []).map((q, qi) => (
+        <div key={qi} className={styles.selectQ}>
+          {q.question ? (
+            <div className={styles.selectQuestion}>{q.question}</div>
+          ) : null}
+          <div className={styles.selectOpts}>
+            {(q.options ?? []).map((o, oi) => (
+              <div
+                key={oi}
+                className={`${styles.selectOpt} ${onAnswer ? styles.clickable : ""}`}
+                role={onAnswer ? "button" : undefined}
+                tabIndex={onAnswer ? 0 : undefined}
+                onClick={onAnswer ? () => onAnswer(String(oi + 1)) : undefined}
+                onKeyDown={
+                  onAnswer
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onAnswer(String(oi + 1));
+                        }
+                      }
+                    : undefined
+                }
+              >
+                <span className={styles.selectOptIdx}>{oi + 1}</span>
+                <span className={styles.selectOptBody}>
+                  <span className={styles.selectOptLabel}>{o.label}</span>
+                  {o.description ? (
+                    <span className={styles.selectOptDesc}>{o.description}</span>
+                  ) : null}
+                </span>
+              </div>
+            ))}
+            {/* 自行输入：AskUserQuestion 隐含的「其它」，输入后回车 / 点发送提交 */}
+            <div className={`${styles.selectOpt} ${styles.selectOptCustom}`}>
+              <span className={styles.selectOptIdx}>✎</span>
+              <span className={styles.selectOptBody}>
+                <input
+                  className={styles.selectCustomInput}
+                  placeholder="自行输入答案…"
+                  value={custom}
+                  disabled={!onAnswer}
+                  onChange={(e) => setCustom(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      submitCustom();
+                    }
+                  }}
+                />
+                <span
+                  className={`${styles.selectCustomSend} ${
+                    onAnswer && custom.trim() ? styles.clickable : styles.disabled
+                  }`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={submitCustom}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      submitCustom();
+                    }
+                  }}
+                >
+                  发送
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+      ))}
+      <div className={styles.selectHint}>
+        点选项直接回应；或在「✎ 自行输入」里敲自定义答案后回车
+      </div>
+    </div>
+  );
+};
+
 /** 工具结果超过该行数时折叠 */
 const RESULT_CLAMP_LINES = 4;
 
@@ -68,68 +180,9 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
 
   const renderItem = (m: PortalMessage, key: string) => {
     // 交互式选择/权限确认（AskUserQuestion）：同步问题与选项，成卡片展示。
-    // 终端里需要用户在 TUI 里选；这里让远程也能看到「在等你选什么」。
+    // 终端里需要用户在 TUI 里选；这里让远程也能看到「在等你选什么」并能回应。
     if (m.role === "select") {
-      let data: {
-        questions?: {
-          question?: string;
-          header?: string;
-          options?: { label?: string; description?: string }[];
-        }[];
-      } = {};
-      try {
-        data = JSON.parse(m.content);
-      } catch {
-        /* 半截 JSON：忽略，按空卡片处理 */
-      }
-      return (
-        <div key={key} className={styles.selectCard}>
-          <div className={styles.selectHead}>⌨︎ 终端等待选择</div>
-          {(data.questions ?? []).map((q, qi) => (
-            <div key={qi} className={styles.selectQ}>
-              {q.question ? (
-                <div className={styles.selectQuestion}>{q.question}</div>
-              ) : null}
-              <div className={styles.selectOpts}>
-                {(q.options ?? []).map((o, oi) => (
-                  <div
-                    key={oi}
-                    className={`${styles.selectOpt} ${onAnswer ? styles.clickable : ""}`}
-                    role={onAnswer ? "button" : undefined}
-                    tabIndex={onAnswer ? 0 : undefined}
-                    onClick={
-                      onAnswer ? () => onAnswer(String(oi + 1)) : undefined
-                    }
-                    onKeyDown={
-                      onAnswer
-                        ? (e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault();
-                              onAnswer(String(oi + 1));
-                            }
-                          }
-                        : undefined
-                    }
-                  >
-                    <span className={styles.selectOptIdx}>{oi + 1}</span>
-                    <span className={styles.selectOptBody}>
-                      <span className={styles.selectOptLabel}>{o.label}</span>
-                      {o.description ? (
-                        <span className={styles.selectOptDesc}>
-                          {o.description}
-                        </span>
-                      ) : null}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-          <div className={styles.selectHint}>
-            点选项直接回应；或在下方对话框输入序号 / 自定义答案
-          </div>
-        </div>
-      );
+      return <SelectCard key={key} content={m.content} onAnswer={onAnswer} />;
     }
     // plan 模式给出的待批准方案：正文是 markdown，单独成卡片
     if (m.role === "plan") {
