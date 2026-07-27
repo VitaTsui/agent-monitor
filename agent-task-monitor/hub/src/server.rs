@@ -1700,13 +1700,24 @@ async fn report(
         // 让人不点开也能看到这轮到底产出/回了什么。
         let msgs_map = &entry.messages;
         let result = |id: &str| -> String {
+            // 上限放宽到 1500 字（钉钉文本消息容得下；上游简报本身最多 2000 字）——
+            // 之前 280 字太小，多要点的结果会被从中间截断，只剩第一点。
+            const LIMIT: usize = 1500;
             msgs_map
                 .get(id)
                 .and_then(|ms| ms.iter().rev().find(|m| m.role.as_str() == "assistant"))
                 .map(|m| {
-                    let s: String = m.content.chars().take(280).collect();
+                    let full = m.content.trim();
+                    let cut = full.chars().count() > LIMIT;
+                    let s: String = full.chars().take(LIMIT).collect();
                     let s = s.trim();
-                    if s.is_empty() { String::new() } else { format!("\n—— 最后结果 ——\n{s}") }
+                    if s.is_empty() {
+                        String::new()
+                    } else if cut {
+                        format!("\n—— 最后结果 ——\n{s}…（内容较长，已截断）")
+                    } else {
+                        format!("\n—— 最后结果 ——\n{s}")
+                    }
                 })
                 .unwrap_or_default()
         };
