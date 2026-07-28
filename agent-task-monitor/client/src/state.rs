@@ -208,39 +208,23 @@ pub fn terminal_key(p: &am_core::model::ProcessInfo) -> String {
 /// 持久化配对缓存的文件：**终端锚(shell pid) → session_id**。锚在终端 shell 上而非易变的
 /// claude pid：claude 经 /clear、--resume、客户端/进程重启会换 pid，但它所在终端的 shell pid
 /// 不变。据此在重启后把「该终端现在的 claude」接回上次的会话，避免落到 tier④ mtime 启发式把
-/// 并发同项目会话交叉错配（退出客户端再重开时的下发错位）。见 process::shell_anchor_pids。
+/// 并发同项目会话交叉错配（退出客户端再重开时的下发错位）。终端锚取自 ProcessInfo.shell_pid。
 fn pairs_file(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("session-pairs.json")
 }
 
-/// 写盘：把「claude_pid → session」换算成「终端锚(shell) → session」再存。终端锚取自
-/// 扫描时算好的 ProcessInfo.shell_pid（找不到则回退 claude 自身 pid）。
-fn save_pairs(
-    data_dir: &std::path::Path,
-    pairs: &std::collections::HashMap<u32, String>,
-    procs: &[am_core::model::ProcessInfo],
-) {
-    let anchor_of: std::collections::HashMap<u32, u32> = procs
-        .iter()
-        .map(|p| (p.pid, p.shell_pid.unwrap_or(p.pid)))
-        .collect();
+/// 写盘：内存缓存本身就是「终端锚(shell) → session」，直接落盘。
+fn save_anchor_pairs(data_dir: &std::path::Path, anchors: &std::collections::HashMap<u32, String>) {
     let mut obj = serde_json::Map::new();
-    for (pid, sid) in pairs {
-        // 同一终端下只该有一个 claude；用终端锚做 key，claude 换 pid 也接得回
-        if let Some(&anchor) = anchor_of.get(pid) {
-            obj.insert(anchor.to_string(), serde_json::json!({ "sid": sid }));
-        }
+    for (anchor, sid) in anchors {
+        obj.insert(anchor.to_string(), serde_json::json!({ "sid": sid }));
     }
     let _ = std::fs::write(pairs_file(data_dir), serde_json::Value::Object(obj).to_string());
 }
 
-/// 读盘并接回：为当前每个活着的 claude 求其终端锚(shell)，若该锚在盘上有记录，就把「这个
-/// claude → 那条会话」放进缓存。锚由当前活进程算出 → 天然只认「此刻真有 claude 在该终端下」
-/// 的记录；死终端/被非-shell 重用的 pid 不会匹配，防 pid 重用错配。返回 claude_pid → session。
-fn load_pairs(
-    data_dir: &std::path::Path,
-    procs: &[am_core::model::ProcessInfo],
-) -> std::collections::HashMap<u32, String> {
+/// 读盘：直接读回「终端锚(shell) → session」。校验推迟到每轮翻译时做（只有当前真有 claude
+/// 在该终端下的锚才会翻译成配对），故这里无需活进程；死终端/被非-shell 重用的锚翻不出配对。
+fn load_anchor_pairs(data_dir: &std::path::Path) -> std::collections::HashMap<u32, String> {
     let mut out = std::collections::HashMap::new();
     let Ok(txt) = std::fs::read_to_string(pairs_file(data_dir)) else {
         return out;
@@ -248,23 +232,11 @@ fn load_pairs(
     let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(&txt) else {
         return out;
     };
-    // 盘上：终端锚 → session
-    let mut anchor_sid: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
     for (anchor_s, ent) in &obj {
         if let (Ok(anchor), Some(sid)) =
             (anchor_s.parse::<u32>(), ent.get("sid").and_then(|x| x.as_str()))
         {
-            anchor_sid.insert(anchor, sid.to_string());
-        }
-    }
-    if anchor_sid.is_empty() {
-        return out;
-    }
-    // 当前每个活 claude 的终端锚（扫描时算好），命中盘上记录 → 把「这个 claude → 会话」接回
-    for p in procs {
-        let anchor = p.shell_pid.unwrap_or(p.pid);
-        if let Some(sid) = anchor_sid.get(&anchor) {
-            out.insert(p.pid, sid.clone());
+            out.insert(anchor, sid.to_string());
         }
     }
     out
@@ -464,25 +436,34 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         *prev = cur;
         active
     };
-    // 稳定配对缓存：pid → session_id。喂给 build_tasks 做兜底，让长时间闲置的会话保持配对、
-    // 不掉成「等待输入」占位；本轮配完再用真实配对刷新缓存。持久化到盘：客户端重启后按
-    // pid+start_time 校验恢复，避免退出重开时空闲会话落到 mtime 启发式而下发错位。
-    static PREV_PAIRS: std::sync::Mutex<Option<std::collections::HashMap<u32, String>>> =
+    // 稳定配对缓存，锚在**终端(shell pid)**上：终端锚 → session_id。喂给 build_tasks 做兜底，
+    // 让长时间闲置的会话保持配对、不掉成「等待输入」占位。锚在终端而非易变的 claude pid：
+    // claude 经 /clear、--resume、重启会换 pid，但所在终端 shell 不变——每轮把「终端锚→会话」
+    // 翻译成「该终端现在的 claude pid → 会话」，claude 换 pid（含客户端重启）也接得回，消除
+    // 空闲/并发会话落到 mtime 启发式而下发错位。这份缓存直接持久化到盘、重启读回。
+    static ANCHOR_PAIRS: std::sync::Mutex<Option<std::collections::HashMap<u32, String>>> =
         std::sync::Mutex::new(None);
     static PAIRS_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    // 首轮：从盘恢复上次配对（claude 进程重启后仍在、pid 不变），只认 pid+start_time 都对得上的
+    // 首轮：从盘恢复终端锚→会话
     if !PAIRS_LOADED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        let restored = load_pairs(&state.config.data_dir, &processes);
+        let restored = load_anchor_pairs(&state.config.data_dir);
         if !restored.is_empty() {
-            client_log(&format!(
-                "恢复配对缓存 {} 条（客户端重启，按 pid+start_time 校验存活进程）",
-                restored.len()
-            ));
-            *PREV_PAIRS.lock().unwrap() = Some(restored);
+            client_log(&format!("恢复配对缓存 {} 条（终端锚，客户端重启）", restored.len()));
+            *ANCHOR_PAIRS.lock().unwrap() = Some(restored);
         }
     }
+    // 翻译：为每个活 claude 取终端锚，命中锚缓存 → 该 claude 配上那条会话（claude 换 pid 也接得回）
     let cached: std::collections::HashMap<u32, String> = {
-        PREV_PAIRS.lock().unwrap().clone().unwrap_or_default()
+        let guard = ANCHOR_PAIRS.lock().unwrap();
+        let mut c = std::collections::HashMap::new();
+        if let Some(anchors) = guard.as_ref() {
+            for p in &processes {
+                if let Some(sid) = anchors.get(&p.shell_pid.unwrap_or(p.pid)) {
+                    c.insert(p.pid, sid.clone());
+                }
+            }
+        }
+        c
     };
     let mut tasks = am_core::scanner::build_tasks(
         &sessions,
@@ -492,21 +473,27 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         &active_ids,
         &cached,
     );
-    // 用本轮真实配对（有 pid、且不是 pid- 占位）刷新缓存，供下一轮兜底
+    // 用本轮真实配对刷新锚缓存：把「claude_pid → 会话」按终端锚归账（有 pid、非 pid- 占位）
     {
-        let mut new_pairs = std::collections::HashMap::new();
+        let shell_of: std::collections::HashMap<u32, u32> = processes
+            .iter()
+            .map(|p| (p.pid, p.shell_pid.unwrap_or(p.pid)))
+            .collect();
+        let mut new_anchors = std::collections::HashMap::new();
         for t in &tasks {
             if let Some(pid) = t.pid {
                 if !t.id.starts_with("pid-") {
-                    new_pairs.insert(pid, t.id.clone());
+                    if let Some(&anchor) = shell_of.get(&pid) {
+                        new_anchors.insert(anchor, t.id.clone());
+                    }
                 }
             }
         }
-        // 持久化（节流每 8 轮 ~12s 写一次）：写盘先于覆盖内存，写的是本轮真实配对
+        // 持久化（节流每 8 轮 ~12s）：写盘先于覆盖内存，写的是本轮真实配对（终端锚→会话）
         if SCAN_TICKS.load(std::sync::atomic::Ordering::Relaxed) % 8 == 0 {
-            save_pairs(&state.config.data_dir, &new_pairs, &processes);
+            save_anchor_pairs(&state.config.data_dir, &new_anchors);
         }
-        *PREV_PAIRS.lock().unwrap() = Some(new_pairs);
+        *ANCHOR_PAIRS.lock().unwrap() = Some(new_anchors);
     }
     // 会话文件层：无存活进程的会话若其历史 tty 被排除也一并剔除（尽力而为）
     // 这里主要保证「有进程」的会话已被上面的 retain 过滤。
