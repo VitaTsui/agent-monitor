@@ -858,6 +858,7 @@ async fn input_task(
     }
     tracing::info!("已向机器 {} 下发输入: {}", task.machine_id, truncate_log(&text));
     let cmd_id = uuid::Uuid::new_v4().to_string();
+    let text_for_notify = text.clone();
     entry.pending.push_back(ControlCmd {
         task_id: id.clone(),
         pid,
@@ -865,8 +866,16 @@ async fn input_task(
         text: Some(text),
         id: Some(cmd_id.clone()),
     });
-    // 注：网页/客户端下发不再主动推钉钉——用户自己刚发的任务无需回推提醒，徒增噪音。
-    // 钉钉只保留「任务完成 / 会话结束 / 需要选择」等你没在盯着时才用得上的状态推送。
+    drop(machines); // 释放锁：下面后台任务会再读 machines
+    // 网页/客户端（非钉钉）下发的任务，主动把「排队中 / 执行中」状态推到钉钉私聊；
+    // 排队的还会盯到执行后再推一条。钉钉自己「发 N」走 queue_command 不经这里，不重复。
+    {
+        let st = state.clone();
+        let (owner, tid) = (user.clone(), id.clone());
+        tokio::spawn(async move {
+            crate::bot::notify_web_dispatch(st, owner, tid, text_for_notify).await
+        });
+    }
     ok(json!({ "pid": pid, "result": "已下发到目标机器", "cmdId": cmd_id }))
 }
 

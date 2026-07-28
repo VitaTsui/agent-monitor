@@ -710,6 +710,84 @@ async fn confirm_and_watch(
     }
 }
 
+/// OTO 主动私聊给某账号本人（网页/客户端下发的状态推送用；无 sessionWebhook 可回）。
+async fn push_oto_owner(state: &SharedState, owner: &str, text: &str) {
+    let app = state.registry.read().await.dingtalk_app_of(owner);
+    if let Some(app) = app {
+        if !app.app_key.is_empty() && !app.app_secret.is_empty() && !app.staff_id.is_empty() {
+            let now_ms = crate::state::now_secs() * 1000;
+            let _ = crate::dingtalk::push_oto(&app, text, None, now_ms).await;
+        }
+    }
+}
+
+/// 网页/客户端（非钉钉）下发任务后，把「排队中 / 执行中」状态主动推到钉钉（OTO 私聊）。
+/// 判定同 confirm_and_watch，但用 OTO 而非 sessionWebhook；排队的还会盯到执行后再推一条。
+pub(crate) async fn notify_web_dispatch(
+    state: SharedState,
+    owner: String,
+    task_id: String,
+    text: String,
+) {
+    let tn = norm(&text);
+    let snippet: String = text.chars().take(200).collect();
+    // 判定阶段：轮询 ~9s，等客户端取走并上报回队列状态
+    let mut queued_list: Option<Vec<String>> = None;
+    for _ in 0..6 {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let Some((hub_pending, term_q)) = read_queue(&state, &owner, &task_id).await else {
+            continue;
+        };
+        if term_q.iter().any(|t| norm(t) == tn) || hub_pending.iter().any(|t| norm(t) == tn) {
+            let mut list = term_q.clone();
+            list.extend(hub_pending);
+            queued_list = Some(list);
+            break;
+        }
+    }
+    let no = session_number(&state, &owner, &task_id)
+        .await
+        .map(|x| format!("#{x} "))
+        .unwrap_or_default();
+    match queued_list {
+        None => {
+            push_oto_owner(
+                &state,
+                &owner,
+                &format!("**▶️ 任务执行中**（网页下发 · 会话 {no}）\n\n{snippet}"),
+            )
+            .await;
+        }
+        Some(list) => {
+            let mut lines =
+                vec![format!("**⏳ 任务已排队**（网页下发 · 会话 {no}）\n\n{snippet}\n\n当前排队：")];
+            for (n, t) in list.iter().enumerate() {
+                let mark = if norm(t) == tn { " ← 本条" } else { "" };
+                lines.push(format!("{}. {}{}", n + 1, t, mark));
+            }
+            push_oto_owner(&state, &owner, &lines.join("\n")).await;
+            // 盯到它被纳入执行
+            for _ in 0..360 {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let Some((hub_pending, term_q)) = read_queue(&state, &owner, &task_id).await else {
+                    return;
+                };
+                let still =
+                    term_q.iter().any(|t| norm(t) == tn) || hub_pending.iter().any(|t| norm(t) == tn);
+                if !still {
+                    push_oto_owner(
+                        &state,
+                        &owner,
+                        &format!("**▶️ 排队任务已开始执行**（网页下发 · 会话 {no}）\n\n{snippet}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// 监控某条排队输入，等它离开队列（被终端纳入执行）后经 sessionWebhook 主动推一条。
 async fn watch_dequeue(
     state: SharedState,
