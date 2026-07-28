@@ -1730,6 +1730,8 @@ async fn report(
                 notified_online: false,
                 select_notified: std::collections::HashSet::new(),
                 online_since: Instant::now(),
+                known_sessions: HashMap::new(),
+                session_last_seen: HashMap::new(),
             }
         });
     // 设备上线边沿：新登记 或 之前已判离线（超阈值）
@@ -1740,10 +1742,14 @@ async fn report(
     entry.last_report = Instant::now();
     // 上线边沿：刷新沉降起点。上线后 NEW_SESSION_SETTLE_SECS 内出现的会话一律当「重连扫回的
     // 已有会话」不推，避免客户端更新/重启后分批扫回历史会话时刷屏「会话开始」。
+    // 同时清空会话基线：离线期间「消失」的旧会话不该在重连时逐条推「已结束」，重连后重建基线。
     if was_offline {
         entry.online_since = Instant::now();
+        entry.known_sessions.clear();
+        entry.session_last_seen.clear();
     }
     let online_secs = entry.online_since.elapsed().as_secs();
+    let now_i = Instant::now();
     let mut tasks = payload.tasks;
     for t in tasks.iter_mut() {
         if !t.recent_messages.is_empty() {
@@ -1752,10 +1758,17 @@ async fn report(
     }
     // 会话状态变化事件（对比旧快照）
     let mut events: Vec<crate::dingtalk::NotifyEvent> = Vec::new();
+    // 本轮要落到 known_sessions 的增改 / 删除（owner 块内只收集，块后统一 apply，避开借用冲突）
+    let mut known_updates: Vec<am_core::model::Task> = Vec::new();
+    let mut known_removes: Vec<String> = Vec::new();
     if let Some(owner) = &notify_owner {
         use crate::dingtalk::{EventKind, NotifyEvent};
         let old: std::collections::HashMap<&str, TaskStatus> =
             entry.tasks.iter().map(|t| (t.id.as_str(), t.status)).collect();
+        // 会话基线是否已建立：空表示刚（重）上线还没建基线，此时出现的会话不算「新」。
+        let baseline = !entry.known_sessions.is_empty();
+        let current_ids: std::collections::HashSet<&str> =
+            tasks.iter().map(|t| t.id.as_str()).collect();
         let dev = &entry.hostname;
         // markdown 正文：设备/终端/项目/会话（两空格软换行，钉钉 markdown 才逐行断开）。
         // `{{NO}}`（format! 编译后为 `{NO}`）占位由 deliver 换成会话编号。
@@ -1790,53 +1803,64 @@ async fn report(
                 .unwrap_or_default()
         };
         for t in &tasks {
-            match old.get(t.id.as_str()) {
-                // 会话开始只在「设备已稳定在线」时推：设备刚（重）连上后，客户端会分几次
-                // 把已有会话陆续扫上来（含 hub 重启、客户端更新/重启），那不是真的新开会话。
-                // 仅当上线已超过沉降期、且本次不是上线边沿时才推。
-                None => {
-                    if !was_offline && online_secs >= NEW_SESSION_SETTLE_SECS {
-                        events.push(NotifyEvent {
-                            owner: owner.clone(),
-                            kind: EventKind::NewSession,
-                            task_id: Some(t.id.clone()),
-                            text: format!("###### 🆕 会话开始\n\n{}", body(t)),
-                        });
-                    }
-                }
-                Some(&prev) => {
-                    if prev == TaskStatus::Running && t.status == TaskStatus::Idle {
-                        events.push(NotifyEvent {
-                            owner: owner.clone(),
-                            kind: EventKind::Waiting,
-                            task_id: Some(t.id.clone()),
-                            text: format!(
-                                "###### 🔔 任务完成 · 等待你的操作\n\n{}{}",
-                                body(t),
-                                result(&t.id)
-                            ),
-                        });
-                    } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
-                        events.push(NotifyEvent {
-                            owner: owner.clone(),
-                            kind: EventKind::Finished,
-                            task_id: Some(t.id.clone()),
-                            text: format!("###### ✅ 会话已结束\n\n{}{}", body(t), result(&t.id)),
-                        });
-                    }
+            // 状态跃迁（会话仍在）：任务完成（Running→Idle）/ 结束（→Finished）
+            if let Some(&prev) = old.get(t.id.as_str()) {
+                if prev == TaskStatus::Running && t.status == TaskStatus::Idle {
+                    events.push(NotifyEvent {
+                        owner: owner.clone(),
+                        kind: EventKind::Waiting,
+                        task_id: Some(t.id.clone()),
+                        text: format!(
+                            "###### 🔔 任务完成 · 等待你的操作\n\n{}{}",
+                            body(t),
+                            result(&t.id)
+                        ),
+                    });
+                } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
+                    events.push(NotifyEvent {
+                        owner: owner.clone(),
+                        kind: EventKind::Finished,
+                        task_id: Some(t.id.clone()),
+                        text: format!("###### ✅ 会话已结束\n\n{}{}", body(t), result(&t.id)),
+                    });
+                    known_removes.push(t.id.clone()); // 已结束：移出基线，别再被「消失」判一次
                 }
             }
+            // 会话开始：基线里没有 = 真·新。仅当基线已建立、设备稳定在线（过沉降期、非上线边沿）
+            // 时推；否则只登记进基线不推（重连扫回 / 冷启动的已有会话不算新）。
+            if !entry.known_sessions.contains_key(&t.id)
+                && baseline
+                && !was_offline
+                && online_secs >= NEW_SESSION_SETTLE_SECS
+            {
+                events.push(NotifyEvent {
+                    owner: owner.clone(),
+                    kind: EventKind::NewSession,
+                    task_id: Some(t.id.clone()),
+                    text: format!("###### 🆕 会话开始\n\n{}", body(t)),
+                });
+            }
+            known_updates.push(t.clone());
         }
-        // 消失的会话 = 结束
-        let new_ids: std::collections::HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
-        for t in &entry.tasks {
-            if !new_ids.contains(t.id.as_str()) && t.status != TaskStatus::Finished {
+        // 消失的会话 = 结束（去抖）：只有连续消失超过 FINISH_GRACE_SECS 才判结束，
+        // 抹掉配对振荡时一两个周期的抖动（消失即回，last_seen 很近，不会误判结束）。
+        for (id, task) in entry.known_sessions.iter() {
+            if current_ids.contains(id.as_str()) || known_removes.contains(id) {
+                continue;
+            }
+            let gone = entry
+                .session_last_seen
+                .get(id)
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(u64::MAX);
+            if gone >= crate::state::FINISH_GRACE_SECS {
                 events.push(NotifyEvent {
                     owner: owner.clone(),
                     kind: EventKind::Finished,
-                    task_id: Some(t.id.clone()),
-                    text: format!("###### ✅ 会话已结束\n\n{}{}", body(t), result(&t.id)),
+                    task_id: Some(id.clone()),
+                    text: format!("###### ✅ 会话已结束\n\n{}{}", body(task), result(id)),
                 });
+                known_removes.push(id.clone());
             }
         }
         // 设备上线边沿
@@ -1893,6 +1917,16 @@ async fn report(
     }
     if notify_owner.is_some() {
         entry.notified_online = true;
+    }
+    // 应用会话基线的增改/删除（owner 块内借用 entry 只读，故延到此处统一 apply）。
+    // 先增改后删除：状态跃迁到 Finished 的会话既在 updates 也在 removes，净效果为移除。
+    for t in &known_updates {
+        entry.known_sessions.insert(t.id.clone(), t.clone());
+        entry.session_last_seen.insert(t.id.clone(), now_i);
+    }
+    for id in &known_removes {
+        entry.known_sessions.remove(id);
+        entry.session_last_seen.remove(id);
     }
     entry.tasks = tasks;
     // 缓存 agent 回传的 git 对比结果

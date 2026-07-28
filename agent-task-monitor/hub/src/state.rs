@@ -56,6 +56,12 @@ pub struct MachineEntry {
     /// 刚上线（含 hub 重启、客户端重启/更新）后客户端会分几次把已有会话陆续扫上来，
     /// 那不是新开会话，不能推。上线后过了沉降期，新冒出来的才算真·新会话。
     pub online_since: Instant,
+    /// 会话基线：id → 最近一次快照。用于「会话开始/结束」的稳定判定，避免配对振荡
+    /// （同一进程在两个会话文件间来回抖）时同一会话反复推开始/结束。
+    pub known_sessions: HashMap<String, Task>,
+    /// 会话 id → 最近一次在上报里出现的时刻。会话「消失」超过 FINISH_GRACE_SECS 才判结束，
+    /// 抹掉一两个上报周期的抖动。
+    pub session_last_seen: HashMap<String, Instant>,
 }
 
 /// 机器离线判定阈值
@@ -64,6 +70,10 @@ pub const OFFLINE_AFTER_SECS: u64 = 10;
 /// 「会话开始」推送沉降期：设备上线后这段时间内出现的会话视为「重连扫回的已有会话」，
 /// 不推。客户端重启/更新后分批扫回历史会话可能持续十几秒，取 30s 留足余量。
 pub const NEW_SESSION_SETTLE_SECS: u64 = 30;
+
+/// 「会话已结束」去抖：会话从上报里消失后，要连续消失这么久才判真结束再推。
+/// 配对振荡（/clear 后进程在新旧会话文件间来回抖）通常几秒内自愈，取 20s 覆盖。
+pub const FINISH_GRACE_SECS: u64 = 20;
 
 /// 文件下发允许写入的根目录：AM_UPLOAD_ROOT，默认用户主目录。
 /// 常量时间比较令牌。
