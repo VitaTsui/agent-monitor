@@ -593,51 +593,68 @@ async fn send_input(
         return e;
     }
 
-    // 稍等客户端取走并上报回队列状态（活跃机器约 1.5s 一轮，轮询最多 ~9s 判定）
+    // 即时回执，不阻塞用户；是否排队/已执行由后台判定后经 sessionWebhook 再推一条。
+    // 没有 webhook（罕见）时退回一句简单确认。
+    match reply {
+        Some(ctx) if !ctx.webhook.is_empty() => {
+            let st = state.clone();
+            let (wh, exp, user, tid, txt, i) = (
+                ctx.webhook.clone(),
+                ctx.expiry_ms,
+                username.to_string(),
+                task_id.clone(),
+                text.clone(),
+                idx.clone(),
+            );
+            tokio::spawn(async move { confirm_and_watch(st, wh, exp, user, tid, txt, i).await });
+            format!("📤 已下发到会话 {idx}：{text}\n确认排队/执行中，稍后通知…")
+        }
+        _ => format!("已发送到会话 {idx}：{text}"),
+    }
+}
+
+/// 后台判定「排队 or 已执行」并经 sessionWebhook 推结果；若排队，继续监控到执行为止再推一条。
+async fn confirm_and_watch(
+    state: SharedState,
+    webhook: String,
+    expiry_ms: u64,
+    username: String,
+    task_id: String,
+    text: String,
+    idx: String,
+) {
     let tn = norm(&text);
-    let mut queued_snapshot: Option<Vec<String>> = None;
+    // 判定阶段：轮询最多 ~9s，等客户端取走并上报回队列状态（活跃机约 1.5s 一轮）
+    let mut queued_list: Option<Vec<String>> = None;
     for _ in 0..6 {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        let Some((hub_pending, term_q)) = read_queue(state, username, &task_id).await else {
+        if expiry_ms > 0 && crate::state::now_secs() * 1000 >= expiry_ms {
+            return;
+        }
+        let Some((hub_pending, term_q)) = read_queue(&state, &username, &task_id).await else {
             continue;
         };
-        let in_queue = term_q.iter().any(|t| norm(t) == tn) || hub_pending.iter().any(|t| norm(t) == tn);
-        if in_queue {
-            // 终端原生队列在前（更靠前执行），hub 待下发在后
+        if term_q.iter().any(|t| norm(t) == tn) || hub_pending.iter().any(|t| norm(t) == tn) {
             let mut list = term_q.clone();
             list.extend(hub_pending);
-            queued_snapshot = Some(list);
+            queued_list = Some(list);
             break;
         }
     }
-
-    match queued_snapshot {
-        None => format!("✅ 已执行（会话 {idx}）：{text}"),
+    match queued_list {
+        None => {
+            let _ = push_webhook(&webhook, &format!("✅ 已执行（会话 {idx}）：{text}")).await;
+        }
         Some(list) => {
-            // 排队中：展示当前排队列表；并起后台监控，等它被纳入执行后主动推一条
-            if let Some(ctx) = reply {
-                if !ctx.webhook.is_empty() {
-                    let st = state.clone();
-                    let (wh, exp, user, tid, txt, i) = (
-                        ctx.webhook.clone(),
-                        ctx.expiry_ms,
-                        username.to_string(),
-                        task_id.clone(),
-                        text.clone(),
-                        idx.clone(),
-                    );
-                    tokio::spawn(async move {
-                        watch_dequeue(st, wh, exp, user, tid, txt, i).await
-                    });
-                }
-            }
             let mut lines = vec![format!("⏳ 已排队（会话 {idx}），暂未执行。当前排队：")];
             for (n, t) in list.iter().enumerate() {
                 let mark = if norm(t) == tn { " ← 本条" } else { "" };
                 lines.push(format!("{}. {}{}", n + 1, t, mark));
             }
-            lines.push("被终端接收执行后会主动通知你。发「排队 N」可随时查看。".to_string());
-            lines.join("\n")
+            lines.push("被终端接收执行后会再通知你。发「排队 N」可随时查看。".to_string());
+            let _ = push_webhook(&webhook, &lines.join("\n")).await;
+            // 继续监控到它被纳入执行
+            watch_dequeue(state, webhook, expiry_ms, username, task_id, text, idx).await;
         }
     }
 }
