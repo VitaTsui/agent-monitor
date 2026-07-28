@@ -1840,14 +1840,23 @@ async fn report(
                 text: format!("###### 🟢 设备上线\n\n**设备**：{dev}"),
             });
         }
-        // 交互式选择提醒：会话最新消息是 select（AskUserQuestion / 权限确认）时，
+        // 交互式选择提醒：会话最新对话消息是 select（AskUserQuestion / 权限确认）时，
         // 进入该状态推一次（边沿触发，靠 select_notified 去重），提示去作答。
+        // 注意：messages() 会在末尾追加 todos/bgtasks 状态快照，不能直接取 ms.last()
+        //（否则有任务清单/后台任务的会话里，最后一条恒是快照、select 永远检不出、不推提醒）。
+        // 取最后一条「非快照」对话消息来判定。
+        let last_convo = |ms: &[am_core::model::MessageBrief]| -> Option<am_core::model::MessageBrief> {
+            ms.iter()
+                .rev()
+                .find(|m| !matches!(m.role.as_str(), "todos" | "bgtasks"))
+                .cloned()
+        };
         let now_selecting: std::collections::HashSet<String> = tasks
             .iter()
             .filter(|t| {
                 msgs_map
                     .get(&t.id)
-                    .and_then(|ms| ms.last())
+                    .and_then(|ms| last_convo(ms))
                     .map(|m| m.role.as_str() == "select")
                     .unwrap_or(false)
             })
@@ -1857,7 +1866,7 @@ async fn report(
             if now_selecting.contains(&t.id) && !entry.select_notified.contains(&t.id) {
                 let opts = msgs_map
                     .get(&t.id)
-                    .and_then(|ms| ms.last())
+                    .and_then(|ms| last_convo(ms))
                     .map(|m| select_options_text(&m.content))
                     .unwrap_or_default();
                 events.push(NotifyEvent {
