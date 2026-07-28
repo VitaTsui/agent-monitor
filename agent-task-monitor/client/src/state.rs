@@ -205,6 +205,60 @@ pub fn terminal_key(p: &am_core::model::ProcessInfo) -> String {
     }
 }
 
+/// 持久化配对缓存的文件：pid → { sid, start }。用于客户端重启后恢复配对——claude 进程在
+/// 客户端重启后照样活着、pid 不变，据此恢复上次的正确配对，避免落到 tier④ mtime 启发式把
+/// 并发同项目的空闲会话交叉错配（退出客户端再重开时的下发错位）。
+fn pairs_file(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("session-pairs.json")
+}
+
+/// 写盘：只存「本轮真实配对且进程仍在」的条目（连同进程 start_time 供重启时防 pid 重用）。
+fn save_pairs(
+    data_dir: &std::path::Path,
+    pairs: &std::collections::HashMap<u32, String>,
+    procs: &[am_core::model::ProcessInfo],
+) {
+    let start_of: std::collections::HashMap<u32, u64> =
+        procs.iter().map(|p| (p.pid, p.start_time)).collect();
+    let mut obj = serde_json::Map::new();
+    for (pid, sid) in pairs {
+        if let Some(start) = start_of.get(pid) {
+            obj.insert(pid.to_string(), serde_json::json!({ "sid": sid, "start": start }));
+        }
+    }
+    let _ = std::fs::write(pairs_file(data_dir), serde_json::Value::Object(obj).to_string());
+}
+
+/// 读盘并校验：只保留「pid 且 start_time 都对得上当前活进程」的条目。start_time 相同即同一
+/// 进程（sysinfo 的 start_time 对同一进程稳定），防客户端重启期间旧 pid 被别的进程重用而错配。
+fn load_pairs(
+    data_dir: &std::path::Path,
+    procs: &[am_core::model::ProcessInfo],
+) -> std::collections::HashMap<u32, String> {
+    let start_of: std::collections::HashMap<u32, u64> =
+        procs.iter().map(|p| (p.pid, p.start_time)).collect();
+    let mut out = std::collections::HashMap::new();
+    let Ok(txt) = std::fs::read_to_string(pairs_file(data_dir)) else {
+        return out;
+    };
+    let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(&txt) else {
+        return out;
+    };
+    for (pid_s, ent) in &obj {
+        let Ok(pid) = pid_s.parse::<u32>() else { continue };
+        let (Some(sid), Some(start)) = (
+            ent.get("sid").and_then(|x| x.as_str()),
+            ent.get("start").and_then(|x| x.as_u64()),
+        ) else {
+            continue;
+        };
+        if start_of.get(&pid) == Some(&start) {
+            out.insert(pid, sid.to_string());
+        }
+    }
+    out
+}
+
 /// 扫描本机，产出带机器信息的任务快照。被排除的终端在此彻底剔除。
 pub async fn local_scan(state: &SharedState) -> Vec<Task> {
     // procs.scan()/scanner.scan() 会起 `ps` 子进程、读会话文件，都是同步阻塞调用。
@@ -400,9 +454,22 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         active
     };
     // 稳定配对缓存：pid → session_id。喂给 build_tasks 做兜底，让长时间闲置的会话保持配对、
-    // 不掉成「等待输入」占位；本轮配完再用真实配对刷新缓存。
+    // 不掉成「等待输入」占位；本轮配完再用真实配对刷新缓存。持久化到盘：客户端重启后按
+    // pid+start_time 校验恢复，避免退出重开时空闲会话落到 mtime 启发式而下发错位。
     static PREV_PAIRS: std::sync::Mutex<Option<std::collections::HashMap<u32, String>>> =
         std::sync::Mutex::new(None);
+    static PAIRS_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    // 首轮：从盘恢复上次配对（claude 进程重启后仍在、pid 不变），只认 pid+start_time 都对得上的
+    if !PAIRS_LOADED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let restored = load_pairs(&state.config.data_dir, &processes);
+        if !restored.is_empty() {
+            client_log(&format!(
+                "恢复配对缓存 {} 条（客户端重启，按 pid+start_time 校验存活进程）",
+                restored.len()
+            ));
+            *PREV_PAIRS.lock().unwrap() = Some(restored);
+        }
+    }
     let cached: std::collections::HashMap<u32, String> = {
         PREV_PAIRS.lock().unwrap().clone().unwrap_or_default()
     };
@@ -423,6 +490,10 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                     new_pairs.insert(pid, t.id.clone());
                 }
             }
+        }
+        // 持久化（节流每 8 轮 ~12s 写一次）：写盘先于覆盖内存，写的是本轮真实配对
+        if SCAN_TICKS.load(std::sync::atomic::Ordering::Relaxed) % 8 == 0 {
+            save_pairs(&state.config.data_dir, &new_pairs, &processes);
         }
         *PREV_PAIRS.lock().unwrap() = Some(new_pairs);
     }
