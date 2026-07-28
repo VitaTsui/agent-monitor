@@ -1852,6 +1852,28 @@ async fn report(
             .filter(|t| msgs_map.get(&t.id).map(|ms| is_pending_select(ms)).unwrap_or(false))
             .map(|t| t.id.clone())
             .collect();
+        // 诊断（临时）：任一会话窗口里含 select 时，打印其非快照消息的末 12 条 role（倒序），
+        // 看 select 后面到底跟了什么（为何 is_pending_select 判 false）。
+        for t in &tasks {
+            if let Some(ms) = msgs_map.get(&t.id) {
+                if ms.iter().any(|m| m.role == "select") {
+                    let seq: Vec<&str> = ms
+                        .iter()
+                        .filter(|m| !matches!(m.role.as_str(), "todos" | "bgtasks"))
+                        .rev()
+                        .take(12)
+                        .map(|m| m.role.as_str())
+                        .collect();
+                    tracing::info!(
+                        "钉钉诊断2 会话={} 状态={:?} pending_select={} 末12role(倒序)={:?}",
+                        &t.id[..t.id.len().min(8)],
+                        t.status,
+                        now_selecting.contains(&t.id),
+                        seq,
+                    );
+                }
+            }
+        }
         for t in &tasks {
             // 状态跃迁（会话仍在）：任务完成（Running→Idle）/ 结束（→Finished）。
             // 重连/客户端重启那一轮（was_offline）绝不比对：此时 `old` 还是重启【前】的旧快照，
