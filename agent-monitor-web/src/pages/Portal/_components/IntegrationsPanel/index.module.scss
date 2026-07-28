@@ -215,3 +215,59 @@
     }
   }
 }
+
+// 钉钉文件接收目录（按项目）
+.recvSection {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(36, 61, 66, 0.08);
+
+  .recvTitle {
+    font-size: 14px;
+    font-weight: 600;
+    color: #243d42;
+    margin-bottom: 6px;
+  }
+
+  .recvHint {
+    font-size: 12px;
+    color: #7c9096;
+    line-height: 1.6;
+    margin-bottom: 12px;
+
+    code {
+      background: rgba(36, 61, 66, 0.07);
+      border-radius: 4px;
+      padding: 0 4px;
+      font-size: 11px;
+    }
+  }
+
+  .recvEmpty {
+    font-size: 12px;
+    color: #9aa7ad;
+    padding: 10px 0;
+  }
+
+  .recvRow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+
+    .recvName {
+      flex: none;
+      width: 150px;
+      font-size: 13px;
+      color: #243d42;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .recvInput {
+      flex: 1;
+      min-width: 0;
+    }
+  }
+}

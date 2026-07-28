@@ -652,13 +652,20 @@ async fn attach_pending_file(
         return Err("会话无项目目录".into());
     }
     let sep = if cwd.contains('\\') { '\\' } else { '/' };
-    let dir = format!("{cwd}{sep}tmp");
+    // 该项目配置的接收目录；未配置则默认 `<cwd>/tmp`。配置值可为绝对路径或相对(相对项目)。
+    let configured = state.registry.read().await.dingtalk_recv_dir(username, &cwd);
+    let dir = match configured {
+        Some(d) if d.starts_with('/') || d.contains(":\\") => d, // 绝对路径直接用
+        Some(d) => format!("{cwd}{sep}{}", d.trim_matches(['/', '\\'])), // 相对项目
+        None => format!("{cwd}{sep}tmp"),
+    };
     // 只留 basename，防路径穿越
     let safe = std::path::Path::new(&pf.file_name)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "file.bin".into());
+    let target = format!("{}{sep}{safe}", dir.trim_end_matches(['/', '\\']));
     let mut machines = state.machines.write().await;
     let entry = machines.get_mut(&task.machine_id).ok_or("会话所属设备已离线")?;
     entry.pending_files.push_back(am_core::model::FileTransfer {
@@ -666,7 +673,12 @@ async fn attach_pending_file(
         filename: safe.clone(),
         content_b64: B64.encode(&bytes),
     });
-    Ok(format!("./tmp/{safe}"))
+    // 回填路径：目标在项目目录内 → 用相对 `./子路径`，否则用绝对路径（Claude 才找得到）。
+    let rel = target
+        .strip_prefix(&format!("{cwd}{sep}"))
+        .map(|r| format!("./{}", r.replace('\\', "/")))
+        .unwrap_or(target);
+    Ok(rel)
 }
 
 async fn send_input(

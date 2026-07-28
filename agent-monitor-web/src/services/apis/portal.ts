@@ -294,10 +294,24 @@ export interface IntegrationsInfo {
     stream?: boolean;
     callbackUrl: string;
   } | null;
+  /** 钉钉文件接收目录（按项目）：cwd/名称/已配目录（未配为 null，默认 tmp） */
+  recvDirProjects?: {
+    cwd: string;
+    name: string;
+    dir?: string | null;
+  }[];
 }
 
 export const getIntegrations = async () => {
   return await get<IntegrationsInfo>("/monitor/integrations");
+};
+
+/** 设置某项目的钉钉文件接收目录（dir 空 = 清除，回落默认 tmp） */
+export const setDingtalkRecvDir = async (project: string, dir: string) => {
+  return await post<{ result: string }>(
+    "/monitor/integrations/dingtalk-recv-dir",
+    { project, dir }
+  );
 };
 
 /** 钉钉群机器人（主动推送） */

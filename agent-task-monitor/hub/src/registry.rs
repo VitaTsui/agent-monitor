@@ -152,6 +152,10 @@ struct Persisted {
     /// 钉钉企业应用（双向）：用户名 → 配置
     #[serde(default)]
     dingtalk_apps: HashMap<String, DingtalkApp>,
+    /// 钉钉文件接收目录（按项目）：用户名 → (项目 cwd → 接收目录)。
+    /// 未配置的项目默认落到 `<项目 cwd>/tmp`。
+    #[serde(default)]
+    dingtalk_recv_dirs: HashMap<String, HashMap<String, String>>,
 }
 
 /// 企业微信自建应用（用户自助接入，双向遥控）
@@ -191,6 +195,7 @@ pub struct Registry {
     dingtalk: HashMap<String, crate::dingtalk::DingtalkNotify>,
     wecom_apps: HashMap<String, WecomApp>,
     dingtalk_apps: HashMap<String, DingtalkApp>,
+    dingtalk_recv_dirs: HashMap<String, HashMap<String, String>>,
 }
 
 impl Registry {
@@ -220,7 +225,7 @@ impl Registry {
             } else {
                 p.super_user
             };
-            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk: p.dingtalk, wecom_apps: p.wecom_apps, dingtalk_apps: p.dingtalk_apps }
+            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk: p.dingtalk, wecom_apps: p.wecom_apps, dingtalk_apps: p.dingtalk_apps, dingtalk_recv_dirs: p.dingtalk_recv_dirs }
         } else {
             Registry {
                 dir,
@@ -230,6 +235,7 @@ impl Registry {
                 dingtalk: HashMap::new(),
                 wecom_apps: HashMap::new(),
                 dingtalk_apps: HashMap::new(),
+                dingtalk_recv_dirs: HashMap::new(),
             }
         };
         if reg.users.is_empty() {
@@ -263,6 +269,7 @@ impl Registry {
             dingtalk: self.dingtalk.clone(),
             wecom_apps: self.wecom_apps.clone(),
             dingtalk_apps: self.dingtalk_apps.clone(),
+            dingtalk_recv_dirs: self.dingtalk_recv_dirs.clone(),
             quota_limit: 0,
             super_user: self.super_user.clone(),
         };
@@ -511,6 +518,34 @@ impl Registry {
 
     pub fn dingtalk_of(&self, username: &str) -> Option<crate::dingtalk::DingtalkNotify> {
         self.dingtalk.get(username).cloned()
+    }
+
+    /// 某项目配置的钉钉文件接收目录（未配置返回 None → 调用方回落 `<cwd>/tmp`）。
+    pub fn dingtalk_recv_dir(&self, username: &str, project_cwd: &str) -> Option<String> {
+        self.dingtalk_recv_dirs
+            .get(username)
+            .and_then(|m| m.get(project_cwd))
+            .filter(|s| !s.trim().is_empty())
+            .cloned()
+    }
+
+    /// 该用户已配置的全部「项目 → 接收目录」。
+    pub fn dingtalk_recv_dirs_of(&self, username: &str) -> HashMap<String, String> {
+        self.dingtalk_recv_dirs.get(username).cloned().unwrap_or_default()
+    }
+
+    /// 设置某项目的接收目录；dir 为空则清除该项目的配置（回落默认 tmp）。
+    pub fn set_dingtalk_recv_dir(&mut self, username: &str, project_cwd: &str, dir: &str) {
+        let entry = self.dingtalk_recv_dirs.entry(username.to_string()).or_default();
+        if dir.trim().is_empty() {
+            entry.remove(project_cwd);
+        } else {
+            entry.insert(project_cwd.to_string(), dir.trim().to_string());
+        }
+        if entry.is_empty() {
+            self.dingtalk_recv_dirs.remove(username);
+        }
+        self.save();
     }
 
     /// 该用户名下全部设备（含离线；设备管理列表用）

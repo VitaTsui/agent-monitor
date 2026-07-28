@@ -93,6 +93,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/integrations/dingtalk-robot/test", post(test_dingtalk_robot))
         .route("/monitor/integrations/wecom-app", post(set_wecom_app))
         .route("/monitor/integrations/dingtalk-app", post(set_dingtalk_app))
+        .route("/monitor/integrations/dingtalk-recv-dir", post(set_dingtalk_recv_dir))
         // 回调（每用户 channel 路由）
         .route(
             "/monitor/int/wecom/:channel",
@@ -1256,12 +1257,36 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
     let Some(user) = auth_user(&state, &headers).await else {
         return err(401, "未登录");
     };
+    // 钉钉文件接收目录（按项目）：已配置的 + 当前活跃会话涉及的项目（供 UI 列出可配的项目）
+    let recv_dirs = state.registry.read().await.dingtalk_recv_dirs_of(&user);
+    let mut projects: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for t in state.tasks_for(&user).await {
+        if !t.project.is_empty() {
+            projects.insert(t.project.clone(), t.project_name.clone());
+        }
+    }
+    // 已配置但当前无活跃会话的项目也要能看到/改
+    for k in recv_dirs.keys() {
+        projects.entry(k.clone()).or_insert_with(|| {
+            k.trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(k)
+                .to_string()
+        });
+    }
+    let project_list: Vec<Value> = projects
+        .into_iter()
+        .map(|(cwd, name)| json!({ "cwd": cwd, "name": name, "dir": recv_dirs.get(&cwd) }))
+        .collect();
+
     let reg = state.registry.read().await;
     let base = public_base();
     let robot = reg.dingtalk_of(&user);
     let wecom = reg.wecom_app_of(&user);
     let dt_app = reg.dingtalk_app_of(&user);
     ok(json!({
+        "recvDirProjects": project_list,
         "dingtalkRobot": robot.map(|c| json!({
             "webhook": c.webhook, "hasSecret": !c.secret.is_empty(),
             "waiting": c.waiting, "finished": c.finished,
@@ -1278,6 +1303,36 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
             "callbackUrl": format!("{base}/monitor/int/dingtalk/{}", a.channel),
         })),
     }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecvDirReq {
+    /// 项目 cwd（唯一键）
+    project: String,
+    /// 接收目录：绝对路径或相对项目的子路径；空 = 清除（回落默认 tmp）
+    #[serde(default)]
+    dir: String,
+}
+
+/// POST /monitor/integrations/dingtalk-recv-dir —— 设置某项目的钉钉文件接收目录
+async fn set_dingtalk_recv_dir(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<RecvDirReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    if req.project.trim().is_empty() {
+        return err(400, "缺少项目");
+    }
+    state
+        .registry
+        .write()
+        .await
+        .set_dingtalk_recv_dir(&user, req.project.trim(), &req.dir);
+    ok(json!({ "result": "已保存" }))
 }
 
 #[derive(Deserialize)]

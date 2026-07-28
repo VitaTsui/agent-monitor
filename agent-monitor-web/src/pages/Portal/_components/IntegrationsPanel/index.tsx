@@ -15,6 +15,7 @@ import {
   IntegrationsInfo,
   getIntegrations,
   setDingtalkApp,
+  setDingtalkRecvDir,
   setDingtalkRobot,
   setWecomApp,
   testDingtalkRobot,
@@ -76,6 +77,12 @@ const IntegrationsPanel: React.FC = () => {
   const [dingUrl, setDingUrl] = useState("");
   const [dingSaving, setDingSaving] = useState(false);
 
+  // 钉钉文件接收目录（按项目）
+  const [recvProjects, setRecvProjects] = useState<
+    { cwd: string; name: string; dir: string }[]
+  >([]);
+  const [recvSaving, setRecvSaving] = useState<string | null>(null);
+
   const load = useCallback(() => {
     getIntegrations()
       .then((res) => {
@@ -100,6 +107,13 @@ const IntegrationsPanel: React.FC = () => {
           });
           setDingUrl(d.dingtalkApp.callbackUrl);
         }
+        setRecvProjects(
+          (d.recvDirProjects ?? []).map((p) => ({
+            cwd: p.cwd,
+            name: p.name,
+            dir: p.dir ?? "",
+          }))
+        );
       })
       .catch(() => void 0);
   }, []);
@@ -256,6 +270,52 @@ const IntegrationsPanel: React.FC = () => {
           <RightOutlined className={styles.arrow} />
         </div>
       ))}
+
+      {/* 钉钉文件接收目录（按项目）：发给机器人的文件默认落到 <项目>/tmp，可按项目改 */}
+      <div className={styles.recvSection}>
+        <div className={styles.recvTitle}>钉钉文件接收目录（按项目）</div>
+        <div className={styles.recvHint}>
+          发给机器人的文件，随下一条任务落到对应会话的这个目录。留空 = 默认{" "}
+          <code>项目/tmp</code>；可填相对子路径（如 <code>uploads</code>）或绝对路径。
+        </div>
+        {recvProjects.length === 0 ? (
+          <div className={styles.recvEmpty}>暂无项目（有活跃会话后自动出现在这里）</div>
+        ) : (
+          recvProjects.map((p) => (
+            <div key={p.cwd} className={styles.recvRow}>
+              <span className={styles.recvName} title={p.cwd}>
+                {p.name}
+              </span>
+              <Input
+                className={styles.recvInput}
+                placeholder="tmp（默认）"
+                value={p.dir}
+                onChange={(v) =>
+                  setRecvProjects((list) =>
+                    list.map((x) => (x.cwd === p.cwd ? { ...x, dir: v } : x))
+                  )
+                }
+              />
+              <Button
+                size="small"
+                loading={recvSaving === p.cwd}
+                onClick={() => {
+                  setRecvSaving(p.cwd);
+                  setDingtalkRecvDir(p.cwd, p.dir.trim())
+                    .then((res) => {
+                      if (res.code === 0) message.success("已保存");
+                      else message.error(res.msg ?? "保存失败");
+                    })
+                    .catch(() => message.error("保存失败"))
+                    .finally(() => setRecvSaving(null));
+                }}
+              >
+                保存
+              </Button>
+            </div>
+          ))
+        )}
+      </div>
 
       {/* 钉钉群机器人 */}
       <Modal
