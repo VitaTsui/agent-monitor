@@ -2,7 +2,7 @@ use crate::admin::{self, auth_user, err, ok};
 use am_core::model::{ControlCmd, ControlReq, ReportPayload, Task, TaskStatus};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use crate::state::{MachineEntry, SharedState, OFFLINE_AFTER_SECS};
+use crate::state::{MachineEntry, SharedState, NEW_SESSION_SETTLE_SECS, OFFLINE_AFTER_SECS};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
@@ -1729,6 +1729,7 @@ async fn report(
                 git_cache: HashMap::new(),
                 notified_online: false,
                 select_notified: std::collections::HashSet::new(),
+                online_since: Instant::now(),
             }
         });
     // 设备上线边沿：新登记 或 之前已判离线（超阈值）
@@ -1737,6 +1738,12 @@ async fn report(
     entry.platform = payload.platform;
     entry.version = payload.version;
     entry.last_report = Instant::now();
+    // 上线边沿：刷新沉降起点。上线后 NEW_SESSION_SETTLE_SECS 内出现的会话一律当「重连扫回的
+    // 已有会话」不推，避免客户端更新/重启后分批扫回历史会话时刷屏「会话开始」。
+    if was_offline {
+        entry.online_since = Instant::now();
+    }
+    let online_secs = entry.online_since.elapsed().as_secs();
     let mut tasks = payload.tasks;
     for t in tasks.iter_mut() {
         if !t.recent_messages.is_empty() {
@@ -1784,10 +1791,11 @@ async fn report(
         };
         for t in &tasks {
             match old.get(t.id.as_str()) {
-                // 会话开始只在「设备已稳定在线」时推：设备刚（重）连上（含 hub 重启后首报）
-                // 时它名下所有会话都会显示为「新」，那不是真的新开会话，别刷屏。
+                // 会话开始只在「设备已稳定在线」时推：设备刚（重）连上后，客户端会分几次
+                // 把已有会话陆续扫上来（含 hub 重启、客户端更新/重启），那不是真的新开会话。
+                // 仅当上线已超过沉降期、且本次不是上线边沿时才推。
                 None => {
-                    if !was_offline {
+                    if !was_offline && online_secs >= NEW_SESSION_SETTLE_SECS {
                         events.push(NotifyEvent {
                             owner: owner.clone(),
                             kind: EventKind::NewSession,

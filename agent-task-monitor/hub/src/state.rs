@@ -52,10 +52,18 @@ pub struct MachineEntry {
     pub notified_online: bool,
     /// 已推过「等待选择」提醒的会话 ID（边沿触发：进入 select 推一次，离开清除）
     pub select_notified: std::collections::HashSet<String>,
+    /// 本次「上线」的起点：设备离线→在线边沿时刷新。用于「会话开始」推送的沉降窗口——
+    /// 刚上线（含 hub 重启、客户端重启/更新）后客户端会分几次把已有会话陆续扫上来，
+    /// 那不是新开会话，不能推。上线后过了沉降期，新冒出来的才算真·新会话。
+    pub online_since: Instant,
 }
 
 /// 机器离线判定阈值
 pub const OFFLINE_AFTER_SECS: u64 = 10;
+
+/// 「会话开始」推送沉降期：设备上线后这段时间内出现的会话视为「重连扫回的已有会话」，
+/// 不推。客户端重启/更新后分批扫回历史会话可能持续十几秒，取 30s 留足余量。
+pub const NEW_SESSION_SETTLE_SECS: u64 = 30;
 
 /// 文件下发允许写入的根目录：AM_UPLOAD_ROOT，默认用户主目录。
 /// 常量时间比较令牌。
