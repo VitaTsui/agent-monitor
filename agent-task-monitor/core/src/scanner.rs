@@ -2272,6 +2272,31 @@ mod replay_state_tests {
 }
 
 #[cfg(test)]
+mod brief_tests {
+    use super::*;
+
+    #[test]
+    fn ask_user_question_becomes_select() {
+        // 真实终端 Claude Code 写出的 AskUserQuestion 记录结构
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{
+              "type":"assistant",
+              "isSidechain":false,
+              "message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"toolu_1","name":"AskUserQuestion","caller":"x",
+                 "input":{"questions":[{"question":"选哪个?","options":[{"label":"A"},{"label":"B"}]}]}}
+              ]},
+              "timestamp":"2026-07-28T08:00:00.000Z"
+            }"#,
+        )
+        .unwrap();
+        let b = entry_to_brief(&v).expect("应产出一条简报");
+        assert_eq!(b.role, "select", "AskUserQuestion 必须解析成 select 角色");
+        assert!(b.content.contains("questions"), "select 内容应含 questions");
+    }
+}
+
+#[cfg(test)]
 mod pairing_tests {
     use super::*;
 

@@ -1953,18 +1953,22 @@ async fn report(
             })
             .map(|t| t.id.clone())
             .collect();
-        // 诊断（临时）：排查「等待选择没推送」。对每个会话记末条对话消息 role，
-        // 以及是否被判为 selecting / 是否已通知过。复现时看日志即知卡在哪一步。
+        // 诊断（临时）：排查「等待选择没推送」。列出每个会话的消息数 + 末尾几条 role，
+        // 直接看 hub 收到的 entry.messages 里 select 到底在不在、是不是末条。
         for t in &tasks {
-            if let Some(m) = msgs_map.get(&t.id).and_then(|ms| last_convo(ms)) {
-                if m.role == "select" || m.role == "plan" {
+            if let Some(ms) = msgs_map.get(&t.id) {
+                let tail_roles: Vec<&str> =
+                    ms.iter().rev().take(4).map(|m| m.role.as_str()).collect();
+                let has_select = ms.iter().any(|m| m.role == "select");
+                if has_select || matches!(t.status, TaskStatus::Idle) {
                     tracing::info!(
-                        "钉钉诊断 会话={} 末条role={} 判为selecting={} 已通知={} 消息数={}",
-                        t.id,
-                        m.role,
-                        now_selecting.contains(&t.id),
-                        entry.select_notified.contains(&t.id),
-                        msgs_map.get(&t.id).map(|v| v.len()).unwrap_or(0),
+                        "钉钉诊断 会话={} 状态={:?} 消息数={} 含select={} 末4条role(倒序)={:?} 末条对话role={:?}",
+                        &t.id[..t.id.len().min(8)],
+                        t.status,
+                        ms.len(),
+                        has_select,
+                        tail_roles,
+                        last_convo(ms).map(|m| m.role),
                     );
                 }
             }
