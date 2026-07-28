@@ -791,6 +791,28 @@ fn select_options_text(content: &str) -> String {
     out.trim_end().to_string()
 }
 
+/// 把一段 markdown 里的标题行（# ~ ######）改成加粗行：钉钉里 assistant 结果常带
+/// `###### 小标题`，heading 会带大字号/上下间距，塞进推送里突兀；转成 **加粗** 更贴合。
+fn md_headings_to_bold(s: &str) -> String {
+    s.lines()
+        .map(|line| {
+            let t = line.trim_start();
+            let hashes = t.chars().take_while(|c| *c == '#').count();
+            if (1..=6).contains(&hashes) && t.chars().nth(hashes) == Some(' ') {
+                let title = t[hashes..].trim();
+                if title.is_empty() {
+                    line.to_string()
+                } else {
+                    format!("**{title}**")
+                }
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// POST /monitor/tasks/:id/input —— 向会话注入一行输入（前台发布任务）
 /// 本机直接 TTY 注入；远程机器进命令队列由该机 agent 执行。
 async fn input_task(
@@ -1761,7 +1783,8 @@ async fn report(
                     let full = m.content.trim();
                     let cut = full.chars().count() > LIMIT;
                     let s: String = full.chars().take(LIMIT).collect();
-                    let s = s.trim();
+                    // 结果正文里的 markdown 标题转成加粗，避免推送里出现大字号 heading
+                    let s = md_headings_to_bold(s.trim());
                     if s.is_empty() {
                         String::new()
                     } else if cut {
