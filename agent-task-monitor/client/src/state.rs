@@ -205,38 +205,39 @@ pub fn terminal_key(p: &am_core::model::ProcessInfo) -> String {
     }
 }
 
-/// 持久化配对缓存的文件：pid → { sid, start }。用于客户端重启后恢复配对——claude 进程在
-/// 客户端重启后照样活着、pid 不变，据此恢复上次的正确配对，避免落到 tier④ mtime 启发式把
-/// 并发同项目的空闲会话交叉错配（退出客户端再重开时的下发错位）。
+/// 持久化配对缓存的文件：**终端锚(shell pid) → session_id**。锚在终端 shell 上而非易变的
+/// claude pid：claude 经 /clear、--resume、客户端/进程重启会换 pid，但它所在终端的 shell pid
+/// 不变。据此在重启后把「该终端现在的 claude」接回上次的会话，避免落到 tier④ mtime 启发式把
+/// 并发同项目会话交叉错配（退出客户端再重开时的下发错位）。见 process::shell_anchor_pids。
 fn pairs_file(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("session-pairs.json")
 }
 
-/// 写盘：只存「本轮真实配对且进程仍在」的条目（连同进程 start_time 供重启时防 pid 重用）。
+/// 写盘：把「claude_pid → session」换算成「终端锚(shell) → session」再存。
 fn save_pairs(
     data_dir: &std::path::Path,
     pairs: &std::collections::HashMap<u32, String>,
-    procs: &[am_core::model::ProcessInfo],
+    _procs: &[am_core::model::ProcessInfo],
 ) {
-    let start_of: std::collections::HashMap<u32, u64> =
-        procs.iter().map(|p| (p.pid, p.start_time)).collect();
+    let pids: Vec<u32> = pairs.keys().copied().collect();
+    let anchor_of = am_core::process::shell_anchor_pids(&pids);
     let mut obj = serde_json::Map::new();
     for (pid, sid) in pairs {
-        if let Some(start) = start_of.get(pid) {
-            obj.insert(pid.to_string(), serde_json::json!({ "sid": sid, "start": start }));
+        // 同一终端下只该有一个 claude；用终端锚做 key，claude 换 pid 也接得回
+        if let Some(&anchor) = anchor_of.get(pid) {
+            obj.insert(anchor.to_string(), serde_json::json!({ "sid": sid }));
         }
     }
     let _ = std::fs::write(pairs_file(data_dir), serde_json::Value::Object(obj).to_string());
 }
 
-/// 读盘并校验：只保留「pid 且 start_time 都对得上当前活进程」的条目。start_time 相同即同一
-/// 进程（sysinfo 的 start_time 对同一进程稳定），防客户端重启期间旧 pid 被别的进程重用而错配。
+/// 读盘并接回：为当前每个活着的 claude 求其终端锚(shell)，若该锚在盘上有记录，就把「这个
+/// claude → 那条会话」放进缓存。锚由当前活进程算出 → 天然只认「此刻真有 claude 在该终端下」
+/// 的记录；死终端/被非-shell 重用的 pid 不会匹配，防 pid 重用错配。返回 claude_pid → session。
 fn load_pairs(
     data_dir: &std::path::Path,
     procs: &[am_core::model::ProcessInfo],
 ) -> std::collections::HashMap<u32, String> {
-    let start_of: std::collections::HashMap<u32, u64> =
-        procs.iter().map(|p| (p.pid, p.start_time)).collect();
     let mut out = std::collections::HashMap::new();
     let Ok(txt) = std::fs::read_to_string(pairs_file(data_dir)) else {
         return out;
@@ -244,16 +245,26 @@ fn load_pairs(
     let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(&txt) else {
         return out;
     };
-    for (pid_s, ent) in &obj {
-        let Ok(pid) = pid_s.parse::<u32>() else { continue };
-        let (Some(sid), Some(start)) = (
-            ent.get("sid").and_then(|x| x.as_str()),
-            ent.get("start").and_then(|x| x.as_u64()),
-        ) else {
-            continue;
-        };
-        if start_of.get(&pid) == Some(&start) {
-            out.insert(pid, sid.to_string());
+    // 盘上：终端锚 → session
+    let mut anchor_sid: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    for (anchor_s, ent) in &obj {
+        if let (Ok(anchor), Some(sid)) =
+            (anchor_s.parse::<u32>(), ent.get("sid").and_then(|x| x.as_str()))
+        {
+            anchor_sid.insert(anchor, sid.to_string());
+        }
+    }
+    if anchor_sid.is_empty() {
+        return out;
+    }
+    // 为当前活着的 claude 求终端锚，锚命中盘上记录 → 接回配对
+    let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
+    let anchor_of = am_core::process::shell_anchor_pids(&pids);
+    for p in procs {
+        if let Some(&anchor) = anchor_of.get(&p.pid) {
+            if let Some(sid) = anchor_sid.get(&anchor) {
+                out.insert(p.pid, sid.clone());
+            }
         }
     }
     out

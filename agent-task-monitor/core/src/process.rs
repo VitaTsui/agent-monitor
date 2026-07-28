@@ -802,6 +802,47 @@ if([AmConIn]::Send([uint32]$TargetPid,$t)){ exit 0 } else { exit 2 }
     }
 }
 
+/// 批量求每个 claude 的「终端锚」= 最近的 shell 祖先 pid（powershell/cmd/bash…）。
+///
+/// 终端（宿主 shell）的 pid 跨 claude 的 `/clear`、`--resume`、重启都**不变**，而 claude 自己
+/// 会换 pid。因此把「会话↔进程」的持久化配对锚在 shell 上，比锚在易变的 claude pid 上稳得多：
+/// 客户端重启 / claude 换 pid 后，仍能靠「同一个 shell 底下现在的 claude」把配对接回去。
+/// 找不到 shell 祖先（异常）则回退为 claude 自身 pid，行为不劣于旧的 claude-pid 锚。
+///
+/// 一次 System 扫描处理全部 claude_pids，避免 per-pid 反复起 System。
+pub fn shell_anchor_pids(
+    claude_pids: &[u32],
+) -> std::collections::HashMap<u32, u32> {
+    use sysinfo::{Pid, System};
+    let is_shell = |n: &str| {
+        matches!(
+            n,
+            "powershell.exe" | "pwsh.exe" | "cmd.exe" | "bash.exe" | "nu.exe" | "wsl.exe"
+                | "bash" | "zsh" | "sh" | "fish" | "nu" | "pwsh" | "powershell" | "-zsh" | "-bash"
+        )
+    };
+    let mut sys = System::new();
+    sys.refresh_processes();
+    let mut out = std::collections::HashMap::new();
+    for &start in claude_pids {
+        let mut cur = start;
+        let mut anchor = start; // 回退：找不到 shell 祖先就用自身
+        for _ in 0..24 {
+            let Some(p) = sys.process(Pid::from_u32(cur)) else { break };
+            if is_shell(&p.name().to_lowercase()) {
+                anchor = cur; // 最近的 shell 祖先即终端锚
+                break;
+            }
+            match p.parent().map(|pp| pp.as_u32()) {
+                Some(pp) if pp != cur && pp > 1 => cur = pp,
+                _ => break,
+            }
+        }
+        out.insert(start, anchor);
+    }
+    out
+}
+
 /// 沿父进程链找 Cursor/VSCode 内嵌终端：若父链里出现 Cursor.exe/Code.exe，返回其「之下最近
 /// 的 shell pid」——即该内嵌终端在扩展里 `terminal.processId` 的值，客户端据此把任务经文件桥
 /// 交给扩展用 `terminal.sendText` 送达（ConPTY 内嵌终端无法用 WriteConsoleInput 注入）。
