@@ -1574,16 +1574,23 @@ async fn upload_file(
 
     let mut dir = String::new();
     let mut filename = String::new();
+    let mut name_field = String::new();
     let mut bytes: Vec<u8> = Vec::new();
     while let Ok(Some(field)) = multipart.next_field().await {
         match field.name().unwrap_or("") {
             "dir" => dir = field.text().await.unwrap_or_default(),
+            // 显式文件名（UTF-8 文本字段）：优先用它，避免 multipart filename 对非 ASCII 解歪
+            "name" => name_field = field.text().await.unwrap_or_default(),
             "file" => {
                 filename = field.file_name().unwrap_or("file.bin").to_string();
                 bytes = field.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
             }
             _ => {}
         }
+    }
+    // 优先显式 name 字段；缺省（旧前端）退回 multipart filename
+    if !name_field.trim().is_empty() {
+        filename = name_field.trim().to_string();
     }
     let dir = dir.trim().to_string();
     if dir.is_empty() || filename.is_empty() || bytes.is_empty() {

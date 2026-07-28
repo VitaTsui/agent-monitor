@@ -193,7 +193,8 @@ pub(crate) async fn dispatch(
         "恢复" | "继续" => control(state, username, &arg, ControlAction::Resume, "已恢复").await,
         "中断" => control(state, username, &arg, ControlAction::Interrupt, "已中断").await,
         "终止" | "停止" => control(state, username, &arg, ControlAction::Stop, "已终止").await,
-        "发" | "发送" | "回复" | "输入" => send_input(state, username, &arg).await,
+        "发" | "发送" | "回复" | "输入" => send_input(state, username, &arg, reply).await,
+        "排队" | "队列" | "queue" => list_queued(state, username, &arg).await,
         "监控" | "watch" => monitor_start(state, username, &arg, reply).await,
         "停止监控" | "取消监控" | "结束监控" | "unwatch" => monitor_stop(state, username).await,
         "撤回" | "recall" => recall_last(state, username, &arg).await,
@@ -318,7 +319,8 @@ fn help_text() -> String {
      • 会话 —— 列出当前会话（带序号）\n\
      • 设备 —— 列出名下设备\n\
      • 暂停 N / 恢复 N / 中断 N / 终止 N —— 控制第 N 个会话\n\
-     • 发 N 内容 —— 向第 N 个会话发布一条输入\n\
+     • 发 N 内容 —— 向第 N 个会话发布一条输入（排队则回队列，执行后主动通知）\n\
+     • 排队 [N] —— 查看排队中的任务（不带 N 汇总所有会话）\n\
      • 撤回 N —— 撤回第 N 个会话最近一条排队中的任务\n\
      • 监控 N —— 持续把第 N 个会话的新内容推到这里\n\
      • 停止监控 —— 结束监控\n\
@@ -543,7 +545,40 @@ async fn control(
     }
 }
 
-async fn send_input(state: &SharedState, username: &str, arg: &str) -> String {
+/// 归一化文本用于队列比对（折叠空白、去首尾）
+fn norm(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 读某会话当前的排队状态：(hub 待下发队列文本, 终端原生队列文本)。
+/// hub 待下发 = 还没被客户端取走的输入；终端原生 = 已注入终端、claude 排队中。
+async fn read_queue(
+    state: &SharedState,
+    username: &str,
+    task_id: &str,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let task = state.tasks_for(username).await.into_iter().find(|t| t.id == task_id)?;
+    let terminal_q = task.queued_inputs.clone();
+    let machines = state.machines.read().await;
+    let hub_pending: Vec<String> = machines
+        .get(&task.machine_id)
+        .map(|e| {
+            e.pending
+                .iter()
+                .filter(|c| c.task_id == task_id && matches!(c.action, ControlAction::Input))
+                .filter_map(|c| c.text.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((hub_pending, terminal_q))
+}
+
+async fn send_input(
+    state: &SharedState,
+    username: &str,
+    arg: &str,
+    reply: Option<&ReplyCtx>,
+) -> String {
     let (idx, text) = split_cmd(arg);
     if text.is_empty() {
         return "用法：发 <序号> <内容>，如「发 1 继续」。".to_string();
@@ -552,9 +587,139 @@ async fn send_input(state: &SharedState, username: &str, arg: &str) -> String {
         Ok(id) => id,
         Err(e) => return e,
     };
-    match queue_command(state, username, &task_id, ControlAction::Input, Some(text.clone())).await {
-        Ok(_) => format!("已发送到会话 {idx}：{text}"),
-        Err(e) => e,
+    if let Err(e) =
+        queue_command(state, username, &task_id, ControlAction::Input, Some(text.clone())).await
+    {
+        return e;
+    }
+
+    // 稍等客户端取走并上报回队列状态（活跃机器约 1.5s 一轮，轮询最多 ~9s 判定）
+    let tn = norm(&text);
+    let mut queued_snapshot: Option<Vec<String>> = None;
+    for _ in 0..6 {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let Some((hub_pending, term_q)) = read_queue(state, username, &task_id).await else {
+            continue;
+        };
+        let in_queue = term_q.iter().any(|t| norm(t) == tn) || hub_pending.iter().any(|t| norm(t) == tn);
+        if in_queue {
+            // 终端原生队列在前（更靠前执行），hub 待下发在后
+            let mut list = term_q.clone();
+            list.extend(hub_pending);
+            queued_snapshot = Some(list);
+            break;
+        }
+    }
+
+    match queued_snapshot {
+        None => format!("✅ 已执行（会话 {idx}）：{text}"),
+        Some(list) => {
+            // 排队中：展示当前排队列表；并起后台监控，等它被纳入执行后主动推一条
+            if let Some(ctx) = reply {
+                if !ctx.webhook.is_empty() {
+                    let st = state.clone();
+                    let (wh, exp, user, tid, txt, i) = (
+                        ctx.webhook.clone(),
+                        ctx.expiry_ms,
+                        username.to_string(),
+                        task_id.clone(),
+                        text.clone(),
+                        idx.clone(),
+                    );
+                    tokio::spawn(async move {
+                        watch_dequeue(st, wh, exp, user, tid, txt, i).await
+                    });
+                }
+            }
+            let mut lines = vec![format!("⏳ 已排队（会话 {idx}），暂未执行。当前排队：")];
+            for (n, t) in list.iter().enumerate() {
+                let mark = if norm(t) == tn { " ← 本条" } else { "" };
+                lines.push(format!("{}. {}{}", n + 1, t, mark));
+            }
+            lines.push("被终端接收执行后会主动通知你。发「排队 N」可随时查看。".to_string());
+            lines.join("\n")
+        }
+    }
+}
+
+/// 监控某条排队输入，等它离开队列（被终端纳入执行）后经 sessionWebhook 主动推一条。
+async fn watch_dequeue(
+    state: SharedState,
+    webhook: String,
+    expiry_ms: u64,
+    username: String,
+    task_id: String,
+    text: String,
+    idx: String,
+) {
+    let tn = norm(&text);
+    // 最多盯 30 分钟；webhook 过期就停
+    for _ in 0..360 {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        if expiry_ms > 0 && crate::state::now_secs() * 1000 >= expiry_ms {
+            return;
+        }
+        let Some((hub_pending, term_q)) = read_queue(&state, &username, &task_id).await else {
+            // 会话消失（结束）：别再盯
+            return;
+        };
+        let still = term_q.iter().any(|t| norm(t) == tn) || hub_pending.iter().any(|t| norm(t) == tn);
+        if !still {
+            let _ = push_webhook(
+                &webhook,
+                &format!("▶️ 排队任务已开始执行（会话 {idx}）：{text}"),
+            )
+            .await;
+            return;
+        }
+    }
+}
+
+/// 「排队 [N]」：查看排队中的任务。给了 N 看该会话；没给就汇总所有有排队的会话。
+async fn list_queued(state: &SharedState, username: &str, arg: &str) -> String {
+    let arg = arg.trim();
+    if !arg.is_empty() {
+        let task_id = match resolve_task(state, username, arg).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let Some((hub_pending, term_q)) = read_queue(state, username, &task_id).await else {
+            return "会话不存在。".to_string();
+        };
+        let mut list = term_q.clone();
+        list.extend(hub_pending);
+        if list.is_empty() {
+            return format!("会话 {arg} 当前没有排队中的任务。");
+        }
+        let mut lines = vec![format!("会话 {arg} 排队中（{} 条）：", list.len())];
+        for (n, t) in list.iter().enumerate() {
+            lines.push(format!("{}. {}", n + 1, t));
+        }
+        return lines.join("\n");
+    }
+    // 汇总：按「会话」序号遍历，列出各会话的排队
+    let tasks = sorted_active_tasks(state, username).await;
+    let ids: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
+    state.bot_last_list.write().await.insert(username.to_string(), ids);
+    let mut out: Vec<String> = Vec::new();
+    for (i, t) in tasks.iter().enumerate() {
+        if let Some((hub_pending, term_q)) = read_queue(state, username, &t.id).await {
+            let mut list = term_q.clone();
+            list.extend(hub_pending);
+            if !list.is_empty() {
+                let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
+                let title: String = title.chars().take(20).collect();
+                out.push(format!("【{}. {}】{} 条：", i + 1, title, list.len()));
+                for (n, x) in list.iter().enumerate() {
+                    out.push(format!("  {}. {}", n + 1, x));
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        "当前没有任何排队中的任务。".to_string()
+    } else {
+        format!("排队中的任务：\n{}", out.join("\n"))
     }
 }
 

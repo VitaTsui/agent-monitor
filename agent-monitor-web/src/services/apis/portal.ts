@@ -239,6 +239,9 @@ export const disconnectShare = async (machineId: string) => {
 export const uploadPortalFile = async (id: string, dir: string, file: File) => {
   const form = new FormData();
   form.append("dir", dir);
+  // 显式传文件名（UTF-8 文本字段）：multipart 的 Content-Disposition filename 对非 ASCII
+  // （如粘贴图片的「粘贴-xxx.png」）编码在服务端会被解歪，导致落盘名与回填名对不上。
+  form.append("name", file.name);
   form.append("file", file);
   return await post<{ path?: string; result?: string; size: number }>(
     `/monitor/devices/${id}/upload`,
