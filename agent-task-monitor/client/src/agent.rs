@@ -188,6 +188,18 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
         // 本轮本机真实存在的会话 pid：hub 下发的命令只允许作用于这些 pid
         let known_pids: std::collections::HashSet<u32> =
             scanned.iter().filter_map(|t| t.pid).collect();
+        // IDE 内嵌终端(Cursor/VSCode)的 claude_pid → 终端 shell pid：扫描时已算好的终端锚，
+        // 下发走文件桥时直接用，免得 execute 里再 ide_shell_pid() 另起一次扫描。只收 IDE 终端，
+        // 复刻 ide_shell_pid「非 IDE 返回 None」的语义（非 IDE 走原生注入，不进桥接分支）。
+        let ide_shell_of: std::collections::HashMap<u32, u32> = scanned
+            .iter()
+            .filter_map(|t| {
+                let p = t.process.as_ref()?;
+                matches!(p.ide, am_core::model::IdeKind::Cursor | am_core::model::IdeKind::Vscode)
+                    .then(|| p.shell_pid.map(|s| (p.pid, s)))
+                    .flatten()
+            })
+            .collect();
         // 活跃会话的项目目录：文件上传允许写进这些目录（项目常不在家目录下，
         // 见 safe_upload_dir_within）
         let session_dirs: Vec<std::path::PathBuf> = scanned
@@ -295,7 +307,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
                     for cmd in commands {
-                        execute(&state, cmd, &known_pids).await;
+                        execute(&state, cmd, &known_pids, &ide_shell_of).await;
                     }
                     // 待写入文件（hub 下发的文件传输）
                     let files: Vec<am_core::model::FileTransfer> = body
@@ -551,7 +563,12 @@ fn write_transfer(f: &am_core::model::FileTransfer, session_dirs: &[std::path::P
 /// 执行 hub 下发的控制命令。
 /// `known_pids` 是本轮本机扫描出的会话 pid 集合——只对这些 pid 动手，
 /// 不无条件信任 hub 响应（响应链路若被中间人篡改，否则可对任意进程发信号）。
-async fn execute(state: &SharedState, cmd: ControlCmd, known_pids: &std::collections::HashSet<u32>) {
+async fn execute(
+    state: &SharedState,
+    cmd: ControlCmd,
+    known_pids: &std::collections::HashSet<u32>,
+    ide_shell_of: &std::collections::HashMap<u32, u32>,
+) {
     let Some(pid) = cmd.pid else {
         // 会话没配对到进程（前端显示为「Claude Code / 等待输入」这类占位标题）时 pid 为空，
         // 命令无处可投——网页却已提示「下发成功」。落盘让这种「发了没反应」可查。
@@ -578,7 +595,11 @@ async fn execute(state: &SharedState, cmd: ControlCmd, known_pids: &std::collect
         let preview: String = text.chars().take(20).collect();
         // 目标是 Cursor/VSCode 内嵌终端（ConPTY/编辑器内置，注入不进去）、且有活着的桥接
         // 扩展在管这个终端，就把任务写进文件桥交给扩展 terminal.sendText 送达（全平台）。
-        if let Some(shell_pid) = am_core::process::ide_shell_pid(pid) {
+        // 终端 shell pid 用扫描时已算好的终端锚（与配对同锚）；本轮没扫到（罕见）再退回
+        // ide_shell_pid() 现算，保证不漏。
+        if let Some(shell_pid) =
+            ide_shell_of.get(&pid).copied().or_else(|| am_core::process::ide_shell_pid(pid))
+        {
             let live = crate::bridge::has_live_terminal(&state.config.data_dir, shell_pid);
             crate::state::client_log(&format!(
                 "桥接判定：会话 {} claude pid={pid} → 内嵌终端 shell pid={shell_pid}，扩展在管={live}",
