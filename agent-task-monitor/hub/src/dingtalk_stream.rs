@@ -151,12 +151,25 @@ async fn connect_once(
                 // data 是一段 JSON 字符串
                 let data_str = frame.get("data").and_then(Value::as_str).unwrap_or("{}");
                 let m: Value = serde_json::from_str(data_str).unwrap_or(Value::Null);
-                let content = m
-                    .pointer("/text/content")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
+                let msgtype = m.get("msgtype").and_then(Value::as_str).unwrap_or("");
+                // 文字：text 直接取；richText（图文一起发）取其中的文字段
+                let content = if msgtype == "richText" {
+                    m.pointer("/content/richText")
+                        .and_then(Value::as_array)
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|it| it.get("text").and_then(Value::as_str))
+                                .collect::<Vec<_>>()
+                                .join("")
+                        })
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string()
+                } else {
+                    m.pointer("/text/content").and_then(Value::as_str).unwrap_or("").trim().to_string()
+                };
+                // 文件/图片：file(带 fileName) / picture / richText 内嵌图片 → 暂存待发
+                let (dl_code, file_name) = extract_file(&m, msgtype);
                 let session_webhook =
                     m.get("sessionWebhook").and_then(Value::as_str).unwrap_or("").to_string();
                 let webhook_expiry =
@@ -189,6 +202,26 @@ async fn connect_once(
                 // 先 ACK 该帧（钉钉据此认为已消费）
                 ack(&mut ws, &message_id).await?;
 
+                // 带文件/图片：暂存为「挂起待发」，随下一条任务一起发出（见 bot::send_input）
+                if let Some(code) = dl_code {
+                    let fname = if file_name.trim().is_empty() {
+                        format!("钉钉文件-{}", &code[..code.len().min(8)])
+                    } else {
+                        file_name.clone()
+                    };
+                    state.bot_pending_files.write().await.insert(
+                        user.to_string(),
+                        crate::state::BotPendingFile {
+                            download_code: code,
+                            file_name: fname.clone(),
+                            at: crate::state::now_secs(),
+                        },
+                    );
+                    tracing::info!("钉钉 Stream 暂存待发文件 user={user} name={fname}");
+                }
+                // 文件-only（没带文字指令）：回执提示，不进 dispatch
+                let file_only = content.is_empty();
+
                 // dispatch + 通过 sessionWebhook 回发，另起任务避免阻塞收帧（心跳要及时）
                 if !session_webhook.is_empty() {
                     let st = state.clone();
@@ -201,7 +234,13 @@ async fn connect_once(
                             staff_id: staff_id.clone(),
                             robot_code: robot_code.clone(),
                         };
-                        let reply = crate::bot::dispatch(&st, &u, &content, Some(&ctx)).await;
+                        let reply = if file_only {
+                            "📎 已收到文件，随下一条任务一起发出（如「@2 处理这个文件」），\
+                             会存到该会话目录的 tmp/ 下并把路径拼到任务开头。"
+                                .to_string()
+                        } else {
+                            crate::bot::dispatch(&st, &u, &content, Some(&ctx)).await
+                        };
                         match cl
                             .post(&session_webhook)
                             .json(&json!({ "msgtype": "text", "text": { "content": reply } }))
@@ -248,4 +287,35 @@ where
     });
     ws.send(Message::Text(ack.to_string())).await?;
     Ok(())
+}
+
+/// 从机器人消息里抽取文件/图片的 (downloadCode, fileName)。支持 file / picture / richText 内嵌图片。
+/// 无附件返回 (None, "")。
+fn extract_file(m: &Value, msgtype: &str) -> (Option<String>, String) {
+    match msgtype {
+        "file" => {
+            let code = m.pointer("/content/downloadCode").and_then(Value::as_str);
+            let name = m
+                .pointer("/content/fileName")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            (code.map(String::from), name)
+        }
+        "picture" => {
+            let code = m
+                .pointer("/content/downloadCode")
+                .or_else(|| m.pointer("/content/pictureDownloadCode"))
+                .and_then(Value::as_str);
+            (code.map(String::from), "图片.jpg".to_string())
+        }
+        "richText" => {
+            // richText 数组里找第一个带 downloadCode 的图片项
+            let code = m.pointer("/content/richText").and_then(Value::as_array).and_then(|arr| {
+                arr.iter().find_map(|it| it.get("downloadCode").and_then(Value::as_str))
+            });
+            (code.map(String::from), "图片.jpg".to_string())
+        }
+        _ => (None, String::new()),
+    }
 }

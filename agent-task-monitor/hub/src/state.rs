@@ -260,6 +260,19 @@ pub struct AppState {
     pub bot_last_list: RwLock<HashMap<String, Vec<String>>>,
     /// 机器人「监控中」的会话：用户名 → 监控态。后台循环据此把新内容推到钉钉会话 webhook。
     pub bot_monitors: RwLock<HashMap<String, BotMonitor>>,
+    /// 钉钉「挂起待发」的文件：用户名 → 待随下一条任务一起发的文件。
+    /// 用户先发文件（或图文一起发图片）→ 暂存于此 → 下一条发任务的指令把它落到会话 tmp 目录、
+    /// 并把相对路径回填到任务文字开头。
+    pub bot_pending_files: RwLock<HashMap<String, BotPendingFile>>,
+}
+
+/// 钉钉挂起的待发文件（downloadCode 换取下载地址，随下一条任务发出时才真正下载+下发）
+#[derive(Clone)]
+pub struct BotPendingFile {
+    pub download_code: String,
+    pub file_name: String,
+    /// 收到时刻（秒），用于过期清理
+    pub at: u64,
 }
 
 /// 机器人持续监控一个会话的状态（通过钉钉会话级 webhook 推送新内容）
@@ -294,6 +307,7 @@ impl AppState {
             sessions_dirty: std::sync::atomic::AtomicBool::new(false),
             bot_last_list: RwLock::new(HashMap::new()),
             bot_monitors: RwLock::new(HashMap::new()),
+            bot_pending_files: RwLock::new(HashMap::new()),
         })
     }
 

@@ -188,6 +188,38 @@ async fn oto_send(
     }
 }
 
+/// 下载机器人「收到的」文件内容（downloadCode → downloadUrl → 字节）。
+pub async fn download_bot_file(
+    app: &crate::registry::DingtalkApp,
+    download_code: &str,
+    now_ms: u64,
+) -> Result<Vec<u8>, String> {
+    let robot_code = robot_code_of(app);
+    let token = access_token(&app.app_key, &app.app_secret, now_ms).await?;
+    let resp = http_client()?
+        .post("https://api.dingtalk.com/v1.0/robot/messageFiles/download")
+        .header("x-acs-dingtalk-access-token", token)
+        .json(&serde_json::json!({ "downloadCode": download_code, "robotCode": robot_code }))
+        .send()
+        .await
+        .map_err(|e| format!("取下载地址失败: {e}"))?;
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let url = v
+        .get("downloadUrl")
+        .and_then(|u| u.as_str())
+        .ok_or_else(|| format!("无 downloadUrl: {v}"))?;
+    let bytes = http_client()?
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("下载文件失败: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| e.to_string())?
+        .to_vec();
+    Ok(bytes)
+}
+
 /// 上传一段文本为钉钉媒体文件，返回 media_id（用同一 access_token）。
 async fn upload_media(token: &str, filename: &str, content: &[u8]) -> Result<String, String> {
     let part = reqwest::multipart::Part::bytes(content.to_vec())

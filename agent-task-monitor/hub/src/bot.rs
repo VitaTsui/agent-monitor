@@ -369,6 +369,7 @@ fn help_text() -> String {
      • 帮助 —— 显示本说明\n\
      速记：@N 后接内容或任意会话指令 —— @2 重启服务 / @2 暂停 / @2 排队 / @2 撤回\n\
      多目标：@1 @2 重启服务（同一任务发给多个会话）\n\
+     发文件：直接发文件/图片给我 → 随下一条任务(如「@2 处理这个文件」)落到该会话 tmp/ 并把路径拼到开头\n\
      （序号以最近一次「会话」列出的为准）"
         .to_string()
 }
@@ -624,13 +625,57 @@ async fn read_queue(
     Some((hub_pending, terminal_q))
 }
 
+/// 下载挂起的钉钉文件并下发到会话项目目录的 tmp/ 下，返回回填用的相对路径 `./tmp/<name>`。
+async fn attach_pending_file(
+    state: &SharedState,
+    username: &str,
+    task_id: &str,
+    pf: &crate::state::BotPendingFile,
+) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    let app = state
+        .registry
+        .read()
+        .await
+        .dingtalk_app_of(username)
+        .ok_or("未配置钉钉应用")?;
+    let now_ms = crate::state::now_secs() * 1000;
+    let bytes = crate::dingtalk::download_bot_file(&app, &pf.download_code, now_ms).await?;
+    let task = state
+        .tasks_for(username)
+        .await
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .ok_or("会话不存在")?;
+    let cwd = task.project.trim_end_matches(['/', '\\']).to_string();
+    if cwd.is_empty() {
+        return Err("会话无项目目录".into());
+    }
+    let sep = if cwd.contains('\\') { '\\' } else { '/' };
+    let dir = format!("{cwd}{sep}tmp");
+    // 只留 basename，防路径穿越
+    let safe = std::path::Path::new(&pf.file_name)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "file.bin".into());
+    let mut machines = state.machines.write().await;
+    let entry = machines.get_mut(&task.machine_id).ok_or("会话所属设备已离线")?;
+    entry.pending_files.push_back(am_core::model::FileTransfer {
+        dir,
+        filename: safe.clone(),
+        content_b64: B64.encode(&bytes),
+    });
+    Ok(format!("./tmp/{safe}"))
+}
+
 async fn send_input(
     state: &SharedState,
     username: &str,
     arg: &str,
     reply: Option<&ReplyCtx>,
 ) -> String {
-    let (idx, text) = split_cmd(arg);
+    let (idx, mut text) = split_cmd(arg);
     if text.is_empty() {
         return "用法：发 <序号> <内容>，如「发 1 继续」。".to_string();
     }
@@ -638,6 +683,16 @@ async fn send_input(
         Ok(id) => id,
         Err(e) => return e,
     };
+    // 挂起待发文件：随本条任务落到会话目录的 tmp/ 下，相对路径拼到任务开头（加空格隔开）。
+    // 超 20 分钟没跟任务的挂起文件视为过期，丢弃不附。
+    if let Some(pf) = state.bot_pending_files.write().await.remove(username) {
+        if crate::state::now_secs().saturating_sub(pf.at) <= 20 * 60 {
+            match attach_pending_file(state, username, &task_id, &pf).await {
+                Ok(rel) => text = format!("{rel} {text}"),
+                Err(e) => return format!("附带文件下发失败：{e}"),
+            }
+        }
+    }
     if let Err(e) =
         queue_command(state, username, &task_id, ControlAction::Input, Some(text.clone())).await
     {
