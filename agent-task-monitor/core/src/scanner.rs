@@ -744,9 +744,9 @@ pub fn build_tasks(
                 true
             });
 
-            // ④ 剩余进程配「最近 30min 还活跃过、且最后写入不早于本进程启动」的会话：
-            // 覆盖续跑/压缩恢复的长会话 —— 会话文件建于很久前、进程比它晚启动、命令行也无
-            // --continue（Claude Code 自动续跑正是如此），但进程一直在写、mtime 很新。
+            // ④ 剩余进程配「最后写入不早于本进程启动」的会话：覆盖续跑/压缩恢复的长会话，
+            // 以及**闲置很久但进程仍活着**的会话 —— 会话文件建于很久前、进程比它晚启动、命令行
+            // 也无 --continue（Claude Code 自动续跑正是如此）。
             //
             // 关键约束 s.mtime >= 进程启动：一个会话若最后一次写入发生在进程启动【之前】，
             // 那这段内容必然是上一个进程留下的（典型：某进程 --resume 了老会话、写了几句后
@@ -754,12 +754,11 @@ pub fn build_tasks(
             // 那条老会话抢过来一直显示旧内容 —— 它没写过那个文件。放进占位（会话尚未产生记录）
             // 才对。进程 start_time 只精确到秒、向下取整（≤ 真实启动），对「进程启动后才写入」
             // 的活跃会话恒成立，不会误伤；只挡住启动前就停笔的旧会话。free_sess 是 mtime 降序。
-            const RECENT_MTIME_MS: u64 = 30 * 60 * 1000;
-            let now = now_ms();
-            let mut free_sess: Vec<&SessionSummary> = free_sess
-                .into_iter()
-                .filter(|s| now.saturating_sub(s.mtime_ms) <= RECENT_MTIME_MS)
-                .collect();
+            //
+            // 不再额外卡「最近 30min 活跃」窗口：闲置的会话 mtime 会冻结，30min 一到它就掉出
+            // ④、进程沦为空白占位、会话被判 Finished（表现为「闲太久被当关闭、又冒出空白终端」）。
+            // 安全性完全由上面的 mtime>=启动 约束保证，与活跃间隔无关；会话集合本身已卡 7 天窗口。
+            let mut free_sess: Vec<&SessionSummary> = free_sess.into_iter().collect();
             // 新进程优先认领新会话：按启动时间降序，避免老进程抢走更晚的会话文件
             free_procs.sort_by(|a, b| b.start_time.cmp(&a.start_time));
             for p in free_procs {
@@ -2559,6 +2558,32 @@ mod pairing_tests {
         assert!(
             tasks.iter().any(|t| t.id == "pid-902"),
             "新空白进程应留占位任务，而非顶着旧会话内容"
+        );
+    }
+
+    /// 回归：会话闲置很久（几小时没输入）但进程仍活着，且该会话的最后写入晚于进程启动
+    /// （确是本进程写的）。此时不该因「mtime 不在最近 30min 内」就把它判 Finished、让进程
+    /// 冒一条空白占位。widen ④ 后应继续配上。（created_ms=0 模拟无出生时间、②配不上的平台）
+    #[test]
+    fn long_idle_session_still_pairs_not_finished() {
+        let now = now_ms();
+        // 进程 5h 前启动、无 --resume/--continue
+        let mut p = proc(1500, now / 1000 - 5 * 3600);
+        p.command = "claude".into();
+        // 会话：3h 没写了（闲置），但最后写入（now-3h）晚于进程启动（now-5h）；出生时间不可得
+        let mut idle = sess("idle", "2026-07-25T00:00:00Z", now - 3 * 3600 * 1000);
+        idle.created_ms = 0;
+
+        let tasks =
+            build_tasks(&[idle], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
+        assert_eq!(
+            tasks.iter().find(|t| t.id == "idle").unwrap().pid,
+            Some(1500),
+            "闲置数小时但进程仍在的会话应保持配对，而非被判关闭"
+        );
+        assert!(
+            !tasks.iter().any(|t| t.id == "pid-1500"),
+            "不该再冒出空白占位终端会话"
         );
     }
 
