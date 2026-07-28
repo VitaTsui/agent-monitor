@@ -222,6 +222,23 @@ fn save_anchor_pairs(data_dir: &std::path::Path, anchors: &std::collections::Has
     let _ = std::fs::write(pairs_file(data_dir), serde_json::Value::Object(obj).to_string());
 }
 
+/// 把「终端锚(shell) → session」翻译成「当前该终端下的 claude_pid → session」。
+/// 每个活进程取其终端锚(ProcessInfo.shell_pid，找不到回退自身 pid)，命中锚表即配上——claude
+/// 换 pid（/clear、--resume、重启）后仍在同一终端 shell 下，据此把配对接回；锚表里没有对应活
+/// 进程的条目（死终端/被非-shell 重用）自然翻不出配对，防 pid 重用错配。
+fn translate_anchors(
+    anchors: &std::collections::HashMap<u32, String>,
+    procs: &[am_core::model::ProcessInfo],
+) -> std::collections::HashMap<u32, String> {
+    let mut out = std::collections::HashMap::new();
+    for p in procs {
+        if let Some(sid) = anchors.get(&p.shell_pid.unwrap_or(p.pid)) {
+            out.insert(p.pid, sid.clone());
+        }
+    }
+    out
+}
+
 /// 读盘：直接读回「终端锚(shell) → session」。校验推迟到每轮翻译时做（只有当前真有 claude
 /// 在该终端下的锚才会翻译成配对），故这里无需活进程；死终端/被非-shell 重用的锚翻不出配对。
 fn load_anchor_pairs(data_dir: &std::path::Path) -> std::collections::HashMap<u32, String> {
@@ -455,15 +472,10 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
     // 翻译：为每个活 claude 取终端锚，命中锚缓存 → 该 claude 配上那条会话（claude 换 pid 也接得回）
     let cached: std::collections::HashMap<u32, String> = {
         let guard = ANCHOR_PAIRS.lock().unwrap();
-        let mut c = std::collections::HashMap::new();
-        if let Some(anchors) = guard.as_ref() {
-            for p in &processes {
-                if let Some(sid) = anchors.get(&p.shell_pid.unwrap_or(p.pid)) {
-                    c.insert(p.pid, sid.clone());
-                }
-            }
+        match guard.as_ref() {
+            Some(anchors) => translate_anchors(anchors, &processes),
+            None => std::collections::HashMap::new(),
         }
-        c
     };
     let mut tasks = am_core::scanner::build_tasks(
         &sessions,
@@ -582,5 +594,67 @@ mod upload_dir_tests {
                 std::path::PathBuf::from("/tmp/amroot/b")
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::translate_anchors;
+    use am_core::model::{IdeKind, ProcessInfo};
+    use std::collections::HashMap;
+
+    /// 造一个带终端锚(shell_pid)的 claude 进程；shell=None 表示找不到 shell 祖先。
+    fn proc(pid: u32, shell: Option<u32>) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            agent: "claude".into(),
+            tty: String::new(),
+            cwd: "/proj".into(),
+            ide: IdeKind::Cursor,
+            ide_name: "Cursor".into(),
+            start_time: 0,
+            cpu_usage: 0.0,
+            memory: 0,
+            command: "claude".into(),
+            shell_pid: shell,
+        }
+    }
+
+    fn anchors(pairs: &[(u32, &str)]) -> HashMap<u32, String> {
+        pairs.iter().map(|(a, s)| (*a, s.to_string())).collect()
+    }
+
+    /// 核心：claude 换了 pid（100→200），但仍在同一终端 shell(2244) 下 —— 锚表存的是
+    /// 「2244→sess」，翻译后新 pid 200 照样接回该会话。这就是「claude 换 pid 也接得回」。
+    #[test]
+    fn reconnects_after_claude_pid_change() {
+        let a = anchors(&[(2244, "sess-A")]);
+        let got = translate_anchors(&a, &[proc(200, Some(2244))]);
+        assert_eq!(got.get(&200), Some(&"sess-A".to_string()));
+    }
+
+    /// 锚表里的终端此刻没有活 claude（死终端/换项目）→ 翻不出配对，不会硬配。
+    #[test]
+    fn stale_anchor_without_live_proc_is_dropped() {
+        let a = anchors(&[(9999, "sess-A")]);
+        let got = translate_anchors(&a, &[proc(200, Some(2244))]);
+        assert!(got.is_empty());
+    }
+
+    /// 找不到 shell 祖先(shell_pid=None) → 回退用 claude 自身 pid 当锚匹配。
+    #[test]
+    fn falls_back_to_self_pid_when_no_shell() {
+        let a = anchors(&[(200, "sess-A")]);
+        let got = translate_anchors(&a, &[proc(200, None)]);
+        assert_eq!(got.get(&200), Some(&"sess-A".to_string()));
+    }
+
+    /// 多终端各自接回，互不串。
+    #[test]
+    fn multiple_terminals_map_independently() {
+        let a = anchors(&[(2244, "sess-A"), (3355, "sess-B")]);
+        let got = translate_anchors(&a, &[proc(200, Some(2244)), proc(201, Some(3355))]);
+        assert_eq!(got.get(&200), Some(&"sess-A".to_string()));
+        assert_eq!(got.get(&201), Some(&"sess-B".to_string()));
     }
 }
