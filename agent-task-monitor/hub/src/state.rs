@@ -475,6 +475,7 @@ pub async fn tick_loop(state: SharedState) {
                                 kind: crate::dingtalk::EventKind::Device,
                                 task_id: None,
                                 text: format!("**🔴 设备离线**\n\n**设备**：{}", m.hostname),
+                                full_content: None,
                             });
                         }
                     }

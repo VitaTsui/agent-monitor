@@ -1774,9 +1774,10 @@ async fn report(
                 t.provider_dsr, t.project_name
             )
         };
-        // 「最后结果」：取该会话最近一条 assistant 文本（本身是 markdown），截断后附到末尾。
+        // 「最后结果」：取该会话最近一条 assistant 文本（本身是 markdown）。返回
+        // (推送里展示的截断版, 若被截断则给出完整原文供 OTO 作为文件补发)。
         let msgs_map = &entry.messages;
-        let result = |id: &str| -> String {
+        let result = |id: &str| -> (String, Option<String>) {
             const LIMIT: usize = 1500;
             msgs_map
                 .get(id)
@@ -1788,35 +1789,38 @@ async fn report(
                     // 结果正文里的 markdown 标题转成加粗，避免推送里出现大字号 heading
                     let s = md_headings_to_bold(s.trim());
                     if s.is_empty() {
-                        String::new()
+                        (String::new(), None)
                     } else if cut {
-                        format!("\n\n**最后结果**\n\n{s}\n\n…（内容较长，已截断）")
+                        (
+                            format!("\n\n**最后结果**\n\n{s}\n\n…（内容较长，完整内容见下方文件）"),
+                            Some(full.to_string()),
+                        )
                     } else {
-                        format!("\n\n**最后结果**\n\n{s}")
+                        (format!("\n\n**最后结果**\n\n{s}"), None)
                     }
                 })
-                .unwrap_or_default()
+                .unwrap_or((String::new(), None))
         };
         for t in &tasks {
             // 状态跃迁（会话仍在）：任务完成（Running→Idle）/ 结束（→Finished）
             if let Some(&prev) = old.get(t.id.as_str()) {
                 if prev == TaskStatus::Running && t.status == TaskStatus::Idle {
+                    let (res, full) = result(&t.id);
                     events.push(NotifyEvent {
                         owner: owner.clone(),
                         kind: EventKind::Waiting,
                         task_id: Some(t.id.clone()),
-                        text: format!(
-                            "**🔔 任务完成 · 等待你的操作**\n\n{}{}",
-                            body(t),
-                            result(&t.id)
-                        ),
+                        text: format!("**🔔 任务完成 · 等待你的操作**\n\n{}{}", body(t), res),
+                        full_content: full,
                     });
                 } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
+                    let (res, full) = result(&t.id);
                     events.push(NotifyEvent {
                         owner: owner.clone(),
                         kind: EventKind::Finished,
                         task_id: Some(t.id.clone()),
-                        text: format!("**✅ 会话已结束**\n\n{}{}", body(t), result(&t.id)),
+                        text: format!("**✅ 会话已结束**\n\n{}{}", body(t), res),
+                        full_content: full,
                     });
                     known_removes.push(t.id.clone()); // 已结束：移出基线，别再被「消失」判一次
                 }
@@ -1833,6 +1837,7 @@ async fn report(
                     kind: EventKind::NewSession,
                     task_id: Some(t.id.clone()),
                     text: format!("**🆕 会话开始**\n\n{}", body(t)),
+                    full_content: None,
                 });
             }
             known_updates.push(t.clone());
@@ -1858,11 +1863,13 @@ async fn report(
                 .map(|t| t.elapsed().as_secs())
                 .unwrap_or(u64::MAX);
             if gone >= crate::state::FINISH_GRACE_SECS {
+                let (res, full) = result(id);
                 events.push(NotifyEvent {
                     owner: owner.clone(),
                     kind: EventKind::Finished,
                     task_id: Some(id.clone()),
-                    text: format!("**✅ 会话已结束**\n\n{}{}", body(task), result(id)),
+                    text: format!("**✅ 会话已结束**\n\n{}{}", body(task), res),
+                    full_content: full,
                 });
                 known_removes.push(id.clone());
             }
@@ -1874,6 +1881,7 @@ async fn report(
                 kind: EventKind::Device,
                 task_id: None,
                 text: format!("**🟢 设备上线**\n\n**设备**：{dev}"),
+                full_content: None,
             });
         }
         // 交互式选择提醒：会话最新对话消息是 select（AskUserQuestion / 权限确认）时，
@@ -1914,6 +1922,7 @@ async fn report(
                         body(t),
                         opts
                     ),
+                    full_content: None,
                 });
             }
         }
