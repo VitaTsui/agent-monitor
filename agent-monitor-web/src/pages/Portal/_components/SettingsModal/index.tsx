@@ -748,7 +748,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
 
       <ShareModal device={shareDevice} onClose={() => setShareDevice(null)} />
 
-      <AntModal
+      <Modal
         title="接入他人设备"
         open={connectOpen}
         onCancel={() => setConnectOpen(false)}
@@ -773,7 +773,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
           value={connPwd}
           onChange={(v) => setConnPwd(v)}
         />
-      </AntModal>
+      </Modal>
     </Modal>
   );
 });

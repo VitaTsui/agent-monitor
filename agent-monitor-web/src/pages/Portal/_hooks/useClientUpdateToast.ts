@@ -1,6 +1,8 @@
 import { useEffect } from "react";
 
-import { Button, notification } from "antd";
+import { notification } from "antd";
+
+import { Button } from "@hsu-react/ui";
 import React from "react";
 
 import { inDesktopClient } from "@/utils/clientAuth";
