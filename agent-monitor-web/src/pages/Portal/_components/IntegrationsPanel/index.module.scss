@@ -272,31 +272,44 @@
   .recvProjRow {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 2px;
+    gap: 12px;
+    padding: 9px 2px;
 
+    // 项目名区域：加大，两行（名称 + 完整路径）
     .recvProjName {
-      flex: none;
-      width: 140px;
-      font-size: 13px;
-      color: #243d42;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      flex: 1 1 40%;
+      min-width: 0;
+
+      .recvProjTitle {
+        font-size: 13.5px;
+        font-weight: 600;
+        color: #243d42;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .recvProjPath {
+        margin-top: 1px;
+        font-size: 11px;
+        color: #9aa7ad;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
     }
 
-    .recvProjDir {
-      flex: 1;
+    // 目录区域：输入框 + 浏览 + 保存
+    .recvProjEdit {
+      flex: 1 1 60%;
       min-width: 0;
-      font-size: 12px;
-      color: #9aa7ad;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 6px;
 
-      &.set {
-        color: #0a6b79;
-        font-weight: 500;
+      .recvProjInput {
+        flex: 1;
+        min-width: 0;
       }
     }
   }
@@ -367,6 +380,22 @@
     .pickArrow {
       color: #c2c8cf;
       font-size: 12px;
+    }
+  }
+}
+
+@media (max-width: 760px) {
+  .recvDev .recvProjRow {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+
+    .recvProjName {
+      flex: none;
+    }
+
+    .recvProjEdit {
+      flex: none;
     }
   }
 }

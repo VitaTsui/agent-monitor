@@ -85,6 +85,8 @@ const IntegrationsPanel: React.FC = () => {
     { machineId: string; hostname: string; projects: RecvProj[] }[]
   >([]);
   const [recvModalOpen, setRecvModalOpen] = useState(false);
+  // 每个项目目录输入框的当前值（cwd → 目录）；可手输或由「浏览」回填
+  const [recvEdits, setRecvEdits] = useState<Record<string, string>>({});
   const recvConfiguredCount = recvDevices.reduce(
     (n, d) => n + d.projects.filter((p) => p.dir).length,
     0
@@ -124,15 +126,21 @@ const IntegrationsPanel: React.FC = () => {
     []
   );
 
-  const openPicker = (p: { cwd: string; name: string; taskId?: string | null }) => {
+  const openPicker = (p: RecvProj) => {
     if (!p.taskId) {
       message.info("该项目当前无活跃会话，无法浏览目录；可等它有会话后再选");
       return;
     }
+    // 打开时定位到「当前选中目录的父级」，方便看到它和同级目录。
+    // 绝对路径 / 无法在项目树里相对浏览 → 从项目根开始。
+    const cur = (recvEdits[p.cwd] ?? p.dir).trim().replace(/^\.\//, "");
+    const isAbs = cur.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(cur);
+    const startRel =
+      cur && !isAbs ? cur.split("/").filter(Boolean).slice(0, -1).join("/") : "";
     setPicker({ cwd: p.cwd, name: p.name, taskId: p.taskId });
-    setPickRel("");
+    setPickRel(startRel);
     setPickDirs([]);
-    loadPickDirs(p.taskId, "");
+    loadPickDirs(p.taskId, startRel);
   };
 
   const commitRecvDir = (cwd: string, dir: string) => {
@@ -175,18 +183,23 @@ const IntegrationsPanel: React.FC = () => {
           });
           setDingUrl(d.dingtalkApp.callbackUrl);
         }
-        setRecvDevices(
-          (d.recvDirDevices ?? []).map((dev) => ({
-            machineId: dev.machineId,
-            hostname: dev.hostname,
-            projects: dev.projects.map((p) => ({
-              cwd: p.cwd,
-              name: p.name,
-              dir: p.dir ?? "",
-              taskId: p.taskId,
-            })),
-          }))
+        const devs = (d.recvDirDevices ?? []).map((dev) => ({
+          machineId: dev.machineId,
+          hostname: dev.hostname,
+          projects: dev.projects.map((p) => ({
+            cwd: p.cwd,
+            name: p.name,
+            dir: p.dir ?? "",
+            taskId: p.taskId,
+          })),
+        }));
+        setRecvDevices(devs);
+        // 输入框初值 = 各项目已配目录
+        const edits: Record<string, string> = {};
+        devs.forEach((dev) =>
+          dev.projects.forEach((p) => (edits[p.cwd] = p.dir))
         );
+        setRecvEdits(edits);
       })
       .catch(() => void 0);
   }, []);
@@ -402,27 +415,32 @@ const IntegrationsPanel: React.FC = () => {
               <div className={styles.recvDevName}>💻 {dev.hostname}</div>
               {dev.projects.map((p) => (
                 <div key={p.cwd} className={styles.recvProjRow}>
-                  <span className={styles.recvProjName} title={p.cwd}>
-                    {p.name}
-                  </span>
-                  <span
-                    className={`${styles.recvProjDir} ${p.dir ? styles.set : ""}`}
-                  >
-                    {p.dir || "tmp（默认）"}
-                  </span>
-                  <Button size="small" onClick={() => openPicker(p)}>
-                    浏览
-                  </Button>
-                  {p.dir ? (
+                  <div className={styles.recvProjName} title={p.cwd}>
+                    <div className={styles.recvProjTitle}>{p.name}</div>
+                    <div className={styles.recvProjPath}>{p.cwd}</div>
+                  </div>
+                  <div className={styles.recvProjEdit}>
+                    <Input
+                      className={styles.recvProjInput}
+                      placeholder="tmp（默认）· 可直接输入或点浏览"
+                      value={recvEdits[p.cwd] ?? p.dir}
+                      onChange={(v) =>
+                        setRecvEdits((m) => ({ ...m, [p.cwd]: v }))
+                      }
+                    />
+                    <Button size="small" onClick={() => openPicker(p)}>
+                      浏览
+                    </Button>
                     <Button
                       size="small"
-                      type="text"
-                      danger
-                      onClick={() => commitRecvDir(p.cwd, "")}
+                      type="primary"
+                      onClick={() =>
+                        commitRecvDir(p.cwd, (recvEdits[p.cwd] ?? "").trim())
+                      }
                     >
-                      清除
+                      保存
                     </Button>
-                  ) : null}
+                  </div>
                 </div>
               ))}
             </div>
@@ -435,8 +453,12 @@ const IntegrationsPanel: React.FC = () => {
         title={picker ? `选择接收目录 · ${picker.name}` : "选择接收目录"}
         open={!!picker}
         onCancel={() => setPicker(null)}
-        onOk={() => picker && commitRecvDir(picker.cwd, pickRel)}
-        okText={`选此目录（${pickRel || "项目根"}）`}
+        onOk={() => {
+          // 回填到该项目输入框（不立即保存，可再改，再点保存）
+          if (picker) setRecvEdits((m) => ({ ...m, [picker.cwd]: pickRel }));
+          setPicker(null);
+        }}
+        okText={`用此目录（${pickRel || "项目根"}）`}
         cancelText="取消"
         width={480}
         centered
