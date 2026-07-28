@@ -1825,27 +1825,33 @@ async fn report(
                 .unwrap_or((String::new(), None))
         };
         for t in &tasks {
-            // 状态跃迁（会话仍在）：任务完成（Running→Idle）/ 结束（→Finished）
-            if let Some(&prev) = old.get(t.id.as_str()) {
-                if prev == TaskStatus::Running && t.status == TaskStatus::Idle {
-                    let (res, full) = result(&t.id);
-                    events.push(NotifyEvent {
-                        owner: owner.clone(),
-                        kind: EventKind::Waiting,
-                        task_id: Some(t.id.clone()),
-                        text: format!("**🔔 任务完成 · 等待你的操作**\n\n{}{}", body(t), res),
-                        full_content: full,
-                    });
-                } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
-                    let (res, full) = result(&t.id);
-                    events.push(NotifyEvent {
-                        owner: owner.clone(),
-                        kind: EventKind::Finished,
-                        task_id: Some(t.id.clone()),
-                        text: format!("**✅ 会话已结束**\n\n{}{}", body(t), res),
-                        full_content: full,
-                    });
-                    known_removes.push(t.id.clone()); // 已结束：移出基线，别再被「消失」判一次
+            // 状态跃迁（会话仍在）：任务完成（Running→Idle）/ 结束（→Finished）。
+            // 重连/客户端重启那一轮（was_offline）绝不比对：此时 `old` 还是重启【前】的旧快照，
+            // 离线期间会话状态早变了，逐条比对会把「离线期间的状态变化」在重连瞬间一次性刷屏
+            //（把所有会话都推一遍）。这一轮只重建基线（下面 known_updates），下一轮起 `old`
+            // 已是重连后的快照，再正常比对。
+            if !was_offline {
+                if let Some(&prev) = old.get(t.id.as_str()) {
+                    if prev == TaskStatus::Running && t.status == TaskStatus::Idle {
+                        let (res, full) = result(&t.id);
+                        events.push(NotifyEvent {
+                            owner: owner.clone(),
+                            kind: EventKind::Waiting,
+                            task_id: Some(t.id.clone()),
+                            text: format!("**🔔 任务完成 · 等待你的操作**\n\n{}{}", body(t), res),
+                            full_content: full,
+                        });
+                    } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
+                        let (res, full) = result(&t.id);
+                        events.push(NotifyEvent {
+                            owner: owner.clone(),
+                            kind: EventKind::Finished,
+                            task_id: Some(t.id.clone()),
+                            text: format!("**✅ 会话已结束**\n\n{}{}", body(t), res),
+                            full_content: full,
+                        });
+                        known_removes.push(t.id.clone()); // 已结束：移出基线，别再被「消失」判一次
+                    }
                 }
             }
             // 会话开始：基线里没有 = 尚未见过；再叠一道「真实年龄」闸门（近几分钟内才开的）
