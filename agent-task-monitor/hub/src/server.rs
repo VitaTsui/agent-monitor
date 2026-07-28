@@ -1781,7 +1781,7 @@ async fn report(
                         kind: EventKind::Waiting,
                         task_id: Some(t.id.clone()),
                         text: format!(
-                            "**🔔 任务完成 · 等待你的操作**\n{}{}",
+                            "**🔔 任务完成 · 等待你的操作**\n\n{}{}",
                             body(t),
                             result(&t.id)
                         ),
@@ -1791,7 +1791,7 @@ async fn report(
                         owner: owner.clone(),
                         kind: EventKind::Finished,
                         task_id: Some(t.id.clone()),
-                        text: format!("**✅ 会话已结束**\n{}{}", body(t), result(&t.id)),
+                        text: format!("**✅ 会话已结束**\n\n{}{}", body(t), result(&t.id)),
                     });
                     known_removes.push(t.id.clone()); // 已结束：移出基线，别再被「消失」判一次
                 }
@@ -1807,7 +1807,7 @@ async fn report(
                     owner: owner.clone(),
                     kind: EventKind::NewSession,
                     task_id: Some(t.id.clone()),
-                    text: format!("**🆕 会话开始**\n{}", body(t)),
+                    text: format!("**🆕 会话开始**\n\n{}", body(t)),
                 });
             }
             known_updates.push(t.clone());
@@ -1828,7 +1828,7 @@ async fn report(
                     owner: owner.clone(),
                     kind: EventKind::Finished,
                     task_id: Some(id.clone()),
-                    text: format!("**✅ 会话已结束**\n{}{}", body(task), result(id)),
+                    text: format!("**✅ 会话已结束**\n\n{}{}", body(task), result(id)),
                 });
                 known_removes.push(id.clone());
             }
@@ -1839,7 +1839,7 @@ async fn report(
                 owner: owner.clone(),
                 kind: EventKind::Device,
                 task_id: None,
-                text: format!("**🟢 设备上线**\n**设备**：{dev}"),
+                text: format!("**🟢 设备上线**\n\n**设备**：{dev}"),
             });
         }
         // 交互式选择提醒：会话最新对话消息是 select（AskUserQuestion / 权限确认）时，
@@ -1876,7 +1876,7 @@ async fn report(
                     kind: EventKind::Select,
                     task_id: Some(t.id.clone()),
                     text: format!(
-                        "**⌨️ 需要你选择**\n{}\n\n{}\n\n回复「发 {{N}} 序号」作答",
+                        "**⌨️ 需要你选择**\n\n{}\n\n{}\n\n回复「发 {{N}} 序号」作答",
                         body(t),
                         opts
                     ),
