@@ -213,14 +213,17 @@ fn pairs_file(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("session-pairs.json")
 }
 
-/// 写盘：把「claude_pid → session」换算成「终端锚(shell) → session」再存。
+/// 写盘：把「claude_pid → session」换算成「终端锚(shell) → session」再存。终端锚取自
+/// 扫描时算好的 ProcessInfo.shell_pid（找不到则回退 claude 自身 pid）。
 fn save_pairs(
     data_dir: &std::path::Path,
     pairs: &std::collections::HashMap<u32, String>,
-    _procs: &[am_core::model::ProcessInfo],
+    procs: &[am_core::model::ProcessInfo],
 ) {
-    let pids: Vec<u32> = pairs.keys().copied().collect();
-    let anchor_of = am_core::process::shell_anchor_pids(&pids);
+    let anchor_of: std::collections::HashMap<u32, u32> = procs
+        .iter()
+        .map(|p| (p.pid, p.shell_pid.unwrap_or(p.pid)))
+        .collect();
     let mut obj = serde_json::Map::new();
     for (pid, sid) in pairs {
         // 同一终端下只该有一个 claude；用终端锚做 key，claude 换 pid 也接得回
@@ -257,14 +260,11 @@ fn load_pairs(
     if anchor_sid.is_empty() {
         return out;
     }
-    // 为当前活着的 claude 求终端锚，锚命中盘上记录 → 接回配对
-    let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
-    let anchor_of = am_core::process::shell_anchor_pids(&pids);
+    // 当前每个活 claude 的终端锚（扫描时算好），命中盘上记录 → 把「这个 claude → 会话」接回
     for p in procs {
-        if let Some(&anchor) = anchor_of.get(&p.pid) {
-            if let Some(sid) = anchor_sid.get(&anchor) {
-                out.insert(p.pid, sid.clone());
-            }
+        let anchor = p.shell_pid.unwrap_or(p.pid);
+        if let Some(sid) = anchor_sid.get(&anchor) {
+            out.insert(p.pid, sid.clone());
         }
     }
     out

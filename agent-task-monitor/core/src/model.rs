@@ -48,6 +48,11 @@ pub struct ProcessInfo {
     pub memory: u64,
     /// 命令行
     pub command: String,
+    /// 终端锚：该 agent 最近的 shell 祖先 pid（powershell/bash…）。终端 shell 的 pid 跨
+    /// claude 的 /clear、--resume、重启都不变，比易变的 claude pid 更适合做「会话↔进程」
+    /// 配对的稳定锚。扫描时算好，供持久化/配对复用（见 process::ProcessScanner::nearest_shell）。
+    #[serde(default)]
+    pub shell_pid: Option<u32>,
 }
 
 /// 会话内一条简要消息（用于详情展示）

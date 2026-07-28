@@ -2335,6 +2335,7 @@ mod pairing_tests {
             cpu_usage: 0.0,
             memory: 0,
             command: "claude".into(),
+            shell_pid: None,
         }
     }
 
@@ -2807,6 +2808,7 @@ mod codex_tests {
             cpu_usage: 0.0,
             memory: 0,
             command: agent.into(),
+            shell_pid: None,
         };
         let sessions = vec![mk("claude", "c1", "-w-app"), mk("codex", "x1", "-w-app")];
         let procs = vec![proc("claude", 11, "app"), proc("codex", 22, "app"), proc("gemini", 33, "app")];
@@ -2849,6 +2851,7 @@ mod codex_tests {
             cpu_usage: 0.0,
             memory: 0,
             command: "claude".into(),
+            shell_pid: None,
         }];
         let tasks = build_tasks(&[], &procs, &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         assert_eq!(tasks.len(), 1);
