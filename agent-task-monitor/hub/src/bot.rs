@@ -395,8 +395,8 @@ pub(crate) async fn session_number(
         .map(|i| i + 1)
 }
 
-/// 活跃会话按「设备名 → 状态」稳定排序。「会话」列表顺序、以及「发 N / 暂停 N …」的序号
-/// 都以它为准 —— 两处共用同一份排序，序号才不会对不上。
+/// 活跃会话按「设备名 → 终端 → 项目 → 状态」稳定排序。「会话」列表顺序、以及
+/// 「发 N / 暂停 N …」的序号都以它为准 —— 两处共用同一份排序，序号才不会对不上。
 async fn sorted_active_tasks(state: &SharedState, username: &str) -> Vec<am_core::model::Task> {
     let mut tasks = state.tasks_for(username).await;
     // 已结束的会话不列出——机器人只关心还能操作的活跃会话
@@ -407,7 +407,13 @@ async fn sorted_active_tasks(state: &SharedState, username: &str) -> Vec<am_core
         TaskStatus::Idle => 2,
         TaskStatus::Finished => 3,
     };
-    tasks.sort_by(|a, b| a.hostname.cmp(&b.hostname).then(rank(a.status).cmp(&rank(b.status))));
+    tasks.sort_by(|a, b| {
+        a.hostname
+            .cmp(&b.hostname)
+            .then(a.provider_dsr.cmp(&b.provider_dsr))
+            .then(a.project_name.cmp(&b.project_name))
+            .then(rank(a.status).cmp(&rank(b.status)))
+    });
     tasks
 }
 
@@ -419,15 +425,23 @@ async fn list_sessions(state: &SharedState, username: &str) -> String {
     let mut ids = Vec::with_capacity(tasks.len());
     let mut lines = vec![format!("共 {} 个活跃会话：", tasks.len())];
     let mut cur_dev = String::new();
+    let mut cur_group = String::new(); // 终端·项目 子分组
     for t in &tasks {
         if t.hostname != cur_dev {
             cur_dev = t.hostname.clone();
+            cur_group.clear(); // 换设备后子分组重置，第一条必出子标题
             lines.push(format!("—— 📱 {} ——", cur_dev));
         }
+        let group = format!("{} · {}", t.provider_dsr, t.project_name);
+        if group != cur_group {
+            cur_group = group.clone();
+            lines.push(format!("  〔{group}〕"));
+        }
         ids.push(t.id.clone());
+        // 子标题里已带终端·项目，行内只留状态 + 会话标题
         let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
         let title: String = title.chars().take(24).collect();
-        lines.push(format!("{}. [{}] {} · {}", ids.len(), status_zh(t.status), title, t.project_name));
+        lines.push(format!("  {}. [{}] {}", ids.len(), status_zh(t.status), title));
     }
     state.bot_last_list.write().await.insert(username.to_string(), ids);
     lines.push("\n操作示例：暂停 1 / 发 1 继续".to_string());
