@@ -1770,6 +1770,22 @@ async fn report(
         let baseline = !entry.known_sessions.is_empty();
         let current_ids: std::collections::HashSet<&str> =
             tasks.iter().map(|t| t.id.as_str()).collect();
+        // 会话「真实年龄」闸门：只有刚开不久（started_at 在近几分钟内）的会话才算真·新。
+        // 这比「上线沉降窗口」可靠得多——旧会话 started_at 是很久以前，无论被重连/客户端重启/
+        // mac App Nap 拖慢扫描在多久后才扫回，都不会被误推「会话开始」。解析失败按「不新」处理
+        // （偏保守：宁可漏推一条真新，也不刷屏旧会话）。
+        const NEW_SESSION_MAX_AGE_SECS: i64 = 5 * 60;
+        let now_s = crate::state::now_secs() as i64;
+        let freshly_started = |t: &am_core::model::Task| -> bool {
+            t.started_at
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| {
+                    let age = now_s - dt.timestamp();
+                    (0..=NEW_SESSION_MAX_AGE_SECS).contains(&age)
+                })
+                .unwrap_or(false)
+        };
         let dev = &entry.hostname;
         // markdown 正文：设备/终端/项目/会话（两空格软换行，钉钉 markdown 才逐行断开）。
         // `{{NO}}`（format! 编译后为 `{NO}`）占位由 deliver 换成会话编号。
@@ -1832,12 +1848,13 @@ async fn report(
                     known_removes.push(t.id.clone()); // 已结束：移出基线，别再被「消失」判一次
                 }
             }
-            // 会话开始：基线里没有 = 真·新。仅当基线已建立、设备稳定在线（过沉降期、非上线边沿）
-            // 时推；否则只登记进基线不推（重连扫回 / 冷启动的已有会话不算新）。
+            // 会话开始：基线里没有 = 尚未见过；再叠一道「真实年龄」闸门（近几分钟内才开的）
+            // 才算真·新——彻底堵住重连/重启把旧会话扫回后误推。基线 + 沉降窗口作为额外去重保留。
             if !entry.known_sessions.contains_key(&t.id)
                 && baseline
                 && !was_offline
                 && online_secs >= NEW_SESSION_SETTLE_SECS
+                && freshly_started(t)
             {
                 events.push(NotifyEvent {
                     owner: owner.clone(),
