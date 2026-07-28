@@ -1833,6 +1833,25 @@ async fn report(
                 })
                 .unwrap_or((String::new(), None))
         };
+        // 「等待选择」判定：从末尾回看最近一条实质消息 —— 若先遇到 select（其后没有 user/
+        // tool_result 应答），说明仍在等你选。比「末条恰好是 select」稳健：AskUserQuestion 记录
+        // 常不在绝对末尾（后面可能还跟 assistant 文本），但只要没被应答就仍算等待。
+        let is_pending_select = |ms: &[am_core::model::MessageBrief]| -> bool {
+            for m in ms.iter().rev() {
+                match m.role.as_str() {
+                    "todos" | "bgtasks" => continue,
+                    "select" => return true,
+                    "user" | "tool_result" => return false,
+                    _ => continue, // assistant/tool/plan：继续往前看
+                }
+            }
+            false
+        };
+        let now_selecting: std::collections::HashSet<String> = tasks
+            .iter()
+            .filter(|t| msgs_map.get(&t.id).map(|ms| is_pending_select(ms)).unwrap_or(false))
+            .map(|t| t.id.clone())
+            .collect();
         for t in &tasks {
             // 状态跃迁（会话仍在）：任务完成（Running→Idle）/ 结束（→Finished）。
             // 重连/客户端重启那一轮（was_offline）绝不比对：此时 `old` 还是重启【前】的旧快照，
@@ -1841,7 +1860,11 @@ async fn report(
             // 已是重连后的快照，再正常比对。
             if !was_offline {
                 if let Some(&prev) = old.get(t.id.as_str()) {
-                    if prev == TaskStatus::Running && t.status == TaskStatus::Idle {
+                    // 等待选择的会话不推「任务完成」——它由下面的「需要你选择」覆盖，避免同时两条
+                    if prev == TaskStatus::Running
+                        && t.status == TaskStatus::Idle
+                        && !now_selecting.contains(&t.id)
+                    {
                         let (res, full) = result(&t.id);
                         events.push(NotifyEvent {
                             owner: owner.clone(),
@@ -1931,56 +1954,16 @@ async fn report(
                 full_content: None,
             });
         }
-        // 交互式选择提醒：会话最新对话消息是 select（AskUserQuestion / 权限确认）时，
-        // 进入该状态推一次（边沿触发，靠 select_notified 去重），提示去作答。
-        // 注意：messages() 会在末尾追加 todos/bgtasks 状态快照，不能直接取 ms.last()
-        //（否则有任务清单/后台任务的会话里，最后一条恒是快照、select 永远检不出、不推提醒）。
-        // 取最后一条「非快照」对话消息来判定。
-        let last_convo = |ms: &[am_core::model::MessageBrief]| -> Option<am_core::model::MessageBrief> {
-            ms.iter()
-                .rev()
-                .find(|m| !matches!(m.role.as_str(), "todos" | "bgtasks"))
-                .cloned()
-        };
-        let now_selecting: std::collections::HashSet<String> = tasks
-            .iter()
-            .filter(|t| {
-                msgs_map
-                    .get(&t.id)
-                    .and_then(|ms| last_convo(ms))
-                    .map(|m| m.role.as_str() == "select")
-                    .unwrap_or(false)
-            })
-            .map(|t| t.id.clone())
-            .collect();
-        // 诊断（临时）：排查「等待选择没推送」。列出每个会话的消息数 + 末尾几条 role，
-        // 直接看 hub 收到的 entry.messages 里 select 到底在不在、是不是末条。
-        for t in &tasks {
-            if let Some(ms) = msgs_map.get(&t.id) {
-                let tail_roles: Vec<&str> =
-                    ms.iter().rev().take(4).map(|m| m.role.as_str()).collect();
-                let has_select = ms.iter().any(|m| m.role == "select");
-                if has_select || matches!(t.status, TaskStatus::Idle) {
-                    tracing::info!(
-                        "钉钉诊断 会话={} 状态={:?} 消息数={} 含select={} 末4条role(倒序)={:?} 末条对话role={:?}",
-                        &t.id[..t.id.len().min(8)],
-                        t.status,
-                        ms.len(),
-                        has_select,
-                        tail_roles,
-                        last_convo(ms).map(|m| m.role),
-                    );
-                }
-            }
-        }
+        // 交互式选择提醒：会话仍在等待选择（now_selecting，已在上方按「最近实质消息是未应答的
+        // select」判定）且尚未提醒过时，推一条。edge 触发靠 select_notified 去重。
         for t in &tasks {
             if now_selecting.contains(&t.id) && !entry.select_notified.contains(&t.id) {
+                // 选项文本取自该会话最近一条 select 消息（未必是绝对末条）
                 let opts = msgs_map
                     .get(&t.id)
-                    .and_then(|ms| last_convo(ms))
+                    .and_then(|ms| ms.iter().rev().find(|m| m.role.as_str() == "select"))
                     .map(|m| select_options_text(&m.content))
                     .unwrap_or_default();
-                tracing::info!("钉钉诊断 推送 Select 事件 会话={}", t.id);
                 events.push(NotifyEvent {
                     owner: owner.clone(),
                     kind: EventKind::Select,
