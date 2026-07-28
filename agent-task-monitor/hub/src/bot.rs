@@ -146,35 +146,53 @@ pub(crate) struct ReplyCtx {
     pub robot_code: String,
 }
 
-/// 展开「@N …」速记：@6 暂停 → 暂停 6；@6 撤回 → 撤回 6；@6 <内容> → 发 6 <内容>。
-/// 让钉钉里直接 @会话号 接指令/任务，省去「发 N」前缀。不以 @ 开头则原样返回。
-fn expand_at_shorthand(text: &str) -> String {
-    let t = text.trim();
-    let Some(rest) = t.strip_prefix('@') else { return t.to_string() };
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        return t.to_string(); // 「@abc」不是会话号，原样交后续
+/// 会话级指令（吃一个会话序号 N）：`@x` 速记与多目标都只对这些指令 + 「内容(=发)」生效。
+const SESSION_CMDS: &[&str] = &[
+    "暂停", "恢复", "继续", "中断", "终止", "停止", "撤回", "监控", "watch", "排队", "队列", "queue",
+];
+
+/// 解析「@N …」速记为一组 (cmd, arg)。支持多目标：`@1 @2 xxx`、`@1 @2 暂停`、`@x 排队`。
+/// - 非 @ 开头 → None（交常规分发）。
+/// - @ 开头但没解析出有效目标/内容 → Some(空) → 提示用法。
+/// - rest 首词是会话级指令 → 每个目标一条「指令 N …」；否则整段当内容 → 每个目标一条「发 N …」。
+fn parse_at_commands(text: &str) -> Option<Vec<(String, String)>> {
+    let mut rest = text.trim();
+    if !rest.starts_with('@') {
+        return None;
     }
-    let after = rest[digits.len()..].trim_start();
-    if after.is_empty() {
-        return t.to_string(); // 「@6」单独无意义，交后续按未知处理
-    }
-    // 第一个词是会话级指令 → 改写成「指令 N …」；否则整段当内容 →「发 N …」
-    let (first, tail) = match after.split_once(char::is_whitespace) {
-        Some((a, b)) => (a, b.trim()),
-        None => (after, ""),
-    };
-    const SESSION_CMDS: &[&str] =
-        &["暂停", "恢复", "继续", "中断", "终止", "停止", "撤回", "监控", "watch"];
-    if SESSION_CMDS.contains(&first) {
-        if tail.is_empty() {
-            format!("{first} {digits}")
-        } else {
-            format!("{first} {digits} {tail}")
+    let mut targets: Vec<String> = Vec::new();
+    loop {
+        rest = rest.trim_start();
+        let Some(r) = rest.strip_prefix('@') else { break };
+        let digits: String = r.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            break; // 「@abc」不是会话号
         }
-    } else {
-        format!("发 {digits} {after}")
+        if !targets.contains(&digits) {
+            targets.push(digits.clone());
+        }
+        rest = &r[digits.len()..];
     }
+    if targets.is_empty() {
+        return Some(vec![]);
+    }
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Some(vec![]);
+    }
+    let (first, tail) = split_cmd(rest);
+    let cmds = if SESSION_CMDS.contains(&first.as_str()) {
+        targets
+            .iter()
+            .map(|n| {
+                let arg = if tail.is_empty() { n.clone() } else { format!("{n} {tail}") };
+                (first.clone(), arg)
+            })
+            .collect()
+    } else {
+        targets.iter().map(|n| ("发".to_string(), format!("{n} {rest}"))).collect()
+    };
+    Some(cmds)
 }
 
 pub(crate) async fn dispatch(
@@ -183,21 +201,44 @@ pub(crate) async fn dispatch(
     text: &str,
     reply: Option<&ReplyCtx>,
 ) -> String {
-    let text = expand_at_shorthand(text);
-    let (cmd, arg) = split_cmd(&text);
-    match cmd.as_str() {
+    // 「@N …」速记（多目标 + 全部会话级指令）：逐条 run_command，回复拼接
+    if let Some(cmds) = parse_at_commands(text) {
+        if cmds.is_empty() {
+            return "用法：@序号 接内容或会话指令，可多个。\n\
+                    例：@1 @2 重启服务 / @1 排队 / @2 暂停 / @1 撤回"
+                .to_string();
+        }
+        let mut out = Vec::new();
+        for (cmd, arg) in cmds {
+            out.push(run_command(state, username, &cmd, &arg, reply).await);
+        }
+        return out.join("\n\n");
+    }
+    let (cmd, arg) = split_cmd(text);
+    run_command(state, username, &cmd, &arg, reply).await
+}
+
+/// 单条指令分发（@N 速记逐条走这里，常规消息也走这里）。
+async fn run_command(
+    state: &SharedState,
+    username: &str,
+    cmd: &str,
+    arg: &str,
+    reply: Option<&ReplyCtx>,
+) -> String {
+    match cmd {
         "帮助" | "help" | "?" | "？" | "菜单" | "" => help_text(),
         "会话" | "列表" | "ls" | "任务" => list_sessions(state, username).await,
         "设备" | "devices" => list_devices(state, username).await,
-        "暂停" => control(state, username, &arg, ControlAction::Pause, "已暂停").await,
-        "恢复" | "继续" => control(state, username, &arg, ControlAction::Resume, "已恢复").await,
-        "中断" => control(state, username, &arg, ControlAction::Interrupt, "已中断").await,
-        "终止" | "停止" => control(state, username, &arg, ControlAction::Stop, "已终止").await,
-        "发" | "发送" | "回复" | "输入" => send_input(state, username, &arg, reply).await,
-        "排队" | "队列" | "queue" => list_queued(state, username, &arg).await,
-        "监控" | "watch" => monitor_start(state, username, &arg, reply).await,
+        "暂停" => control(state, username, arg, ControlAction::Pause, "已暂停").await,
+        "恢复" | "继续" => control(state, username, arg, ControlAction::Resume, "已恢复").await,
+        "中断" => control(state, username, arg, ControlAction::Interrupt, "已中断").await,
+        "终止" | "停止" => control(state, username, arg, ControlAction::Stop, "已终止").await,
+        "发" | "发送" | "回复" | "输入" => send_input(state, username, arg, reply).await,
+        "排队" | "队列" | "queue" => list_queued(state, username, arg).await,
+        "监控" | "watch" => monitor_start(state, username, arg, reply).await,
         "停止监控" | "取消监控" | "结束监控" | "unwatch" => monitor_stop(state, username).await,
-        "撤回" | "recall" => recall_last(state, username, &arg).await,
+        "撤回" | "recall" => recall_last(state, username, arg).await,
         "绑定" | "bind" => bind_recipient(state, username, reply).await,
         "解绑" | "unbind" => unbind_recipient(state, username).await,
         _ => format!("未知指令「{cmd}」。发「帮助」看用法。"),
@@ -326,7 +367,8 @@ fn help_text() -> String {
      • 停止监控 —— 结束监控\n\
      • 绑定 / 解绑 —— 设为/取消「任务完成·会话结束」主动私聊推送的接收人\n\
      • 帮助 —— 显示本说明\n\
-     速记：@N 后直接接内容或指令 —— @2 重启服务 = 发 2 重启服务；@2 暂停 = 暂停 2\n\
+     速记：@N 后接内容或任意会话指令 —— @2 重启服务 / @2 暂停 / @2 排队 / @2 撤回\n\
+     多目标：@1 @2 重启服务（同一任务发给多个会话）\n\
      （序号以最近一次「会话」列出的为准）"
         .to_string()
 }
@@ -773,7 +815,7 @@ async fn queue_command(
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_at_shorthand, split_cmd};
+    use super::{parse_at_commands, split_cmd};
 
     #[test]
     fn split_command() {
@@ -783,17 +825,29 @@ mod tests {
     }
 
     #[test]
-    fn at_shorthand() {
+    fn at_commands() {
+        let c = |s: &str| parse_at_commands(s);
         // @N + 内容 → 发 N 内容
-        assert_eq!(expand_at_shorthand("@2 重启服务"), "发 2 重启服务");
-        assert_eq!(expand_at_shorthand("@2重启服务"), "发 2 重启服务");
-        // @N + 会话级指令 → 指令 N
-        assert_eq!(expand_at_shorthand("@2 暂停"), "暂停 2");
-        assert_eq!(expand_at_shorthand("@2 撤回"), "撤回 2");
-        assert_eq!(expand_at_shorthand("@2 监控"), "监控 2");
-        // 非 @ / 非会话号 / 单独 @N：原样
-        assert_eq!(expand_at_shorthand("发 2 继续"), "发 2 继续");
-        assert_eq!(expand_at_shorthand("@abc"), "@abc");
-        assert_eq!(expand_at_shorthand("@2"), "@2");
+        assert_eq!(c("@2 重启服务"), Some(vec![("发".into(), "2 重启服务".into())]));
+        assert_eq!(c("@2重启服务"), Some(vec![("发".into(), "2 重启服务".into())]));
+        // @N + 会话级指令（含排队）→ 指令 N
+        assert_eq!(c("@2 暂停"), Some(vec![("暂停".into(), "2".into())]));
+        assert_eq!(c("@2 排队"), Some(vec![("排队".into(), "2".into())]));
+        assert_eq!(c("@2 撤回"), Some(vec![("撤回".into(), "2".into())]));
+        // 多目标：同一内容/指令下发到多个会话
+        assert_eq!(
+            c("@1 @2 重启服务"),
+            Some(vec![("发".into(), "1 重启服务".into()), ("发".into(), "2 重启服务".into())])
+        );
+        assert_eq!(
+            c("@1 @2 暂停"),
+            Some(vec![("暂停".into(), "1".into()), ("暂停".into(), "2".into())])
+        );
+        // 去重目标
+        assert_eq!(c("@1 @1 x"), Some(vec![("发".into(), "1 x".into())]));
+        // 非 @ → None（走常规分发）；无效目标/空 → Some(空)（提示用法）
+        assert_eq!(c("发 2 继续"), None);
+        assert_eq!(c("@abc"), Some(vec![]));
+        assert_eq!(c("@2"), Some(vec![]));
     }
 }
