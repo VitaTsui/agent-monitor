@@ -62,6 +62,9 @@ pub struct MachineEntry {
     /// 会话 id → 最近一次在上报里出现的时刻。会话「消失」超过 FINISH_GRACE_SECS 才判结束，
     /// 抹掉一两个上报周期的抖动。
     pub session_last_seen: HashMap<String, Instant>,
+    /// 会话 id → 最近一次处于「等待选择」的时刻。等待用户选择时会话仍活着，但配对可能抖动、
+    /// 消息被清，若按「消失=结束/重现=开始」处理会误推。此窗口内不推该会话的开始/结束。
+    pub last_select_at: HashMap<String, Instant>,
 }
 
 /// 机器离线判定阈值
@@ -74,6 +77,10 @@ pub const NEW_SESSION_SETTLE_SECS: u64 = 30;
 /// 「会话已结束」去抖：会话从上报里消失后，要连续消失这么久才判真结束再推。
 /// 配对振荡（/clear 后进程在新旧会话文件间来回抖）通常几秒内自愈，取 20s 覆盖。
 pub const FINISH_GRACE_SECS: u64 = 20;
+
+/// 「等待选择」保护窗：会话最近这段时间内出现过等待选择态时，其消失/重现不推开始/结束
+/// （用户可能在慢慢选，会话仍活着，只是配对抖动）。取 30 分钟，够长时间挂着待选。
+pub const SELECT_PROTECT_SECS: u64 = 1800;
 
 /// 文件下发允许写入的根目录：AM_UPLOAD_ROOT，默认用户主目录。
 /// 常量时间比较令牌。

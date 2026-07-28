@@ -1724,6 +1724,7 @@ async fn report(
                 online_since: Instant::now(),
                 known_sessions: HashMap::new(),
                 session_last_seen: HashMap::new(),
+                last_select_at: HashMap::new(),
             }
         });
     // 设备上线边沿：新登记 或 之前已判离线（超阈值）
@@ -1739,6 +1740,7 @@ async fn report(
         entry.online_since = Instant::now();
         entry.known_sessions.clear();
         entry.session_last_seen.clear();
+        entry.last_select_at.clear();
     }
     let online_secs = entry.online_since.elapsed().as_secs();
     let now_i = Instant::now();
@@ -1841,6 +1843,15 @@ async fn report(
             if current_ids.contains(id.as_str()) || known_removes.contains(id) {
                 continue;
             }
+            // 最近在等待选择的会话：仍活着（用户在慢慢选），配对抖动导致的消失不算结束
+            let select_protected = entry
+                .last_select_at
+                .get(id)
+                .map(|t| t.elapsed().as_secs() < crate::state::SELECT_PROTECT_SECS)
+                .unwrap_or(false);
+            if select_protected {
+                continue;
+            }
             let gone = entry
                 .session_last_seen
                 .get(id)
@@ -1906,6 +1917,10 @@ async fn report(
                 });
             }
         }
+        // 记下正在等待选择的会话时刻：其之后若配对抖动消失，disappear 分支据此保护、不误推结束
+        for id in &now_selecting {
+            entry.last_select_at.insert(id.clone(), now_i);
+        }
         entry.select_notified = now_selecting;
     }
     if notify_owner.is_some() {
@@ -1920,6 +1935,7 @@ async fn report(
     for id in &known_removes {
         entry.known_sessions.remove(id);
         entry.session_last_seen.remove(id);
+        entry.last_select_at.remove(id);
     }
     entry.tasks = tasks;
     // 缓存 agent 回传的 git 对比结果
