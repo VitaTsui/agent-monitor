@@ -1852,27 +1852,34 @@ async fn report(
             .filter(|t| msgs_map.get(&t.id).map(|ms| is_pending_select(ms)).unwrap_or(false))
             .map(|t| t.id.clone())
             .collect();
-        // 诊断（临时）：任一会话窗口里含 select 时，打印其非快照消息的末 12 条 role（倒序），
-        // 看 select 后面到底跟了什么（为何 is_pending_select 判 false）。
+        // 诊断（临时）：列出所有非结束会话的 id/终端/状态/消息数/末3role，
+        // 看正在等待选择的 Cursor 会话有没有把消息(含 select)报上来。
         for t in &tasks {
-            if let Some(ms) = msgs_map.get(&t.id) {
-                if ms.iter().any(|m| m.role == "select") {
-                    let seq: Vec<&str> = ms
-                        .iter()
+            if matches!(t.status, TaskStatus::Finished) {
+                continue;
+            }
+            let ms = msgs_map.get(&t.id);
+            let cnt = ms.map(|v| v.len()).unwrap_or(0);
+            let tail: Vec<&str> = ms
+                .map(|v| {
+                    v.iter()
                         .filter(|m| !matches!(m.role.as_str(), "todos" | "bgtasks"))
                         .rev()
-                        .take(12)
+                        .take(3)
                         .map(|m| m.role.as_str())
-                        .collect();
-                    tracing::info!(
-                        "钉钉诊断2 会话={} 状态={:?} pending_select={} 末12role(倒序)={:?}",
-                        &t.id[..t.id.len().min(8)],
-                        t.status,
-                        now_selecting.contains(&t.id),
-                        seq,
-                    );
-                }
-            }
+                        .collect()
+                })
+                .unwrap_or_default();
+            tracing::info!(
+                "钉钉诊断3 会话={} 终端={} 项目={} 状态={:?} pid={:?} 消息数={} 末3role={:?}",
+                &t.id[..t.id.len().min(8)],
+                t.provider_dsr,
+                t.project_name,
+                t.status,
+                t.pid,
+                cnt,
+                tail,
+            );
         }
         for t in &tasks {
             // 状态跃迁（会话仍在）：任务完成（Running→Idle）/ 结束（→Finished）。
