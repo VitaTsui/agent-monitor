@@ -39,6 +39,10 @@ pub struct MachineEntry {
     pub pending_git: VecDeque<am_core::model::GitQuery>,
     /// 待下发的目录列举请求（上传选目录）
     pub pending_dir: VecDeque<am_core::model::DirQuery>,
+    /// 待下发的文件夹操作（新建/删除/重命名）
+    pub pending_fsop: VecDeque<am_core::model::FsOp>,
+    /// 文件夹操作结果缓存：op_id → 结果（网页轮询后即读走）
+    pub fsop_results: HashMap<String, am_core::model::FsOpResult>,
     /// 目录列举结果缓存：(task_id, rel) → 子目录名
     /// (task_id, rel) → (子目录, 文件)。文件用于「选择文件回填相对路径」。
     pub dir_cache: HashMap<(String, String), (Vec<String>, Vec<String>)>,
@@ -46,10 +50,37 @@ pub struct MachineEntry {
     pub git_cache: HashMap<String, am_core::model::GitOverview>,
     /// 上次通知过的在线状态（钉钉推送用，边沿触发上线/离线，避免重复）
     pub notified_online: bool,
+    /// 已推过「等待选择」提醒的会话 ID（边沿触发：进入 select 推一次，离开清除）
+    pub select_notified: std::collections::HashSet<String>,
+    /// 本次「上线」的起点：设备离线→在线边沿时刷新。用于「会话开始」推送的沉降窗口——
+    /// 刚上线（含 hub 重启、客户端重启/更新）后客户端会分几次把已有会话陆续扫上来，
+    /// 那不是新开会话，不能推。上线后过了沉降期，新冒出来的才算真·新会话。
+    pub online_since: Instant,
+    /// 会话基线：id → 最近一次快照。用于「会话开始/结束」的稳定判定，避免配对振荡
+    /// （同一进程在两个会话文件间来回抖）时同一会话反复推开始/结束。
+    pub known_sessions: HashMap<String, Task>,
+    /// 会话 id → 最近一次在上报里出现的时刻。会话「消失」超过 FINISH_GRACE_SECS 才判结束，
+    /// 抹掉一两个上报周期的抖动。
+    pub session_last_seen: HashMap<String, Instant>,
+    /// 会话 id → 最近一次处于「等待选择」的时刻。等待用户选择时会话仍活着，但配对可能抖动、
+    /// 消息被清，若按「消失=结束/重现=开始」处理会误推。此窗口内不推该会话的开始/结束。
+    pub last_select_at: HashMap<String, Instant>,
 }
 
 /// 机器离线判定阈值
 pub const OFFLINE_AFTER_SECS: u64 = 10;
+
+/// 「会话开始」推送沉降期：设备上线后这段时间内出现的会话视为「重连扫回的已有会话」，
+/// 不推。客户端重启/更新后分批扫回历史会话可能持续十几秒，取 30s 留足余量。
+pub const NEW_SESSION_SETTLE_SECS: u64 = 30;
+
+/// 「会话已结束」去抖：会话从上报里消失后，要连续消失这么久才判真结束再推。
+/// 配对振荡（/clear 后进程在新旧会话文件间来回抖）通常几秒内自愈，取 20s 覆盖。
+pub const FINISH_GRACE_SECS: u64 = 20;
+
+/// 「等待选择」保护窗：会话最近这段时间内出现过等待选择态时，其消失/重现不推开始/结束
+/// （用户可能在慢慢选，会话仍活着，只是配对抖动）。取 30 分钟，够长时间挂着待选。
+pub const SELECT_PROTECT_SECS: u64 = 1800;
 
 /// 文件下发允许写入的根目录：AM_UPLOAD_ROOT，默认用户主目录。
 /// 常量时间比较令牌。
@@ -227,6 +258,20 @@ pub struct AppState {
     /// 机器人「最近一次列出的会话」：用户名 → 有序 task_id，
     /// 让「暂停 3」这类按序号操作能对上会话。
     pub bot_last_list: RwLock<HashMap<String, Vec<String>>>,
+    /// 机器人「监控中」的会话：用户名 → 监控态。后台循环据此把新内容推到钉钉会话 webhook。
+    pub bot_monitors: RwLock<HashMap<String, BotMonitor>>,
+}
+
+/// 机器人持续监控一个会话的状态（通过钉钉会话级 webhook 推送新内容）
+#[derive(Clone)]
+pub struct BotMonitor {
+    pub task_id: String,
+    /// 钉钉会话 webhook（回消息用的临时地址，可主动 POST 推送）
+    pub webhook: String,
+    /// webhook 失效时间(ms)；超过则停止监控（0=未知，不因此停）
+    pub expiry_ms: u64,
+    /// 已推送到的最后一条消息时间戳（算增量用）
+    pub last_ts: String,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -248,7 +293,19 @@ impl AppState {
             started_at: chrono::Local::now(),
             sessions_dirty: std::sync::atomic::AtomicBool::new(false),
             bot_last_list: RwLock::new(HashMap::new()),
+            bot_monitors: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// 取某会话最近缓存的消息（在各机器的 messages 缓存里找第一个命中的）
+    pub async fn bot_task_messages(&self, task_id: &str) -> Vec<am_core::model::MessageBrief> {
+        let machines = self.machines.read().await;
+        for entry in machines.values() {
+            if let Some(msgs) = entry.messages.get(task_id) {
+                return msgs.clone();
+            }
+        }
+        Vec::new()
     }
 
     /// 聚合指定用户「可见」的任务（信任 + 归属；超级管理员看全部）
@@ -416,7 +473,9 @@ pub async fn tick_loop(state: SharedState) {
                             offline_events.push(crate::dingtalk::NotifyEvent {
                                 owner,
                                 kind: crate::dingtalk::EventKind::Device,
-                                text: format!("🔴 设备离线 · {}", m.hostname),
+                                task_id: None,
+                                text: format!("**🔴 设备离线**\n\n**设备**：{}", m.hostname),
+                                full_content: None,
                             });
                         }
                     }

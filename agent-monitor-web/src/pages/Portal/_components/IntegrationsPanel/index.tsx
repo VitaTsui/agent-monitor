@@ -67,7 +67,12 @@ const IntegrationsPanel: React.FC = () => {
   const [wecomUrl, setWecomUrl] = useState("");
   const [wecomSaving, setWecomSaving] = useState(false);
   // 钉钉企业应用
-  const [ding, setDing] = useState({ appSecret: "", hasSecret: false });
+  const [ding, setDing] = useState({
+    appSecret: "",
+    hasSecret: false,
+    appKey: "",
+    stream: false,
+  });
   const [dingUrl, setDingUrl] = useState("");
   const [dingSaving, setDingSaving] = useState(false);
 
@@ -87,7 +92,12 @@ const IntegrationsPanel: React.FC = () => {
           setWecomUrl(d.wecomApp.callbackUrl);
         }
         if (d.dingtalkApp) {
-          setDing({ appSecret: "", hasSecret: d.dingtalkApp.hasSecret });
+          setDing({
+            appSecret: "",
+            hasSecret: d.dingtalkApp.hasSecret,
+            appKey: d.dingtalkApp.appKey ?? "",
+            stream: !!d.dingtalkApp.stream,
+          });
           setDingUrl(d.dingtalkApp.callbackUrl);
         }
       })
@@ -153,12 +163,21 @@ const IntegrationsPanel: React.FC = () => {
       message.warning("请填写钉钉应用的 AppSecret");
       return;
     }
+    const useStream = !!ding.appKey.trim();
     setDingSaving(true);
-    setDingtalkApp({ appSecret: ding.appSecret.trim() || undefined })
+    setDingtalkApp({
+      appSecret: ding.appSecret.trim() || undefined,
+      // AppKey 是可见字段，始终以当前输入为准（清空即切回 HTTP 回调模式）
+      appKey: ding.appKey.trim(),
+    })
       .then((res) => {
         if (res.code !== 0) return message.error(res.msg ?? "保存失败");
-        message.success("已保存，把下方回调地址填进钉钉应用的消息接收");
-        setDing((d) => ({ ...d, appSecret: "", hasSecret: true }));
+        message.success(
+          useStream
+            ? "已保存并启用 Stream 长连接，无需公网回调地址，去钉钉里 @机器人 试试"
+            : "已保存，把下方回调地址填进钉钉应用的消息接收",
+        );
+        setDing((d) => ({ ...d, appSecret: "", hasSecret: true, stream: useStream }));
         if (res.data?.callbackUrl) setDingUrl(res.data.callbackUrl);
       })
       .catch(() => message.error("保存失败，请检查网络"))
@@ -363,8 +382,18 @@ const IntegrationsPanel: React.FC = () => {
       >
         <div className={styles.form}>
           <div className={styles.desc}>
-            钉钉开放平台建企业内部应用机器人，「消息接收模式」选 HTTP 填下方回调地址，
-            AppSecret 用于验签。
+            钉钉开放平台建企业内部应用机器人。<b>推荐 Stream 模式</b>：填 AppKey + AppSecret，
+            服务端主动连钉钉收消息，<b>无需公网回调地址</b>（海外服务器也能用，绕开「消息接收
+            地址校验失败」）。若留空 AppKey，则回退 HTTP 回调模式，需把下方回调地址填进「消息
+            接收模式 · HTTP」。
+          </div>
+          <div className={styles.field}>
+            <label className={styles.label}>AppKey / ClientID（Stream 模式）</label>
+            <Input
+              placeholder="填了走 Stream 长连接；留空则用下方 HTTP 回调地址"
+              value={ding.appKey}
+              onChange={(v) => setDing((d) => ({ ...d, appKey: v }))}
+            />
           </div>
           <div className={styles.field}>
             <label className={styles.label}>AppSecret</label>
@@ -374,7 +403,12 @@ const IntegrationsPanel: React.FC = () => {
               onChange={(v) => setDing((d) => ({ ...d, appSecret: v }))}
             />
           </div>
-          {dingUrl ? (
+          {ding.appKey.trim() ? (
+            <div className={styles.desc}>
+              ✅ Stream 模式：保存后服务端会自动建立长连接，钉钉里 @机器人 发指令即可，
+              回调地址可忽略。
+            </div>
+          ) : dingUrl ? (
             <div className={styles.urlRow}>
               <span className={styles.urlLabel}>回调地址</span>
               <span className={styles.urlValue}>{dingUrl}</span>
@@ -383,7 +417,7 @@ const IntegrationsPanel: React.FC = () => {
           ) : null}
           <div className={styles.actions}>
             <Button type="primary" className={styles.actBtn} loading={dingSaving} onClick={saveDing}>
-              保存并生成回调地址
+              {ding.appKey.trim() ? "保存并启用 Stream" : "保存并生成回调地址"}
             </Button>
           </div>
         </div>

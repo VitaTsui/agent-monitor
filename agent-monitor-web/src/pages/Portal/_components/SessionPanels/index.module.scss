@@ -94,10 +94,10 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     }
   }
 
-  // 两块等高且不宜太高：这是悬浮在对话上方的浮层，占高了就挡内容。
-  // 固定高度（而非 max-height）保证两块一致，内容多了自己滚。
+  // 悬浮在对话上方的浮层，占高了就挡内容：高度随内容自适应，132px 作为上限——
+  // 内容少时贴合真实高度不留空白，多了才滚动。
   .dockBody {
-    height: 132px;
+    max-height: 132px;
     overflow-y: auto;
     padding: 8px 12px;
   }
@@ -147,12 +147,12 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     color: $text;
   }
 
-  // 进行中（仅会话运行时）：方框半填充 + 脉冲，文字主题色
+  // 进行中（仅会话运行时）：整块主题色实心 + 脉冲，文字主题色。
+  // （已完成项不进清单，空框=待办、实心=进行中，语义清晰，不再用对角半填充）
   &.in_progress {
     .todoBox {
       border-color: $accent;
-      background:
-        linear-gradient(135deg, $accent 0 50%, transparent 50% 100%);
+      background: $accent;
       animation: todoPulse 1.4s ease-in-out infinite;
     }
 

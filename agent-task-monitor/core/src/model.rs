@@ -126,6 +126,9 @@ pub struct Task {
     /// 最近若干条消息摘要（agent 上报时携带，供 hub 缓存）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_messages: Vec<MessageBrief>,
+    /// 终端里 claude 原生排队、尚未被接受执行的输入（按入队顺序，供前端底部挂载显示）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_inputs: Vec<String>,
 }
 
 /// 控制动作
@@ -144,6 +147,9 @@ pub enum ControlAction {
     Kill,
     /// 向会话注入输入（发布任务）
     Input,
+    /// 向终端注入按键（不提交）：text 形如 "up:3"（按 3 次上键撤回排队）/ "esc"（插入排队）。
+    /// 仅 iTerm2(mac) 与 Windows 控制台可干净注入；Terminal.app 不支持（前端走提示）。
+    TermKey,
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,6 +203,9 @@ pub struct ReportPayload {
     pub git_results: Vec<GitResult>,
     #[serde(default)]
     pub dir_results: Vec<DirResult>,
+    /// 上一轮 hub 请求的文件夹操作结果（回传）。旧客户端不带 → 空。
+    #[serde(default)]
+    pub fs_op_results: Vec<FsOpResult>,
 }
 
 /// 一个改动文件（git status --porcelain 解析）
@@ -264,6 +273,36 @@ pub struct DirResult {
     /// 旧客户端不带该字段 → 反序列化为空。
     #[serde(default)]
     pub files: Vec<String>,
+}
+
+/// hub → agent：会话目录内的文件夹操作（上传选目录弹窗里新建/删除/重命名）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsOp {
+    /// 操作 id：网页据此轮询结果
+    pub op_id: String,
+    pub task_id: String,
+    /// 会话项目目录（agent 本机路径，作为根，不允许越出）
+    pub cwd: String,
+    /// 目标所在相对目录（"" = 根），分隔符统一 '/'
+    pub rel: String,
+    /// 操作类型：mkdir / delete / rename
+    pub op: String,
+    /// 目标名（rel 下的目录/文件名）
+    pub name: String,
+    /// rename 的新名（其余操作忽略）
+    #[serde(default)]
+    pub new_name: String,
+}
+
+/// agent → hub：文件夹操作结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsOpResult {
+    pub op_id: String,
+    pub ok: bool,
+    #[serde(default)]
+    pub msg: String,
 }
 
 /// hub → agent 的待执行控制命令

@@ -51,13 +51,12 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     > div {
       border-radius: 16px !important;
       border: 1px solid rgba(36, 61, 66, 0.15) !important;
-      box-shadow: 0 2px 8px rgba(36, 61, 66, 0.05);
+      box-shadow: none !important;
       background: #fff;
-      transition: border-color 0.15s, box-shadow 0.15s;
+      transition: border-color 0.15s;
 
       &:focus-within {
         border-color: rgba(15, 155, 173, 0.5) !important;
-        box-shadow: 0 2px 10px rgba(15, 155, 173, 0.1);
       }
     }
 
@@ -185,6 +184,23 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   .uploadLabel {
     font-size: 12.5px;
     color: #7c9096;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+
+    .dirNewBtn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      color: #0f9bad;
+      cursor: pointer;
+      font-weight: 500;
+
+      &:hover {
+        color: #0a6b79;
+      }
+    }
   }
 }
 
@@ -200,8 +216,10 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     word-break: break-all;
   }
 
+  // 固定高度（两个目录树弹窗共用）：目录条目多寡不一会让弹窗忽高忽低，钉死高度、
+  // 内容少留白、多了自己滚，弹窗尺寸稳定。
   .dirTree {
-    max-height: 240px;
+    height: 260px;
     overflow-y: auto;
     border: 1px solid rgba(36, 61, 66, 0.1);
     border-radius: 10px;
@@ -219,10 +237,45 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 
       &:hover {
         background: rgba(15, 155, 173, 0.08);
+
+        .dirItemOps {
+          opacity: 1;
+        }
       }
 
       .dirIcon {
         font-size: 14px;
+      }
+
+      // 目录名占满、可点进入；操作按钮靠右，hover 才显形
+      .dirItemName {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        word-break: break-all;
+      }
+
+      .dirItemOps {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        opacity: 0;
+        transition: opacity 0.12s;
+        color: #7c9096;
+
+        // 触屏无 hover：常驻显示
+        @media (hover: none) {
+          opacity: 1;
+        }
+
+        :global(.anticon):hover {
+          color: #0f9bad;
+        }
+        :global(.anticon):last-child:hover {
+          color: #e0564e;
+        }
       }
     }
 
@@ -296,8 +349,20 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
       border-radius: 8px;
       cursor: pointer;
 
-      &:hover {
-        background: rgba(15, 155, 173, 0.08);
+      &:hover,
+      // 方向键高亮项：和 hover 同一视觉
+      &.slashActiveItem {
+        background: rgba(15, 155, 173, 0.12);
+      }
+
+      // 自定义命令「直接发送」项：底部描边区隔于列表命令
+      &.slashCustom {
+        border-bottom: 1px solid rgba(36, 61, 66, 0.08);
+        margin-bottom: 2px;
+
+        .slashName {
+          color: #0f9bad;
+        }
       }
 
       .slashName {

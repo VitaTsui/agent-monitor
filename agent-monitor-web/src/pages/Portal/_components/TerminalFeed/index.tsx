@@ -14,6 +14,10 @@ interface TerminalFeedProps {
   providerDsr?: string;
   /** 撤回仍在排队的输入（排队气泡上的撤回按钮） */
   onRecall?: (cmdId: string) => void;
+  /** 撤回「已入终端队列」的输入（注入 ↑ 到终端） */
+  onRecallDelivered?: () => void;
+  /** 回应终端里的交互式选择（点选项 = 发送对应序号到终端） */
+  onAnswer?: (text: string) => void;
 }
 
 /** 一轮对话：一条用户消息 + 其后的助手/工具活动 */
@@ -51,11 +55,123 @@ function toTurns(messages: PortalMessage[]): Turn[] {
 
 const fmtTime = (ts?: string) => (ts ? dayjs(ts).format("MM-DD HH:mm") : "");
 
+/**
+ * 交互式选择卡（AskUserQuestion）。除了同步预设选项，补上一条「自行输入」——
+ * AskUserQuestion 始终隐含一个「其它/自定义」项，终端里能自己敲答案，远端也要能。
+ * 输入即走 onAnswer（等价在对话框里发一行自定义答案）。
+ */
+const SelectCard: React.FC<{
+  content: string;
+  onAnswer?: (text: string) => void;
+}> = ({ content, onAnswer }) => {
+  const [custom, setCustom] = useState("");
+  let data: {
+    questions?: {
+      question?: string;
+      header?: string;
+      options?: { label?: string; description?: string }[];
+    }[];
+  } = {};
+  try {
+    data = JSON.parse(content);
+  } catch {
+    /* 半截 JSON：忽略，按空卡片处理 */
+  }
+
+  const submitCustom = () => {
+    const t = custom.trim();
+    if (t && onAnswer) {
+      onAnswer(t);
+      setCustom("");
+    }
+  };
+
+  return (
+    <div className={styles.selectCard}>
+      <div className={styles.selectHead}>⌨︎ 终端等待选择</div>
+      {(data.questions ?? []).map((q, qi) => (
+        <div key={qi} className={styles.selectQ}>
+          {q.question ? (
+            <div className={styles.selectQuestion}>{q.question}</div>
+          ) : null}
+          <div className={styles.selectOpts}>
+            {(q.options ?? []).map((o, oi) => (
+              <div
+                key={oi}
+                className={`${styles.selectOpt} ${onAnswer ? styles.clickable : ""}`}
+                role={onAnswer ? "button" : undefined}
+                tabIndex={onAnswer ? 0 : undefined}
+                onClick={onAnswer ? () => onAnswer(String(oi + 1)) : undefined}
+                onKeyDown={
+                  onAnswer
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onAnswer(String(oi + 1));
+                        }
+                      }
+                    : undefined
+                }
+              >
+                <span className={styles.selectOptIdx}>{oi + 1}</span>
+                <span className={styles.selectOptBody}>
+                  <span className={styles.selectOptLabel}>{o.label}</span>
+                  {o.description ? (
+                    <span className={styles.selectOptDesc}>{o.description}</span>
+                  ) : null}
+                </span>
+              </div>
+            ))}
+            {/* 自行输入：AskUserQuestion 隐含的「其它」，输入后回车 / 点发送提交 */}
+            <div className={`${styles.selectOpt} ${styles.selectOptCustom}`}>
+              <span className={styles.selectOptIdx}>✎</span>
+              <span className={styles.selectOptBody}>
+                <input
+                  className={styles.selectCustomInput}
+                  placeholder="自行输入答案…"
+                  value={custom}
+                  disabled={!onAnswer}
+                  onChange={(e) => setCustom(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      submitCustom();
+                    }
+                  }}
+                />
+                <span
+                  className={`${styles.selectCustomSend} ${
+                    onAnswer && custom.trim() ? styles.clickable : styles.disabled
+                  }`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={submitCustom}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      submitCustom();
+                    }
+                  }}
+                >
+                  发送
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+      ))}
+      <div className={styles.selectHint}>
+        点选项直接回应；或在「✎ 自行输入」里敲自定义答案后回车
+      </div>
+    </div>
+  );
+};
+
 /** 工具结果超过该行数时折叠 */
 const RESULT_CLAMP_LINES = 4;
 
 const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
-  const { messages, running, providerDsr, onRecall } = props;
+  const { messages, running, providerDsr, onRecall, onRecallDelivered, onAnswer } = props;
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   const turns = toTurns(messages);
@@ -65,6 +181,11 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
   };
 
   const renderItem = (m: PortalMessage, key: string) => {
+    // 交互式选择/权限确认（AskUserQuestion）：同步问题与选项，成卡片展示。
+    // 终端里需要用户在 TUI 里选；这里让远程也能看到「在等你选什么」并能回应。
+    if (m.role === "select") {
+      return <SelectCard key={key} content={m.content} onAnswer={onAnswer} />;
+    }
     // plan 模式给出的待批准方案：正文是 markdown，单独成卡片
     if (m.role === "plan") {
       return (
@@ -154,7 +275,7 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
         // 方案是待批准的计划而非过程噪音，需随时同步显示。
         // （清单与后台任务是「当前状态」，已由 ChatPane 抽出去单独成面板。）
         const visibleItems = inProgress
-          ? keyed.filter(({ m }) => ["assistant", "plan"].includes(m.role))
+          ? keyed.filter(({ m }) => ["assistant", "plan", "select"].includes(m.role))
           : keyed;
         // 执行中时给一条「最近动作」预览（最后一条工具调用）
         const lastTool = inProgress
@@ -190,6 +311,21 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
                             onRecall(turn.user!.cmdId!);
+                          }
+                        }}
+                      >
+                        撤回
+                      </span>
+                    ) : turn.user.delivered && onRecallDelivered ? (
+                      <span
+                        className={styles.recallBtn}
+                        role="button"
+                        tabIndex={0}
+                        onClick={onRecallDelivered}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            onRecallDelivered();
                           }
                         }}
                       >

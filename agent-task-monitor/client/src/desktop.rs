@@ -53,6 +53,85 @@ fn write_close_behavior(state: &SharedState, b: CloseBehavior) {
     }
 }
 
+// ---- 保持电脑唤醒（防休眠/息屏）----
+fn keep_awake_pref_path(state: &SharedState) -> std::path::PathBuf {
+    state.config.data_dir.join("keepawake.pref")
+}
+fn read_keep_awake(state: &SharedState) -> bool {
+    std::fs::read_to_string(keep_awake_pref_path(state))
+        .map(|s| s.trim() == "on")
+        .unwrap_or(false)
+}
+fn write_keep_awake(state: &SharedState, on: bool) {
+    if let Err(e) = std::fs::write(keep_awake_pref_path(state), if on { "on" } else { "off" }) {
+        tracing::warn!("保持唤醒设置写入失败: {e}");
+    }
+}
+
+/// 保持电脑唤醒：mac 用 caffeinate 子进程（-w 本进程退出即自停，防遗留）；
+/// Windows 用 SetThreadExecutionState 在专线程持有 ES_CONTINUOUS。
+#[cfg(target_os = "macos")]
+mod keep_awake {
+    use std::process::Child;
+    use std::sync::Mutex;
+    static CAFFEINATE: Mutex<Option<Child>> = Mutex::new(None);
+    pub fn set(on: bool) {
+        let mut g = CAFFEINATE.lock().unwrap();
+        if on {
+            if g.is_some() {
+                return;
+            }
+            // -d 防息屏 -i 防空闲休眠 -s 防系统休眠 -u 声明用户活跃 -w 绑本进程存活
+            let pid = std::process::id().to_string();
+            match std::process::Command::new("caffeinate")
+                .args(["-disu", "-w", &pid])
+                .spawn()
+            {
+                Ok(c) => *g = Some(c),
+                Err(e) => tracing::warn!("启动 caffeinate 失败: {e}"),
+            }
+        } else if let Some(mut c) = g.take() {
+            let _ = c.kill();
+        }
+    }
+}
+#[cfg(windows)]
+mod keep_awake {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ON: AtomicBool = AtomicBool::new(false);
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    extern "system" {
+        fn SetThreadExecutionState(flags: u32) -> u32;
+    }
+    const ES_CONTINUOUS: u32 = 0x8000_0000;
+    const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
+    const ES_DISPLAY_REQUIRED: u32 = 0x0000_0002;
+    pub fn set(on: bool) {
+        ON.store(on, Ordering::SeqCst);
+        if on && !RUNNING.swap(true, Ordering::SeqCst) {
+            std::thread::spawn(|| {
+                // ES_CONTINUOUS 是线程级持续态：同一线程反复置位、关闭时清位并退出
+                while ON.load(Ordering::SeqCst) {
+                    unsafe {
+                        SetThreadExecutionState(
+                            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED,
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                }
+                unsafe {
+                    SetThreadExecutionState(ES_CONTINUOUS);
+                }
+                RUNNING.store(false, Ordering::SeqCst);
+            });
+        }
+    }
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+mod keep_awake {
+    pub fn set(_on: bool) {}
+}
+
 /// 窗口显示时：作为一般应用（macOS 显示 Dock 图标）。
 #[cfg(target_os = "macos")]
 fn set_app_visible_in_dock<R: tauri::Runtime>(app: &tauri::AppHandle<R>, visible: bool) {
@@ -82,7 +161,45 @@ fn disable_app_nap() {
     );
     std::mem::forget(token);
 }
-#[cfg(not(target_os = "macos"))]
+/// Windows 11 的 EcoQoS 会把后台/最小化进程降频（CPU 降速、定时器合并），把 1.5s 的
+/// 扫描与命令轮询拉长到几十秒——表现为「网页发了任务，终端几十秒后才收到、像没送达」。
+/// 用 SetProcessInformation 关掉本进程的「执行速度节流」，后台也按正常频率跑。
+#[cfg(windows)]
+fn disable_app_nap() {
+    #[repr(C)]
+    struct ProcessPowerThrottlingState {
+        version: u32,
+        control_mask: u32,
+        state_mask: u32,
+    }
+    const PROCESS_POWER_THROTTLING_EXECUTION_SPEED: u32 = 0x1;
+    const CURRENT_VERSION: u32 = 1;
+    const PROCESS_POWER_THROTTLING: i32 = 4; // PROCESS_INFORMATION_CLASS::ProcessPowerThrottling
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn SetProcessInformation(
+            h: isize,
+            class: i32,
+            info: *const core::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+    // control_mask 指定「我要管执行速度节流」，state_mask=0 表示「关闭该节流」（始终全速）
+    let st = ProcessPowerThrottlingState {
+        version: CURRENT_VERSION,
+        control_mask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        state_mask: 0,
+    };
+    unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            PROCESS_POWER_THROTTLING,
+            &st as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<ProcessPowerThrottlingState>() as u32,
+        );
+    }
+}
+#[cfg(all(unix, not(target_os = "macos")))]
 fn disable_app_nap() {}
 
 /// 把主窗口最小化到托盘：隐藏窗口 + macOS 退出 Dock（程序仍在后台跑）。
@@ -200,7 +317,9 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             terminals_get,
             terminal_set_excluded,
             update_status,
-            update_start
+            update_start,
+            win_minimize,
+            win_close
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -208,6 +327,17 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             // 后台/托盘态下必须持续以 1.5s 扫描上报会话状态，故先豁免 App Nap，
             // 否则定时器被系统压到 ~60s，终端里发的任务要一分钟才反映到面板。
             disable_app_nap();
+            // 恢复上次「保持电脑唤醒」设置
+            keep_awake::set(read_keep_awake(&state_setup));
+            // 默认装上 Cursor/VSCode 桥接扩展（内嵌终端下发靠它）：后台 best-effort，
+            // 每个扩展版本只装一次；未装编辑器 / CLI 不在 PATH 就静默跳过。
+            {
+                let hub = web_base.clone();
+                let dd = state_setup.config.data_dir.clone();
+                std::thread::spawn(move || {
+                    let _ = ensure_bridge_extension(&hub, &dd, false);
+                });
+            }
 
             // 作为一般桌面应用运行：macOS 显示 Dock 图标（Regular）。
             // agent 模式启动即后台，初始就用 Accessory —— 若先 Regular 再切，
@@ -248,7 +378,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                     }
                 }
             }
-            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("终端任务监控")
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(960.0, 640.0)
@@ -259,8 +389,27 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         reveal(w.app_handle(), want_visible);
                     }
-                })
-                .build()?;
+                });
+            // 仅 macOS 用 Overlay 融合式标题栏：保留原生红黄绿交通灯、隐藏标题文字，
+            // 网页内容延伸到标题栏区域（对标 Claude / Codex 桌面端）。Windows/Linux 保持
+            // 系统原生边框不动 —— 之前 Windows 去边框自绘按钮点不动、无法关闭缩小。
+            #[cfg(target_os = "macos")]
+            let builder = builder
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true);
+            let win = builder.build()?;
+            // 默认「网页授权跳转登录」：未配对时自动在系统浏览器打开授权页。浏览器有完整
+            // 能力（第三方登录/密码管理器/已有登录态），用户在浏览器登录并授权本机后，客户端
+            // 轮询拿到 device_token，内嵌 webview 随即自动重载并静默登录（见后台线程
+            // reload-on-token）。内嵌页仍保留登录入口作兜底。
+            if need_onboard {
+                let u = portal_url.clone();
+                // 稍延后：先让主窗露出来，再弹浏览器，避免一上来就抢焦点
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    open_external(&u);
+                });
+            }
             // 兜底：远程页面加载失败/超时也要露出主窗（白屏好过永远的启动窗）
             {
                 let h = app.handle().clone();
@@ -341,6 +490,25 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                             };
                             write_close_behavior(&state_evt, next);
                         }
+                        "keep_awake" => {
+                            // 切换「保持电脑唤醒」并立即生效；落盘让重启后保持
+                            let on = !read_keep_awake(&state_evt);
+                            write_keep_awake(&state_evt, on);
+                            keep_awake::set(on);
+                        }
+                        "install_ext" => {
+                            // 手动强制重装 Cursor/VSCode 桥接扩展，装完弹提示
+                            let hub = web_base_menu.clone();
+                            let dd = state_evt.config.data_dir.clone();
+                            std::thread::spawn(move || {
+                                let n = ensure_bridge_extension(&hub, &dd, true);
+                                notify_progress(&if n > 0 {
+                                    format!("已把桥接扩展安装到 {n} 个编辑器（Cursor/VSCode），重载窗口即生效")
+                                } else {
+                                    "未检测到 Cursor/VSCode 的命令行（code/cursor 未加入 PATH）。请在编辑器里执行「Shell Command: Install 'code'/'cursor' command in PATH」后重试".to_string()
+                                });
+                            });
+                        }
                         "quit" => app.exit(0),
                         other => {
                             // 监控范围勾选项：id=excl::<tty>
@@ -374,8 +542,21 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             let state_bg = state_setup.clone();
             std::thread::spawn(move || {
                 let mut last_sig = String::new();
+                // 记住上轮是否已配对：从「未配对」跳到「已配对」（浏览器授权完成、拿到
+                // device_token）时重载 webview，让页面 client_auth 静默登录接管、直接进
+                // 已授权门户，无需用户在客户端里再登一次。
+                let mut was_paired = tauri::async_runtime::block_on(async {
+                    state_bg.device_token.read().await.is_some()
+                });
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(3));
+                    let paired_now = tauri::async_runtime::block_on(async {
+                        state_bg.device_token.read().await.is_some()
+                    });
+                    if paired_now && !was_paired {
+                        was_paired = true;
+                        reload_main(&handle_bg);
+                    }
                     let (terminals, excluded, hub_err, upd) = tauri::async_runtime::block_on(async {
                         let t = state_bg.terminals.read().await.clone();
                         let e = state_bg.excludes.read().await.list();
@@ -529,6 +710,21 @@ fn build_tray_menu<R: tauri::Runtime>(
         autostart_enabled(),
         None::<&str>,
     )?;
+    let keep_awake = CheckMenuItem::with_id(
+        manager,
+        "keep_awake",
+        "保持电脑唤醒（防休眠/息屏）",
+        true,
+        read_keep_awake(state),
+        None::<&str>,
+    )?;
+    let install_ext = MenuItem::with_id(
+        manager,
+        "install_ext",
+        "安装 Cursor/VSCode 桥接扩展",
+        true,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(manager, "quit", "退出", true, None::<&str>)?;
 
     let menu = Menu::new(manager)?;
@@ -578,6 +774,8 @@ fn build_tray_menu<R: tauri::Runtime>(
     menu.append(&sep()?)?;
     menu.append(&close_to_tray)?;
     menu.append(&autostart)?;
+    menu.append(&keep_awake)?;
+    menu.append(&install_ext)?;
     menu.append(&sep()?)?;
     menu.append(&scope)?;
     menu.append(&sep()?)?;
@@ -776,6 +974,25 @@ fn update_start(
 /// 网页端 IPC：查询开机自启状态。
 /// 客户端窗口加载的是远端前台页；页面里的「开机自启」开关经这两个命令
 /// 操作本机（浏览器里打开同一页面时没有 __TAURI__，开关不渲染）。
+/// 无边框窗口的自绘顶栏用：最小化 / 关闭当前窗口（Windows 去掉系统边框后
+/// 没有原生按钮，靠网页顶栏按钮走 IPC 调这两个命令）。关闭沿用「收进托盘」
+/// 语义（隐藏窗口而非退出进程），与点原生关闭按钮一致。
+#[tauri::command]
+fn win_minimize(window: tauri::Window) {
+    let _ = window.minimize();
+}
+
+#[tauri::command]
+fn win_close(window: tauri::Window) {
+    // 与关闭按钮/托盘一致：隐藏到托盘，保持后台上报，不退出进程
+    let _ = window.hide();
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = window.app_handle().set_activation_policy(ActivationPolicy::Accessory);
+    }
+}
+
 #[tauri::command]
 fn autostart_get() -> bool {
     autostart_enabled()
@@ -1076,30 +1293,38 @@ fn alert_box(title: &str, text: &str) {
 /// 流式下载 + 进度日志 + 30s 无数据即报错：跨境网络常见「连上了但一直
 /// 不来数据」，整体超时要干等 5 分钟且全程无反馈（实际用户日志：三次
 /// 「开始自更新」后连下载完成都没有）——停滞必须快速可见地失败。
-fn download_to(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
-    // 弱网环境（跨境链路）单次失败很常见：自动重试一次，两次都挂才报错
-    match download_to_once(url, dest) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            ulog(&format!("[update] 首次下载失败（{e}），3s 后重试一次"));
-            std::thread::sleep(std::time::Duration::from_secs(3));
-            download_to_once(url, dest)
+/// 下载文件。`report`=true 才把进度写进「更新进度」通道（自更新用；扩展 vsix 等辅助
+/// 下载传 false，别污染更新 UI）。`min_bytes` 是最小合法大小（安装包用 1MB 挡半包，
+/// 小文件如 vsix 传更小）。
+fn download_to(url: &str, dest: &std::path::Path, report: bool, min_bytes: usize) -> anyhow::Result<()> {
+    // 跨境链路（中国→海外 Vultr）慢且易抖：多试几次，指数退避，最后一次挂了才报错。
+    let mut last = String::new();
+    for attempt in 1..=4 {
+        match download_to_once(url, dest, report, min_bytes) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = format!("{e}");
+                let wait = attempt * 3;
+                ulog(&format!("[update] 第{attempt}次下载失败（{e}），{wait}s 后重试"));
+                std::thread::sleep(std::time::Duration::from_secs(wait as u64));
+            }
         }
     }
+    anyhow::bail!("多次下载均失败：{last}")
 }
 
-fn download_to_once(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
+fn download_to_once(url: &str, dest: &std::path::Path, report: bool, min_bytes: usize) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let bytes = rt.block_on(async {
         let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(15))
+            .connect_timeout(std::time::Duration::from_secs(30))
             .build()?;
         let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(60),
             client.get(url).send(),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("连接更新服务器超时（30s）"))??;
+        .map_err(|_| anyhow::anyhow!("连接更新服务器超时（60s）"))??;
         if !resp.status().is_success() {
             anyhow::bail!("下载失败 HTTP {}", resp.status());
         }
@@ -1110,20 +1335,22 @@ fn download_to_once(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
         let mut last_mark = 0usize;
         loop {
             let chunk = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
+                std::time::Duration::from_secs(120),
                 resp.chunk(),
             )
             .await
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "下载停滞（30s 无数据，已收 {}/{} 字节），请稍后重试或到官网手动下载",
+                    "下载停滞（120s 无数据，已收 {}/{} 字节），请稍后重试或到官网手动下载",
                     out.len(),
                     total
                 )
             })??;
             let Some(chunk) = chunk else { break };
             out.extend_from_slice(&chunk);
-            set_update_progress("downloading", out.len() as u64, total);
+            if report {
+                set_update_progress("downloading", out.len() as u64, total);
+            }
             // 每 2MB 记一次进度，网络问题可从日志直接定位
             if out.len() - last_mark >= 2 * 1024 * 1024 {
                 last_mark = out.len();
@@ -1132,8 +1359,8 @@ fn download_to_once(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
         }
         Ok::<_, anyhow::Error>(out)
     })?;
-    if bytes.len() < 1024 * 1024 {
-        anyhow::bail!("更新包异常（{} 字节），已取消", bytes.len());
+    if bytes.len() < min_bytes {
+        anyhow::bail!("下载内容异常（{} 字节），已取消", bytes.len());
     }
     std::fs::write(dest, &bytes)?;
     Ok(())
@@ -1155,6 +1382,68 @@ pub fn self_update_probe(hub: &str) {
     }
 }
 
+/// 桥接扩展版本：随扩展 package.json 的 version 走；变更时改这里，客户端会重装一次。
+const BRIDGE_EXT_VERSION: &str = "0.1.3";
+
+/// 默认把 Cursor/VSCode 桥接扩展装上：从 hub 下 vsix → 检测 cursor/code CLI → 安装。
+/// 每个扩展版本只装一次（标记文件）。装不上（未装编辑器/CLI 不在 PATH）静默跳过。
+/// `force` 为真时忽略标记、强制重装（托盘手动触发用）。
+fn ensure_bridge_extension(hub: &str, data_dir: &std::path::Path, force: bool) -> u32 {
+    let marker = data_dir.join(format!("bridge-ext-{BRIDGE_EXT_VERSION}.done"));
+    if !force && marker.exists() {
+        return 0;
+    }
+    let vsix = data_dir.join("agent-monitor-bridge.vsix");
+    // 静默下载（report=false，不动更新进度 UB）、最小 1KB（vsix 才几 KB）
+    if let Err(e) = download_to(
+        &format!("{hub}/downloads/agent-monitor-bridge.vsix"),
+        &vsix,
+        false,
+        1024,
+    ) {
+        ulog(&format!("[bridge] 扩展 vsix 下载失败: {e}"));
+        return 0;
+    }
+    let mut installed = 0u32;
+    for cli in ["cursor", "code"] {
+        if install_vsix(cli, &vsix) {
+            installed += 1;
+            ulog(&format!("[bridge] 已安装桥接扩展到 {cli}"));
+        }
+    }
+    // 只要装成功过一个就打标记（避免每次启动重复下载/安装）
+    if installed > 0 {
+        let _ = std::fs::write(&marker, BRIDGE_EXT_VERSION);
+    }
+    installed
+}
+
+/// 调 `<cli> --install-extension <vsix> --force`。CLI 不在 PATH / 未装编辑器 → 返回 false。
+#[cfg(windows)]
+fn install_vsix(cli: &str, vsix: &std::path::Path) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // cursor/code 是 .cmd 批处理，需经 cmd 调用；CREATE_NO_WINDOW 不闪黑窗
+    std::process::Command::new("cmd")
+        .args(["/C", cli, "--install-extension"])
+        .arg(vsix)
+        .arg("--force")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+#[cfg(not(windows))]
+fn install_vsix(cli: &str, vsix: &std::path::Path) -> bool {
+    std::process::Command::new(cli)
+        .arg("--install-extension")
+        .arg(vsix)
+        .arg("--force")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 #[cfg(target_os = "macos")]
 fn do_self_update(hub: &str) -> anyhow::Result<()> {
     // 定位自身 .app：exe 位于 <bundle>.app/Contents/MacOS/ 下
@@ -1171,7 +1460,7 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
     let zip = tmp.join("update.zip");
-    download_to(&format!("{hub}/downloads/agent-monitor-mac.zip"), &zip)?;
+    download_to(&format!("{hub}/downloads/agent-monitor-mac.zip"), &zip, true, 1024 * 1024)?;
     ulog("[update] 下载完成");
     set_update_progress("installing", 0, 0);
 
@@ -1227,7 +1516,7 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let tmp = std::env::temp_dir();
     let installer = tmp.join("agent-monitor-setup.exe");
-    download_to(&format!("{hub}/downloads/agent-monitor-setup.exe"), &installer)?;
+    download_to(&format!("{hub}/downloads/agent-monitor-setup.exe"), &installer, true, 1024 * 1024)?;
     ulog("[update] 安装器下载完成，静默安装");
     set_update_progress("installing", 0, 0);
     // 全静默更新，不出安装向导：NSIS /S 静默安装（沿用上次安装目录与组件选择，

@@ -107,7 +107,9 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
       )
       .catch(() => setClientVer(null));
   };
-  const updating = !!clientVer?.progress;
+  // 「更新中」必须是「确有新版本 + 有进度」才算——否则辅助下载（如桥接扩展 vsix）
+  // 遗留的进度状态会把按钮卡在「更新中」不可点（客户端已是最新却显示更新中）。
+  const updating = !!clientVer?.progress && !!clientVer?.latest;
 
   // 打开设置期间轮询版本/进度（更新中每 1.5s 刷新进度条）
   useEffect(() => {
@@ -369,6 +371,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
       width={920}
       title={null}
       closable={false}
+      centered
     >
       <div
         className={`${styles.layout} ${
@@ -407,6 +410,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
           role="button"
           tabIndex={0}
           aria-label="关闭设置"
+          data-sheet-close
           onClick={onClose}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
@@ -419,6 +423,31 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
         </span>
         <aside className={styles.nav}>
           <div className={styles.navTitle}>设置</div>
+          {/* Claude sheet 顶部的身份 pill（仅移动端，见 scss）：点按进账户 */}
+          <div
+            className={styles.identityPill}
+            role="button"
+            tabIndex={0}
+            onClick={() => {
+              setTab("account");
+              setMobileView("content");
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setTab("account");
+                setMobileView("content");
+              }
+            }}
+          >
+            <span className={styles.identityAvatar}>
+              {(user.nickname ?? user.username ?? "U").slice(0, 1)}
+            </span>
+            <span className={styles.identityName}>
+              {user.nickname ?? user.username}
+            </span>
+            <RightOutlined className={styles.identityArrow} />
+          </div>
           <div className={styles.navList} role="tablist" aria-label="设置分类">
             {navItems.map((n) => (
               <div
@@ -500,20 +529,12 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                     <div className={styles.devInfo}>
                       <div className={styles.devName}>
                         客户端版本
+                        {/* 版本标签固定显示当前版本，更新中也不切成「正在下载/安装」——
+                            更新进度由下方的进度条单独呈现，标签只作版本标识 */}
                         {clientVer ? (
-                          updating ? (
-                            <Tag color="processing">
-                              {clientVer.progress?.phase === "installing"
-                                ? "正在安装…"
-                                : clientVer.progress?.phase === "restarting"
-                                  ? "即将重启…"
-                                  : "正在下载更新…"}
-                            </Tag>
-                          ) : (
-                            <Tag color={clientVer.latest ? "warning" : "green"}>
-                              v{clientVer.current}
-                            </Tag>
-                          )
+                          <Tag color={clientVer.latest ? "warning" : "green"}>
+                            v{clientVer.current}
+                          </Tag>
                         ) : null}
                       </div>
                       {updating && clientVer?.progress ? (
@@ -549,7 +570,8 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                       )}
                     </div>
                     {clientVer?.latest && !updating ? (
-                      // 已知有新版本：直接给「更新」按钮，不用再点「检查更新」走一遍确认
+                      // 有新版本且尚未在更新：给「更新到 vX」按钮。更新中则落到下面显示
+                      // 「更新中」+进度（updating 已排除了「已是最新却有遗留进度」的误判）。
                       <Button
                         size="small"
                         className={styles.updateNowBtn}

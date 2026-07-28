@@ -10,10 +10,10 @@ $active-bg: rgba(36, 61, 66, 0.09);
 
 .Portal {
   height: 100%;
-  // 键盘由 resize:none + JS 处理：webview 不动、整页不位移，底部让出
-  // max(键盘高, home 安全区) —— 键盘弹起时输入框贴键盘上方、收起时
-  // 让开 home 指示条；内容区收缩、顶栏纹丝不动。
-  padding-bottom: max(var(--kb-height, 0px), env(safe-area-inset-bottom));
+  // 底部只让出键盘高度（键盘由 resize:none + JS 处理，webview 不动、整页不位移）。
+  // home 指示条安全区不在这里让位 —— 否则内容区会缩上去、露出下方常驻的侧栏底色
+  // 形成「底部空隙 + 配色不一致」。安全区改由对话框(composerWrap)内部消化。
+  padding-bottom: var(--kb-height, 0px);
   box-sizing: border-box;
   display: flex;
   background: $cream;
@@ -243,9 +243,12 @@ $active-bg: rgba(36, 61, 66, 0.09);
       padding: 7px 10px;
       border-radius: 8px;
       cursor: pointer;
-
-      &:hover {
-        background: $hover;
+      // 触摸屏不套 :hover —— 否则移动端首触只落 hover 态、需再点一次才触发 onClick
+      // （经典 sticky-hover），表现为「点两次才打开会话」。仅指针设备保留悬停反馈。
+      @media (hover: hover) {
+        &:hover {
+          background: $hover;
+        }
       }
 
       &.active {
@@ -709,48 +712,61 @@ $active-bg: rgba(36, 61, 66, 0.09);
       }
     }
 
-    // 侧栏变滑入抽屉
+    // 抽屉宽度（供侧栏与内容推移量共用）
+    --drawer-w: min(84vw, 320px);
+
+    // 侧栏「推移内容」式（对标 Claude App）：侧栏常驻左侧，由内容整体右移露出，
+    // 而不是盖在内容之上。
     .sider {
       position: fixed;
       top: 0;
       left: 0;
       bottom: 0;
-      // 低于 antd 弹窗默认基线(1000)：弹窗自然叠在抽屉之上，且多层弹窗
-      // 保留 antd 的递增层级（父/子弹窗不再同层互相拦截点击）
-      z-index: 940;
-      width: calc(84vw + env(safe-area-inset-left));
-      max-width: calc(320px + env(safe-area-inset-left));
+      // 在内容之下：内容盖住它，右移时才露出
+      z-index: 1;
+      width: calc(var(--drawer-w) + env(safe-area-inset-left));
       min-width: 0;
+      // 移动端不要侧栏右侧描边：推开后它与内容之间会多出一条明显分界线
+      border-right: none;
       // 状态栏/灵动岛与左侧圆角让位，内容不被系统 UI 压住
       padding-top: env(safe-area-inset-top);
       padding-left: env(safe-area-inset-left);
-      // userRow 自带 8px 外边距，安全区扣掉这部分避免底部双份留白
       padding-bottom: max(0px, calc(env(safe-area-inset-bottom) - 8px));
-      transform: translateX(-100%);
-      transition: transform 0.25s ease;
-      box-shadow: 0 0 40px rgba(0, 0, 0, 0.18);
-
-      &.mobileOpen {
-        transform: translateX(0);
-      }
       // 移动端强制展开态（忽略桌面折叠）
       &.folded {
-        width: 84vw;
+        width: var(--drawer-w);
         min-width: 0;
       }
     }
 
+    // 主区全宽 + 单列；不透明以盖住侧栏，推开时右移露出侧栏
+    .main {
+      width: 100%;
+      position: relative;
+      z-index: 2;
+      background: $cream;
+      transition: transform 0.25s ease, border-radius 0.25s ease;
+      will-change: transform;
+
+      &.mainPushed {
+        transform: translateX(var(--drawer-w));
+        // 被推开后左侧两角保持设备圆角观感；不加描边/阴影，靠圆角与底色差自然区隔
+        border-top-left-radius: 26px;
+        border-bottom-left-radius: 26px;
+        overflow: hidden;
+      }
+    }
+
+    // 推开时盖在「露出的内容右侧」上，点它收起抽屉；不挡左侧侧栏
     .mobileBackdrop {
       display: block;
       position: fixed;
-      inset: 0;
-      z-index: 939;
-      background: rgba(0, 0, 0, 0.4);
-    }
-
-    // 主区全宽 + 单列
-    .main {
-      width: 100%;
+      top: 0;
+      bottom: 0;
+      left: var(--drawer-w);
+      right: 0;
+      z-index: 3;
+      background: transparent;
     }
     .paneGrid,
     .paneGrid[data-count="2"],
@@ -866,4 +882,11 @@ $active-bg: rgba(36, 61, 66, 0.09);
     .descDesktop { display: none; }
     .descMobile { display: inline; }
   }
+}
+
+// 无边框客户端：整页顶部让出标题栏高度，避免顶部内容被透明拖拽条挡住点击；
+// mac 交通灯落在左上这条里、windows 自绘按钮落在右上。box-sizing:border-box +
+// overflow:hidden 已保证不撑高溢出。浏览器里无此类名、不受影响。
+:global(html.desktop-client) .Portal {
+  padding-top: var(--titlebar-h, 30px);
 }

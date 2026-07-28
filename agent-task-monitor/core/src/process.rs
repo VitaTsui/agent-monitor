@@ -76,6 +76,55 @@ impl ProcessScanner {
         result
     }
 
+    /// 权威配对：claude 进程 pid → 它正在跑的会话 id。
+    ///
+    /// Claude Code 给它派生的每个子进程注入两个环境变量 `CLAUDE_PID`（拥有该子进程的
+    /// claude 进程 pid）与 `CLAUDE_CODE_SESSION_ID`（= 会话 jsonl 文件名）。据此可得
+    /// 「会话 ↔ claude 进程」的**权威链**，不依赖文件句柄（Windows 上 claude 写一行开一次
+    /// 就关，句柄扫描抓不到）或时间戳启发式（并发同项目会话本质歧义）。
+    ///
+    /// 覆盖面：仅当会话**当前有活着的子进程**（正在跑工具/命令）时能取到；空闲会话没有
+    /// 子进程 → 取不到，交回 build_tasks 的配对缓存（tier⑤）与 mtime 兜底。一旦活跃时
+    /// 拿到过一次，缓存就把它粘住。环境块须单独刷新，开销较大，调用方应节流。
+    ///
+    /// 平台：environ 由 sysinfo 提供（Windows 读 PEB、Linux 读 /proc/<pid>/environ、
+    /// macOS 读自有进程），无需自写 unsafe。取不到 environ 的进程被安全跳过 → 空表。
+    pub fn session_pins(&mut self) -> std::collections::HashMap<u32, String> {
+        self.sys.refresh_processes_specifics(
+            ProcessRefreshKind::new().with_environ(UpdateKind::Always),
+        );
+        // 采集候选：谁（reporter）在 env 里声称「CLAUDE_PID → session_id」，同时建进程图
+        // （父链 + 存活 claude 集合），供 resolve_session_pins 做「存活祖先」校验。
+        let mut candidates: Vec<(u32, u32, String)> = Vec::new();
+        let mut parent_of: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let mut alive_claude: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for (pid, proc_) in self.sys.processes() {
+            let pid = pid.as_u32();
+            if let Some(pp) = proc_.parent().map(|p| p.as_u32()) {
+                parent_of.insert(pid, pp);
+            }
+            // 精确识别 claude（agent_kind 会挡掉 claude-backup-tool 之类子串误判），
+            // 不用松散的 name.contains("claude")
+            if agent_kind(proc_.name(), proc_.cmd()) == Some("claude") {
+                alive_claude.insert(pid);
+            }
+            let (mut claude_pid, mut session_id) = (None, None);
+            for kv in proc_.environ() {
+                if let Some(v) = kv.strip_prefix("CLAUDE_PID=") {
+                    claude_pid = v.trim().parse::<u32>().ok();
+                } else if let Some(v) = kv.strip_prefix("CLAUDE_CODE_SESSION_ID=") {
+                    if !v.is_empty() {
+                        session_id = Some(v.to_string());
+                    }
+                }
+            }
+            if let (Some(cp), Some(sid)) = (claude_pid, session_id) {
+                candidates.push((pid, cp, sid));
+            }
+        }
+        resolve_session_pins(&candidates, &parent_of, &alive_claude)
+    }
+
     /// Windows：父链里是否存在 shell（终端会话的标志）。
     /// IDE 插件/后台服务由扩展宿主直接拉起，父链没有 shell。
     #[cfg(windows)]
@@ -187,6 +236,58 @@ impl ProcessScanner {
     }
 }
 
+/// 从 env 候选里挑出**可信**的「claude pid → session id」权威配对。
+///
+/// 病灶：`run_in_background` 派生的后台任务（及其它子进程）会**继承** `CLAUDE_PID` /
+/// `CLAUDE_CODE_SESSION_ID`。当拥有它的 claude 退出（用户 `/clear`、会话重启）后，这些子进程
+/// 常常**孤儿化并继续存活**，其 env 里仍带着**已死的旧 CLAUDE_PID**。若照单全收，就会把会话
+/// 配到一个不存在的 pid（build_tasks 里被丢弃 → 该会话退回 mtime 启发式，串终端），更危险的是
+/// Windows 会**重用 PID**：旧 pid 一旦被无关新进程占用，就会把该会话错配过去（= cursor 终端
+/// 会话获取错误）。
+///
+/// 过滤规则（两条都要满足才采信）：
+/// 1. `CLAUDE_PID` 必须是**当前存活的 claude 进程**（排除已死孤儿 / 被非 claude 重用的 pid）；
+/// 2. 该 `CLAUDE_PID` 必须是上报进程的**祖先**（顺父链上溯能走到）——真正的子孙进程满足，
+///    父链已断的孤儿走不到，进一步防 PID 重用后的张冠李戴。
+///
+/// 同一 claude 的多个子孙给出同一 (pid, session)，去重取其一即可。
+fn resolve_session_pins(
+    candidates: &[(u32, u32, String)],
+    parent_of: &std::collections::HashMap<u32, u32>,
+    alive_claude: &std::collections::HashSet<u32>,
+) -> std::collections::HashMap<u32, String> {
+    let mut out = std::collections::HashMap::new();
+    for (reporter, claude_pid, sid) in candidates {
+        if !alive_claude.contains(claude_pid) {
+            continue; // CLAUDE_PID 已死（孤儿）或被非 claude 进程重用
+        }
+        if !is_ancestor(*claude_pid, *reporter, parent_of) {
+            continue; // 父链走不到该 claude → 不是它的子孙，多半是孤儿/重用
+        }
+        out.entry(*claude_pid).or_insert_with(|| sid.clone());
+    }
+    out
+}
+
+/// 顺 `parent_of` 父链从 `from` 上溯（最多 24 跳），判断 `ancestor` 是否为其祖先。
+fn is_ancestor(
+    ancestor: u32,
+    from: u32,
+    parent_of: &std::collections::HashMap<u32, u32>,
+) -> bool {
+    let mut cur = from;
+    for _ in 0..24 {
+        if cur == ancestor {
+            return true;
+        }
+        match parent_of.get(&cur) {
+            Some(&pp) if pp != cur && pp > 1 => cur = pp,
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// macOS 上 sysinfo 拿不到 root 进程（如 login）的父子关系，用 ps 兜底
 #[cfg(unix)]
 fn ppid_via_ps(pid: u32) -> Option<u32> {
@@ -283,6 +384,9 @@ pub fn control(pid: u32, action: ControlAction) -> Result<&'static str> {
             ControlAction::Stop => libc::SIGTERM,
             ControlAction::Kill => libc::SIGKILL,
             ControlAction::Input => return Err(anyhow!("Input 动作需走 send_input")),
+            ControlAction::TermKey => {
+                return Err(anyhow!("TermKey 动作需走 send_terminal_keys"))
+            }
         };
         let ret = unsafe { libc::kill(pid as i32, sig) };
         if ret != 0 {
@@ -313,6 +417,7 @@ pub fn control(pid: u32, action: ControlAction) -> Result<&'static str> {
                 Err(anyhow!("Windows 平台暂不支持暂停/恢复"))
             }
             ControlAction::Input => Err(anyhow!("Input 动作需走 send_input")),
+            ControlAction::TermKey => Err(anyhow!("TermKey 动作需走 send_terminal_keys")),
         }
     }
     #[cfg(not(any(unix, windows)))]
@@ -339,10 +444,514 @@ pub fn send_input(pid: u32, text: &str) -> Result<&'static str> {
 
         inject_tiocsti(&tty, text)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows_send_input(pid, text)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (pid, text);
-        Err(anyhow!("当前平台暂不支持远程发布任务（仅 Unix 支持终端注入）"))
+        Err(anyhow!("当前平台暂不支持远程发布任务"))
+    }
+}
+
+/// 向终端注入按键（不提交），用于「撤回排队(↑)」「插入排队(Esc)」。
+/// spec："up:3" = 按 3 次上键；"esc" = 按 1 次 Esc。仅 iTerm2(mac) 与 Windows 控制台
+/// 可干净注入；Terminal.app 无法在不切前台的前提下注入方向键 → 返回错误（前端走提示）。
+pub fn send_terminal_keys(pid: u32, spec: &str) -> Result<&'static str> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(anyhow!("非法 pid: {pid}"));
+    }
+    let (key, count) = parse_key_spec(spec);
+    if count == 0 {
+        return Ok("无按键");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        mac_send_key(pid, key, count)
+    }
+    #[cfg(windows)]
+    {
+        windows_send_key(pid, key, count)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let tty = tty_of(pid).ok_or_else(|| anyhow!("无法定位进程 {pid} 的终端设备"))?;
+        tiocsti_send_key(&tty, key, count)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (key, count);
+        Err(anyhow!("当前平台不支持按键注入"))
+    }
+}
+
+/// 解析 "up:3" / "esc" → (键名, 次数)。次数封顶 50 防误触发风暴。
+fn parse_key_spec(spec: &str) -> (&str, usize) {
+    let mut it = spec.splitn(2, ':');
+    let key = it.next().unwrap_or("").trim();
+    let count = it
+        .next()
+        .and_then(|c| c.trim().parse::<usize>().ok())
+        .unwrap_or(1);
+    (key, count.min(50))
+}
+
+/// 键名 → 终端转义字节序列。↑ 用普通光标模式 ESC[A；Esc 单字节。
+#[cfg(all(unix, not(target_os = "macos")))]
+fn key_seq(key: &str) -> Option<&'static [u8]> {
+    match key {
+        "up" => Some(b"\x1b[A"),
+        "esc" => Some(b"\x1b"),
+        _ => None,
+    }
+}
+
+/// macOS 终端按键注入：先试 iTerm2（write text 转义序列，无需切前台），
+/// 匹配不到再试 Terminal.app（System Events key code，需切前台 + 辅助功能权限）。
+#[cfg(target_os = "macos")]
+fn mac_send_key(pid: u32, key: &str, count: usize) -> Result<&'static str> {
+    let tty = tty_of(pid).ok_or_else(|| anyhow!("无法定位进程 {pid} 的终端设备"))?;
+    let tty_e = tty.replace('\\', "\\\\").replace('"', "\\\"");
+
+    // 1) iTerm2：write text 直接把转义序列写进会话，不切前台
+    let seq_expr = match key {
+        "up" => "(character id 27) & \"[A\"",
+        "esc" => "(character id 27)",
+        _ => return Err(anyhow!("未知按键: {key}")),
+    };
+    let iterm = format!(
+        r#"tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if (tty of s) is "{tty_e}" then
+          repeat {count} times
+            tell s to write text ({seq_expr}) newline no
+          end repeat
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell
+return "notfound""#
+    );
+    if run_osascript(&iterm).map(|o| o.contains("ok")).unwrap_or(false) {
+        return Ok("已注入按键");
+    }
+
+    // 2) Terminal.app：do script 送不了方向键，只能把目标标签页切到前台，再用
+    // System Events 发键码（key code 126=↑，53=Esc）。切前台不可避免；且需在
+    // 系统设置→隐私与安全性→辅助功能里允许「终端任务监控」，否则 System Events 被拒。
+    let keycode = match key {
+        "up" => 126,
+        "esc" => 53,
+        _ => return Err(anyhow!("未知按键: {key}")),
+    };
+    let terminal = format!(
+        r#"tell application "Terminal"
+  repeat with w in windows
+    repeat with t in tabs of w
+      if (tty of t) is "{tty_e}" then
+        set selected of t to true
+        set index of w to 1
+        activate
+        delay 0.2
+        tell application "System Events"
+          repeat {count} times
+            key code {keycode}
+            delay 0.04
+          end repeat
+        end tell
+        return "ok"
+      end if
+    end repeat
+  end repeat
+end tell
+return "notfound""#
+    );
+    match run_osascript(&terminal) {
+        Ok(o) if o.contains("ok") => Ok("已注入按键"),
+        Ok(o) if o.contains("notfound") => Err(anyhow!("未匹配到 iTerm2/Terminal.app 会话")),
+        Ok(_) => Ok("已注入按键"),
+        // System Events 被辅助功能权限拦截时 osascript 报错，给出可操作提示
+        Err(e) => Err(anyhow!(
+            "Terminal.app 按键注入失败（{e}）。若提示无权限，请到「系统设置→隐私与安全性→辅助功能」允许「终端任务监控」。"
+        )),
+    }
+}
+
+/// Linux：TIOCSTI 把转义序列逐字节注入 count 次。
+#[cfg(all(unix, not(target_os = "macos")))]
+fn tiocsti_send_key(tty: &str, key: &str, count: usize) -> Result<&'static str> {
+    use std::os::unix::io::AsRawFd;
+    let seq = key_seq(key).ok_or_else(|| anyhow!("未知按键: {key}"))?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(tty)
+        .map_err(|e| anyhow!("注入失败：无法打开终端 {tty}（{e}）"))?;
+    let fd = file.as_raw_fd();
+    for _ in 0..count {
+        for &b in seq {
+            let c = b as libc::c_char;
+            let ret = unsafe { libc::ioctl(fd, libc::TIOCSTI, &c) };
+            if ret != 0 {
+                return Err(anyhow!("注入失败：TIOCSTI 被系统禁用或权限不足"));
+            }
+        }
+    }
+    Ok("已注入按键")
+}
+
+/// Windows：AttachConsole + WriteConsoleInput 发虚拟键（按下+抬起）count 次。
+#[cfg(windows)]
+fn windows_send_key(pid: u32, key: &str, count: usize) -> Result<&'static str> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let (vk, uch): (u16, u16) = match key {
+        "up" => (0x26, 0),   // VK_UP，非可打印字符 → UnicodeChar 0
+        "esc" => (0x1B, 27), // VK_ESCAPE，UnicodeChar = ESC
+        _ => return Err(anyhow!("未知按键: {key}")),
+    };
+    let dir = std::env::temp_dir();
+    let ps_path = dir.join(format!("am-key-{pid}-{}.ps1", std::process::id()));
+    let script = format!(
+        r#"param([int]$TargetPid,[int]$Vk,[int]$Uch,[int]$Count)
+$ErrorActionPreference='Stop'
+$code=@'
+using System;
+using System.Runtime.InteropServices;
+using System.Collections.Generic;
+public class AmKey {{
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern bool AttachConsole(uint pid);
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern bool FreeConsole();
+  [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode)] public static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct KEY_EVENT_RECORD {{ public int bKeyDown; public ushort wRepeatCount; public ushort wVirtualKeyCode; public ushort wVirtualScanCode; public char UnicodeChar; public uint dwControlKeyState; }}
+  [StructLayout(LayoutKind.Explicit)] public struct INPUT_RECORD {{ [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public KEY_EVENT_RECORD Key; }}
+  [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode,EntryPoint="WriteConsoleInputW")] public static extern bool WriteConsoleInput(IntPtr h, INPUT_RECORD[] buf, uint len, out uint written);
+  static INPUT_RECORD Mk(ushort vk, char uc, bool down){{ var r=new INPUT_RECORD(); r.EventType=1; var k=new KEY_EVENT_RECORD(); k.bKeyDown=down?1:0; k.wRepeatCount=1; k.wVirtualKeyCode=vk; k.wVirtualScanCode=0; k.UnicodeChar=uc; k.dwControlKeyState=0; r.Key=k; return r; }}
+  static bool WriteAll(IntPtr h, List<INPUT_RECORD> recs){{
+    int i=0; var arr=recs.ToArray();
+    while(i<arr.Length){{ int n=Math.Min(8, arr.Length-i); var chunk=new INPUT_RECORD[n]; Array.Copy(arr,i,chunk,0,n); uint w; if(!WriteConsoleInput(h, chunk, (uint)n, out w) || w==0) return false; i+=(int)w; }}
+    return true;
+  }}
+  public static bool Send(uint pid, ushort vk, char uc, int count){{
+    FreeConsole();
+    if(!AttachConsole(pid)) return false;
+    try {{
+      IntPtr h=CreateFileW("CONIN$",0xC0000000u,3u,IntPtr.Zero,3u,0u,IntPtr.Zero);
+      if(h==(IntPtr)(-1)) return false;
+      var recs=new List<INPUT_RECORD>();
+      for(int i=0;i<count;i++){{ recs.Add(Mk(vk,uc,true)); recs.Add(Mk(vk,uc,false)); }}
+      return WriteAll(h, recs);
+    }} finally {{ FreeConsole(); }}
+  }}
+}}
+'@
+Add-Type -TypeDefinition $code -Language CSharp
+if([AmKey]::Send([uint32]$TargetPid,[uint16]$Vk,[char]$Uch,$Count)){{ exit 0 }} else {{ exit 2 }}
+"#
+    );
+    std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
+        .arg(&ps_path)
+        .arg("-TargetPid")
+        .arg(pid.to_string())
+        .arg("-Vk")
+        .arg(vk.to_string())
+        .arg("-Uch")
+        .arg(uch.to_string())
+        .arg("-Count")
+        .arg(count.to_string())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let _ = std::fs::remove_file(&ps_path);
+    match out {
+        Ok(o) if o.status.success() => Ok("已注入按键"),
+        Ok(o) => Err(anyhow!(
+            "按键注入失败（进程可能非控制台程序或权限不足）。{}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Err(anyhow!("powershell 执行失败: {e}")),
+    }
+}
+
+/// Windows：把文本注入目标控制台进程的输入缓冲。
+/// 机制：AttachConsole(pid) 挂到 claude 所在控制台（含 Windows Terminal/VS Code 的
+/// ConPTY 伪控制台）→ WriteConsoleInput 写入按键事件 → FreeConsole 复原。经由一段临时
+/// PowerShell 脚本（Add-Type P/Invoke）执行，文本走临时文件传递以彻底避开转义问题。
+/// 多行用 bracketed paste 包裹，内部换行只当文本、不提前提交（与 Unix 路径一致）。
+#[cfg(windows)]
+fn windows_send_input(pid: u32, text: &str) -> Result<&'static str> {
+    use std::io::Write;
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    // Windows Terminal（ConPTY）：WriteConsoleInput 对伪控制台不可靠（可能报错、也可能
+    // 「成功却没送达」），故先判定——父链里有 WindowsTerminal.exe 就直接走聚焦粘贴，不再
+    // 尝试 WriteConsoleInput。传统 conhost 控制台父链里没有它，继续走下面的 WriteConsoleInput。
+    if let Some(wt_pid) = windows_wt_pid(pid) {
+        return windows_paste_send(wt_pid, text);
+    }
+
+    // 多行包 bracketed paste：ESC[200~ … ESC[201~，末尾 Enter 在包裹外提交整块
+    let payload = if text.contains('\n') {
+        format!("\u{1b}[200~{text}\u{1b}[201~")
+    } else {
+        text.to_string()
+    };
+
+    let dir = std::env::temp_dir();
+    let stamp = std::process::id();
+    let txt_path = dir.join(format!("am-send-{pid}-{stamp}.txt"));
+    let ps_path = dir.join(format!("am-send-{pid}-{stamp}.ps1"));
+    std::fs::write(&txt_path, payload.as_bytes())
+        .map_err(|e| anyhow!("写入临时文本失败: {e}"))?;
+
+    // 脚本：读文本 → 逐字符写 KEY_EVENT_RECORD → 末尾补一个回车提交
+    let script = r#"param([int]$TargetPid,[string]$TextFile)
+$ErrorActionPreference='Stop'
+$code=@'
+using System;
+using System.Runtime.InteropServices;
+using System.Collections.Generic;
+public class AmConIn {
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern bool AttachConsole(uint pid);
+  [DllImport("kernel32.dll",SetLastError=true)] public static extern bool FreeConsole();
+  [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode)] public static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct KEY_EVENT_RECORD { public int bKeyDown; public ushort wRepeatCount; public ushort wVirtualKeyCode; public ushort wVirtualScanCode; public char UnicodeChar; public uint dwControlKeyState; }
+  [StructLayout(LayoutKind.Explicit)] public struct INPUT_RECORD { [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public KEY_EVENT_RECORD Key; }
+  [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode,EntryPoint="WriteConsoleInputW")] public static extern bool WriteConsoleInput(IntPtr h, INPUT_RECORD[] buf, uint len, out uint written);
+  static INPUT_RECORD Mk(char c, ushort vk, bool down){ var r=new INPUT_RECORD(); r.EventType=1; var k=new KEY_EVENT_RECORD(); k.bKeyDown=down?1:0; k.wRepeatCount=1; k.wVirtualKeyCode=vk; k.wVirtualScanCode=0; k.UnicodeChar=c; k.dwControlKeyState=0; r.Key=k; return r; }
+  // 一次写太多记录会撑爆控制台输入缓冲、报 ERROR_INSUFFICIENT_BUFFER(0x8007007A) —— 长
+  // 输入注入失败正因如此。改成每 8 条一批分次写，每批失败即回退。
+  static bool WriteAll(IntPtr h, System.Collections.Generic.List<INPUT_RECORD> recs){
+    int i=0; var arr=recs.ToArray();
+    while(i<arr.Length){
+      int n=Math.Min(8, arr.Length-i);
+      var chunk=new INPUT_RECORD[n];
+      Array.Copy(arr,i,chunk,0,n);
+      uint w;
+      if(!WriteConsoleInput(h, chunk, (uint)n, out w) || w==0) return false;
+      i+=(int)w;
+    }
+    return true;
+  }
+  public static bool Send(uint pid, string text){
+    FreeConsole();
+    if(!AttachConsole(pid)) return false;
+    try {
+      IntPtr h=CreateFileW("CONIN$",0xC0000000u,3u,IntPtr.Zero,3u,0u,IntPtr.Zero);
+      if(h==(IntPtr)(-1)) return false;
+      var recs=new System.Collections.Generic.List<INPUT_RECORD>();
+      foreach(char c in text){ recs.Add(Mk(c,0,true)); recs.Add(Mk(c,0,false)); }
+      recs.Add(Mk('\r',0x0D,true)); recs.Add(Mk('\r',0x0D,false));
+      return WriteAll(h, recs);
+    } finally { FreeConsole(); }
+  }
+}
+'@
+Add-Type -TypeDefinition $code -Language CSharp
+$t=[System.IO.File]::ReadAllText($TextFile,[System.Text.Encoding]::UTF8)
+if([AmConIn]::Send([uint32]$TargetPid,$t)){ exit 0 } else { exit 2 }
+"#;
+    std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
+
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
+        .arg(&ps_path)
+        .arg("-TargetPid")
+        .arg(pid.to_string())
+        .arg("-TextFile")
+        .arg(&txt_path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    // 尽力清理临时文件（失败无妨，系统临时目录会被回收）
+    let _ = std::fs::remove_file(&txt_path);
+    let _ = std::fs::remove_file(&ps_path);
+    let _ = std::io::stdout().flush();
+
+    match out {
+        Ok(o) if o.status.success() => Ok("已发送（WriteConsoleInput）"),
+        Ok(o) => {
+            // WriteConsoleInput 失败：传统 conhost 控制台一般能成功，失败多半是 Windows
+            // Terminal（ConPTY）——伪控制台的输入管道由宿主持有，外部写不进去。退回
+            // 「聚焦该 Windows Terminal 窗口 + 剪贴板粘贴 + 回车」模拟输入。
+            let primary = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            match windows_wt_pid(pid) {
+                Some(wt_pid) => windows_paste_send(wt_pid, text).map_err(|e| {
+                    anyhow!("WriteConsoleInput 失败；Windows Terminal 粘贴回退也失败：{e}（原始：{primary}）")
+                }),
+                None => Err(anyhow!(
+                    "注入失败：AttachConsole/WriteConsoleInput 未成功（进程可能非控制台程序或权限不足）。{primary}"
+                )),
+            }
+        }
+        Err(e) => Err(anyhow!("powershell 执行失败: {e}")),
+    }
+}
+
+/// 沿父进程链找 Cursor/VSCode 内嵌终端：若父链里出现 Cursor.exe/Code.exe，返回其「之下最近
+/// 的 shell pid」——即该内嵌终端在扩展里 `terminal.processId` 的值，客户端据此把任务经文件桥
+/// 交给扩展用 `terminal.sendText` 送达（ConPTY 内嵌终端无法用 WriteConsoleInput 注入）。
+/// 不是 IDE 内嵌终端则返回 None。
+pub fn ide_shell_pid(claude_pid: u32) -> Option<u32> {
+    use sysinfo::{Pid, System};
+    let is_shell = |n: &str| {
+        matches!(
+            n,
+            "powershell.exe" | "pwsh.exe" | "cmd.exe" | "bash.exe" | "nu.exe" | "wsl.exe"
+                | "bash" | "zsh" | "sh" | "fish" | "nu" | "pwsh" | "powershell" | "-zsh" | "-bash"
+        )
+    };
+    // 命中 Cursor/VSCode 宿主（含 mac 的 helper/electron 命名，与 detect_ide 一致）
+    let is_ide = |n: &str| {
+        n.contains("cursor")
+            || n == "code.exe"
+            || n == "code"
+            || n.contains("code helper")
+            || n.contains("code - ")
+    };
+    let mut sys = System::new();
+    sys.refresh_processes();
+    let mut cur = claude_pid;
+    let mut last_shell: Option<u32> = None;
+    for _ in 0..24 {
+        let p = sys.process(Pid::from_u32(cur))?;
+        let name = p.name().to_lowercase();
+        if is_shell(&name) {
+            last_shell = Some(cur);
+        }
+        if is_ide(&name) {
+            return last_shell;
+        }
+        match p.parent().map(|pp| pp.as_u32()) {
+            Some(pp) if pp != cur && pp > 1 => cur = pp,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// 沿父进程链找 WindowsTerminal.exe（Windows Terminal 宿主），找到返回其 pid（用于定位
+/// 它的窗口做聚焦粘贴）；传统 conhost 控制台的父链里没有它 → 返回 None，仍走 WriteConsoleInput。
+#[cfg(windows)]
+fn windows_wt_pid(claude_pid: u32) -> Option<u32> {
+    use sysinfo::{Pid, System};
+    let mut sys = System::new();
+    sys.refresh_processes();
+    let mut cur = claude_pid;
+    for _ in 0..24 {
+        let p = sys.process(Pid::from_u32(cur))?;
+        if p.name().to_lowercase().contains("windowsterminal") {
+            return Some(cur);
+        }
+        match p.parent().map(|pp| pp.as_u32()) {
+            Some(pp) if pp != cur && pp > 4 => cur = pp,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Windows Terminal 回退：把文本放剪贴板 → 聚焦 wt_pid 的可见窗口 → 发 Ctrl+V + 回车。
+/// 局限：会抢前台焦点；多标签页时粘到「当前活动标签」，claude 不在活动标签则会送错——
+/// 这是已有 WT 标签页对外注入的固有限制（见 CreatePseudoConsole 文档）。
+#[cfg(windows)]
+fn windows_paste_send(wt_pid: u32, text: &str) -> Result<&'static str> {
+    use std::io::Write;
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let dir = std::env::temp_dir();
+    let stamp = std::process::id();
+    let txt_path = dir.join(format!("am-paste-{wt_pid}-{stamp}.txt"));
+    let ps_path = dir.join(format!("am-paste-{wt_pid}-{stamp}.ps1"));
+    std::fs::write(&txt_path, text.as_bytes()).map_err(|e| anyhow!("写入临时文本失败: {e}"))?;
+
+    // 找到该进程的可见顶层窗口 → SetForegroundWindow → keybd_event 发 Ctrl+V、回车。
+    // 剪贴板用 PowerShell 的 Set-Clipboard/Get-Clipboard 存取并复原，省去 C# 剪贴板 P/Invoke。
+    let script = r#"param([int]$WtPid,[string]$TextFile)
+$ErrorActionPreference='Stop'
+$code=@'
+using System;
+using System.Runtime.InteropServices;
+public class AmPaste {
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  public delegate bool EnumProc(IntPtr h, IntPtr p);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
+  const uint KEYUP=2; const byte VK_CTRL=0x11, VK_V=0x56, VK_RET=0x0D;
+  static IntPtr FindWin(uint target){
+    IntPtr found=IntPtr.Zero;
+    EnumWindows((h,p)=>{ uint wp; GetWindowThreadProcessId(h,out wp); if(wp==target && IsWindowVisible(h)){ found=h; return false; } return true; }, IntPtr.Zero);
+    return found;
+  }
+  public static bool Run(uint pid){
+    IntPtr h=FindWin(pid);
+    if(h==IntPtr.Zero) return false;
+    ShowWindow(h,9); SetForegroundWindow(h);
+    System.Threading.Thread.Sleep(180);
+    keybd_event(VK_CTRL,0,0,IntPtr.Zero); keybd_event(VK_V,0,0,IntPtr.Zero);
+    keybd_event(VK_V,0,KEYUP,IntPtr.Zero); keybd_event(VK_CTRL,0,KEYUP,IntPtr.Zero);
+    System.Threading.Thread.Sleep(140);
+    keybd_event(VK_RET,0,0,IntPtr.Zero); keybd_event(VK_RET,0,KEYUP,IntPtr.Zero);
+    return true;
+  }
+}
+'@
+Add-Type -TypeDefinition $code -Language CSharp
+$t=[System.IO.File]::ReadAllText($TextFile,[System.Text.Encoding]::UTF8)
+$old=''
+try { $old=Get-Clipboard -Raw } catch {}
+Set-Clipboard -Value $t
+$ok=[AmPaste]::Run([uint32]$WtPid)
+Start-Sleep -Milliseconds 250
+try { if($old -ne $null){ Set-Clipboard -Value $old } } catch {}
+if($ok){ exit 0 } else { exit 4 }
+"#;
+    std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
+
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
+        .arg(&ps_path)
+        .arg("-WtPid")
+        .arg(wt_pid.to_string())
+        .arg("-TextFile")
+        .arg(&txt_path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let _ = std::fs::remove_file(&txt_path);
+    let _ = std::fs::remove_file(&ps_path);
+    let _ = std::io::stdout().flush();
+    match out {
+        Ok(o) if o.status.success() => Ok("已发送（Windows Terminal 聚焦粘贴）"),
+        Ok(o) => Err(anyhow!(
+            "找不到 Windows Terminal 窗口或粘贴失败。{}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Err(anyhow!("powershell 执行失败: {e}")),
     }
 }
 
@@ -369,7 +978,9 @@ fn inject_tiocsti(tty: &str, text: &str) -> Result<&'static str> {
     } else {
         bytes.extend_from_slice(text.as_bytes());
     }
-    bytes.push(b'\n');
+    // 提交键必须是回车 CR(\r=0x0D)，不能用换行 LF(\n)：TUI（Claude Code 等）把 CR 当
+    // 「提交」、把 LF 当「输入里换一行」。之前推 \n 导致文字进了输入框却只换行、不提交。
+    bytes.push(b'\r');
     for b in bytes {
         let c = b as libc::c_char;
         let ret = unsafe { libc::ioctl(fd, libc::TIOCSTI, &c) };
@@ -404,14 +1015,24 @@ fn applescript_write(tty: &str, text: &str) -> Result<&'static str> {
         esc(text)
     };
 
-    // iTerm2：write text 会自动追加回车
+    // iTerm2：先只键入文本（newline no，不让它自动补换行——那有时是 LF、只换行不提交），
+    // 停一下再单独送回车 CR(character id 13) 作提交。停顿关键在长/多行内容：claude 会进
+    // 粘贴态，紧跟的回车会被并进粘贴而不提交（表现为「只换行」）；等它把粘贴吃完再回车才稳。
+    // 停顿按内容长度递增：0.12s 起步、封顶 1s。
+    let submit_delay = (0.12 + text.chars().count() as f64 / 3000.0).min(1.0);
     let iterm = format!(
         r#"tell application "iTerm2"
   repeat with w in windows
     repeat with t in tabs of w
       repeat with s in sessions of t
         if (tty of s) is "{tty_e}" then
-          tell s to write text "{text_e}"
+          tell s to write text "{text_e}" newline no
+          delay {submit_delay:.2}
+          tell s to write text (character id 13) newline no
+          delay 0.35
+          -- 兜底二次回车：若上面的回车被粘贴态吞掉（任务只换行没提交），这一下把它提交；
+          -- 若已提交则此时输入为空，claude 对空回车无动作，安全。
+          tell s to write text (character id 13) newline no
           return "ok"
         end if
       end repeat
@@ -431,6 +1052,9 @@ return "notfound""#
     repeat with t in tabs of w
       if (tty of t) is "{tty_e}" then
         do script "{text_e}" in t
+        delay 0.35
+        -- 兜底二次回车（同 iTerm2）：长/多行内容被粘贴态吞掉回车时补一下提交
+        do script "" in t
         return "ok"
       end if
     end repeat
@@ -528,6 +1152,7 @@ fn action_label(action: ControlAction) -> &'static str {
         ControlAction::Stop => "已终止",
         ControlAction::Kill => "已强制终止",
         ControlAction::Input => "已发送",
+        ControlAction::TermKey => "已注入按键",
     }
 }
 
@@ -568,5 +1193,96 @@ mod agent_kind_tests {
         );
         assert_eq!(agent_kind("Cursor Helper", &s(&["/Applications/Cursor.app/x"])), None);
         assert_eq!(agent_kind("claude-backup-tool", &s(&["claude-backup-tool"])), None);
+    }
+}
+
+#[cfg(test)]
+mod session_pins_tests {
+    use super::resolve_session_pins;
+    use std::collections::{HashMap, HashSet};
+
+    fn parents(pairs: &[(u32, u32)]) -> HashMap<u32, u32> {
+        pairs.iter().copied().collect()
+    }
+    fn alive(pids: &[u32]) -> HashSet<u32> {
+        pids.iter().copied().collect()
+    }
+
+    /// 直接子进程报出存活 claude 的会话 → 采信。
+    #[test]
+    fn accepts_live_child() {
+        // 100(claude) → 200(bash 后台任务，reporter)
+        let cands = vec![(200, 100, "sess-A".to_string())];
+        let got = resolve_session_pins(&cands, &parents(&[(200, 100)]), &alive(&[100]));
+        assert_eq!(got.get(&100), Some(&"sess-A".to_string()));
+    }
+
+    /// 孙进程也能顺父链走到 claude → 采信。
+    #[test]
+    fn accepts_live_grandchild() {
+        // 100(claude) → 200(bash) → 300(node，reporter)
+        let cands = vec![(300, 100, "sess-A".to_string())];
+        let got = resolve_session_pins(&cands, &parents(&[(300, 200), (200, 100)]), &alive(&[100]));
+        assert_eq!(got.get(&100), Some(&"sess-A".to_string()));
+    }
+
+    /// 核心回归：claude 已退出、后台任务孤儿化仍带着已死 CLAUDE_PID → 丢弃，
+    /// 不再产生指向不存在 pid 的假配对（旧行为会把 {17548: fc8e9621} 这类塞进去）。
+    #[test]
+    fn rejects_orphan_with_dead_claude_pid() {
+        // 17548(claude) 已死，孤儿 200 仍报它；200 被系统重挂到 1
+        let cands = vec![(200, 17548, "fc8e9621".to_string())];
+        let got = resolve_session_pins(&cands, &parents(&[(200, 1)]), &alive(&[8968, 42640]));
+        assert!(got.is_empty(), "已死 CLAUDE_PID 的孤儿配对必须被丢弃");
+    }
+
+    /// PID 重用：旧 pid 被无关的**非 claude** 新进程占用 → 不在 alive_claude 里 → 丢弃。
+    #[test]
+    fn rejects_reused_pid_by_non_claude() {
+        let cands = vec![(200, 17548, "fc8e9621".to_string())];
+        // 17548 现在活着，但不是 claude（不在集合里）
+        let got = resolve_session_pins(&cands, &parents(&[(200, 17548)]), &alive(&[8968]));
+        assert!(got.is_empty());
+    }
+
+    /// 存活 claude 但不是上报进程的祖先（父链走不到）→ 丢弃，防止张冠李戴。
+    #[test]
+    fn rejects_when_not_ancestor() {
+        // 100 是存活 claude，但 reporter 200 的父链是 200→300→1，够不到 100
+        let cands = vec![(200, 100, "sess-A".to_string())];
+        let got = resolve_session_pins(&cands, &parents(&[(200, 300), (300, 1)]), &alive(&[100, 300]));
+        assert!(got.is_empty());
+    }
+
+    /// 同一 claude 的多个子孙报同一会话 → 去重为一条。
+    #[test]
+    fn dedups_same_claude() {
+        let cands = vec![
+            (200, 100, "sess-A".to_string()),
+            (201, 100, "sess-A".to_string()),
+        ];
+        let got = resolve_session_pins(
+            &cands,
+            &parents(&[(200, 100), (201, 100)]),
+            &alive(&[100]),
+        );
+        assert_eq!(got.len(), 1);
+        assert_eq!(got.get(&100), Some(&"sess-A".to_string()));
+    }
+
+    /// 多个不同 claude 各自的子进程 → 各配各的。
+    #[test]
+    fn multiple_distinct_claudes() {
+        let cands = vec![
+            (200, 100, "sess-A".to_string()),
+            (300, 101, "sess-B".to_string()),
+        ];
+        let got = resolve_session_pins(
+            &cands,
+            &parents(&[(200, 100), (300, 101)]),
+            &alive(&[100, 101]),
+        );
+        assert_eq!(got.get(&100), Some(&"sess-A".to_string()));
+        assert_eq!(got.get(&101), Some(&"sess-B".to_string()));
     }
 }

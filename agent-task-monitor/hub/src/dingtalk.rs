@@ -64,7 +64,7 @@ pub fn verify_app_sign(app_secret: &str, timestamp: &str, sign: &str) -> bool {
 }
 
 /// 最小 URL 编码（只处理 base64 里会出现的 + / = 和空格）
-fn urlencode(s: &str) -> String {
+pub(crate) fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         match b {
@@ -77,10 +77,20 @@ fn urlencode(s: &str) -> String {
     out
 }
 
-/// 推送一条文本到钉钉机器人。now_ms 由调用方给（便于测试）。
+/// markdown 标题：取正文首行、去掉 #/*/空格，截断——钉钉 markdown 消息要一个纯文本 title。
+fn md_title(text: &str) -> String {
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("终端通知");
+    let t: String = line.trim_matches(|c| c == '#' || c == '*' || c == ' ').chars().take(24).collect();
+    if t.is_empty() { "终端通知".to_string() } else { t }
+}
+
+/// 推送一条 markdown 到钉钉群机器人 Webhook。now_ms 由调用方给（便于测试）。
 pub async fn push_text(cfg: &DingtalkNotify, text: &str, now_ms: u64) -> Result<(), String> {
     let url = signed_url(&cfg.webhook, &cfg.secret, now_ms);
-    let body = serde_json::json!({ "msgtype": "text", "text": { "content": text } });
+    let body = serde_json::json!({
+        "msgtype": "markdown",
+        "markdown": { "title": md_title(text), "text": text }
+    });
     let resp = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
@@ -100,11 +110,159 @@ pub async fn push_text(cfg: &DingtalkNotify, text: &str, now_ms: u64) -> Result<
     }
 }
 
-/// 一条待推送事件（已格式化为文本 + 归属用户 + 事件类别）
+// ---------- 企业应用 OTO 主动推送（Stream 用户，无需群机器人 webhook） ----------
+
+/// access_token 缓存：app_key -> (token, 过期 epoch 秒)。钉钉 token 2h 有效，缓存复用。
+fn token_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, (String, u64)>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (String, u64)>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// 用 appKey/appSecret 换 access_token（带缓存，提前 60s 过期刷新）。
+async fn access_token(app_key: &str, app_secret: &str, now_ms: u64) -> Result<String, String> {
+    let now = now_ms / 1000;
+    if let Some((tok, exp)) = token_cache().lock().unwrap().get(app_key) {
+        if *exp > now + 60 {
+            return Ok(tok.clone());
+        }
+    }
+    let resp = http_client()?
+        .post("https://api.dingtalk.com/v1.0/oauth2/accessToken")
+        .json(&serde_json::json!({ "appKey": app_key, "appSecret": app_secret }))
+        .send()
+        .await
+        .map_err(|e| format!("取 token 请求失败: {e}"))?;
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let tok = v
+        .get("accessToken")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| format!("取 token 失败: {v}"))?
+        .to_string();
+    let expire = v.get("expireIn").and_then(|t| t.as_u64()).unwrap_or(7200);
+    token_cache()
+        .lock()
+        .unwrap()
+        .insert(app_key.to_string(), (tok.clone(), now + expire));
+    Ok(tok)
+}
+
+fn robot_code_of(app: &crate::registry::DingtalkApp) -> &str {
+    // Stream 机器人 robotCode 一般 == app_key；捕获到就用捕获的
+    if app.robot_code.is_empty() { &app.app_key } else { &app.robot_code }
+}
+
+/// 发一条 OTO 消息（msgKey + msgParam 由调用方给），复用已取的 token。
+async fn oto_send(
+    app: &crate::registry::DingtalkApp,
+    token: &str,
+    msg_key: &str,
+    msg_param: serde_json::Value,
+) -> Result<(), String> {
+    let body = serde_json::json!({
+        "robotCode": robot_code_of(app),
+        "userIds": [app.staff_id],
+        "msgKey": msg_key,
+        "msgParam": serde_json::to_string(&msg_param).map_err(|e| e.to_string())?,
+    });
+    let resp = http_client()?
+        .post("https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend")
+        .header("x-acs-dingtalk-access-token", token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("OTO 请求失败: {e}"))?;
+    let status = resp.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        Err(format!("钉钉 OTO 拒绝（HTTP {status}）: {v}"))
+    }
+}
+
+/// 上传一段文本为钉钉媒体文件，返回 media_id（用同一 access_token）。
+async fn upload_media(token: &str, filename: &str, content: &[u8]) -> Result<String, String> {
+    let part = reqwest::multipart::Part::bytes(content.to_vec())
+        .file_name(filename.to_string())
+        .mime_str("text/plain")
+        .map_err(|e| e.to_string())?;
+    let form = reqwest::multipart::Form::new().part("media", part);
+    let url = format!("https://oapi.dingtalk.com/media/upload?access_token={token}&type=file");
+    let resp = http_client()?
+        .post(&url)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("媒体上传请求失败: {e}"))?;
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if v.get("errcode").and_then(|c| c.as_i64()) == Some(0) {
+        v.get("media_id")
+            .and_then(|m| m.as_str())
+            .map(String::from)
+            .ok_or_else(|| format!("媒体上传无 media_id: {v}"))
+    } else {
+        Err(format!("媒体上传失败: {v}"))
+    }
+}
+
+/// 通过企业应用机器人 OTO 接口，主动把一条文本发给某个用户（staffId）。
+/// full 非空且比正文长时，额外把完整内容作为 .txt 文件发在下面（正文被截断的兜底）。
+pub async fn push_oto(
+    app: &crate::registry::DingtalkApp,
+    text: &str,
+    full: Option<&str>,
+    now_ms: u64,
+) -> Result<(), String> {
+    if app.staff_id.is_empty() {
+        return Err("未捕获 staffId（先给机器人发一条消息以登记身份）".into());
+    }
+    let token = access_token(&app.app_key, &app.app_secret, now_ms).await?;
+    // msgParam 是 JSON 字符串（钉钉要求）；sampleMarkdown 让结果里的 md 正常渲染
+    // （手机端正常；桌面端 OTO 可能显示成代码块，属客户端差异）。
+    oto_send(
+        app,
+        &token,
+        "sampleMarkdown",
+        serde_json::json!({ "title": md_title(text), "text": text }),
+    )
+    .await?;
+    // 内容太长被截断：把完整内容作为文件补发（失败只记日志，不影响正文已送达）
+    if let Some(full) = full {
+        match upload_media(&token, "完整内容.txt", full.as_bytes()).await {
+            Ok(media_id) => {
+                let param = serde_json::json!({
+                    "mediaId": media_id,
+                    "fileName": "完整内容.txt",
+                    "fileType": "txt",
+                });
+                if let Err(e) = oto_send(app, &token, "sampleFile", param).await {
+                    tracing::warn!("钉钉 OTO 完整内容文件发送失败: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("钉钉 OTO 完整内容上传失败: {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// 一条待推送事件（已格式化为 markdown 文本 + 归属用户 + 事件类别）
 pub struct NotifyEvent {
     pub owner: String,
     pub kind: EventKind,
+    /// 关联会话（用于查「发 N」编号；设备类事件为 None）
+    pub task_id: Option<String>,
+    /// markdown 正文，可含 `{{NO}}` 占位符，由 deliver 换成会话编号
     pub text: String,
+    /// 内容过长被截断时的完整文本：OTO 会把它作为 .txt 文件补发在正文下面。
+    pub full_content: Option<String>,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -113,6 +271,8 @@ pub enum EventKind {
     Finished,
     NewSession,
     Device,
+    /// 会话进入「等待选择」（交互式选择/权限确认）：提醒去作答
+    Select,
 }
 
 impl DingtalkNotify {
@@ -122,6 +282,8 @@ impl DingtalkNotify {
             EventKind::Finished => self.finished,
             EventKind::NewSession => self.new_session,
             EventKind::Device => self.device,
+            // 群 webhook 复用「等待输入」开关；企业应用 OTO 一律推（见 deliver）
+            EventKind::Select => self.waiting,
         }
     }
 }
@@ -130,13 +292,49 @@ impl DingtalkNotify {
 /// now_ms 由调用方给（tick/report 里取一次系统时间）。
 pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>, now_ms: u64) {
     for ev in events {
+        // 占位换成「发 N」编号（与 resolve_task 同源）：`{NO}` → 视觉标签「#N 」；
+        // `{N}` → 纯数字（用在「发 N / 撤回 N」这类指令语法里）。查不到编号就退化。
+        // 注意占位是单花括号 —— server 那边是 format! 里的 `{{NO}}`，编译后就是 `{NO}`。
+        let no = match &ev.task_id {
+            Some(id) => crate::bot::session_number(state, &ev.owner, id).await,
+            None => None,
+        };
+        let text = match no {
+            Some(n) => ev
+                .text
+                .replace("{NO}", &format!("#{n} "))
+                .replace("{N}", &n.to_string()),
+            None => ev.text.replace("{NO}", "").replace("{N}", "N"),
+        };
+        // 1) 群自定义机器人 Webhook（按用户逐事件开关，原有行为）
         let cfg = state.registry.read().await.dingtalk_of(&ev.owner);
-        let Some(cfg) = cfg else { continue };
-        if !cfg.enabled() || !cfg.wants(ev.kind) {
-            continue;
+        if let Some(cfg) = cfg {
+            if cfg.enabled() && cfg.wants(ev.kind) {
+                if let Err(e) = push_text(&cfg, &text, now_ms).await {
+                    tracing::warn!("钉钉 Webhook 推送失败（{}）: {e}", ev.owner);
+                }
+            }
         }
-        if let Err(e) = push_text(&cfg, &ev.text, now_ms).await {
-            tracing::warn!("钉钉推送失败（{}）: {e}", ev.owner);
+        // 2) 企业应用 OTO 主动推：会话开始 / 任务完成 / 会话结束，直接私聊给用户本人。
+        //    设备上线不推（避免噪音）；需已配 Stream 应用且已捕获 staffId。
+        if matches!(
+            ev.kind,
+            EventKind::NewSession
+                | EventKind::Waiting
+                | EventKind::Finished
+                | EventKind::Select
+        ) {
+            let app = state.registry.read().await.dingtalk_app_of(&ev.owner);
+            if let Some(app) = app {
+                if !app.app_key.is_empty()
+                    && !app.app_secret.is_empty()
+                    && !app.staff_id.is_empty()
+                {
+                    if let Err(e) = push_oto(&app, &text, ev.full_content.as_deref(), now_ms).await {
+                        tracing::warn!("钉钉 OTO 主动推送失败（{}）: {e}", ev.owner);
+                    }
+                }
+            }
         }
     }
 }

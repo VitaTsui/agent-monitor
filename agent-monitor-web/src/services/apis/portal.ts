@@ -6,6 +6,8 @@ import { get, post, del } from "@/services/Axios";
 
 import { ListRes } from "@/services/ResType";
 
+import { inDesktopClient } from "@/utils/clientAuth";
+
 export interface PortalTaskProcess {
   pid: number;
   agent: string;
@@ -59,6 +61,8 @@ interface IPortalTaskData {
   version: string | null;
   gitBranch: string | null;
   process: PortalTaskProcess | null;
+  /** 终端里 claude 原生排队、尚未被接受执行的输入（按入队顺序） */
+  queuedInputs: string[];
 }
 export type PortalTaskData = Partial<IPortalTaskData>;
 
@@ -131,7 +135,8 @@ export const sendPortalInput = async (
 ) => {
   return await post<{ pid: number; result: string; cmdId?: string }>(
     `/monitor/tasks/${id}/input`,
-    { text, pid }
+    // source 让 hub 区分「客户端 / 网页」下发来源，用于钉钉推送正文标注
+    { text, pid, source: inDesktopClient() ? "client" : "web" }
   );
 };
 
@@ -282,6 +287,8 @@ export interface IntegrationsInfo {
   } | null;
   dingtalkApp: {
     hasSecret: boolean;
+    appKey?: string;
+    stream?: boolean;
     callbackUrl: string;
   } | null;
 }
@@ -319,8 +326,12 @@ export const setWecomApp = async (data: {
 };
 
 /** 钉钉企业应用（双向），返回专属回调地址 */
-export const setDingtalkApp = async (data: { appSecret?: string }) => {
-  return await post<{ callbackUrl: string | null }>(
+export const setDingtalkApp = async (data: {
+  appSecret?: string;
+  /** 填了 AppKey 走 Stream 长连接（免公网回调）；传 "" 清空回 HTTP 回调模式 */
+  appKey?: string;
+}) => {
+  return await post<{ callbackUrl: string | null; stream?: boolean }>(
     "/monitor/integrations/dingtalk-app",
     data,
   );
@@ -338,10 +349,38 @@ export const recallPortalInput = async (id: string, cmdId: string) => {
   return await post<boolean>(`/monitor/tasks/${id}/recall`, { cmdId });
 };
 
+/** 向终端注入按键：撤回终端原生排队(up，按 count 次) / 插入排队到会话(esc)。
+ *  仅 iTerm2(mac) 与 Windows 控制台可干净注入。 */
+export const termKeyTask = async (
+  id: string,
+  key: "up" | "esc",
+  count = 1,
+) => {
+  return await post<boolean>(`/monitor/tasks/${id}/termkey`, { key, count });
+};
+
 /** 会话目录下的子目录与文件（异步：pending=true 时轮询重试） */
 export const getTaskDirs = async (id: string, rel: string) => {
   return await get<{ dirs: string[]; files: string[]; cwd: string; pending: boolean }>(
     `/monitor/tasks/${id}/dirs`,
     { params: { rel } },
+  );
+};
+
+/** 会话目录内文件夹操作（新建/删除/重命名）：下发给 agent，返回 opId 后轮询结果 */
+export const fsopTask = async (
+  id: string,
+  body: { op: "mkdir" | "delete" | "rename"; rel: string; name: string; newName?: string },
+) => {
+  return await post<{ opId: string; pending: boolean }>(
+    `/monitor/tasks/${id}/fsop`,
+    body,
+  );
+};
+
+/** 取文件夹操作结果（agent 回传前 pending=true，需轮询） */
+export const getFsopResult = async (id: string, opId: string) => {
+  return await get<{ ok?: boolean; msg?: string; pending: boolean }>(
+    `/monitor/tasks/${id}/fsop/${opId}`,
   );
 };

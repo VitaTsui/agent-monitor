@@ -65,10 +65,30 @@ fn pin_unix(pids: &[u32]) -> HashMap<u32, String> {
 /// 近期活跃窗口：只对最近改动过的会话文件做 Restart Manager 查询，避免对上百个
 /// 历史 .jsonl 全查。已关闭很久的会话本就该判 Finished，无需精确配对。
 #[cfg(windows)]
-const RECENT_MS: u64 = 6 * 3600 * 1000;
+// 窗口要覆盖「进程还活着但会话闲置很久」的情形：闲置数天的会话若其 claude 进程仍在、
+// 仍持有文件句柄，就该被 RmGetList 抓到并精确配对。6h 太窄会把它们排除在检查之外，
+// 于是 pinned 恒为 0、只能退回易错位的时间戳启发式。8 天对齐配对候选窗口。
+const RECENT_MS: u64 = 8 * 24 * 3600 * 1000;
 
+// Windows 精确配对已改用「子进程环境变量」权威链（见 ProcessScanner::session_pins），
+// 下面这套 Restart Manager 句柄扫描默认不跑：实测(2026-07，本机 RmGetList 直接采样)
+// Claude Code 每次写入都是 open→append→close，会话 .jsonl 句柄寿命 < 25ms、不跨空闲持有；
+// 对 8 天窗口内 120 个候选 jsonl（含闲置数天的会话）全扫描，holder 恒为 0/120 —— 零收益，
+// 而每次最多 200 次 RmStartSession/Register/GetList/EndSession 是实打实的开销。仅保留作
+// 「重新验证句柄假设」的诊断入口：设环境变量 AM_PIN_RM=1 才启用。
 #[cfg(windows)]
 fn pin_windows(pids: &[u32], projects_dirs: &[PathBuf]) -> HashMap<u32, String> {
+    if std::env::var_os("AM_PIN_RM").is_some() {
+        pin_windows_rm(pids, projects_dirs)
+    } else {
+        HashMap::new()
+    }
+}
+
+/// 诊断专用（默认不跑，`AM_PIN_RM=1` 才由 `pin_windows` 调用）：Restart Manager 句柄扫描
+/// 的原实现，保留用于将来重新验证「claude 是否持有会话文件句柄」的假设。实测零命中。
+#[cfg(windows)]
+fn pin_windows_rm(pids: &[u32], projects_dirs: &[PathBuf]) -> HashMap<u32, String> {
     use std::collections::HashSet;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -89,11 +109,15 @@ fn pin_windows(pids: &[u32], projects_dirs: &[PathBuf]) -> HashMap<u32, String> 
     }
 
     for file in &candidates {
-        if let Some(pid) = holder_pid(file) {
+        // RmGetList 会列出所有占用该文件的进程（claude 之外，Cursor/索引器/杀软也可能
+        // 各持一个句柄）。只取「第一个」会漏掉排在后面的 claude —— 这里遍历全部，挑出
+        // 属于本机 claude 会话进程集合的那个，才是这条会话文件的真正主人。
+        for pid in holder_pids(file) {
             if pidset.contains(&pid) {
                 if let Some(stem) = file.file_stem().and_then(|s| s.to_str()) {
                     out.entry(pid).or_insert_with(|| stem.to_string());
                 }
+                break;
             }
         }
     }
@@ -130,7 +154,7 @@ fn collect_recent_jsonl(dir: &std::path::Path, now_ms: u64, out: &mut Vec<PathBu
 
 /// Restart Manager：返回占用该文件的、第一个 agent 候选进程 pid（失败返回 None）。
 #[cfg(windows)]
-fn holder_pid(file: &std::path::Path) -> Option<u32> {
+fn holder_pids(file: &std::path::Path) -> Vec<u32> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::System::RestartManager::{
         RmEndSession, RmGetList, RmRegisterResources, RmStartSession, RM_PROCESS_INFO,
@@ -141,7 +165,7 @@ fn holder_pid(file: &std::path::Path) -> Option<u32> {
     let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
     // SAFETY: 传入符合 API 约定的缓冲区；失败即早退
     if unsafe { RmStartSession(&mut session, 0, key.as_mut_ptr()) } != 0 {
-        return None;
+        return Vec::new();
     }
     let wide: Vec<u16> = file.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
     let files = [wide.as_ptr()];
@@ -156,7 +180,7 @@ fn holder_pid(file: &std::path::Path) -> Option<u32> {
             std::ptr::null(),
         )
     };
-    let result = if reg == 0 {
+    let result: Vec<u32> = if reg == 0 {
         let mut needed: u32 = 0;
         let mut count: u32 = 0;
         let mut reason: u32 = 0;
@@ -165,7 +189,7 @@ fn holder_pid(file: &std::path::Path) -> Option<u32> {
             RmGetList(session, &mut needed, &mut count, std::ptr::null_mut(), &mut reason)
         };
         if needed == 0 {
-            None
+            Vec::new()
         } else {
             let mut infos: Vec<RM_PROCESS_INFO> =
                 vec![unsafe { std::mem::zeroed() }; needed as usize];
@@ -178,13 +202,13 @@ fn holder_pid(file: &std::path::Path) -> Option<u32> {
                     .iter()
                     .take(count as usize)
                     .map(|i| i.Process.dwProcessId)
-                    .next()
+                    .collect()
             } else {
-                None
+                Vec::new()
             }
         }
     } else {
-        None
+        Vec::new()
     };
     unsafe { RmEndSession(session) };
     result

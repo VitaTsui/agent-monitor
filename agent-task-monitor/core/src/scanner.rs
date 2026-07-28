@@ -23,6 +23,11 @@ pub struct SessionSummary {
     pub last_action: String,
     /// 最后一条有效条目是否表示「回合结束」（助手纯文本收尾）
     pub turn_ended: bool,
+    /// 本会话是刚 `/clear` 出来、还没输入的「全新空会话」：内容只有 /clear 命令块、无真实
+    /// prompt。claude 执行 /clear 会另起这样一个会话，同一进程从旧会话转到它。build_tasks
+    /// 据此把进程从「被清空取代的旧会话」迁到本会话（clear-follow），否则进程会被 tier②
+    /// 「认领 created 最早的会话」粘回旧会话 → 网页内容/标题定格在清空前。
+    pub cleared: bool,
     pub started_at: Option<String>,
     pub last_active_at: Option<String>,
     pub version: Option<String>,
@@ -36,6 +41,10 @@ pub struct SessionSummary {
     pub line_count: u64,
     /// 近 5 小时滚动窗口内的 token 用量（input+output+cache_creation 估算）
     pub used_tokens_5h: u64,
+    /// 终端里 claude 原生排队、尚未被会话接受执行的输入（按入队顺序）。
+    /// 来自会话 jsonl 的 queue-operation 记录：enqueue 入列、remove 出列（被接受或取消），
+    /// 末态仍在列的即当前排队项。前端把它们挂在内容区底部显示。
+    pub queued_inputs: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -290,6 +299,7 @@ impl SessionScanner {
             prompt,
             last_action,
             turn_ended,
+            cleared: false,
             started_at,
             last_active_at: last_active,
             version: None,
@@ -298,6 +308,7 @@ impl SessionScanner {
             created_ms: 0,
             line_count: 0,
             used_tokens_5h: 0,
+            queued_inputs: Vec::new(),
         };
         self.cache.insert(
             path.to_path_buf(),
@@ -507,6 +518,9 @@ pub fn build_tasks(
     // active_ids 曾用于「按 mtime 推进兜底」，改为「只配自己创建的会话」后不再需要，
     // 保留形参以免动全部调用点。
     active_ids: &HashSet<String>,
+    // 上一轮的稳定配对（pid → session_id）：让长时间闲置的会话保持配对、不掉成
+    // 「等待输入」占位。仅在本轮没有更强信号（①②③④）配上该进程时兜底沿用。
+    cached: &HashMap<u32, String>,
 ) -> Vec<Task> {
     let _ = active_ids;
     // 按 cwd 分组进程（已按启动时间升序）
@@ -549,20 +563,81 @@ pub fn build_tasks(
 
     let mut pid_of_session: HashMap<&str, &ProcessInfo> = HashMap::new();
     let mut paired_pids: HashSet<u32> = HashSet::new();
+    // pid→进程、session_id→会话：全函数各建一份，供各配对层共用，避免每层重建映射或线性 find
+    let proc_by_pid: HashMap<u32, &ProcessInfo> =
+        processes.iter().map(|p| (p.pid, p)).collect();
+    let sid_index: HashMap<&str, &SessionSummary> =
+        sessions.iter().map(|s| (s.session_id.as_str(), s)).collect();
 
     // 第一优先：按「进程打开着哪个会话文件」得出的确定配对（pinned）。
     // 这能解决「关闭的会话 mtime 反而更新、抢走了活进程」——因为已关闭会话的文件
     // 没有活进程占着，压根不会出现在 pinned 里；闲置但仍开着的会话则会被正确配上。
     if !pinned.is_empty() {
-        let proc_by_pid: HashMap<u32, &ProcessInfo> =
-            processes.iter().map(|p| (p.pid, p)).collect();
         for (pid, sid) in pinned {
-            if let (Some(p), Some(s)) = (
-                proc_by_pid.get(pid),
-                sessions.iter().find(|s| &s.session_id == sid),
-            ) {
+            if let (Some(p), Some(s)) = (proc_by_pid.get(pid), sid_index.get(sid.as_str()).copied())
+            {
                 pid_of_session.insert(s.session_id.as_str(), *p);
                 paired_pids.insert(*pid);
+            }
+        }
+    }
+
+    // clear-follow：claude 执行 /clear 会另起一个「只含 /clear 命令、还没输入」的全新会话
+    // （cleared=true），同一进程从旧会话转到它。但下面 tier② 会按「created 最早」把进程粘回
+    // 它启动时创建的旧会话 → 网页内容/标题定格在清空前。这里据配对缓存把「上一轮配在同项目、
+    // 现被清空取代」的进程迁到新会话（进程还是同一个，只是会话号变了）。缓存是权威信号
+    //（上一轮该 pid 确实配在旧会话），单会话场景下无歧义；多进程同时 /clear 时按「旧会话
+    // mtime 最新」挑最可能刚清空的那个，至少不会更差。被迁走的旧会话记入 released，本轮不
+    // 再被其它 tier 抢配（它已结束）。
+    let mut released: HashSet<&str> = HashSet::new();
+    // clear-follow (a) 保持：上一轮已迁到 cleared 空会话的进程，本轮继续粘住它，抢在 tier②
+    // 之前。否则——缓存本轮已指向新会话、(b) 不会再迁，空闲的进程会被 tier② 按「created 最早」
+    // 又拽回旧会话；下一轮缓存又变回旧会话、(b) 再迁到新…… 于是进程在 旧↔新 间每轮抖动，
+    // 表现为卡片标题/内容闪烁（旧会话有标题 ↔ 新空会话只剩项目名）。粘住即止住抖动。
+    for (pid, sid) in cached {
+        if paired_pids.contains(pid) || pid_of_session.contains_key(sid.as_str()) {
+            continue;
+        }
+        let Some(s) = sid_index.get(sid.as_str()).copied() else { continue };
+        if s.cleared {
+            if let Some(p) = proc_by_pid.get(pid) {
+                pid_of_session.insert(s.session_id.as_str(), *p);
+                paired_pids.insert(*pid);
+            }
+        }
+    }
+    // clear-follow (b) 迁移：收集本轮全新清空会话；没有就整层跳过，额外开销只落在真有 /clear 的轮次
+    let mut fresh: Vec<&SessionSummary> = sessions
+        .iter()
+        .filter(|s| s.cleared && !pid_of_session.contains_key(s.session_id.as_str()))
+        .collect();
+    if !fresh.is_empty() {
+        fresh.sort_by_key(|s| s.created_ms); // 按 created 升序稳定处理
+        for s_new in fresh {
+            // 候选：缓存里配在「同项目、更旧会话」的存活且未配对进程
+            let mut best: Option<(u32, &SessionSummary)> = None; // (pid, 被取代的旧会话)
+            for (pid, old_sid) in cached {
+                if old_sid == &s_new.session_id || paired_pids.contains(pid) {
+                    continue;
+                }
+                let Some(p) = proc_by_pid.get(pid) else { continue };
+                if p.agent != s_new.provider || encode_path(&p.cwd) != s_new.project_key {
+                    continue;
+                }
+                // 旧会话须存在、且比新会话更早创建（确是被取代的前身）
+                let Some(old) = sid_index.get(old_sid.as_str()).copied() else { continue };
+                if old.created_ms >= s_new.created_ms {
+                    continue;
+                }
+                if best.is_none_or(|(_, b)| old.mtime_ms > b.mtime_ms) {
+                    best = Some((*pid, old));
+                }
+            }
+            if let Some((pid, old)) = best {
+                pid_of_session.insert(s_new.session_id.as_str(), proc_by_pid[&pid]);
+                paired_pids.insert(pid);
+                // 该 pid 的旧会话已被取代 → 释放，避免其它 tier 又把它配给别的进程
+                released.insert(old.session_id.as_str());
             }
         }
     }
@@ -579,7 +654,10 @@ pub fn build_tasks(
                 .collect();
             let mut free_sess: Vec<&SessionSummary> = sess
                 .iter()
-                .filter(|s| !pid_of_session.contains_key(s.session_id.as_str()))
+                .filter(|s| {
+                    !pid_of_session.contains_key(s.session_id.as_str())
+                        && !released.contains(s.session_id.as_str())
+                })
                 .map(|s| *s)
                 .collect();
 
@@ -596,44 +674,61 @@ pub fn build_tasks(
                 true
             });
 
-            // ② 进程只配「自己创建的会话」：进程一定是它那个会话文件的创建者，故
-            // created_ms 落在 [启动-2min, 启动+4h]（允许少许时钟偏差 + 首条消息慢一点）。
-            // 旧的有内容会话创建于进程启动之前（created 远早于 start），被挡在外，绝不会被
-            // 「刚开、还没自己会话的空白进程」抢去显示旧内容（实测 Cursor 空白终端正是此坑：
-            // 4 个进程 5min 前启动，最新会话却是 9h 前建的，全是死进程留下的旧会话）。
-            // 贪心取时间差最小的 (进程,会话) 对。
-            const CREATE_BACK_MS: i64 = 2 * 60 * 1000;
+            // ② 进程只配「自己创建的会话」：进程一定先于它创建的会话，且 start_time 向下取整
+            // ≤ 真实启动，故「会话 created_ms ≥ 进程 start」恒成立。回看窗口必须≈0，只留 0.5s
+            // 兜文件系统时间戳粒度。曾用 2min→仍错配，2s→仍不够：若会话在进程启动后几秒才落盘
+            // （首条消息略慢），另一个晚 2s 内启动的进程会把它抢走（diff 落在 -2s 内），贪心取
+            // |diff| 最小就张冠李戴（实测 Cursor 多终端 /clear 发到「上一个会话」的终端）。收到
+            // 0.5s 后，早于本进程启动创建的会话被彻底排除，各进程只配自己启动后创建的那条。
+            const CREATE_BACK_MS: i64 = 500;
             const CREATE_FWD_MS: i64 = 4 * 3600 * 1000;
-            loop {
-                let mut best: Option<(usize, usize, i64)> = None;
-                for (pi, p) in free_procs.iter().enumerate() {
-                    if p.start_time == 0 {
+            // 进程按启动升序，逐个认领「创建时间 ≥ 自身启动(容 0.5s)、且尚未被认领的最早
+            // 会话」。为什么不用「|diff| 最小贪心」：那会让晚启动的进程把早启动进程的会话抢走
+            // ——只要那条会话的创建时间恰好离晚进程更近（会话首条消息略慢落盘时常发生），就
+            // 张冠李戴，表现为「当前会话下发到上一个会话的终端」。按启动序 + 认领最早后继会话，
+            // 早开的进程先挑走它自己那条（最早创建的后继），晚开的进程只能拿更晚的，天然不串。
+            let mut proc_order: Vec<usize> = (0..free_procs.len())
+                .filter(|&i| free_procs[i].start_time != 0)
+                .collect();
+            proc_order.sort_by_key(|&i| free_procs[i].start_time);
+            let mut used_sess = vec![false; free_sess.len()];
+            let mut used_proc = vec![false; free_procs.len()];
+            for &pi in &proc_order {
+                let p_ms = (free_procs[pi].start_time as i64) * 1000;
+                let mut best: Option<usize> = None;
+                let mut best_created = i64::MAX;
+                for (si, s) in free_sess.iter().enumerate() {
+                    if used_sess[si] || s.created_ms == 0 {
                         continue;
                     }
-                    let p_ms = (p.start_time as i64) * 1000;
-                    for (si, s) in free_sess.iter().enumerate() {
-                        if s.created_ms == 0 {
-                            continue;
-                        }
-                        let diff = s.created_ms as i64 - p_ms; // >0 = 会话比进程晚建
-                        if diff >= -CREATE_BACK_MS && diff <= CREATE_FWD_MS {
-                            let d = diff.abs();
-                            if best.map_or(true, |(_, _, bd)| d < bd) {
-                                best = Some((pi, si, d));
-                            }
-                        }
+                    let diff = s.created_ms as i64 - p_ms;
+                    if diff >= -CREATE_BACK_MS
+                        && diff <= CREATE_FWD_MS
+                        && (s.created_ms as i64) < best_created
+                    {
+                        best_created = s.created_ms as i64;
+                        best = Some(si);
                     }
                 }
-                match best {
-                    Some((pi, si, _)) => {
-                        let p = free_procs.remove(pi);
-                        let s = free_sess.remove(si);
-                        pid_of_session.insert(s.session_id.as_str(), p);
-                        paired_pids.insert(p.pid);
-                    }
-                    None => break,
+                if let Some(si) = best {
+                    used_sess[si] = true;
+                    used_proc[pi] = true;
+                    pid_of_session.insert(free_sess[si].session_id.as_str(), free_procs[pi]);
+                    paired_pids.insert(free_procs[pi].pid);
                 }
             }
+            free_procs = free_procs
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !used_proc[*i])
+                .map(|(_, p)| *p)
+                .collect();
+            free_sess = free_sess
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !used_sess[*i])
+                .map(|(_, s)| *s)
+                .collect();
 
             // ③ 命令行 --continue（恢复最近改动的会话，无显式 id）：配给剩余里 mtime 最近
             // 的会话（free_sess 是 mtime 降序）。没有 --resume/--continue、也没有自己新建会话
@@ -649,23 +744,60 @@ pub fn build_tasks(
                 true
             });
 
-            // ④ 剩余进程配「最近 30min 还活跃过」的会话（mtime 新）：覆盖续跑/压缩恢复的
-            // 长会话 —— 它的会话文件创建于很久前、进程比它晚启动、命令行也无 --continue
-            // （Claude Code 自动续跑正是如此），但一直在写、mtime 很新。窗口把 8h+ 没动的
-            // 旧会话（Cursor 死进程留下的）挡在外，空白进程仍留占位。free_sess 是 mtime 降序。
+            // ④ 剩余进程配「最近 30min 还活跃过、且最后写入不早于本进程启动」的会话：
+            // 覆盖续跑/压缩恢复的长会话 —— 会话文件建于很久前、进程比它晚启动、命令行也无
+            // --continue（Claude Code 自动续跑正是如此），但进程一直在写、mtime 很新。
+            //
+            // 关键约束 s.mtime >= 进程启动：一个会话若最后一次写入发生在进程启动【之前】，
+            // 那这段内容必然是上一个进程留下的（典型：某进程 --resume 了老会话、写了几句后
+            // 退出；用户又在同目录开一个全新空白终端）。此时新空白进程绝不能凭 mtime 新就把
+            // 那条老会话抢过来一直显示旧内容 —— 它没写过那个文件。放进占位（会话尚未产生记录）
+            // 才对。进程 start_time 只精确到秒、向下取整（≤ 真实启动），对「进程启动后才写入」
+            // 的活跃会话恒成立，不会误伤；只挡住启动前就停笔的旧会话。free_sess 是 mtime 降序。
             const RECENT_MTIME_MS: u64 = 30 * 60 * 1000;
             let now = now_ms();
-            let mut it = free_sess
+            let mut free_sess: Vec<&SessionSummary> = free_sess
                 .into_iter()
-                .filter(|s| now.saturating_sub(s.mtime_ms) <= RECENT_MTIME_MS);
+                .filter(|s| now.saturating_sub(s.mtime_ms) <= RECENT_MTIME_MS)
+                .collect();
+            // 新进程优先认领新会话：按启动时间降序，避免老进程抢走更晚的会话文件
+            free_procs.sort_by(|a, b| b.start_time.cmp(&a.start_time));
             for p in free_procs {
-                match it.next() {
-                    Some(s) => {
-                        pid_of_session.insert(s.session_id.as_str(), p);
-                        paired_pids.insert(p.pid);
-                    }
-                    None => break,
+                let p_start_ms = (p.start_time as u64).saturating_mul(1000);
+                // free_sess 已按 mtime 降序：第一条满足「mtime≥启动」的即该进程可认领的最新会话
+                if let Some(pos) = free_sess
+                    .iter()
+                    .position(|s| s.mtime_ms >= p_start_ms)
+                {
+                    let s = free_sess.remove(pos);
+                    pid_of_session.insert(s.session_id.as_str(), p);
+                    paired_pids.insert(p.pid);
                 }
+            }
+        }
+    }
+
+    // ⑤ 缓存兜底：仍没配上会话的存活进程，若上一轮它配过某会话、该会话还在（7 天内）、
+    // 且本轮没被更强信号（①-④）配给别的进程 —— 就沿用上一轮的配对。专治「长时间闲置的
+    // 会话（>30min 够不着 phase④，命令行又无 --resume）掉成『等待输入』占位、唤醒后又冒出
+    // 一条新会话」：配对一旦建立就粘住，只要进程活着、会话还在，就不再翻来覆去。
+    if !cached.is_empty() {
+        for (pid, sid) in cached {
+            if paired_pids.contains(pid) {
+                continue;
+            }
+            if pid_of_session.contains_key(sid.as_str()) {
+                continue; // 该会话本轮已被别的进程配走（如 /clear 后进程改配新会话）
+            }
+            if let (Some(p), Some(s)) = (
+                proc_by_pid.get(pid),
+                sid_index
+                    .get(sid.as_str())
+                    .copied()
+                    .filter(|s| now.saturating_sub(s.mtime_ms) < 7 * 24 * 3600 * 1000),
+            ) {
+                pid_of_session.insert(s.session_id.as_str(), *p);
+                paired_pids.insert(*pid);
             }
         }
     }
@@ -721,6 +853,7 @@ pub fn build_tasks(
             git_branch: s.git_branch.clone(),
             process: proc_info,
             recent_messages: Vec::new(),
+            queued_inputs: s.queued_inputs.clone(),
         });
     }
 
@@ -774,6 +907,7 @@ pub fn build_tasks(
             git_branch: None,
             process: Some(p.clone()),
             recent_messages: Vec::new(),
+            queued_inputs: Vec::new(),
         });
     }
 
@@ -806,6 +940,12 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
     let mut prompt = String::new();
     let mut last_action = String::new();
     let mut turn_ended = false;
+    // 是否见过 /clear 命令块（尾窗内）。与「无真实 prompt」合起来 → cleared：刚清空、未输入。
+    let mut saw_clear = false;
+    // 忠实回放 claude 原生输入队列：(匹配键=原始 content, 展示文本=Some 时才是真实用户
+    // 输入)。通知类（task-notification 等）也占位（展示文本 None），这样按位置的「空
+    // content 出列」能对上正确的项，最终只把「真实用户输入」拿去展示。
+    let mut queue: Vec<(String, Option<String>)> = Vec::new();
     let mut started_at: Option<String> = None;
     let mut last_active_at: Option<String> = None;
     let mut version: Option<String> = None;
@@ -846,23 +986,63 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                     continue;
                 }
                 let content = v.pointer("/message/content");
+                // /clear 命令：内容形如 "<command-name>/clear</command-name>..."。清空后
+                // claude 另起的新会话开头就是它。标记见过，配合「无真实 prompt」判 cleared。
+                if content
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| s.contains("<command-name>/clear</command-name>"))
+                {
+                    saw_clear = true;
+                }
                 if let Some(text) = user_text(content) {
                     prompt = text;
                     last_action = "等待助手响应".into();
                     turn_ended = false;
+                    saw_clear = false; // 清空后又有真实输入 → 不再是「刚清空的空会话」
                 } else if content_has_tool_result(content) {
                     turn_ended = false;
                 }
             }
-            "queue-operation" => {
-                if v.get("operation").and_then(Value::as_str) == Some("enqueue") {
-                    if let Some(text) = queued_user_text(&v) {
-                        prompt = text;
+            "queue-operation" => match v.get("operation").and_then(Value::as_str) {
+                Some("enqueue") => {
+                    let key = v.get("content").and_then(Value::as_str).unwrap_or("").trim();
+                    let disp = queued_user_text(&v);
+                    if let Some(text) = &disp {
+                        prompt = text.clone();
                         last_action = "等待助手响应".into();
                         turn_ended = false;
                     }
+                    queue.push((truncate(key, 500), disp));
                 }
-            }
+                // 出列（被会话接受执行 或 取消）：content 有值→按内容精确移除（匹配不到
+                // 再退移队首）；content 为空→移除队首（FIFO，最旧的先被接受）。空 content
+                // 的 remove 之前被 queued_user_text 滤成 None、什么都不做，已接受/撤回的项
+                // 因此卡在队列里一直显示「排队中」不消失。
+                Some("remove") => {
+                    let key = v.get("content").and_then(Value::as_str).unwrap_or("").trim();
+                    if !key.is_empty() {
+                        let k = truncate(key, 500);
+                        if let Some(pos) = queue.iter().position(|(c, _)| c == &k) {
+                            queue.remove(pos);
+                        } else if !queue.is_empty() {
+                            queue.remove(0);
+                        }
+                    } else if !queue.is_empty() {
+                        queue.remove(0);
+                    }
+                }
+                // 会话接受队首执行（content 恒空）：移除队首
+                Some("dequeue") => {
+                    if !queue.is_empty() {
+                        queue.remove(0);
+                    }
+                }
+                // 全部弹出（终端按 Esc 把排队全部插入会话）：清空
+                Some("popAll") => {
+                    queue.clear();
+                }
+                _ => {}
+            },
             "assistant" => {
                 // 统计 5h 窗口内 token 用量（input+output+cache_creation）
                 if let Some(u) = v.pointer("/message/usage") {
@@ -906,6 +1086,11 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         }
     }
 
+    // 只把真实用户排队输入（展示文本 Some）拿去上报；通知类占位项丢弃
+    let queued_inputs: Vec<String> = queue.into_iter().filter_map(|(_, d)| d).collect();
+    // 刚清空、未输入的空会话：见过 /clear 且没有真实 prompt
+    let cleared = saw_clear && prompt.is_empty();
+
     Some(SessionSummary {
         provider: "claude".into(),
         session_id: session_id.to_string(),
@@ -914,7 +1099,9 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         title: String::new(),
         prompt,
         last_action,
-        turn_ended,
+        // cleared 会话没有进行中的回合 → 视为回合结束（显示 Idle 而非 Running）
+        turn_ended: turn_ended || cleared,
+        cleared,
         started_at,
         last_active_at,
         version,
@@ -923,6 +1110,7 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         created_ms: 0,
         line_count: 0,
         used_tokens_5h,
+        queued_inputs,
     })
 }
 
@@ -1128,18 +1316,18 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
             }
             None
         }
-        "queue-operation" => {
-            if v.get("operation").and_then(Value::as_str) == Some("enqueue") {
-                let text = queued_user_text(v)?;
-                return Some(MessageBrief { role: "user".into(), content: text, timestamp: ts });
-            }
-            None
-        }
+        // 排队项不进对话流：它们由 Task.queued_inputs 单独上报、前端挂在对话框上方。
+        // 若还在这里产出 user 简报，重度排队的会话（如交互式选择时堆了很多待处理输入）
+        // 会用 enqueue 简报把最近 N 条窗口挤满，执行中只渲染 assistant/plan 时便显示为
+        // 「空会话」；且被接受后 claude 另写真实 user 记录，会重复。故一律不产出。
+        "queue-operation" => None,
         "assistant" => {
             let items = v.pointer("/message/content")?.as_array()?;
             let mut text_buf = String::new();
             let mut tools = Vec::new();
             let mut plan: Option<&str> = None;
+            // 交互式选择/权限确认（AskUserQuestion）：把问题与选项整份同步给前端渲染成卡片
+            let mut select_input: Option<&Value> = None;
             for item in items {
                 match item.get("type").and_then(Value::as_str) {
                     Some("text") => {
@@ -1159,6 +1347,10 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                                 .and_then(Value::as_str);
                             continue;
                         }
+                        if name == "AskUserQuestion" {
+                            select_input = item.get("input");
+                            continue;
+                        }
                         let hint = tool_input_hint(item.get("input"));
                         tools.push(if hint.is_empty() {
                             name.to_string()
@@ -1174,6 +1366,14 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 return Some(MessageBrief {
                     role: "plan".into(),
                     content: truncate(p.trim(), 4000),
+                    timestamp: ts,
+                });
+            }
+            // 交互式选择卡片：整份 input（questions/options）序列化给前端
+            if let Some(inp) = select_input {
+                return Some(MessageBrief {
+                    role: "select".into(),
+                    content: truncate(&inp.to_string(), 4000),
                     timestamp: ts,
                 });
             }
@@ -1235,6 +1435,8 @@ struct BgTask {
     label: String,
     /// running | completed | failed | killed | stopped
     status: String,
+    /// "agent"（子代理 Task）| "bg"（后台命令）—— 前端据此拆成独立的子代理列表
+    kind: String,
 }
 
 /// 追踪会话里「在后台跑着」的任务。
@@ -1245,8 +1447,8 @@ struct BgTask {
 /// - 结束：后续某条 user 记录里的 <task-notification> 带 <task-id> 与 <status>。
 #[derive(Default)]
 struct BgTracker {
-    /// tool_use_id -> 展示名（等 tool_result 回填任务号）
-    pending: HashMap<String, String>,
+    /// tool_use_id -> (展示名, 种类 agent|bg)（等 tool_result 回填任务号）
+    pending: HashMap<String, (String, String)>,
     items: Vec<BgTask>,
     dirty: bool,
 }
@@ -1301,19 +1503,22 @@ impl BgTracker {
             .and_then(Value::as_str)
             .map(|s| truncate(s, 80))
             .unwrap_or_else(|| name.to_string());
-        self.pending.insert(use_id.to_string(), label);
+        // Task 工具 = 子代理；其余 run_in_background 的（Bash 等）= 后台命令
+        let kind = if name == "Task" { "agent" } else { "bg" };
+        self.pending
+            .insert(use_id.to_string(), (label, kind.to_string()));
     }
 
     fn on_tool_result(&mut self, item: &Value) {
         let Some(use_id) = item.get("tool_use_id").and_then(Value::as_str) else {
             return;
         };
-        let Some(label) = self.pending.remove(use_id) else {
+        let Some((label, kind)) = self.pending.remove(use_id) else {
             return;
         };
         let text = tool_result_text(item);
         let Some(id) = parse_bg_id(&text) else { return };
-        self.items.push(BgTask { id, label, status: "running".into() });
+        self.items.push(BgTask { id, label, status: "running".into(), kind });
         self.dirty = true;
     }
 
@@ -2081,6 +2286,7 @@ mod pairing_tests {
             prompt: String::new(),
             last_action: String::new(),
             turn_ended: true,
+            cleared: false,
             started_at: Some(started.into()),
             last_active_at: None,
             version: None,
@@ -2089,6 +2295,7 @@ mod pairing_tests {
             created_ms: 0,
             line_count: 1,
             used_tokens_5h: 0,
+            queued_inputs: Vec::new(),
         }
     }
 
@@ -2107,6 +2314,110 @@ mod pairing_tests {
         }
     }
 
+    /// parse_tail 应把「只含 /clear 命令、未输入」的新会话标记 cleared=true、prompt 空。
+    /// 用真实 /clear 会话的行结构（mode/snapshot/caveat/command-name/local_command）验证。
+    #[test]
+    fn parse_tail_flags_cleared_session() {
+        let tail = concat!(
+            r#"{"type":"mode","mode":"normal","sessionId":"s1"}"#, "\n",
+            r#"{"type":"file-history-snapshot","messageId":"m1"}"#, "\n",
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"<local-command-caveat>Caveat: local command</local-command-caveat>"}}"#, "\n",
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"<command-name>/clear</command-name>\n<command-args></command-args>"}}"#, "\n",
+            r#"{"type":"system","subtype":"local_command","content":"<local-command-stdout></local-command-stdout>"}"#, "\n",
+        );
+        let s = parse_tail("s1", std::path::Path::new("/x/-proj/s1.jsonl"), tail).unwrap();
+        assert!(s.cleared, "只含 /clear 的新会话应标记 cleared");
+        assert!(s.prompt.is_empty(), "cleared 会话不该有真实 prompt");
+        assert!(s.turn_ended, "cleared 会话视为回合结束（Idle）");
+    }
+
+    /// 反例：清空后又输入了真实内容 → 不再是空会话，cleared=false。
+    #[test]
+    fn parse_tail_cleared_reset_after_real_input() {
+        let tail = concat!(
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"<command-name>/clear</command-name>"}}"#, "\n",
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"hello world"}}"#, "\n",
+        );
+        let s = parse_tail("s2", std::path::Path::new("/x/-proj/s2.jsonl"), tail).unwrap();
+        assert!(!s.cleared, "清空后有真实输入 → 不再 cleared");
+        assert_eq!(s.prompt, "hello world");
+    }
+
+    /// /clear 回归：进程 P 在启动时创建了旧会话 old（created≈start），运行中执行 /clear，
+    /// claude 另起一个「只含 /clear、未输入」的新会话 fresh（cleared=true，created=现在）。
+    /// P 实际已转到 fresh，但 tier② 会按「created 最早」把 P 粘回 old → 网页定格清空前内容。
+    /// clear-follow 据缓存（上一轮 P 配的是 old）把 P 迁到 fresh，old 落 Finished。
+    #[test]
+    fn clear_follow_moves_process_to_fresh_session() {
+        let now = now_ms();
+        let start_s = now / 1000 - 3600; // 进程 1h 前启动
+        let mut old = sess("old", "2026-07-23T00:00:00Z", now - 1000);
+        old.created_ms = start_s * 1000 + 1000; // 旧会话创建≈进程启动
+        old.cleared = false;
+        let mut fresh = sess("fresh", "2026-07-23T09:00:00Z", now - 500);
+        fresh.title = String::new();
+        fresh.prompt = String::new();
+        fresh.created_ms = now - 2000; // 刚 /clear 出来
+        fresh.cleared = true;
+        let p = proc(200, start_s);
+        // 缓存：上一轮 P 配在 old
+        let mut cached = HashMap::new();
+        cached.insert(200u32, "old".to_string());
+
+        let tasks = build_tasks(&[old, fresh], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &cached);
+        let f = tasks.iter().find(|t| t.id == "fresh").unwrap();
+        let o = tasks.iter().find(|t| t.id == "old").unwrap();
+        assert_eq!(f.pid, Some(200), "clear-follow 应把进程迁到刚清空的新会话");
+        assert_eq!(o.pid, None, "被清空取代的旧会话不该再占着进程");
+        assert_eq!(o.status, TaskStatus::Finished);
+    }
+
+    /// 闪烁回归：/clear 迁移后，下一轮缓存已指向新会话，进程必须**继续粘在新会话**，
+    /// 不能被 tier② 按「created 最早」又拽回旧会话——否则 旧↔新 每轮抖动 = 卡片闪烁。
+    /// 模拟第二轮：cached={200: fresh}，fresh 仍 cleared（用户还没输入）。
+    #[test]
+    fn clear_follow_stable_no_flicker_next_round() {
+        let now = now_ms();
+        let start_s = now / 1000 - 3600;
+        let mut old = sess("old", "2026-07-23T00:00:00Z", now - 3000);
+        old.created_ms = start_s * 1000 + 1000; // 旧会话 created 最早（tier② 会想抢它）
+        old.cleared = false;
+        let mut fresh = sess("fresh", "2026-07-23T09:00:00Z", now - 500);
+        fresh.title = String::new();
+        fresh.prompt = String::new();
+        fresh.created_ms = now - 2000;
+        fresh.cleared = true; // 用户还没输入，仍是空会话
+        let p = proc(200, start_s);
+        let mut cached = HashMap::new();
+        cached.insert(200u32, "fresh".to_string()); // 上一轮已迁到 fresh
+        let tasks = build_tasks(&[old, fresh], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &cached);
+        let f = tasks.iter().find(|t| t.id == "fresh").unwrap();
+        let o = tasks.iter().find(|t| t.id == "old").unwrap();
+        assert_eq!(f.pid, Some(200), "进程应继续粘在新会话（不回抖）");
+        assert_eq!(o.pid, None, "旧会话不该被 tier② 又抢回进程");
+    }
+
+    /// clear-follow 不误伤：没有 /clear（无 cleared 会话）时，配对行为与既有一致。
+    /// 两个进程各自的旧会话都不该因缓存被搬走。
+    #[test]
+    fn clear_follow_noop_without_cleared_session() {
+        let now = now_ms();
+        let start_s = now / 1000 - 3600;
+        let mut a = sess("a", "2026-07-23T00:00:00Z", now - 1000);
+        a.created_ms = start_s * 1000 + 1000;
+        let mut b = sess("b", "2026-07-23T00:10:00Z", now - 800);
+        b.created_ms = start_s * 1000 + 2000;
+        let pa = proc(201, start_s);
+        let pb = proc(202, start_s + 1);
+        let mut cached = HashMap::new();
+        cached.insert(201u32, "a".to_string());
+        cached.insert(202u32, "b".to_string());
+        let tasks = build_tasks(&[a, b], &[pa, pb], &|_| false, &HashMap::new(), &HashSet::new(), &cached);
+        // 两条会话各自保住自己的进程，没有互串
+        assert!(tasks.iter().any(|t| t.id == "a" && t.pid.is_some()));
+        assert!(tasks.iter().any(|t| t.id == "b" && t.pid.is_some()));
+    }
+
     /// 真实场景（Windows/Cursor）：空白新会话创建于进程启动那刻（created_ms≈start），
     /// 但没写内容 → mtime 旧、无 started_at；而旧的有内容会话 mtime 反而更新。
     /// 必须按 created_ms 把进程配给空白会话，旧会话落 Finished —— 不能被 mtime 抢走。
@@ -2122,7 +2433,7 @@ mod pairing_tests {
         let mut p = proc(200, start_s);
         p.command = "claude".into();
 
-        let tasks = build_tasks(&[blank, old], &[p], &|_| false, &HashMap::new(), &HashSet::new());
+        let tasks = build_tasks(&[blank, old], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         let b = tasks.iter().find(|t| t.id == "blank").unwrap();
         let o = tasks.iter().find(|t| t.id == "old").unwrap();
         assert_eq!(b.pid, Some(200), "进程应配给创建时刻≈启动的空白会话");
@@ -2143,7 +2454,7 @@ mod pairing_tests {
         let mut p = proc(300, now / 1000 - 30);
         p.command = "claude --resume resumed-xyz".into();
 
-        let tasks = build_tasks(&[resumed], &[p], &|_| false, &HashMap::new(), &HashSet::new());
+        let tasks = build_tasks(&[resumed], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         assert_eq!(tasks.iter().find(|t| t.id == "resumed-xyz").unwrap().pid, Some(300));
     }
 
@@ -2161,7 +2472,7 @@ mod pairing_tests {
         let mut pinned = HashMap::new();
         pinned.insert(100u32, "cursor".to_string()); // 进程真正打开的是 cursor 会话
 
-        let tasks = build_tasks(&[closed, cursor], &[p], &|_| false, &pinned, &HashSet::new());
+        let tasks = build_tasks(&[closed, cursor], &[p], &|_| false, &pinned, &HashSet::new(), &HashMap::new());
         let cur = tasks.iter().find(|t| t.id == "cursor").unwrap();
         let clo = tasks.iter().find(|t| t.id == "closed").unwrap();
         assert_eq!(cur.pid, Some(100), "活进程应配给它打开的 cursor 会话");
@@ -2176,18 +2487,20 @@ mod pairing_tests {
     #[test]
     fn windows_trailing_backslash_cwd_still_pairs() {
         assert_eq!(encode_path("D:\\proj\\"), encode_path("D:\\proj"));
-        assert_eq!(encode_path("D:\\proj\\"), "D--proj");
+        // 期望值随平台大小写策略走：Windows 统一小写（d--proj），其它平台保持原样（D--proj）
+        assert_eq!(encode_path("D:\\proj\\"), normalize_key_case("D--proj".to_string()));
 
         let now = now_ms();
         let mut s = sess("live", "2026-07-20T00:00:00Z", now - 30_000);
-        s.project_key = "D--proj".into(); // 会话目录名（无尾随）
+        // 会话目录名由 encode_path(cwd) 而来，与生产一致（含平台大小写同一化）
+        s.project_key = encode_path("D:\\proj");
         s.cwd = "D:\\proj".into();
         s.created_ms = now - 30_000; // 会话在进程启动时创建
         let mut p = proc(4242, now / 1000 - 30); // 进程 30s 前启动
         p.cwd = "D:\\proj\\".into(); // 进程 cwd 带尾随反斜杠
         p.tty = String::new();
 
-        let tasks = build_tasks(&[s], &[p], &|_| false, &HashMap::new(), &HashSet::new());
+        let tasks = build_tasks(&[s], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         // 配对成功 = 恰好一条任务、带 pid、状态非 Finished（不是占位进程）
         assert_eq!(tasks.len(), 1, "应配成一条，而非会话+占位进程两条");
         assert_eq!(tasks[0].pid, Some(4242));
@@ -2209,7 +2522,7 @@ mod pairing_tests {
         p.command = "claude".into();
 
         let tasks =
-            build_tasks(&[cont, old], &[p], &|_| false, &HashMap::new(), &HashSet::new());
+            build_tasks(&[cont, old], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         assert_eq!(
             tasks.iter().find(|t| t.id == "cont").unwrap().pid,
             Some(700),
@@ -2219,6 +2532,33 @@ mod pairing_tests {
             tasks.iter().find(|t| t.id == "old").unwrap().pid,
             None,
             "8h 没动的旧会话不该被抢"
+        );
+    }
+
+    /// 回归：某进程 --resume 了老会话、写了几句后退出；用户又在同目录开一个【全新空白】
+    /// 终端（无 --resume/--continue、还没产生自己的会话）。那条老会话虽然 mtime 还很新
+    /// （5min 前刚写），但它的最后写入发生在新进程【启动之前】—— 新空白进程绝不能凭 mtime
+    /// 新就把它抢来一直显示旧内容，应留占位（pid-<pid>）。
+    #[test]
+    fn fresh_blank_process_does_not_grab_recently_closed_resumed_session() {
+        let now = now_ms();
+        // 老会话：5min 前最后写入（在 30min 窗口内、mtime 很新），2h 前创建
+        let mut resumed = sess("resumed", "2026-07-17T00:00:00Z", now - 5 * 60_000);
+        resumed.created_ms = now - 2 * 3600 * 1000;
+        // 新空白进程：1min 前才启动（晚于老会话最后写入），命令行无 --resume/--continue
+        let mut p = proc(902, now / 1000 - 60);
+        p.command = "claude".into();
+
+        let tasks =
+            build_tasks(&[resumed], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
+        assert_eq!(
+            tasks.iter().find(|t| t.id == "resumed").unwrap().pid,
+            None,
+            "启动前就停笔的老会话不该被新空白进程抢去"
+        );
+        assert!(
+            tasks.iter().any(|t| t.id == "pid-902"),
+            "新空白进程应留占位任务，而非顶着旧会话内容"
         );
     }
 
@@ -2238,7 +2578,7 @@ mod pairing_tests {
         p.command = "claude --continue".into();
         let procs = vec![p];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::new());
+        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         let by_id = |id: &str| tasks.iter().find(|t| t.id == id).unwrap().clone();
 
         assert_eq!(by_id("alive").pid, Some(3191), "正在写入的会话必须拿到进程");
@@ -2266,7 +2606,7 @@ mod pairing_tests {
         let sessions = vec![newest, middle, stale];
         let procs = vec![proc(100, start_a), proc(200, start_b)];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::new());
+        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         let pid = |id: &str| tasks.iter().find(|t| t.id == id).unwrap().pid;
 
         assert_eq!(pid("newest"), Some(200), "进程配自己启动时创建的会话");
@@ -2395,6 +2735,7 @@ mod codex_tests {
             prompt: String::new(),
             last_action: String::new(),
             turn_ended: true,
+            cleared: false,
             started_at: None,
             last_active_at: None,
             version: None,
@@ -2403,6 +2744,7 @@ mod codex_tests {
             created_ms: now - 60_000,
             line_count: 1,
             used_tokens_5h: 0,
+            queued_inputs: Vec::new(),
         };
         let proc = |agent: &str, pid: u32, key: &str| ProcessInfo {
             pid,
@@ -2419,7 +2761,7 @@ mod codex_tests {
         let sessions = vec![mk("claude", "c1", "-w-app"), mk("codex", "x1", "-w-app")];
         let procs = vec![proc("claude", 11, "app"), proc("codex", 22, "app"), proc("gemini", 33, "app")];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::from(["c1".to_string(), "x1".to_string()]));
+        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::from(["c1".to_string(), "x1".to_string()]), &HashMap::new());
         let by = |id: &str| tasks.iter().find(|t| t.id == id).unwrap();
 
         assert_eq!(by("c1").pid, Some(11), "claude 会话配 claude 进程");
@@ -2458,7 +2800,7 @@ mod codex_tests {
             memory: 0,
             command: "claude".into(),
         }];
-        let tasks = build_tasks(&[], &procs, &|_| false, &HashMap::new(), &HashSet::new());
+        let tasks = build_tasks(&[], &procs, &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Claude Code", "空目录名不该带「 · 」尾巴");
         assert!(!tasks[0].title.contains('·'));

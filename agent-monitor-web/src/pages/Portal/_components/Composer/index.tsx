@@ -2,19 +2,26 @@ import React, { useEffect, useRef, useState } from "react";
 
 import { Chat, Input, Modal } from "@hsu-react/ui";
 import { message } from "antd";
+import { reaction } from "mobx";
 import {
+  DeleteOutlined,
+  EditOutlined,
   FileSearchOutlined,
+  FolderAddOutlined,
   PaperClipOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
 
 import {
   SlashCommand,
+  fsopTask,
+  getFsopResult,
   getPortalSlashCommands,
   getTaskDirs,
   uploadPortalFile,
 } from "@/services/apis/portal";
 import { CONFIRM_WORD, DangerHit, checkDanger } from "../../_utils/dangerCheck";
+import PortalStore from "../../PortalStore";
 import styles from "./index.module.scss";
 
 interface ComposerProps {
@@ -39,8 +46,13 @@ const Composer: React.FC<ComposerProps> = (props) => {
   // 斜杠命令：仅当输入以「/」开头且未含空格时弹出（Claude Code 终端式），
   // null=不在命令模式，字符串=「/」之后已输入的过滤词
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
+  // 命令菜单里方向键高亮的项索引
+  const [slashActive, setSlashActive] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // 供原生 keydown 捕获处理器读取当前菜单项/高亮（避免闭包拿到旧值）
+  const slashItemsRef = useRef<Array<{ key: string; run: () => void }>>([]);
+  const slashActiveRef = useRef(0);
 
   /**
    * 把文本追加进 Chat.Input 的输入框。
@@ -61,18 +73,86 @@ const Composer: React.FC<ComposerProps> = (props) => {
     ta.focus();
   };
 
-  // 监听输入框内容：以「/xxx」（无空格）开头就进命令模式并按 xxx 过滤
+  // 撤回后把原文回填进本会话的对话框（PortalStore.composerRefill 命中自己的 taskId
+  // 才消费），方便改完再发。Composer 非 observer，用 reaction 订阅这一个字段即可。
+  useEffect(() => {
+    const dispose = reaction(
+      () => PortalStore.composerRefill,
+      (r) => {
+        if (r && r.taskId === taskId) {
+          appendToInput(r.text);
+          PortalStore.consumeComposerRefill();
+        }
+      },
+    );
+    return dispose;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId]);
+
+  // 监听输入框内容：以「/xxx」（无空格）开头就进命令模式并按 xxx 过滤。
+  // 关键：setSlashQuery 必须延后一帧（rAF）再调用 —— 直接在原生 input 事件里 setState 会
+  // 触发重渲染，把 hsu-ui 受控 textarea 的值回滚成本次按键前的旧值（表现为「/ 和字母都要
+  // 按两次、连打两个不同字母只留第二个、输入框里根本不显示」）。延后到下一帧时，hsu-ui 的
+  // onChange 已把值落定，此时更新 slashQuery 不会再回滚当前按键。
   useEffect(() => {
     const ta = rootRef.current?.querySelector("textarea");
     if (!ta) return;
+    let raf = 0;
     const onInput = () => {
-      const v = ta.value;
-      const m = /^\/(\S*)$/.exec(v);
-      setSlashQuery(m ? m[1] : null);
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const v = ta.value;
+        const m = /^\/(\S*)$/.exec(v);
+        setSlashQuery(m ? m[1] : null);
+      });
     };
+    const onBlur = () => setTimeout(() => setSlashQuery(null), 150);
     ta.addEventListener("input", onInput);
-    ta.addEventListener("blur", () => setTimeout(() => setSlashQuery(null), 150));
-    return () => ta.removeEventListener("input", onInput);
+    ta.addEventListener("blur", onBlur);
+    return () => {
+      cancelAnimationFrame(raf);
+      ta.removeEventListener("input", onInput);
+      ta.removeEventListener("blur", onBlur);
+    };
+  }, [taskId]);
+
+  // 移动端：回车换行、不发送（发送用右下角发送按钮）。hsu-ui Chat.Input 默认回车即提交，
+  // 这里在捕获阶段拦住移动端的 Enter、stopPropagation 阻止它到达 Chat.Input 的提交处理，
+  // 不 preventDefault 让 textarea 自然插入换行。
+  useEffect(() => {
+    const ta = rootRef.current?.querySelector("textarea");
+    if (!ta) return;
+    const onKeyDownCapture = (e: KeyboardEvent) => {
+      // 命令菜单开着时：↑↓ 移高亮、回车选中当前项（选中后自动聚焦回输入框）
+      const items = slashItemsRef.current;
+      if (items.length > 0 && !e.isComposing) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          e.stopPropagation();
+          setSlashActive((i) => (i + 1) % items.length);
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          e.stopPropagation();
+          setSlashActive((i) => (i - 1 + items.length) % items.length);
+          return;
+        }
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          e.stopPropagation();
+          items[slashActiveRef.current]?.run();
+          rootRef.current?.querySelector("textarea")?.focus();
+          return;
+        }
+      }
+      const isMobile = window.matchMedia("(max-width: 760px)").matches;
+      if (isMobile && e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+        e.stopPropagation();
+      }
+    };
+    ta.addEventListener("keydown", onKeyDownCapture, true);
+    return () => ta.removeEventListener("keydown", onKeyDownCapture, true);
   }, [taskId]);
 
   // 把某条命令填进输入框（保留在输入框，用户可继续补参数或直接回车发布）
@@ -137,6 +217,93 @@ const Composer: React.FC<ComposerProps> = (props) => {
     setDirRel(next);
     setDirList([]);
     loadDirs(next);
+  };
+
+  // 文件夹操作忙标记（防连点）
+  const [fsBusy, setFsBusy] = useState(false);
+  // 新建/重命名文件夹弹窗（应用内居中 Modal，替代原生 window.prompt）
+  const [folderModal, setFolderModal] = useState<{ mode: "mkdir" | "rename"; orig: string } | null>(
+    null,
+  );
+  const [folderInput, setFolderInput] = useState("");
+  // 删除文件夹确认弹窗（替代原生 window.confirm）
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+
+  /** 执行文件夹操作：下发 → 轮询结果 → 提示 → 重拉当前目录 */
+  const runFsop = async (
+    op: "mkdir" | "delete" | "rename",
+    name: string,
+    newName?: string,
+  ) => {
+    if (!taskId || fsBusy) return;
+    setFsBusy(true);
+    const hide = message.loading(
+      op === "mkdir" ? "新建中…" : op === "delete" ? "删除中…" : "重命名中…",
+      0,
+    );
+    try {
+      const res = await fsopTask(taskId, { op, rel: dirRel, name, newName });
+      if (res.code !== 0 || !res.data?.opId) {
+        message.error(res.msg ?? "操作失败");
+        return;
+      }
+      const opId = res.data.opId;
+      // agent 下一轮上报（≤1.5s）才执行，轮询取结果（最多 ~12s）
+      let done = false;
+      for (let i = 0; i < 12 && !done; i++) {
+        await new Promise((r) => window.setTimeout(r, 1000));
+        const rr = await getFsopResult(taskId, opId);
+        if (rr.code === 0 && rr.data && !rr.data.pending) {
+          done = true;
+          if (rr.data.ok) message.success(rr.data.msg || "已完成");
+          else message.error(rr.data.msg || "操作失败");
+        }
+      }
+      if (!done) message.warning("操作已下发，稍后刷新目录查看");
+    } catch {
+      message.error("操作失败，请检查网络");
+    } finally {
+      hide();
+      setFsBusy(false);
+      loadDirs(dirRel); // 无论成败都重拉，反映最新目录
+    }
+  };
+
+  const newFolder = () => {
+    setFolderInput("");
+    setFolderModal({ mode: "mkdir", orig: "" });
+  };
+
+  const renameFolder = (name: string) => {
+    setFolderInput(name);
+    setFolderModal({ mode: "rename", orig: name });
+  };
+
+  const deleteFolder = (name: string) => setDeleteTarget(name);
+
+  // 新建/重命名弹窗的确定：校验后下发，成功即关弹窗
+  const submitFolder = () => {
+    if (!folderModal) return;
+    const next = folderInput.trim();
+    if (!next) {
+      message.warning("名称不能为空");
+      return;
+    }
+    if (/[\\/]/.test(next)) {
+      message.warning("名称不能包含斜杠");
+      return;
+    }
+    if (folderModal.mode === "rename") {
+      if (next !== folderModal.orig) runFsop("rename", folderModal.orig, next);
+    } else {
+      runFsop("mkdir", next);
+    }
+    setFolderModal(null);
+  };
+
+  const confirmDelete = () => {
+    if (deleteTarget) runFsop("delete", deleteTarget);
+    setDeleteTarget(null);
   };
 
   const onPickFile = (file: File) => {
@@ -284,6 +451,45 @@ const Composer: React.FC<ComposerProps> = (props) => {
           })
           .slice(0, 8);
 
+  // 允许输入不在列表里的自定义「/命令」：只要不是恰好命中某条命令，就在列表顶部给一个
+  // 「直接发送」项，点它把当前输入原样发出（列表只是建议、从不拦截自定义命令）。
+  const exactMatch =
+    slashQuery !== null &&
+    commands.some(
+      (c) => c.name.toLowerCase() === `/${slashQuery.toLowerCase()}`,
+    );
+  const showCustom = slashQuery !== null && slashQuery !== "" && !exactMatch;
+
+  const sendCustom = () => {
+    const ta = rootRef.current?.querySelector("textarea");
+    const v = ta?.value ?? "";
+    if (!v.trim()) return;
+    guardedSend(v);
+    if (ta) {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(ta, "");
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      ta.focus();
+    }
+    setSlashQuery(null);
+  };
+
+  // 命令菜单项（含顶部「发送自定义」项）：方向键/回车导航与渲染共用同一份顺序。
+  // 期间用 ref 暴露给原生 keydown 处理器，避免闭包读到旧值。
+  const slashItems: Array<{ key: string; run: () => void }> = [];
+  if (showCustom) slashItems.push({ key: "__custom", run: sendCustom });
+  matched.forEach((c) => slashItems.push({ key: c.name, run: () => fillCommand(c.name) }));
+  slashItemsRef.current = slashItems;
+  slashActiveRef.current = Math.min(slashActive, Math.max(0, slashItems.length - 1));
+
+  // 菜单重开 / 换过滤词 / 集合变化时，高亮回到第一项
+  useEffect(() => {
+    setSlashActive(0);
+  }, [slashQuery]);
+
   return (
     <div
       className={`${styles.Composer} ${dragOver ? styles.dragOver : ""}`}
@@ -313,21 +519,48 @@ const Composer: React.FC<ComposerProps> = (props) => {
       ) : null}
       {/* 斜杠命令下拉：仅在输入「/」时弹出（Claude Code 终端式），
           不再常驻一排命令 chip */}
-      {matched.length > 0 && !disabled && (
+      {(matched.length > 0 || showCustom) && !disabled && (
         <div className={styles.slashMenu}>
-          {matched.map((c) => (
+          {showCustom ? (
             <div
-              key={c.name}
-              className={styles.slashItem}
+              className={`${styles.slashItem} ${styles.slashCustom} ${
+                slashActive === 0 ? styles.slashActiveItem : ""
+              }`}
               role="button"
               tabIndex={0}
+              onMouseEnter={() => setSlashActive(0)}
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() => fillCommand(c.name)}
+              onClick={() => {
+                sendCustom();
+                rootRef.current?.querySelector("textarea")?.focus();
+              }}
             >
-              <span className={styles.slashName}>{c.name}</span>
-              {c.desc ? <span className={styles.slashDesc}>{c.desc}</span> : null}
+              <span className={styles.slashName}>发送 /{slashQuery}</span>
+              <span className={styles.slashDesc}>不在列表中的自定义命令，直接发出</span>
             </div>
-          ))}
+          ) : null}
+          {matched.map((c, i) => {
+            const idx = showCustom ? i + 1 : i;
+            return (
+              <div
+                key={c.name}
+                className={`${styles.slashItem} ${
+                  slashActive === idx ? styles.slashActiveItem : ""
+                }`}
+                role="button"
+                tabIndex={0}
+                onMouseEnter={() => setSlashActive(idx)}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  fillCommand(c.name);
+                  rootRef.current?.querySelector("textarea")?.focus();
+                }}
+              >
+                <span className={styles.slashName}>{c.name}</span>
+                {c.desc ? <span className={styles.slashDesc}>{c.desc}</span> : null}
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -384,7 +617,17 @@ const Composer: React.FC<ComposerProps> = (props) => {
           <div className={styles.uploadFile}>
             文件：<b>{pendingFile?.name}</b>
           </div>
-          <div className={styles.uploadLabel}>目标目录（会话目录内选择）</div>
+          <div className={styles.uploadLabel}>
+            <span>目标目录（会话目录内选择）</span>
+            <span
+              className={styles.dirNewBtn}
+              role="button"
+              tabIndex={0}
+              onClick={newFolder}
+            >
+              <FolderAddOutlined /> 新建文件夹
+            </span>
+          </div>
           <div className={styles.dirCrumb}>
             会话目录{dirRel ? ` / ${dirRel.split("/").join(" / ")}` : ""}
           </div>
@@ -400,14 +643,31 @@ const Composer: React.FC<ComposerProps> = (props) => {
               <div className={styles.dirEmpty}>{dirRel ? "没有子目录" : "该目录下没有子目录"}</div>
             ) : (
               dirList.map((d) => (
-                <div
-                  key={d}
-                  className={styles.dirItem}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => enterDir(d)}
-                >
-                  <span className={styles.dirIcon}>📁</span> {d}
+                <div key={d} className={styles.dirItem}>
+                  <span
+                    className={styles.dirItemName}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => enterDir(d)}
+                  >
+                    <span className={styles.dirIcon}>📁</span> {d}
+                  </span>
+                  <span className={styles.dirItemOps}>
+                    <EditOutlined
+                      title="重命名"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        renameFolder(d);
+                      }}
+                    />
+                    <DeleteOutlined
+                      title="删除"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteFolder(d);
+                      }}
+                    />
+                  </span>
                 </div>
               ))
             )}
@@ -487,6 +747,43 @@ const Composer: React.FC<ComposerProps> = (props) => {
         }}
       />
 
+      {/* 新建 / 重命名文件夹（应用内居中弹窗，替代原生 window.prompt） */}
+      <Modal
+        title={folderModal?.mode === "rename" ? "重命名文件夹" : "新建文件夹"}
+        open={!!folderModal}
+        onCancel={() => setFolderModal(null)}
+        onOk={submitFolder}
+        okText="确定"
+        cancelText="取消"
+        okButtonProps={{ disabled: !folderInput.trim() }}
+        width={400}
+        centered
+      >
+        <Input
+          value={folderInput}
+          onChange={(value) => setFolderInput(value)}
+          placeholder="文件夹名称"
+          onPressEnter={submitFolder}
+        />
+      </Modal>
+
+      {/* 删除文件夹确认（应用内居中弹窗，替代原生 window.confirm） */}
+      <Modal
+        title="删除文件夹"
+        open={!!deleteTarget}
+        onCancel={() => setDeleteTarget(null)}
+        onOk={confirmDelete}
+        okText="删除"
+        cancelText="取消"
+        okButtonProps={{ danger: true }}
+        width={400}
+        centered
+      >
+        <div>
+          删除文件夹「{deleteTarget}」及其全部内容？此操作不可恢复。
+        </div>
+      </Modal>
+
       {/* 危险输入多重确认（类 Claude Code bypass 权限等需特别管理） */}
       <Modal
         className={styles.dangerModal}
@@ -505,6 +802,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
           disabled: dangerStep === 2 && confirmInput.trim() !== CONFIRM_WORD,
         }}
         width={480}
+        centered
       >
         <div className={styles.dangerBody}>
           <div className={styles.dangerText}>

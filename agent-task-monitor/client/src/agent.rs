@@ -35,6 +35,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     // 待随下一轮上报回传的 git 对比结果
     let mut pending_git_results: Vec<am_core::model::GitResult> = Vec::new();
     let mut pending_dir_results: Vec<am_core::model::DirResult> = Vec::new();
+    let mut pending_fs_op_results: Vec<am_core::model::FsOpResult> = Vec::new();
 
     // 监听会话目录：文件一有写入（用户在终端里发了任务、助手产生输出）就立刻唤醒本
     // 循环扫描上报，而不必干等 1.5s 轮询——后者在窗口关到托盘/失焦后会被 macOS
@@ -145,6 +146,15 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
         // 本轮本机真实存在的会话 pid：hub 下发的命令只允许作用于这些 pid
         let known_pids: std::collections::HashSet<u32> =
             scanned.iter().filter_map(|t| t.pid).collect();
+        // 活跃会话的项目目录：文件上传允许写进这些目录（项目常不在家目录下，
+        // 见 safe_upload_dir_within）
+        let session_dirs: Vec<std::path::PathBuf> = scanned
+            .iter()
+            .filter_map(|t| t.process.as_ref())
+            .map(|p| p.cwd.clone())
+            .filter(|c| !c.is_empty())
+            .map(std::path::PathBuf::from)
+            .collect();
         let tasks = if trusted {
             attach_messages(&state, &mut scanned, &mut msg_cache).await;
             scanned
@@ -161,6 +171,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             tasks,
             git_results: std::mem::take(&mut pending_git_results),
             dir_results: std::mem::take(&mut pending_dir_results),
+            fs_op_results: std::mem::take(&mut pending_fs_op_results),
         };
 
         let mut req = client.post(format!("{hub}/monitor/report"));
@@ -250,7 +261,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
                     for f in files {
-                        write_transfer(&f);
+                        write_transfer(&f, &session_dirs);
                     }
                     // git 对比请求：本机跑 git，结果随下一轮上报回传
                     let git_queries: Vec<am_core::model::GitQuery> = body
@@ -283,6 +294,19 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                             files,
                             task_id: q.task_id,
                             rel: q.rel,
+                        });
+                    }
+                    // 文件夹操作（上传选目录弹窗里的新建/删除/重命名）
+                    let fs_ops: Vec<am_core::model::FsOp> = body
+                        .pointer("/data/fsOps")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    for op in fs_ops {
+                        let (ok, msg) = run_fs_op(&op);
+                        pending_fs_op_results.push(am_core::model::FsOpResult {
+                            op_id: op.op_id,
+                            ok,
+                            msg,
                         });
                     }
                 }
@@ -407,7 +431,7 @@ async fn attach_messages(state: &SharedState, tasks: &mut [Task], cache: &mut Ms
 }
 
 /// 写入 hub 下发的文件到本机目标目录
-fn write_transfer(f: &am_core::model::FileTransfer) {
+fn write_transfer(f: &am_core::model::FileTransfer, session_dirs: &[std::path::PathBuf]) {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     let Ok(bytes) = B64.decode(f.content_b64.as_bytes()) else {
         tracing::warn!("文件内容解码失败: {}", f.filename);
@@ -415,7 +439,8 @@ fn write_transfer(f: &am_core::model::FileTransfer) {
     };
     // 目标目录按本机的允许范围复验：不能只信 hub 校验过——
     // hub 的 upload_root 是另一台机器的，且响应链路一旦被篡改就等于本机任意写。
-    let dir = match crate::state::safe_upload_dir(&f.dir) {
+    // 允许写进家目录，或任一活跃会话的项目目录（项目常不在家目录下）。
+    let dir = match crate::state::safe_upload_dir_within(&f.dir, session_dirs) {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!("拒绝写入下发文件 {}: {e}", f.filename);
@@ -442,26 +467,68 @@ fn write_transfer(f: &am_core::model::FileTransfer) {
 /// 不无条件信任 hub 响应（响应链路若被中间人篡改，否则可对任意进程发信号）。
 async fn execute(state: &SharedState, cmd: ControlCmd, known_pids: &std::collections::HashSet<u32>) {
     let Some(pid) = cmd.pid else {
-        tracing::warn!("命令缺少 pid，跳过: {:?}", cmd);
+        // 会话没配对到进程（前端显示为「Claude Code / 等待输入」这类占位标题）时 pid 为空，
+        // 命令无处可投——网页却已提示「下发成功」。落盘让这种「发了没反应」可查。
+        crate::state::client_log(&format!(
+            "命令缺少 pid，跳过（任务 {}，会话可能尚未配对到终端进程）",
+            cmd.task_id
+        ));
         return;
     };
     if !known_pids.contains(&pid) {
-        tracing::warn!(
-            "拒绝执行：pid={pid} 不属于本机当前会话（任务 {}）",
-            cmd.task_id
-        );
+        // 落盘可见日志：GUI 应用的 stderr(tracing) 看不到，注入失败要能在 client.log 查到。
+        // 「网页提示下发成功、终端却没收到」多半就是这里——pid 不在本机本轮扫描到的会话集合
+        // （会话未配对到进程 / pid 已变 / 该会话在别的设备）。
+        crate::state::client_log(&format!(
+            "拒绝执行输入：pid={pid} 不在本机当前会话集合（任务 {}，本机已知 {} 个会话 pid）",
+            cmd.task_id,
+            known_pids.len()
+        ));
         return;
     }
     // 输入注入（发布任务）单独处理
     if matches!(cmd.action, am_core::model::ControlAction::Input) {
         let text = cmd.text.unwrap_or_default();
+        let preview: String = text.chars().take(20).collect();
+        // 目标是 Cursor/VSCode 内嵌终端（ConPTY/编辑器内置，注入不进去）、且有活着的桥接
+        // 扩展在管这个终端，就把任务写进文件桥交给扩展 terminal.sendText 送达（全平台）。
+        if let Some(shell_pid) = am_core::process::ide_shell_pid(pid) {
+            let live = crate::bridge::has_live_terminal(&state.config.data_dir, shell_pid);
+            crate::state::client_log(&format!(
+                "桥接判定：会话 {} claude pid={pid} → 内嵌终端 shell pid={shell_pid}，扩展在管={live}",
+                cmd.task_id
+            ));
+            if live && crate::bridge::send_via_extension(&state.config.data_dir, shell_pid, &text) {
+                crate::state::client_log(&format!(
+                    "注入输入：经 Cursor/VSCode 扩展桥接（终端 pid={shell_pid}，{preview}…）"
+                ));
+                return;
+            }
+        }
         // send_input 在 macOS 上走 osascript，会遍历 Terminal/iTerm 的每个窗口与标签页，
         // 常态就要数秒，终端处于模态/无响应时还可能一直挂着 —— 绝不能占住 async worker。
         let res = tokio::task::spawn_blocking(move || am_core::process::send_input(pid, &text)).await;
         match res {
-            Ok(Ok(_)) => tracing::info!("执行 hub 输入命令: 任务 {} pid={pid}", cmd.task_id),
-            Ok(Err(e)) => tracing::warn!("执行 hub 输入命令失败: {e}"),
-            Err(e) => tracing::warn!("执行 hub 输入命令的阻塞任务异常: {e}"),
+            Ok(Ok(m)) => crate::state::client_log(&format!(
+                "注入输入成功：pid={pid} {m}（{preview}…）"
+            )),
+            Ok(Err(e)) => crate::state::client_log(&format!("注入输入失败：pid={pid} {e}")),
+            Err(e) => crate::state::client_log(&format!("注入输入阻塞任务异常：pid={pid} {e}")),
+        }
+        return;
+    }
+    // 终端按键注入（撤回排队 ↑ / 插入排队 Esc）单独处理
+    if matches!(cmd.action, am_core::model::ControlAction::TermKey) {
+        let spec = cmd.text.unwrap_or_default();
+        let spec_log = spec.clone();
+        let res =
+            tokio::task::spawn_blocking(move || am_core::process::send_terminal_keys(pid, &spec))
+                .await;
+        let spec = spec_log;
+        match res {
+            Ok(Ok(m)) => crate::state::client_log(&format!("注入按键成功：pid={pid} {spec} {m}")),
+            Ok(Err(e)) => crate::state::client_log(&format!("注入按键失败：pid={pid} {spec} {e}")),
+            Err(e) => crate::state::client_log(&format!("注入按键阻塞任务异常：pid={pid} {e}")),
         }
         return;
     }
@@ -543,6 +610,83 @@ mod version_tests {
     }
 }
 
+
+/// 执行会话目录内的文件夹操作（新建/删除/重命名）。全程用 canonicalize 卡在会话根内，
+/// 越权/非法一律拒绝。返回 (成功, 提示语)。
+fn run_fs_op(op: &am_core::model::FsOp) -> (bool, String) {
+    use std::path::Path;
+    let bad = |n: &str| n.is_empty() || n.contains('/') || n.contains('\\') || n == "." || n == "..";
+    if bad(&op.name) {
+        return (false, "非法名称".into());
+    }
+    if op.rel.split('/').any(|s| s == "..") {
+        return (false, "非法路径".into());
+    }
+    let root = Path::new(&op.cwd);
+    let Ok(canon_root) = root.canonicalize() else {
+        return (false, "会话目录不可用".into());
+    };
+    // 目标所在目录（rel）必须存在且在根内
+    let base = root.join(op.rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let Ok(canon_base) = base.canonicalize() else {
+        return (false, "目录不存在".into());
+    };
+    if !canon_base.starts_with(&canon_root) {
+        return (false, "越权目录".into());
+    }
+    match op.op.as_str() {
+        "mkdir" => {
+            let target = canon_base.join(&op.name);
+            if target.exists() {
+                return (false, "同名已存在".into());
+            }
+            match std::fs::create_dir(&target) {
+                Ok(_) => (true, "已新建文件夹".into()),
+                Err(e) => (false, format!("新建失败：{e}")),
+            }
+        }
+        "delete" => {
+            let target = canon_base.join(&op.name);
+            let Ok(ct) = target.canonicalize() else {
+                return (false, "不存在".into());
+            };
+            // 不允许删根本身，且必须在根内
+            if ct == canon_root || !ct.starts_with(&canon_root) {
+                return (false, "越权目录".into());
+            }
+            let r = if ct.is_dir() {
+                std::fs::remove_dir_all(&ct)
+            } else {
+                std::fs::remove_file(&ct)
+            };
+            match r {
+                Ok(_) => (true, "已删除".into()),
+                Err(e) => (false, format!("删除失败：{e}")),
+            }
+        }
+        "rename" => {
+            if bad(&op.new_name) {
+                return (false, "非法新名称".into());
+            }
+            let target = canon_base.join(&op.name);
+            let Ok(ct) = target.canonicalize() else {
+                return (false, "不存在".into());
+            };
+            if ct == canon_root || !ct.starts_with(&canon_root) {
+                return (false, "越权目录".into());
+            }
+            let dst = canon_base.join(&op.new_name);
+            if dst.exists() {
+                return (false, "同名已存在".into());
+            }
+            match std::fs::rename(&ct, &dst) {
+                Ok(_) => (true, "已重命名".into()),
+                Err(e) => (false, format!("重命名失败：{e}")),
+            }
+        }
+        _ => (false, "未知操作".into()),
+    }
+}
 
 /// 列出 root/rel 下的子目录名（仅目录；防越出 root；隐藏目录排后；上限 300）
 /// 列出 root/rel 下的子目录与文件（各自排序，隐藏项靠后）。

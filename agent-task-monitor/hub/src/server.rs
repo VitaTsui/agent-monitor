@@ -2,7 +2,7 @@ use crate::admin::{self, auth_user, err, ok};
 use am_core::model::{ControlCmd, ControlReq, ReportPayload, Task, TaskStatus};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use crate::state::{MachineEntry, SharedState, OFFLINE_AFTER_SECS};
+use crate::state::{MachineEntry, SharedState, NEW_SESSION_SETTLE_SECS, OFFLINE_AFTER_SECS};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
@@ -65,9 +65,12 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/tasks/:id/slash-commands", get(task_slash_commands))
         .route("/monitor/tasks/:id/control", post(control_task))
         .route("/monitor/tasks/:id/input", post(input_task))
+        .route("/monitor/tasks/:id/termkey", post(termkey_task))
         .route("/monitor/tasks/:id/queued", get(queued_inputs))
         .route("/monitor/tasks/:id/recall", post(recall_input))
         .route("/monitor/tasks/:id/dirs", get(task_dirs))
+        .route("/monitor/tasks/:id/fsop", post(task_fsop))
+        .route("/monitor/tasks/:id/fsop/:opid", get(task_fsop_result))
         .route("/monitor/machines", get(machines))
         .route("/monitor/agent", get(agent_status))
         .route("/monitor/ws", get(ws_handler))
@@ -287,8 +290,48 @@ async fn pair_status(
     ok(json!({ "claimed": false, "expired": false }))
 }
 
+/// 已就绪、可对外推送的桌面版本：downloads 里已存在 `AgentMonitor-<v>-setup.exe`
+/// 的最高版本（不超过 hub 自身版本）。
+///
+/// hub 一部署就会按自身版本推送，但对应安装包往往还要几分钟才构建/上传完；这期间
+/// 若照 hub 版本推送，客户端会去下还没传好的包、拿到旧包打转。改为只推送「安装包已
+/// 上传」的版本，上传完成后自然开始推送，彻底避免「推送早于构建完成」。
+fn ready_desktop_version(downloads_dir: &std::path::Path) -> String {
+    let hub_ver = env!("CARGO_PKG_VERSION");
+    let parse = |v: &str| -> Option<(u32, u32, u32)> {
+        let mut it = v.split('.');
+        Some((
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+        ))
+    };
+    // 「最新桌面版」= downloads 里已就绪的最高版本安装包 AgentMonitor-<ver>-setup.exe。
+    // 不再拿 hub 自身编译版本（env!CARGO_PKG_VERSION）当上限：客户端自更新下载的是固定名
+    // agent-monitor-setup.exe，与 hub 版本无关；而版本化安装包「最后上传」本就是该版发布完成
+    // 的信号。若还卡 hub 版本，只要部署的 hub 二进制落后于已发布客户端，检查更新就会报旧版本
+    // （= 用户遇到的「检测到的最新版落后于实际最新版」）。hub_ver 仅作 downloads 为空时的兜底。
+    let mut best: Option<((u32, u32, u32), String)> = None;
+    if let Ok(rd) = std::fs::read_dir(downloads_dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if let Some(v) = name
+                .strip_prefix("AgentMonitor-")
+                .and_then(|s| s.strip_suffix("-setup.exe"))
+            {
+                if let Some(t) = parse(v) {
+                    if best.as_ref().map_or(true, |(bt, _)| t > *bt) {
+                        best = Some((t, v.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, v)| v).unwrap_or_else(|| hub_ver.to_string())
+}
+
 /// GET /monitor/version —— 最新版本信息（客户端/移动端更新检测用，公开）。
-/// desktop = hub 自身版本（同一代码库）；android 读 downloads/manifest.json（打包时写入）。
+/// desktop = 已就绪可推送的桌面版本；android 读 downloads/manifest.json（打包时写入）。
 async fn version_info(State(state): State<SharedState>) -> Json<Value> {
     let downloads_dir = std::env::var("AM_DOWNLOADS_DIR")
         .map(std::path::PathBuf::from)
@@ -302,7 +345,7 @@ async fn version_info(State(state): State<SharedState>) -> Json<Value> {
     // minVersion = 强制更新下限：低于它的客户端必须更新才能继续使用
     // （有根本性协议/安全变更时在 manifest.json 里抬高对应字段）
     ok(json!({
-        "desktop": env!("CARGO_PKG_VERSION"),
+        "desktop": ready_desktop_version(&downloads_dir),
         "desktopMin": pick("/desktop/minVersion"),
         "android": pick("/android/version"),
         "androidMin": pick("/android/minVersion"),
@@ -718,6 +761,56 @@ async fn control_task(
 struct InputReq {
     text: String,
     pid: Option<u32>,
+    /// 下发来源："client"/"web"（网页仍会带上，hub 目前不据此推送，保留兼容不报错）。
+    #[serde(default)]
+    #[allow(dead_code)]
+    source: Option<String>,
+}
+
+/// 把 select 消息（AskUserQuestion 的整份 input JSON）里的问题+选项转成一段可读文本，
+/// 供钉钉「等待选择」提醒展示。解析失败返回空串。
+fn select_options_text(content: &str) -> String {
+    let Ok(v) = serde_json::from_str::<Value>(content) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    if let Some(qs) = v.get("questions").and_then(|q| q.as_array()) {
+        for q in qs {
+            if let Some(question) = q.get("question").and_then(|x| x.as_str()) {
+                out.push_str(question);
+                out.push('\n');
+            }
+            if let Some(opts) = q.get("options").and_then(|o| o.as_array()) {
+                for (i, o) in opts.iter().enumerate() {
+                    let label = o.get("label").and_then(|x| x.as_str()).unwrap_or("");
+                    out.push_str(&format!("{}. {}\n", i + 1, label));
+                }
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// 把一段 markdown 里的标题行（# ~ ######）改成加粗行：钉钉里 assistant 结果常带
+/// `###### 小标题`，heading 会带大字号/上下间距，塞进推送里突兀；转成 **加粗** 更贴合。
+fn md_headings_to_bold(s: &str) -> String {
+    s.lines()
+        .map(|line| {
+            let t = line.trim_start();
+            let hashes = t.chars().take_while(|c| *c == '#').count();
+            if (1..=6).contains(&hashes) && t.chars().nth(hashes) == Some(' ') {
+                let title = t[hashes..].trim();
+                if title.is_empty() {
+                    line.to_string()
+                } else {
+                    format!("**{title}**")
+                }
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// POST /monitor/tasks/:id/input —— 向会话注入一行输入（前台发布任务）
@@ -772,7 +865,65 @@ async fn input_task(
         text: Some(text),
         id: Some(cmd_id.clone()),
     });
+    // 注：网页/客户端下发不再主动推钉钉——用户自己刚发的任务无需回推提醒，徒增噪音。
+    // 钉钉只保留「任务完成 / 会话结束 / 需要选择」等你没在盯着时才用得上的状态推送。
     ok(json!({ "pid": pid, "result": "已下发到目标机器", "cmdId": cmd_id }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TermKeyReq {
+    /// "up"（撤回排队，按 count 次上键）| "esc"（插入排队，按一次 Esc）
+    key: String,
+    #[serde(default)]
+    count: u32,
+    #[serde(default)]
+    pid: Option<u32>,
+}
+
+/// POST /monitor/tasks/:id/termkey —— 向终端注入按键：撤回排队(↑) / 插入排队(Esc)。
+/// 仅 iTerm2(mac) 与 Windows 控制台可干净注入；Terminal.app 由前端走提示、不会走到这里。
+async fn termkey_task(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<TermKeyReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let spec = match req.key.as_str() {
+        "up" => format!("up:{}", req.count.clamp(1, 50)),
+        "esc" => "esc".to_string(),
+        _ => return err(400, "未知按键"),
+    };
+    let task = {
+        let tasks = state.tasks_for(&user).await;
+        tasks.into_iter().find(|t| t.id == id)
+    };
+    let Some(task) = task else {
+        return err(404, "任务不存在");
+    };
+    let pid = match (req.pid, task.pid) {
+        (Some(p), Some(tp)) if p != tp => return err(403, "pid 与任务不符"),
+        (Some(_), None) => return err(403, "该任务没有关联进程"),
+        _ => task.pid,
+    };
+    let mut machines = state.machines.write().await;
+    let Some(entry) = machines.get_mut(&task.machine_id) else {
+        return err(404, "任务所属机器已离线");
+    };
+    if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
+        return err(500, "任务所属机器已离线，无法下发");
+    }
+    entry.pending.push_back(ControlCmd {
+        task_id: id.clone(),
+        pid,
+        action: am_core::model::ControlAction::TermKey,
+        text: Some(spec),
+        id: None,
+    });
+    ok(json!({ "result": "已下发按键" }))
 }
 
 /// GET /monitor/tasks/:id/queued —— 该会话仍在 hub 队列里、还没被客户端
@@ -912,6 +1063,99 @@ async fn task_dirs(
     }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FsOpReq {
+    /// mkdir / delete / rename
+    op: String,
+    #[serde(default)]
+    rel: String,
+    name: String,
+    #[serde(default)]
+    new_name: String,
+}
+
+/// 单个路径段合法性：非空、无分隔符、非 . / ..
+fn valid_seg(s: &str) -> bool {
+    !s.is_empty() && !s.contains('/') && !s.contains('\\') && s != "." && s != ".."
+}
+
+/// POST /monitor/tasks/:id/fsop —— 会话目录内新建/删除/重命名文件夹（异步：下发给
+/// agent 执行，返回 opId，网页再轮询 /fsop/:opid 取结果）。
+async fn task_fsop(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<FsOpReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let rel = req.rel.trim().trim_matches('/').to_string();
+    if rel.split('/').filter(|s| !s.is_empty()).any(|seg| seg == "..") || rel.starts_with('/') {
+        return err(400, "非法目录");
+    }
+    if !matches!(req.op.as_str(), "mkdir" | "delete" | "rename") {
+        return err(400, "未知操作");
+    }
+    if !valid_seg(&req.name) {
+        return err(400, "非法名称");
+    }
+    if req.op == "rename" && !valid_seg(&req.new_name) {
+        return err(400, "非法新名称");
+    }
+    let task = {
+        let tasks = state.tasks_for(&user).await;
+        tasks.into_iter().find(|t| t.id == id)
+    };
+    let Some(task) = task else {
+        return err(404, "任务不存在");
+    };
+    let cwd = task.process.as_ref().map(|p| p.cwd.clone()).unwrap_or_default();
+    if cwd.is_empty() {
+        return err(400, "该会话没有工作目录信息");
+    }
+    let op_id = format!("{}-{}", task.machine_id, crate::state::now_secs());
+    let op_id = format!("{op_id}-{}", rel.len() + req.name.len() + req.op.len());
+    let mut machines = state.machines.write().await;
+    let Some(entry) = machines.get_mut(&task.machine_id) else {
+        return err(404, "任务所属机器已离线");
+    };
+    if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
+        return err(500, "任务所属机器已离线");
+    }
+    entry.pending_fsop.push_back(am_core::model::FsOp {
+        op_id: op_id.clone(),
+        task_id: id.clone(),
+        cwd,
+        rel: rel.clone(),
+        op: req.op,
+        name: req.name,
+        new_name: req.new_name,
+    });
+    // 该目录的列举缓存作废：操作后网页会重新拉取，须重新向 agent 查询而非返回旧缓存
+    entry.dir_cache.remove(&(id, rel));
+    ok(json!({ "opId": op_id, "pending": true }))
+}
+
+/// GET /monitor/tasks/:id/fsop/:opid —— 取某文件夹操作的执行结果（agent 回传前 pending）
+async fn task_fsop_result(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((_id, opid)): Path<(String, String)>,
+) -> Json<Value> {
+    if auth_user(&state, &headers).await.is_none() {
+        return err(401, "未登录");
+    }
+    let mut machines = state.machines.write().await;
+    for entry in machines.values_mut() {
+        if let Some(r) = entry.fsop_results.remove(&opid) {
+            return ok(json!({ "ok": r.ok, "msg": r.msg, "pending": false }));
+        }
+    }
+    ok(json!({ "pending": true }))
+}
+
 fn truncate_log(s: &str) -> String {
     s.chars().take(60).collect()
 }
@@ -1020,6 +1264,8 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
         })),
         "dingtalkApp": dt_app.map(|a| json!({
             "hasSecret": !a.app_secret.is_empty(),
+            "appKey": a.app_key,
+            "stream": !a.app_key.is_empty(),
             "callbackUrl": format!("{base}/monitor/int/dingtalk/{}", a.channel),
         })),
     }))
@@ -1123,9 +1369,13 @@ async fn set_wecom_app(
 struct DingtalkAppReq {
     #[serde(default)]
     app_secret: String,
+    /// Stream 模式的 AppKey/ClientID（填了才走长连接）；空字符串=清空回 HTTP 回调模式
+    #[serde(default)]
+    app_key: String,
 }
 
-/// POST /monitor/integrations/dingtalk-app —— 保存钉钉企业应用配置，返回回调地址
+/// POST /monitor/integrations/dingtalk-app —— 保存钉钉企业应用配置。填了 appKey 则走
+/// Stream 长连接（无需公网回调地址）；否则仍是 HTTP 回调模式，返回回调地址。
 async fn set_dingtalk_app(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -1134,15 +1384,21 @@ async fn set_dingtalk_app(
     let Some(user) = auth_user(&state, &headers).await else {
         return err(401, "未登录");
     };
+    let existing = state.registry.read().await.dingtalk_app_of(&user);
+    // 密钥留空=沿用已存的（前端不回显密钥）；AppKey 是可见字段，直接以请求为准
     let secret = if req.app_secret.trim().is_empty() {
-        state.registry.read().await.dingtalk_app_of(&user).map(|a| a.app_secret).unwrap_or_default()
+        existing.as_ref().map(|a| a.app_secret.clone()).unwrap_or_default()
     } else {
         req.app_secret.trim().to_string()
     };
-    let channel = state.registry.write().await.set_dingtalk_app(&user, &secret);
+    let app_key = req.app_key.trim().to_string();
+    let channel = state.registry.write().await.set_dingtalk_app(&user, &secret, &app_key);
     match channel {
-        Some(ch) => ok(json!({ "callbackUrl": format!("{}/monitor/int/dingtalk/{ch}", public_base()) })),
-        None => ok(json!({ "callbackUrl": null })),
+        Some(ch) => ok(json!({
+            "callbackUrl": format!("{}/monitor/int/dingtalk/{ch}", public_base()),
+            "stream": !app_key.is_empty(),
+        })),
+        None => ok(json!({ "callbackUrl": null, "stream": false })),
     }
 }
 
@@ -1459,9 +1715,16 @@ async fn report(
                 messages: HashMap::new(),
                 pending_git: VecDeque::new(),
                 pending_dir: VecDeque::new(),
+                pending_fsop: VecDeque::new(),
+                fsop_results: HashMap::new(),
                 dir_cache: HashMap::new(),
                 git_cache: HashMap::new(),
                 notified_online: false,
+                select_notified: std::collections::HashSet::new(),
+                online_since: Instant::now(),
+                known_sessions: HashMap::new(),
+                session_last_seen: HashMap::new(),
+                last_select_at: HashMap::new(),
             }
         });
     // 设备上线边沿：新登记 或 之前已判离线（超阈值）
@@ -1470,6 +1733,17 @@ async fn report(
     entry.platform = payload.platform;
     entry.version = payload.version;
     entry.last_report = Instant::now();
+    // 上线边沿：刷新沉降起点。上线后 NEW_SESSION_SETTLE_SECS 内出现的会话一律当「重连扫回的
+    // 已有会话」不推，避免客户端更新/重启后分批扫回历史会话时刷屏「会话开始」。
+    // 同时清空会话基线：离线期间「消失」的旧会话不该在重连时逐条推「已结束」，重连后重建基线。
+    if was_offline {
+        entry.online_since = Instant::now();
+        entry.known_sessions.clear();
+        entry.session_last_seen.clear();
+        entry.last_select_at.clear();
+    }
+    let online_secs = entry.online_since.elapsed().as_secs();
+    let now_i = Instant::now();
     let mut tasks = payload.tasks;
     for t in tasks.iter_mut() {
         if !t.recent_messages.is_empty() {
@@ -1478,48 +1752,126 @@ async fn report(
     }
     // 会话状态变化事件（对比旧快照）
     let mut events: Vec<crate::dingtalk::NotifyEvent> = Vec::new();
+    // 本轮要落到 known_sessions 的增改 / 删除（owner 块内只收集，块后统一 apply，避开借用冲突）
+    let mut known_updates: Vec<am_core::model::Task> = Vec::new();
+    let mut known_removes: Vec<String> = Vec::new();
     if let Some(owner) = &notify_owner {
         use crate::dingtalk::{EventKind, NotifyEvent};
         let old: std::collections::HashMap<&str, TaskStatus> =
             entry.tasks.iter().map(|t| (t.id.as_str(), t.status)).collect();
+        // 会话基线是否已建立：空表示刚（重）上线还没建基线，此时出现的会话不算「新」。
+        let baseline = !entry.known_sessions.is_empty();
+        let current_ids: std::collections::HashSet<&str> =
+            tasks.iter().map(|t| t.id.as_str()).collect();
         let dev = &entry.hostname;
-        for t in &tasks {
+        // markdown 正文：设备/终端/项目/会话（两空格软换行，钉钉 markdown 才逐行断开）。
+        // `{{NO}}`（format! 编译后为 `{NO}`）占位由 deliver 换成会话编号。
+        let body = |t: &am_core::model::Task| -> String {
             let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
-            let title: String = title.chars().take(24).collect();
-            match old.get(t.id.as_str()) {
-                None => events.push(NotifyEvent {
-                    owner: owner.clone(),
-                    kind: EventKind::NewSession,
-                    text: format!("🆕 新会话 · {dev}\n{title}（{}）", t.project_name),
-                }),
-                Some(&prev) => {
-                    if prev == TaskStatus::Running && t.status == TaskStatus::Idle {
-                        events.push(NotifyEvent {
-                            owner: owner.clone(),
-                            kind: EventKind::Waiting,
-                            text: format!("⏸ 等待输入 · {dev}\n{title}（{}）", t.project_name),
-                        });
-                    } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
-                        events.push(NotifyEvent {
-                            owner: owner.clone(),
-                            kind: EventKind::Finished,
-                            text: format!("✅ 会话结束 · {dev}\n{title}（{}）", t.project_name),
-                        });
+            let title: String = title.chars().take(40).collect();
+            format!(
+                "**设备**：{dev}  \n**终端**：{}  \n**项目**：{}  \n**会话**：{{NO}}{title}",
+                t.provider_dsr, t.project_name
+            )
+        };
+        // 「最后结果」：取该会话最近一条 assistant 文本（本身是 markdown）。返回
+        // (推送里展示的截断版, 若被截断则给出完整原文供 OTO 作为文件补发)。
+        let msgs_map = &entry.messages;
+        let result = |id: &str| -> (String, Option<String>) {
+            const LIMIT: usize = 1500;
+            msgs_map
+                .get(id)
+                .and_then(|ms| ms.iter().rev().find(|m| m.role.as_str() == "assistant"))
+                .map(|m| {
+                    let full = m.content.trim();
+                    let cut = full.chars().count() > LIMIT;
+                    let s: String = full.chars().take(LIMIT).collect();
+                    // 结果正文里的 markdown 标题转成加粗，避免推送里出现大字号 heading
+                    let s = md_headings_to_bold(s.trim());
+                    if s.is_empty() {
+                        (String::new(), None)
+                    } else if cut {
+                        (
+                            format!("\n\n**最后结果**\n\n{s}\n\n…（内容较长，完整内容见下方文件）"),
+                            Some(full.to_string()),
+                        )
+                    } else {
+                        (format!("\n\n**最后结果**\n\n{s}"), None)
                     }
+                })
+                .unwrap_or((String::new(), None))
+        };
+        for t in &tasks {
+            // 状态跃迁（会话仍在）：任务完成（Running→Idle）/ 结束（→Finished）
+            if let Some(&prev) = old.get(t.id.as_str()) {
+                if prev == TaskStatus::Running && t.status == TaskStatus::Idle {
+                    let (res, full) = result(&t.id);
+                    events.push(NotifyEvent {
+                        owner: owner.clone(),
+                        kind: EventKind::Waiting,
+                        task_id: Some(t.id.clone()),
+                        text: format!("**🔔 任务完成 · 等待你的操作**\n\n{}{}", body(t), res),
+                        full_content: full,
+                    });
+                } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
+                    let (res, full) = result(&t.id);
+                    events.push(NotifyEvent {
+                        owner: owner.clone(),
+                        kind: EventKind::Finished,
+                        task_id: Some(t.id.clone()),
+                        text: format!("**✅ 会话已结束**\n\n{}{}", body(t), res),
+                        full_content: full,
+                    });
+                    known_removes.push(t.id.clone()); // 已结束：移出基线，别再被「消失」判一次
                 }
             }
+            // 会话开始：基线里没有 = 真·新。仅当基线已建立、设备稳定在线（过沉降期、非上线边沿）
+            // 时推；否则只登记进基线不推（重连扫回 / 冷启动的已有会话不算新）。
+            if !entry.known_sessions.contains_key(&t.id)
+                && baseline
+                && !was_offline
+                && online_secs >= NEW_SESSION_SETTLE_SECS
+            {
+                events.push(NotifyEvent {
+                    owner: owner.clone(),
+                    kind: EventKind::NewSession,
+                    task_id: Some(t.id.clone()),
+                    text: format!("**🆕 会话开始**\n\n{}", body(t)),
+                    full_content: None,
+                });
+            }
+            known_updates.push(t.clone());
         }
-        // 消失的会话 = 结束
-        let new_ids: std::collections::HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
-        for t in &entry.tasks {
-            if !new_ids.contains(t.id.as_str()) && t.status != TaskStatus::Finished {
-                let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
-                let title: String = title.chars().take(24).collect();
+        // 消失的会话 = 结束（去抖）：只有连续消失超过 FINISH_GRACE_SECS 才判结束，
+        // 抹掉配对振荡时一两个周期的抖动（消失即回，last_seen 很近，不会误判结束）。
+        for (id, task) in entry.known_sessions.iter() {
+            if current_ids.contains(id.as_str()) || known_removes.contains(id) {
+                continue;
+            }
+            // 最近在等待选择的会话：仍活着（用户在慢慢选），配对抖动导致的消失不算结束
+            let select_protected = entry
+                .last_select_at
+                .get(id)
+                .map(|t| t.elapsed().as_secs() < crate::state::SELECT_PROTECT_SECS)
+                .unwrap_or(false);
+            if select_protected {
+                continue;
+            }
+            let gone = entry
+                .session_last_seen
+                .get(id)
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(u64::MAX);
+            if gone >= crate::state::FINISH_GRACE_SECS {
+                let (res, full) = result(id);
                 events.push(NotifyEvent {
                     owner: owner.clone(),
                     kind: EventKind::Finished,
-                    text: format!("✅ 会话结束 · {dev}\n{title}", ),
+                    task_id: Some(id.clone()),
+                    text: format!("**✅ 会话已结束**\n\n{}{}", body(task), res),
+                    full_content: full,
                 });
+                known_removes.push(id.clone());
             }
         }
         // 设备上线边沿
@@ -1527,17 +1879,84 @@ async fn report(
             events.push(NotifyEvent {
                 owner: owner.clone(),
                 kind: EventKind::Device,
-                text: format!("🟢 设备上线 · {dev}"),
+                task_id: None,
+                text: format!("**🟢 设备上线**\n\n**设备**：{dev}"),
+                full_content: None,
             });
         }
+        // 交互式选择提醒：会话最新对话消息是 select（AskUserQuestion / 权限确认）时，
+        // 进入该状态推一次（边沿触发，靠 select_notified 去重），提示去作答。
+        // 注意：messages() 会在末尾追加 todos/bgtasks 状态快照，不能直接取 ms.last()
+        //（否则有任务清单/后台任务的会话里，最后一条恒是快照、select 永远检不出、不推提醒）。
+        // 取最后一条「非快照」对话消息来判定。
+        let last_convo = |ms: &[am_core::model::MessageBrief]| -> Option<am_core::model::MessageBrief> {
+            ms.iter()
+                .rev()
+                .find(|m| !matches!(m.role.as_str(), "todos" | "bgtasks"))
+                .cloned()
+        };
+        let now_selecting: std::collections::HashSet<String> = tasks
+            .iter()
+            .filter(|t| {
+                msgs_map
+                    .get(&t.id)
+                    .and_then(|ms| last_convo(ms))
+                    .map(|m| m.role.as_str() == "select")
+                    .unwrap_or(false)
+            })
+            .map(|t| t.id.clone())
+            .collect();
+        for t in &tasks {
+            if now_selecting.contains(&t.id) && !entry.select_notified.contains(&t.id) {
+                let opts = msgs_map
+                    .get(&t.id)
+                    .and_then(|ms| last_convo(ms))
+                    .map(|m| select_options_text(&m.content))
+                    .unwrap_or_default();
+                events.push(NotifyEvent {
+                    owner: owner.clone(),
+                    kind: EventKind::Select,
+                    task_id: Some(t.id.clone()),
+                    text: format!(
+                        "**⌨️ 需要你选择**\n\n{}\n\n{}\n\n回复「发 {{N}} 序号」作答",
+                        body(t),
+                        opts
+                    ),
+                    full_content: None,
+                });
+            }
+        }
+        // 记下正在等待选择的会话时刻：其之后若配对抖动消失，disappear 分支据此保护、不误推结束
+        for id in &now_selecting {
+            entry.last_select_at.insert(id.clone(), now_i);
+        }
+        entry.select_notified = now_selecting;
     }
     if notify_owner.is_some() {
         entry.notified_online = true;
+    }
+    // 应用会话基线的增改/删除（owner 块内借用 entry 只读，故延到此处统一 apply）。
+    // 先增改后删除：状态跃迁到 Finished 的会话既在 updates 也在 removes，净效果为移除。
+    for t in &known_updates {
+        entry.known_sessions.insert(t.id.clone(), t.clone());
+        entry.session_last_seen.insert(t.id.clone(), now_i);
+    }
+    for id in &known_removes {
+        entry.known_sessions.remove(id);
+        entry.session_last_seen.remove(id);
+        entry.last_select_at.remove(id);
     }
     entry.tasks = tasks;
     // 缓存 agent 回传的 git 对比结果
     for r in payload.dir_results {
         entry.dir_cache.insert((r.task_id.clone(), r.rel.clone()), (r.dirs, r.files));
+    }
+    // 文件夹操作结果：按 op_id 存起来供网页轮询（上限防止 map 无限涨）
+    for r in payload.fs_op_results {
+        entry.fsop_results.insert(r.op_id.clone(), r);
+    }
+    if entry.fsop_results.len() > 256 {
+        entry.fsop_results.clear();
     }
     for r in payload.git_results {
         entry.git_cache.insert(r.task_id, r.overview);
@@ -1548,10 +1967,14 @@ async fn report(
         entry.tasks.iter().map(|t| t.id.as_str()).collect();
     entry.messages.retain(|k, _| alive.contains(k.as_str()));
     entry.git_cache.retain(|k, _| alive.contains(k.as_str()));
+    // 输入指令一律即时下发到终端：点了发送就直接键入终端会话，是否「排队」由终端里
+    // claude 自己的原生队列决定（会话跑着时新输入排在其后、被接收后才执行），hub 不再
+    // 代为扣留。（撤回按「终端队列是否已接收」判定，见前端。）
     let commands: Vec<ControlCmd> = entry.pending.drain(..).collect();
     let files: Vec<am_core::model::FileTransfer> = entry.pending_files.drain(..).collect();
     let git_queries: Vec<am_core::model::GitQuery> = entry.pending_git.drain(..).collect();
     let dir_queries: Vec<am_core::model::DirQuery> = entry.pending_dir.drain(..).collect();
+    let fs_ops: Vec<am_core::model::FsOp> = entry.pending_fsop.drain(..).collect();
     drop(machines);
 
     // 钉钉推送：不阻塞上报响应，后台异步发
@@ -1563,15 +1986,18 @@ async fn report(
 
     // 告知 agent 是否已被信任：未信任时 agent 不应再上报任何会话数据
     let trusted = state.registry.read().await.device_meta(&payload.machine_id).trusted;
-    // hubVersion：hub 与桌面客户端同一工作区发版，hub 的版本即最新客户端版本，
-    // agent 用它做更新提示（托盘「新版本可用」）
+    // hubVersion：只推「安装包已上传」的版本，避免推送早于构建/上传完成（见 ready_desktop_version）
+    let downloads_dir = std::env::var("AM_DOWNLOADS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| state.config.data_dir.join("downloads"));
     ok(json!({
         "commands": commands,
         "files": files,
         "gitQueries": git_queries,
         "dirQueries": dir_queries,
+        "fsOps": fs_ops,
         "trusted": trusted,
-        "hubVersion": env!("CARGO_PKG_VERSION"),
+        "hubVersion": ready_desktop_version(&downloads_dir),
         // 强制更新下限：客户端低于它必须更新才能继续使用
         "minVersion": desktop_min_version(&state).await,
     }))

@@ -15,8 +15,6 @@ import {
   EllipsisOutlined,
   LaptopOutlined,
   LogoutOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
   SafetyOutlined,
@@ -39,6 +37,25 @@ import ScrollText from "./_components/ScrollText";
 import SettingsModal from "./_components/SettingsModal";
 import type { SettingsTab } from "./_components/SettingsModal";
 import styles from "./index.module.scss";
+
+/** 侧栏折叠图标：面板 + 左栏分隔线（对标 VS Code / ChatGPT 的侧栏切换，
+ *  取代过于「后管菜单」的汉堡折叠图标）。折叠态把分隔线挪到更左，暗示会收窄。 */
+const SidebarIcon: React.FC<{ folded?: boolean }> = ({ folded }) => (
+  <svg
+    width="21"
+    height="21"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.9"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden
+  >
+    <rect x="3" y="4.5" width="18" height="15" rx="2.6" />
+    <line x1={folded ? "8" : "9.5"} y1="4.5" x2={folded ? "8" : "9.5"} y2="19.5" />
+  </svg>
+);
 
 const STATUS_LABEL: Record<string, string> = {
   running: "执行中",
@@ -87,12 +104,16 @@ const Portal: React.FC = observer(() => {
   // 移动端：顶栏「⋯」操作菜单与代码改动弹窗
   const [mobileActs, setMobileActs] = useState(false);
   const [mobileGit, setMobileGit] = useState(false);
+  const [isMobile, setIsMobile] = useState(
+    () => window.matchMedia("(max-width: 760px)").matches,
+  );
 
   // 移动端强制展开侧栏内容：桌面折叠态下缩窄窗口时，
   // CSS 会把抽屉撑到 84vw，但折叠态 JSX 不渲染内容 → 空白抽屉，这里在 JS 层纠正
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 760px)");
     const sync = () => {
+      setIsMobile(mq.matches);
       if (mq.matches) {
         setSiderFolded(false);
       }
@@ -289,8 +310,8 @@ const Portal: React.FC = observer(() => {
           className={styles.mobileMenuBtn}
           role="button"
           tabIndex={0}
-          aria-label="打开会话列表"
-          onClick={() => setMobileNav(true)}
+          aria-label="打开/收起会话列表"
+          onClick={() => setMobileNav((v) => !v)}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
@@ -298,7 +319,7 @@ const Portal: React.FC = observer(() => {
             }
           }}
         >
-          <MenuUnfoldOutlined />
+          <SidebarIcon folded={!mobileNav} />
         </span>
         <span className={styles.mobileTitle}>
           {openTasks[0] ? (
@@ -377,9 +398,7 @@ const Portal: React.FC = observer(() => {
       )}
 
       <aside
-        className={`${styles.sider} ${siderFolded ? styles.folded : ""} ${
-          mobileNav ? styles.mobileOpen : ""
-        }`}
+        className={`${styles.sider} ${siderFolded ? styles.folded : ""}`}
       >
         <div className={styles.siderHeader}>
           <div className={styles.brand}>
@@ -403,7 +422,7 @@ const Portal: React.FC = observer(() => {
                 }
               }}
             >
-              {siderFolded ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+              <SidebarIcon folded={siderFolded} />
             </span>
           </Tooltip>
         </div>
@@ -527,15 +546,18 @@ const Portal: React.FC = observer(() => {
                                   </span>
                                 </div>
                               </div>
-                              <Tooltip title="拆分显示">
-                                <SplitCellsOutlined
-                                  className={styles.splitBtn}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    splitOpen(t.id ?? "");
-                                  }}
-                                />
-                              </Tooltip>
+                              {/* 移动端窄屏不支持拆分并排，去掉拆分按钮，只单会话查看 */}
+                              {!isMobile && (
+                                <Tooltip title="拆分显示">
+                                  <SplitCellsOutlined
+                                    className={styles.splitBtn}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      splitOpen(t.id ?? "");
+                                    }}
+                                  />
+                                </Tooltip>
+                              )}
                             </div>
                           ))}
                       </div>
@@ -552,9 +574,10 @@ const Portal: React.FC = observer(() => {
         <Popover
           open={userMenuOpen}
           onOpenChange={(o) => {
-            // 移动端：不弹菜单，直接进整屏设置（Claude App 式头像入口）
+            // 移动端：不弹菜单，直接进整屏设置（Claude App 式头像入口）。
+            // 不再顺手收起侧栏——点头像只是开设置，设置浮在上层，关掉后侧栏仍在，
+            // 避免「点头像侧栏莫名收起」的观感。
             if (o && window.matchMedia("(max-width: 760px)").matches) {
-              setMobileNav(false);
               openSettings("account");
               return;
             }
@@ -600,7 +623,7 @@ const Portal: React.FC = observer(() => {
         </Popover>
       </aside>
 
-      <main className={styles.main}>
+      <main className={`${styles.main} ${mobileNav ? styles.mainPushed : ""}`}>
         {paneCount === 0 ? (
           <div className={styles.mainEmpty}>
             <div className={styles.greeting}>

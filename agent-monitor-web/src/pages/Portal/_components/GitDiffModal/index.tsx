@@ -133,6 +133,7 @@ const GitDiffModal: React.FC<GitDiffModalProps> = (props) => {
       onCancel={onClose}
       footer={null}
       width={860}
+      centered
     >
       <Spin spinning={loading} tip="正在读取改动…">
         {overview && overview.error ? (

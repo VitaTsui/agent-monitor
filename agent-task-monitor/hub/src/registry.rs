@@ -170,6 +170,17 @@ pub struct WecomApp {
 pub struct DingtalkApp {
     pub channel: String,
     pub app_secret: String,
+    /// Stream 模式的 clientId（钉钉应用 AppKey / ClientID）。填了它就走 Stream
+    /// 长连接（hub 主动连钉钉，免公网入站回调），绕开中国→海外服务器可达性问题。
+    #[serde(default)]
+    pub app_key: String,
+    /// 机器人 robotCode（收到消息时捕获；主动 OTO 推送用）。Stream 机器人一般 == app_key，
+    /// 但以消息里带的为准。
+    #[serde(default)]
+    pub robot_code: String,
+    /// 用户本人的 staffId（收到消息时捕获）。主动推送就发给这个人。
+    #[serde(default)]
+    pub staff_id: String,
 }
 
 pub struct Registry {
@@ -402,22 +413,81 @@ impl Registry {
         self.wecom_apps.iter().find(|(_, a)| a.channel == channel).map(|(u, a)| (u.clone(), a.clone()))
     }
 
-    /// 保存钉钉企业应用配置；app_secret 为空则删除。返回回调 channel。
-    pub fn set_dingtalk_app(&mut self, user: &str, app_secret: &str) -> Option<String> {
+    /// 保存钉钉企业应用配置；app_secret 为空则删除。app_key 填了则走 Stream 长连接。
+    /// 返回回调 channel（HTTP 回调模式用；Stream 模式用不到但保留兼容）。
+    pub fn set_dingtalk_app(&mut self, user: &str, app_secret: &str, app_key: &str) -> Option<String> {
         if app_secret.trim().is_empty() {
             self.dingtalk_apps.remove(user);
             self.save();
             return None;
         }
-        let channel = self.dingtalk_apps.get(user).map(|a| a.channel.clone())
-            .filter(|c| !c.is_empty())
-            .unwrap_or_else(new_channel);
+        // 保留已捕获的身份（robot_code/staff_id）与 channel：重存凭据不该清掉它们
+        let prev = self.dingtalk_apps.get(user).cloned().unwrap_or_default();
+        let channel = if prev.channel.is_empty() { new_channel() } else { prev.channel.clone() };
         self.dingtalk_apps.insert(user.to_string(), DingtalkApp {
             channel: channel.clone(),
             app_secret: app_secret.trim().to_string(),
+            app_key: app_key.trim().to_string(),
+            robot_code: prev.robot_code,
+            staff_id: prev.staff_id,
         });
         self.save();
         Some(channel)
+    }
+
+    /// 收到 Stream 机器人消息时，捕获发信人 staffId 与 robotCode（主动 OTO 推送要用）。
+    /// staffId「首次捕获即绑定」，之后不因别的发信人自动改绑（防止他人私聊机器人把推送劫持走）；
+    /// 要改绑用 `bind_dingtalk_staff` 显式覆盖。robotCode 是机器人自身编码、与发信人无关，可随时更新。
+    /// 仅在有变化时落盘。返回是否发生了变更。
+    pub fn set_dingtalk_identity(&mut self, user: &str, staff_id: &str, robot_code: &str) -> bool {
+        let Some(app) = self.dingtalk_apps.get_mut(user) else { return false };
+        let mut changed = false;
+        if !staff_id.is_empty() && app.staff_id.is_empty() {
+            app.staff_id = staff_id.to_string();
+            changed = true;
+        }
+        if !robot_code.is_empty() && app.robot_code != robot_code {
+            app.robot_code = robot_code.to_string();
+            changed = true;
+        }
+        if changed {
+            self.save();
+        }
+        changed
+    }
+
+    /// 显式（重新）绑定推送接收人：把发信人 staffId 强制绑到该账号（「绑定」指令用）。
+    pub fn bind_dingtalk_staff(&mut self, user: &str, staff_id: &str, robot_code: &str) -> bool {
+        let Some(app) = self.dingtalk_apps.get_mut(user) else { return false };
+        if staff_id.is_empty() {
+            return false;
+        }
+        app.staff_id = staff_id.to_string();
+        if !robot_code.is_empty() {
+            app.robot_code = robot_code.to_string();
+        }
+        self.save();
+        true
+    }
+
+    /// 解绑推送接收人（「解绑」指令用）。返回原本是否有绑定。
+    pub fn unbind_dingtalk_staff(&mut self, user: &str) -> bool {
+        let Some(app) = self.dingtalk_apps.get_mut(user) else { return false };
+        if app.staff_id.is_empty() {
+            return false;
+        }
+        app.staff_id.clear();
+        self.save();
+        true
+    }
+
+    /// 所有配了 Stream（app_key+app_secret 都非空）的钉钉应用：(user, app_key, app_secret)
+    pub fn dingtalk_stream_apps(&self) -> Vec<(String, String, String)> {
+        self.dingtalk_apps
+            .iter()
+            .filter(|(_, a)| !a.app_key.is_empty() && !a.app_secret.is_empty())
+            .map(|(u, a)| (u.clone(), a.app_key.clone(), a.app_secret.clone()))
+            .collect()
     }
 
     pub fn dingtalk_app_of(&self, user: &str) -> Option<DingtalkApp> {

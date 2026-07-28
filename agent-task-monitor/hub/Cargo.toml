@@ -27,6 +27,8 @@ axum = { version = "0.7", features = ["ws", "multipart"] }
 tower-http = { version = "0.5", features = ["cors", "fs", "set-header"] }
 tower = "0.4"
 futures-util = "0.3"
+# 钉钉 Stream 长连接客户端（rustls，避免 openssl）
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 base64 = "0.22"
 rsa = { version = "0.9", features = ["sha2"] }
 sha1 = "0.10"

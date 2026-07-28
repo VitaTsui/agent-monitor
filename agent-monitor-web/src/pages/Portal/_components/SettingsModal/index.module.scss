@@ -97,6 +97,11 @@ $hover: rgba(36, 61, 66, 0.06);
     display: none;
   }
 
+  // 身份 pill：仅移动端 sheet 用（桌面隐藏）
+  .identityPill {
+    display: none;
+  }
+
   // 右上角关闭按钮（弹窗无标题栏，需要显式的关闭入口）
   .closeBtn {
     position: absolute;
@@ -190,10 +195,30 @@ $hover: rgba(36, 61, 66, 0.06);
   // 移动端：iOS 设置式两级界面 —— 一级=菜单列表，二级=分区内容（固定
   // 头部：返回 + 标题 + 关闭，内容区单独滚动，关闭钮永远可达）
   @media (max-width: 760px) {
+    // 固定全屏：不同分栏内容高度不同会让抽屉式 sheet「高高低低变来变去」，
+    // 这里锁死为整屏高度，切换分栏时高度不再跳动，也不再露出顶部背景间隙。
+    :global(.ant-modal-content) {
+      height: 100dvh !important;
+      max-height: 100dvh !important;
+      min-height: 100dvh !important;
+      border-radius: 0 !important;
+      padding-top: env(safe-area-inset-top) !important;
+
+      // 全屏页不需要底部抽屉的顶部抓手条
+      &::before {
+        display: none !important;
+      }
+    }
+
+    // 弹窗 body 自身不滚动：否则会连着头部一起滚（antd-overload 给移动端 body 挂了
+    // overflow-y:auto）。改为 body 不滚、只让内部 .content 单独滚，头部才能真正钉住。
+    :global(.ant-modal-body) {
+      overflow: hidden !important;
+    }
+
     .layout {
       flex-direction: column;
-      height: 84dvh;
-      max-height: 84dvh;
+      height: 100%;
       overflow: hidden;
     }
 
@@ -208,8 +233,8 @@ $hover: rgba(36, 61, 66, 0.06);
       border-bottom: 0.5px solid rgba(36, 61, 66, 0.14);
 
       .mobileHeadTitle {
-        font-size: 17px;
-        font-weight: 600;
+        font-size: 18px;
+        font-weight: 650;
         color: $text;
       }
 
@@ -238,14 +263,24 @@ $hover: rgba(36, 61, 66, 0.06);
       }
     }
 
+    // 关闭钮：右上角白色圆形按钮（左上角留给二级页的「返回」，互不冲突）
     .closeBtn {
-      top: 9px;
+      top: 7px;
       right: 12px;
-      width: 32px;
-      height: 32px;
+      left: auto;
+      width: 34px;
+      height: 34px;
       border-radius: 50%;
-      background: rgba(36, 61, 66, 0.07);
+      background: #fff;
+      color: $text;
+      font-size: 15px;
+      box-shadow: 0 1px 4px rgba(36, 61, 66, 0.16);
       z-index: 3;
+
+      &:hover {
+        background: #fff;
+        color: $text;
+      }
     }
 
     // 一级：iOS 设置式分组列表（灰底页面 + 白色圆角分组卡 + 彩色图标 + 分隔线）
@@ -260,6 +295,53 @@ $hover: rgba(36, 61, 66, 0.06);
 
       .navTitle {
         display: none;
+      }
+
+      // Claude sheet 顶部身份 pill：白色圆角行，头像 + 名字 + chevron
+      .identityPill {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 14px;
+        margin-bottom: 18px;
+        background: #fff;
+        border-radius: 14px;
+        cursor: pointer;
+
+        .identityAvatar {
+          flex: none;
+          width: 34px;
+          height: 34px;
+          border-radius: 50%;
+          background: $accent;
+          color: #fff;
+          font-size: 15px;
+          font-weight: 600;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .identityName {
+          flex: 1;
+          min-width: 0;
+          font-size: 16px;
+          font-weight: 600;
+          color: $text;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .identityArrow {
+          flex: none;
+          color: #c2c8cf;
+          font-size: 15px;
+        }
+
+        &:active {
+          background: #f7f7f5;
+        }
       }
 
       // 整组做成一张白色圆角卡
@@ -284,28 +366,27 @@ $hover: rgba(36, 61, 66, 0.06);
         &:not(:last-child)::after {
           content: "";
           position: absolute;
-          left: 56px;
+          left: 52px;
           right: 0;
           bottom: 0;
           height: 0.5px;
           background: rgba(36, 61, 66, 0.12);
         }
 
-        // 彩色圆角图标底（iOS 设置图标质感）—— 仅移动端上色
+        // Claude 风格：单色细线图标（不是 iOS 的彩色圆角块）
         .navIcon {
           flex: none;
-          width: 30px;
-          height: 30px;
-          border-radius: 8px;
+          width: 26px;
+          height: 26px;
           display: flex;
           align-items: center;
           justify-content: center;
-          background: var(--nav-color, #8a94a6);
-          color: #fff;
+          background: transparent;
+          color: #5b6b70;
 
           :global(.anticon) {
-            font-size: 17px;
-            color: #fff;
+            font-size: 21px;
+            color: #5b6b70;
           }
         }
 
@@ -332,7 +413,7 @@ $hover: rgba(36, 61, 66, 0.06);
           }
 
           .navIcon :global(.anticon) {
-            color: #fff;
+            color: #5b6b70;
           }
         }
 
@@ -363,22 +444,26 @@ $hover: rgba(36, 61, 66, 0.06);
       .devActions {
         flex-wrap: wrap;
         justify-content: flex-end;
-        gap: 8px;
+        gap: 6px;
         margin-top: 6px;
 
-        // 按钮收小一点（之前 34px 偏大），保持触控可用
+        // 收小胶囊：之前偏大、和「删除」文字按钮不协调；紧凑些更均衡，仍够触控。
+        // 注意要用 !important 盖过 antd-overload 里移动端弹窗按钮的 min-height:42px。
         .actBtn,
         .shareBtn,
         .trustBtn {
-          height: 30px;
-          padding-inline: 14px;
-          font-size: 12.5px;
+          height: 28px !important;
+          min-height: 28px !important;
+          padding-inline: 12px !important;
+          font-size: 12px !important;
+          border-radius: 999px !important;
         }
 
         .delBtn {
-          height: 30px;
-          padding-inline: 10px;
-          font-size: 12.5px;
+          height: 28px !important;
+          min-height: 28px !important;
+          padding-inline: 8px !important;
+          font-size: 12px !important;
         }
       }
     }

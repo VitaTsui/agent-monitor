@@ -1,6 +1,7 @@
 import {
   getQueuedInputs,
   recallPortalInput,
+  termKeyTask,
   PortalControlAction,
   PortalDevice,
   PortalMessage,
@@ -66,11 +67,18 @@ class PortalStore {
   private _devices: PortalDevice[] = [];
   /** 顶部选中的设备 */
   private _selectedMachineId = "";
-  /** 拆分视图中打开的会话（有序） */
+  /** 拆分视图中打开的会话（有序，全局跨设备） */
   private _openIds: string[] = [];
   private _messagesById: Record<string, PortalMessage[]> = {};
   private _loadingIds: string[] = [];
   private _keyword = "";
+  /**
+   * 撤回后把原文回填给对应会话的对话框：Composer 用 reaction 监听，命中自己的
+   * taskId 就把 text 填进输入框再消费掉。带 nonce 是为了「撤回同一段文本」也能
+   * 重新触发（否则相同对象引用不变、reaction 不响应）。
+   */
+  composerRefill: { taskId: string; text: string; nonce: number } | null = null;
+  private _refillNonce = 0;
 
   constructor() {
     // 连接管理字段是命令式状态（WS 句柄、定时器句柄、世代号、关闭标志），
@@ -164,10 +172,10 @@ class PortalStore {
     if (id === this.selectedMachineId) {
       return;
     }
+    // 切设备只改左侧列表的筛选，不动已打开的会话：打开的会话是全局的（可跨多设备），
+    // 配合拆分可同时查看多设备的多个会话；也不默认选中任何会话。各会话属于哪台设备由
+    // 内容区标题下方的设备名标识（见 ChatPane）。
     this._selectedMachineId = id;
-    // 切换设备：右侧重置为空态 —— 不默认选中任何终端，由用户点选。
-    this._openIds = [];
-    this.dropMessageCache();
   };
 
   /**
@@ -186,12 +194,22 @@ class PortalStore {
         (t.status !== "finished" ||
           Date.now() - (t.mtimeMs ?? 0) < 2 * 3600 * 1000)
     );
+    // 归一化目录键：与后端 encode_path（core/scanner）逐字对齐 —— 去尾随分隔符后，
+    // 把每个非字母数字字符一律替换成 '-'，再小写。同一目录下的空会话（占位任务用进程
+    // cwd）与真实会话（用 jsonl 里的 cwd），以及 cursor / 非 cursor 终端，其 cwd 字符串
+    // 常在分隔符、盘符冒号、标点等处有细微差异；只做「斜杠/大小写」归一挡不住，必须与
+    // 配对键同规则，才能保证「后端认作同一目录、就分进同一个分组」。
+    const normProj = (p: string | undefined) =>
+      (p ?? "")
+        .replace(/[/\\]+$/, "")
+        .replace(/[^a-zA-Z0-9]/g, "-")
+        .toLowerCase();
     const byProject = new Map<string, TermGroup>();
     for (const t of list) {
       // 组标题只显示文件夹名，不要完整路径
       const dirName = (t.project ?? "").split(/[\\/]/).filter(Boolean).pop() ?? "";
       const title = t.projectName || dirName || "未知项目";
-      const key = `proj-${t.project || title}`;
+      const key = `proj-${normProj(t.project) || title.toLowerCase()}`;
       const group = byProject.get(key);
       if (group) {
         group.tasks.push(t);
@@ -199,7 +217,19 @@ class PortalStore {
         byProject.set(key, { key, title, tasks: [t] });
       }
     }
-    return [...byProject.values()];
+    // 固定字母序：分组按标题、组内会话按标题(再退 id)稳定排序 —— 之前顺序跟随
+    // filtered 的活跃度，活跃会话一变就整列上下跳；改成字母序后位置钉死不乱跳。
+    const groups = [...byProject.values()];
+    const taskKey = (t: PortalTaskData) =>
+      t.title || t.prompt || t.projectName || t.id || "";
+    groups.sort((a, b) => a.title.localeCompare(b.title, "zh"));
+    for (const g of groups) {
+      g.tasks.sort((a, b) => {
+        const c = taskKey(a).localeCompare(taskKey(b), "zh");
+        return c !== 0 ? c : (a.id ?? "").localeCompare(b.id ?? "");
+      });
+    }
+    return groups;
   }
 
   get devices() {
@@ -380,12 +410,34 @@ class PortalStore {
    * 落地一份会话列表快照。WS 推送与兜底轮询共用，保证两条通路行为一致。
    */
   private applyTasks = (list: PortalTaskData[]) => {
+    // /clear、compact 等会让同一终端进程换新会话（新 id/jsonl）：pid 会从旧会话挪到
+    // 新会话。先记下旧表里各会话的 pid，换表后把「丢了 pid 的打开会话」跟随到「现在
+    // 持有该 pid 的会话」——这样 /clear 后仍能对着同一终端发任务、看内容，而不是卡在
+    // 已失联（无 pid）的旧会话上，导致「下发失败、终端没这个任务」。
+    const prevPidById = new Map<string, number | null | undefined>();
+    for (const t of this._tasks) prevPidById.set(t.id ?? "", t.pid);
+
     // 内容没变就不换引用，否则整棵会话树白重渲染一遍。
     if (JSON.stringify(list) !== JSON.stringify(this._tasks)) {
       this._tasks = list;
     }
 
-    // 不再默认选中任何终端：openIds 为空就保持空态（用户自己点选）。
+    // pid 跟随：打开的会话若丢了 pid，切到现在持有其原 pid 的会话（同一终端的新会话）
+    const followed = this._openIds.map((id) => {
+      const cur = this._tasks.find((t) => t.id === id);
+      const prevPid = prevPidById.get(id);
+      if (cur && !cur.pid && prevPid) {
+        const succ = this._tasks.find((t) => t.pid === prevPid && t.id !== id);
+        if (succ?.id) return succ.id;
+      }
+      return id;
+    });
+    // 跟随后可能与已打开的会话撞车，去重保序
+    const deduped = Array.from(new Set(followed));
+    if (deduped.join(" ") !== this._openIds.join(" ")) {
+      this._openIds = deduped;
+    }
+
     // 仅做存活清理：已消失的会话从打开列表里剔除。
     const alive = this._openIds.filter((id) =>
       this._tasks.some((t) => t.id === id)
@@ -394,7 +446,7 @@ class PortalStore {
       this._openIds = alive;
       this.dropMessageCache();
     }
-    // 对话内容不走推送（推送只含会话列表），仍按需拉取
+    // 对话内容不走推送（推送只含会话列表），仍按需拉取（跟随后的新会话首拉即有内容）
     this._openIds.forEach((id) => this.fetchMessages(id, false));
   };
 
@@ -546,6 +598,56 @@ class PortalStore {
       .catch(() => void 0);
   };
 
+  /** 撤回后把原文回填给对应会话的对话框（供 Composer 监听消费） */
+  public consumeComposerRefill = () => {
+    this.composerRefill = null;
+  };
+
+  /**
+   * 向终端注入按键：撤回终端原生排队（up，按 count 次）/ 插入排队到会话（esc）。
+   * 仅 iTerm2(mac) 与 Windows 控制台可干净注入；Terminal.app 会失败并提示手动按键。
+   */
+  public termKey = (id: string, key: "up" | "esc", count = 1) => {
+    termKeyTask(id, key, count)
+      .then((res) => {
+        if (res.code === 0) {
+          antdMessage.success(key === "up" ? "已撤回终端排队" : "已插入排队到会话");
+        } else {
+          antdMessage.warning(res.msg ?? "按键注入失败");
+        }
+      })
+      .catch(() => antdMessage.error("操作失败，请检查网络"));
+  };
+
+  /**
+   * 一起撤回底部挂载的多条排队任务，并把它们的原文合并回填进对话框。
+   * 只有仍在 hub 队列（带 cmdId、还没被终端取走）的能真正撤回；已进终端原生队列的
+   * 撤不回（claude 不开放出队），这里只负责把可撤的撤掉、并把全部文本回填供改后再发。
+   */
+  public recallAllQueued = (id: string, cmdIds: string[], allText: string) => {
+    cmdIds.forEach((cmdId) =>
+      recallPortalInput(id, cmdId)
+        .then((res) => {
+          if (res.code === 0) {
+            const cur = this._messagesById[id] ?? [];
+            this._messagesById = {
+              ...this._messagesById,
+              [id]: cur.filter((m) => !(m.local && m.cmdId === cmdId)),
+            };
+          }
+        })
+        .catch(() => void 0),
+    );
+    if (allText.trim()) {
+      this.composerRefill = {
+        taskId: id,
+        text: allText,
+        nonce: ++this._refillNonce,
+      };
+    }
+    antdMessage.success("已撤回排队任务");
+  };
+
   /** 撤回还在排队的输入（已被终端接收则提示失败并去掉排队标记） */
   public recallInput = (id: string, cmdId: string) => {
     recallPortalInput(id, cmdId)
@@ -553,10 +655,19 @@ class PortalStore {
         const cur = this._messagesById[id] ?? [];
         if (res.code === 0) {
           antdMessage.success("已撤回");
+          // 撤下排队回显，同时把原文回填进该会话的对话框，方便改完再发
+          const recalled = cur.find((m) => m.local && m.cmdId === cmdId);
           this._messagesById = {
             ...this._messagesById,
             [id]: cur.filter((m) => !(m.local && m.cmdId === cmdId)),
           };
+          if (recalled?.content) {
+            this.composerRefill = {
+              taskId: id,
+              text: recalled.content,
+              nonce: ++this._refillNonce,
+            };
+          }
         } else {
           antdMessage.warning(res.msg ?? "已被终端接收，无法撤回");
           this._messagesById = {
@@ -593,15 +704,30 @@ class PortalStore {
           // 让真实消息（带终端时间戳）接管，避免同一条显示两遍。
           // 归一化比对：空白差异（换行/缩进/首尾）一律视为同一条
           const norm = (s: string) => s.replace(/\s+/g, " ").trim();
-          const incomingUser = new Set(
-            incoming.filter((m) => m.role === "user").map((m) => norm(m.content)),
-          );
+          const incomingUserNorms = incoming
+            .filter((m) => m.role === "user")
+            .map((m) => norm(m.content));
+          // 回显能否被某条同步回来的 user 消息接管：
+          // 除了完全相等，还接受「同步内容包含回显全文」——终端把注入的文本
+          // 记进 jsonl 时常会带上结构化前后文（工具结果、上下文块等），导致内容
+          // 比原始输入更长，只做全等比对会漏判、两条并存。长度阈值挡掉过短回显
+          // （如 “ok”）被任意长消息命中的误伤。
+          const echoTakenOver = (echoNorm: string) => {
+            if (!echoNorm) {
+              return false;
+            }
+            return incomingUserNorms.some(
+              (u) =>
+                u === echoNorm ||
+                (echoNorm.length >= 4 && u.includes(echoNorm)),
+            );
+          };
           const now = Date.now();
           const withoutEcho = prev.filter((m) => {
             if (!m.local) {
               return true;
             }
-            if (incomingUser.has(norm(m.content))) {
+            if (echoTakenOver(norm(m.content))) {
               return false;
             }
             // 自愈兜底：已送达终端超 5 分钟仍没等来同步替换（内容被终端改写等

@@ -176,8 +176,8 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
         color: #a5f3fc;
       }
 
-      // 代码块：明显更暗的实底 + 描边，与深色卡片拉开层次；文字提亮到接近纯白，
-      // 长行横向滚动不撑破布局
+      // 无语言标记的代码块：ReactMarkdown 只输出 <pre><code>，这里自绘深底盒子——
+      // 明显更暗的实底 + 描边，与深色卡片拉开层次；文字提亮到接近纯白，长行横向滚动不撑破布局
       pre {
         background: #10201f;
         border: 1px solid rgba(255, 255, 255, 0.14);
@@ -192,6 +192,32 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           padding: 0;
           font-size: 12.5px;
           color: #e6f0ef;
+        }
+      }
+
+      // 带语言标记的代码块：hsu-ui 已自带「边框 + 顶栏复制」的盒子(div.code)，
+      // 外层 pre 若再套一层黑底描边就成了双重包裹。剥掉 pre 自身的盒子样式，
+      // 让内层 div.code 独立成盒，代码正文补回内边距与横向滚动。
+      pre:has(> div) {
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        padding: 0;
+        overflow: visible;
+
+        code {
+          display: block;
+          padding: 10px 12px;
+          overflow-x: auto;
+          color: #e6f0ef;
+        }
+
+        // 顶栏(.nav #212121)里的复制按钮(hsu-ui Copy)默认取浅色主题变量(深灰)，
+        // 落在深色顶栏上几乎看不见 → 就近把顶栏内的文字/图标主题变量提亮
+        > div > div:first-child {
+          --cf-text-2: #cfeaed;
+          --cf-text: #ffffff;
+          --cf-row-hover: rgba(255, 255, 255, 0.12);
         }
       }
 
@@ -457,3 +483,149 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     }
   }
 }
+
+  // 交互式选择卡片（AskUserQuestion 同步）：琥珀色调，暗示「等待输入」
+  .selectCard {
+    border: 1px solid rgba(217, 164, 65, 0.45);
+    border-radius: 8px;
+    margin: 2px 0 6px;
+    overflow: hidden;
+
+    .selectHead {
+      padding: 5px 10px;
+      background: rgba(217, 164, 65, 0.16);
+      color: #f0c674;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .selectQ {
+      padding: 8px 10px 2px;
+
+      .selectQuestion {
+        color: $term-text;
+        font-size: 12.5px;
+        margin-bottom: 6px;
+      }
+
+      .selectOpts {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .selectOpt {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 6px 8px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+
+        &.clickable {
+          cursor: pointer;
+          transition: background 0.12s, border-color 0.12s;
+
+          &:hover {
+            background: rgba(217, 164, 65, 0.16);
+            border-color: rgba(217, 164, 65, 0.5);
+          }
+        }
+
+        .selectOptIdx {
+          flex: none;
+          width: 18px;
+          height: 18px;
+          border-radius: 5px;
+          background: rgba(217, 164, 65, 0.22);
+          color: #f0c674;
+          font-size: 11px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .selectOptBody {
+          display: flex;
+          flex-direction: column;
+          min-width: 0;
+
+          .selectOptLabel {
+            color: $term-text;
+            font-size: 12.5px;
+          }
+
+          .selectOptDesc {
+            color: rgba(230, 240, 239, 0.6);
+            font-size: 11.5px;
+            margin-top: 1px;
+          }
+        }
+
+        // 自行输入行：body 改横向（输入框 + 发送钮）
+        &.selectOptCustom {
+          align-items: center;
+
+          .selectOptBody {
+            flex: 1;
+            flex-direction: row;
+            align-items: center;
+            gap: 6px;
+          }
+
+          .selectCustomInput {
+            flex: 1;
+            min-width: 0;
+            padding: 4px 8px;
+            border-radius: 5px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            background: rgba(0, 0, 0, 0.22);
+            color: $term-text;
+            font-size: 12.5px;
+            outline: none;
+
+            &::placeholder {
+              color: rgba(230, 240, 239, 0.4);
+            }
+
+            &:focus {
+              border-color: rgba(217, 164, 65, 0.5);
+            }
+
+            &:disabled {
+              opacity: 0.5;
+            }
+          }
+
+          .selectCustomSend {
+            flex: none;
+            padding: 3px 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            background: rgba(217, 164, 65, 0.22);
+            color: #f0c674;
+
+            &.clickable {
+              cursor: pointer;
+
+              &:hover {
+                background: rgba(217, 164, 65, 0.36);
+              }
+            }
+
+            &.disabled {
+              opacity: 0.4;
+              pointer-events: none;
+            }
+          }
+        }
+      }
+    }
+
+    .selectHint {
+      padding: 4px 10px 8px;
+      color: rgba(230, 240, 239, 0.5);
+      font-size: 11px;
+    }
+  }

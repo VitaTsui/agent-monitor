@@ -73,6 +73,17 @@ pub fn upload_root() -> std::path::PathBuf {
 /// 之类的目录写文件（文件名虽已过滤穿越，但目录本身就足够拿下机器）。
 /// 因此目标目录必须落在 `upload_root()` 之内。
 pub fn safe_upload_dir(dir: &str) -> Result<std::path::PathBuf, String> {
+    safe_upload_dir_within(dir, &[])
+}
+
+/// 同 `safe_upload_dir`，但除了 `upload_root()`，还额外允许写进 `extra_roots` 里的任一目录
+/// （传入本机活跃会话的项目 cwd）。原因：文件选目录弹窗是**相对会话 cwd**浏览的，项目常不在
+/// 家目录下；只按家目录校验会把「浏览进项目子目录再上传」这种合法操作误拒——表现为网页提示
+/// 上传成功、终端里却找不到文件。会话 cwd 是本机已在监控的合法目录，放行是安全的。
+pub fn safe_upload_dir_within(
+    dir: &str,
+    extra_roots: &[std::path::PathBuf],
+) -> Result<std::path::PathBuf, String> {
     let dir = dir.trim();
     if dir.is_empty() {
         return Err("缺少目标目录".into());
@@ -98,8 +109,15 @@ pub fn safe_upload_dir(dir: &str) -> Result<std::path::PathBuf, String> {
             other => out.push(other.as_os_str()),
         }
     }
-    if !out.starts_with(&root) {
-        return Err(format!("目标目录超出允许范围（仅允许 {} 之内）", root.display()));
+    let allowed = out.starts_with(&root)
+        || extra_roots
+            .iter()
+            .any(|r| !r.as_os_str().is_empty() && out.starts_with(r));
+    if !allowed {
+        return Err(format!(
+            "目标目录超出允许范围（仅允许 {} 或活跃会话的项目目录之内）",
+            root.display()
+        ));
     }
     Ok(out)
 }
@@ -310,7 +328,10 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         static PIN_CACHE: std::sync::Mutex<Option<std::collections::HashMap<u32, String>>> =
             std::sync::Mutex::new(None);
         let tick = SCAN_TICKS.load(Ordering::Relaxed);
-        if tick % 4 == 0 {
+        // 每 20 轮（约 30s）算一次，其余复用缓存；会话↔进程对应关系很稳定，够用。
+        // 首轮（tick==1，诊断块已 fetch_add 过所以从 1 起）也算：否则要等 ~80s 才有 pinned，
+        // 其间只能靠 mtime（易错位），正是「刚开客户端就下发」时最容易配错的窗口。
+        if tick == 1 || tick % 20 == 0 {
             let pids: Vec<u32> = processes.iter().map(|p| p.pid).collect();
             let dirs = {
                 let scanner = state.scanner.lock().await;
@@ -320,8 +341,40 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                     home.join(".codex/sessions"),
                 ]
             };
-            let fresh =
+            // 权威来源：claude 派生子进程的 env 里带 CLAUDE_PID + CLAUDE_CODE_SESSION_ID，
+            // 直接给出「会话 ↔ claude pid」（见 ProcessScanner::session_pins）。这是 Windows
+            // 上唯一可靠的 pinned 来源——claude 写一行开一次就关，句柄扫描（RmGetList/lsof）
+            // 抓不到。openfiles::pin_sessions 留作补充（Unix lsof；Windows 已默认空），env 优先。
+            let env_pins = {
+                let mut procs = state.procs.lock().await;
+                tokio::task::block_in_place(|| procs.session_pins())
+            };
+            let env_n = env_pins.len();
+            let mut fresh =
                 tokio::task::block_in_place(|| crate::openfiles::pin_sessions(&pids, &dirs));
+            let file_n = fresh.len();
+            fresh.extend(env_pins); // env 权威，覆盖句柄扫描结果
+            // 诊断：pinned 是最可靠的配对来源。每 ~30s 记一次命中情况（env 权威 / 文件句柄
+            // 各多少），长期 env=0 说明会话都没有活子进程、只能靠缓存+mtime 兜底。
+            {
+                static LAST_LOG: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let mut l = LAST_LOG.lock().unwrap();
+                if now.saturating_sub(*l) > 30 {
+                    *l = now;
+                    client_log(&format!(
+                        "配对来源 pinned={} 条（env权威={} 文件句柄={}）：{:?}（进程数 {}）",
+                        fresh.len(),
+                        env_n,
+                        file_n,
+                        fresh,
+                        pids.len()
+                    ));
+                }
+            }
             *PIN_CACHE.lock().unwrap() = Some(fresh.clone());
             fresh
         } else {
@@ -346,13 +399,33 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         *prev = cur;
         active
     };
+    // 稳定配对缓存：pid → session_id。喂给 build_tasks 做兜底，让长时间闲置的会话保持配对、
+    // 不掉成「等待输入」占位；本轮配完再用真实配对刷新缓存。
+    static PREV_PAIRS: std::sync::Mutex<Option<std::collections::HashMap<u32, String>>> =
+        std::sync::Mutex::new(None);
+    let cached: std::collections::HashMap<u32, String> = {
+        PREV_PAIRS.lock().unwrap().clone().unwrap_or_default()
+    };
     let mut tasks = am_core::scanner::build_tasks(
         &sessions,
         &processes,
         &|pid| paused.contains(&pid),
         &pinned,
         &active_ids,
+        &cached,
     );
+    // 用本轮真实配对（有 pid、且不是 pid- 占位）刷新缓存，供下一轮兜底
+    {
+        let mut new_pairs = std::collections::HashMap::new();
+        for t in &tasks {
+            if let Some(pid) = t.pid {
+                if !t.id.starts_with("pid-") {
+                    new_pairs.insert(pid, t.id.clone());
+                }
+            }
+        }
+        *PREV_PAIRS.lock().unwrap() = Some(new_pairs);
+    }
     // 会话文件层：无存活进程的会话若其历史 tty 被排除也一并剔除（尽力而为）
     // 这里主要保证「有进程」的会话已被上面的 retain 过滤。
 
