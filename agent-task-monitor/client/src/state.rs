@@ -222,21 +222,38 @@ fn save_anchor_pairs(data_dir: &std::path::Path, anchors: &std::collections::Has
     let _ = std::fs::write(pairs_file(data_dir), serde_json::Value::Object(obj).to_string());
 }
 
-/// 把「终端锚(shell) → session」翻译成「当前该终端下的 claude_pid → session」。
-/// 每个活进程取其终端锚(ProcessInfo.shell_pid，找不到回退自身 pid)，命中锚表即配上——claude
+/// 把「终端锚(shell) → session」翻译成「当前该终端下的**主 claude** pid → session」。
+/// 每个活进程取其终端锚(ProcessInfo.shell_pid，找不到回退自身 pid)，命中锚表即候选——claude
 /// 换 pid（/clear、--resume、重启）后仍在同一终端 shell 下，据此把配对接回；锚表里没有对应活
 /// 进程的条目（死终端/被非-shell 重用）自然翻不出配对，防 pid 重用错配。
+///
+/// 同一终端锚可能有**多个 claude**：主 claude 与它用 Task 工具派生的子 agent（子 agent 是主
+/// claude 的子进程、同一终端 shell 的孙进程，终端锚相同）。若两个 pid 都映射到同一会话，会话
+/// 可能被配到子 agent，导致控制动作（暂停/中断/杀）误打到子 agent、子 agent 结束后配对又跳。
+/// 故同一锚**只认最早启动的那个** = 主 claude（子 agent 总在会话进行中才派生、启动更晚）。
 fn translate_anchors(
     anchors: &std::collections::HashMap<u32, String>,
     procs: &[am_core::model::ProcessInfo],
 ) -> std::collections::HashMap<u32, String> {
-    let mut out = std::collections::HashMap::new();
+    // 每个终端锚先挑出主 claude（start_time 最小）
+    let mut main_of: std::collections::HashMap<u32, &am_core::model::ProcessInfo> =
+        std::collections::HashMap::new();
     for p in procs {
-        if let Some(sid) = anchors.get(&p.shell_pid.unwrap_or(p.pid)) {
-            out.insert(p.pid, sid.clone());
+        let anchor = p.shell_pid.unwrap_or(p.pid);
+        if !anchors.contains_key(&anchor) {
+            continue;
+        }
+        match main_of.get(&anchor) {
+            Some(cur) if cur.start_time <= p.start_time => {} // 已有更早启动的，保留
+            _ => {
+                main_of.insert(anchor, p);
+            }
         }
     }
-    out
+    main_of
+        .into_iter()
+        .map(|(anchor, p)| (p.pid, anchors[&anchor].clone()))
+        .collect()
 }
 
 /// 读盘：直接读回「终端锚(shell) → session」。校验推迟到每轮翻译时做（只有当前真有 claude
@@ -605,6 +622,10 @@ mod anchor_tests {
 
     /// 造一个带终端锚(shell_pid)的 claude 进程；shell=None 表示找不到 shell 祖先。
     fn proc(pid: u32, shell: Option<u32>) -> ProcessInfo {
+        proc_at(pid, shell, 0)
+    }
+    /// 带指定启动时间（用于区分主 claude / 子 agent）。
+    fn proc_at(pid: u32, shell: Option<u32>, start_time: u64) -> ProcessInfo {
         ProcessInfo {
             pid,
             agent: "claude".into(),
@@ -612,7 +633,7 @@ mod anchor_tests {
             cwd: "/proj".into(),
             ide: IdeKind::Cursor,
             ide_name: "Cursor".into(),
-            start_time: 0,
+            start_time,
             cpu_usage: 0.0,
             memory: 0,
             command: "claude".into(),
@@ -656,5 +677,21 @@ mod anchor_tests {
         let got = translate_anchors(&a, &[proc(200, Some(2244)), proc(201, Some(3355))]);
         assert_eq!(got.get(&200), Some(&"sess-A".to_string()));
         assert_eq!(got.get(&201), Some(&"sess-B".to_string()));
+    }
+
+    /// 撞车回归：同一终端 shell(2244) 下有主 claude(pid=200,先启动) 与 Task 子 agent
+    /// (pid=999,后启动)，两者终端锚相同。会话只能配到**主 claude**，不能配到子 agent。
+    #[test]
+    fn same_shell_picks_earliest_started_main_claude() {
+        let a = anchors(&[(2244, "sess-A")]);
+        let main = proc_at(200, Some(2244), 1000); // 先启动
+        let sub = proc_at(999, Some(2244), 2000); // 会话进行中才派生，启动更晚
+        // 两种进程顺序都要稳定挑主 claude（不受 Vec/HashMap 顺序影响）
+        let got1 = translate_anchors(&a, &[main.clone(), sub.clone()]);
+        let got2 = translate_anchors(&a, &[sub, main]);
+        for got in [got1, got2] {
+            assert_eq!(got.get(&200), Some(&"sess-A".to_string()), "会话应配到主 claude");
+            assert_eq!(got.get(&999), None, "子 agent 不该拿到会话");
+        }
     }
 }
