@@ -472,24 +472,33 @@ pub(crate) async fn session_number(
         .map(|i| i + 1)
 }
 
-/// 活跃会话按「设备名 → 终端 → 项目 → 状态」稳定排序。「会话」列表顺序、以及
+/// 活跃会话按「设备名 → 终端 → 项目 → 会话标题 → id」**稳定**排序。「会话」列表顺序、以及
 /// 「发 N / 暂停 N …」的序号都以它为准 —— 两处共用同一份排序，序号才不会对不上。
+///
+/// 排序键刻意全用「不随运行时变化」的字段：不再按状态排（Running 优先）——否则会话一
+/// Running↔Idle 切换，序号就整体重排，「发 N」指向的会话跟着变，用户容易发错。标题+id
+/// 兜底保证同项目内也定序。与网页会话列表的「项目→标题」稳定字母序对齐，两端序号一致。
 async fn sorted_active_tasks(state: &SharedState, username: &str) -> Vec<am_core::model::Task> {
     let mut tasks = state.tasks_for(username).await;
     // 已结束的会话不列出——机器人只关心还能操作的活跃会话
     tasks.retain(|t| t.status != TaskStatus::Finished);
-    let rank = |s: TaskStatus| match s {
-        TaskStatus::Running => 0,
-        TaskStatus::Paused => 1,
-        TaskStatus::Idle => 2,
-        TaskStatus::Finished => 3,
+    // 会话标题：与网页 taskKey 同源（标题→提示词→终端名），空则退终端名
+    let title_key = |t: &am_core::model::Task| -> String {
+        if !t.title.is_empty() {
+            t.title.clone()
+        } else if !t.prompt.is_empty() {
+            t.prompt.clone()
+        } else {
+            t.provider_dsr.clone()
+        }
     };
     tasks.sort_by(|a, b| {
         a.hostname
             .cmp(&b.hostname)
             .then(a.provider_dsr.cmp(&b.provider_dsr))
             .then(a.project_name.cmp(&b.project_name))
-            .then(rank(a.status).cmp(&rank(b.status)))
+            .then(title_key(a).cmp(&title_key(b)))
+            .then(a.id.cmp(&b.id))
     });
     tasks
 }
