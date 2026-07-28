@@ -96,12 +96,13 @@ export function activate(context: vscode.ExtensionContext) {
         term.show(false);
         const text = String(cmd.text ?? "");
         const submit = cmd.submit !== false;
-        term.sendText(text, submit);
-        // 兜底二次回车（对齐 mac osascript 的 inject_applescript）：长/多行内容会让 claude
-        // 进入粘贴态，sendText 补的那个提交回车被并进粘贴而只换行没提交（表现为「任务贴进去
-        // 了但没发出」）。等粘贴态吃完后再补一个空回车提交；若首次已提交，此时输入为空，
-        // claude 对空回车无动作，安全。延时按内容长度递增（300ms 起，封顶 1.2s）。
         if (submit) {
+          // 「文本进去了但没发出（只换行）」的根因：长/多行内容会让 claude 进入粘贴态，
+          // sendText(text, true) 把文本和提交回车同批发出，回车被并进粘贴而只换行没提交。
+          // 修法：先只粘文本、不带回车；等粘贴态吃完后再【单独送一个】回车提交。
+          // 关键——只送一个回车（不是补第二个）：若某次首个回车已提交、或后面弹出了
+          // 交互式选择/权限确认框，多按一个回车会误触发下一步/误确认选择。单回车最稳。
+          term.sendText(text, false);
           const delay = Math.min(1200, 300 + text.length / 3);
           setTimeout(() => {
             try {
@@ -110,6 +111,8 @@ export function activate(context: vscode.ExtensionContext) {
               /* 终端可能已关闭，忽略 */
             }
           }, delay);
+        } else {
+          term.sendText(text, false);
         }
         safeUnlink(fp);
         // 诊断：记录命中的终端，便于排查「下发到错误终端」
