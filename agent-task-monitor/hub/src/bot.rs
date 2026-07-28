@@ -146,13 +146,45 @@ pub(crate) struct ReplyCtx {
     pub robot_code: String,
 }
 
+/// 展开「@N …」速记：@6 暂停 → 暂停 6；@6 撤回 → 撤回 6；@6 <内容> → 发 6 <内容>。
+/// 让钉钉里直接 @会话号 接指令/任务，省去「发 N」前缀。不以 @ 开头则原样返回。
+fn expand_at_shorthand(text: &str) -> String {
+    let t = text.trim();
+    let Some(rest) = t.strip_prefix('@') else { return t.to_string() };
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return t.to_string(); // 「@abc」不是会话号，原样交后续
+    }
+    let after = rest[digits.len()..].trim_start();
+    if after.is_empty() {
+        return t.to_string(); // 「@6」单独无意义，交后续按未知处理
+    }
+    // 第一个词是会话级指令 → 改写成「指令 N …」；否则整段当内容 →「发 N …」
+    let (first, tail) = match after.split_once(char::is_whitespace) {
+        Some((a, b)) => (a, b.trim()),
+        None => (after, ""),
+    };
+    const SESSION_CMDS: &[&str] =
+        &["暂停", "恢复", "继续", "中断", "终止", "停止", "撤回", "监控", "watch"];
+    if SESSION_CMDS.contains(&first) {
+        if tail.is_empty() {
+            format!("{first} {digits}")
+        } else {
+            format!("{first} {digits} {tail}")
+        }
+    } else {
+        format!("发 {digits} {after}")
+    }
+}
+
 pub(crate) async fn dispatch(
     state: &SharedState,
     username: &str,
     text: &str,
     reply: Option<&ReplyCtx>,
 ) -> String {
-    let (cmd, arg) = split_cmd(text);
+    let text = expand_at_shorthand(text);
+    let (cmd, arg) = split_cmd(&text);
     match cmd.as_str() {
         "帮助" | "help" | "?" | "？" | "菜单" | "" => help_text(),
         "会话" | "列表" | "ls" | "任务" => list_sessions(state, username).await,
@@ -292,6 +324,7 @@ fn help_text() -> String {
      • 停止监控 —— 结束监控\n\
      • 绑定 / 解绑 —— 设为/取消「任务完成·会话结束」主动私聊推送的接收人\n\
      • 帮助 —— 显示本说明\n\
+     速记：@N 后直接接内容或指令 —— @2 重启服务 = 发 2 重启服务；@2 暂停 = 暂停 2\n\
      （序号以最近一次「会话」列出的为准）"
         .to_string()
 }
@@ -558,12 +591,27 @@ async fn queue_command(
 
 #[cfg(test)]
 mod tests {
-    use super::split_cmd;
+    use super::{expand_at_shorthand, split_cmd};
 
     #[test]
     fn split_command() {
         assert_eq!(split_cmd("会话"), ("会话".into(), "".into()));
         assert_eq!(split_cmd("暂停 3"), ("暂停".into(), "3".into()));
         assert_eq!(split_cmd("发 2 继续执行"), ("发".into(), "2 继续执行".into()));
+    }
+
+    #[test]
+    fn at_shorthand() {
+        // @N + 内容 → 发 N 内容
+        assert_eq!(expand_at_shorthand("@2 重启服务"), "发 2 重启服务");
+        assert_eq!(expand_at_shorthand("@2重启服务"), "发 2 重启服务");
+        // @N + 会话级指令 → 指令 N
+        assert_eq!(expand_at_shorthand("@2 暂停"), "暂停 2");
+        assert_eq!(expand_at_shorthand("@2 撤回"), "撤回 2");
+        assert_eq!(expand_at_shorthand("@2 监控"), "监控 2");
+        // 非 @ / 非会话号 / 单独 @N：原样
+        assert_eq!(expand_at_shorthand("发 2 继续"), "发 2 继续");
+        assert_eq!(expand_at_shorthand("@abc"), "@abc");
+        assert_eq!(expand_at_shorthand("@2"), "@2");
     }
 }
