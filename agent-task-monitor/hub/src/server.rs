@@ -1855,6 +1855,14 @@ async fn report(
             if current_ids.contains(id.as_str()) || known_removes.contains(id) {
                 continue;
             }
+            // 上次就已是 Finished 的会话「消失」= 滑出 7 天窗口（早就结束了），不是刚结束：
+            // 冷启动/重连把既有 Finished 会话登记进基线，一周后它老化滑出窗口时不该再推一次
+            //「会话已结束」。真·刚结束的会话走上面的「Running/Idle→Finished 跃迁」推送并移出
+            // 基线，不会走到这里。只有上次还活着的会话消失才算真结束。移出基线即可，不推。
+            if task.status == TaskStatus::Finished {
+                known_removes.push(id.clone());
+                continue;
+            }
             // 最近在等待选择的会话：仍活着（用户在慢慢选），配对抖动导致的消失不算结束
             let select_protected = entry
                 .last_select_at
