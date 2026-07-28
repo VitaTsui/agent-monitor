@@ -216,58 +216,129 @@
   }
 }
 
-// 钉钉文件接收目录（按项目）
+
+// 钉钉文件接收目录（重设计：图标头 + 下拉选/新建 + 已配置 chips）
 .recvSection {
-  margin-top: 18px;
-  padding-top: 16px;
-  border-top: 1px solid rgba(36, 61, 66, 0.08);
+  margin-top: 20px;
+  padding: 16px;
+  border: 1px solid rgba(36, 61, 66, 0.1);
+  border-radius: 14px;
+  background: linear-gradient(180deg, #fbfdfd 0%, #f4fafb 100%);
 
-  .recvTitle {
-    font-size: 14px;
-    font-weight: 600;
-    color: #243d42;
-    margin-bottom: 6px;
-  }
-
-  .recvHint {
-    font-size: 12px;
-    color: #7c9096;
-    line-height: 1.6;
-    margin-bottom: 12px;
-
-    code {
-      background: rgba(36, 61, 66, 0.07);
-      border-radius: 4px;
-      padding: 0 4px;
-      font-size: 11px;
-    }
-  }
-
-  .recvEmpty {
-    font-size: 12px;
-    color: #9aa7ad;
-    padding: 10px 0;
-  }
-
-  .recvRow {
+  .recvHead {
     display: flex;
     align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
+    gap: 12px;
+    margin-bottom: 14px;
 
-    .recvName {
+    .recvIcon {
       flex: none;
-      width: 150px;
-      font-size: 13px;
-      color: #243d42;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      color: #fff;
+      background: #0f9bad;
     }
 
-    .recvInput {
+    .recvHeadText {
+      min-width: 0;
+
+      .recvTitle {
+        font-size: 14px;
+        font-weight: 600;
+        color: #243d42;
+      }
+
+      .recvSub {
+        margin-top: 2px;
+        font-size: 12px;
+        color: #7c9096;
+      }
+    }
+  }
+
+  .recvForm {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+
+    .recvSelect {
+      flex: none;
+      width: 200px;
+    }
+
+    .recvDirInput {
       flex: 1;
       min-width: 0;
+    }
+  }
+
+  .recvList {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+
+    .recvChip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 8px 5px 10px;
+      border-radius: 999px;
+      background: rgba(15, 155, 173, 0.1);
+      border: 1px solid rgba(15, 155, 173, 0.25);
+      font-size: 12px;
+      max-width: 100%;
+
+      .recvChipName {
+        font-weight: 600;
+        color: #0a6b79;
+      }
+
+      .recvChipDir {
+        color: #4a5c62;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .recvChipDel {
+        flex: none;
+        display: inline-flex;
+        cursor: pointer;
+        color: #7c9096;
+        font-size: 11px;
+
+        &:hover {
+          color: #d4380d;
+        }
+      }
+    }
+  }
+}
+
+// 下拉里的「新建项目」页脚
+.recvCreate {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid rgba(36, 61, 66, 0.08);
+}
+
+// iOS / 窄屏：表单竖排、下拉全宽、触控更大
+@media (max-width: 760px) {
+  .recvSection {
+    .recvForm {
+      flex-direction: column;
+      align-items: stretch;
+
+      .recvSelect {
+        width: 100%;
+      }
     }
   }
 }

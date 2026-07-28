@@ -3,13 +3,15 @@ import React, { useCallback, useEffect, useState } from "react";
 import { Tooltip, message } from "antd";
 import {
   CheckOutlined,
+  CloseOutlined,
   CopyOutlined,
   DingtalkOutlined,
+  FolderOutlined,
   RightOutlined,
   WechatOutlined,
 } from "@ant-design/icons";
 
-import { Button, Input, Modal, Switch } from "@hsu-react/ui";
+import { Button, Input, Modal, Select, Switch } from "@hsu-react/ui";
 
 import {
   IntegrationsInfo,
@@ -21,6 +23,10 @@ import {
   testDingtalkRobot,
 } from "@/services/apis/portal";
 import styles from "./index.module.scss";
+
+/** 从项目 cwd 取末段目录名 */
+const shortName = (cwd: string) =>
+  cwd.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || cwd;
 
 const CopyBtn: React.FC<{ text: string }> = ({ text }) => {
   const [done, setDone] = useState(false);
@@ -81,7 +87,32 @@ const IntegrationsPanel: React.FC = () => {
   const [recvProjects, setRecvProjects] = useState<
     { cwd: string; name: string; dir: string }[]
   >([]);
-  const [recvSaving, setRecvSaving] = useState<string | null>(null);
+  const [recvSel, setRecvSel] = useState<string | undefined>(undefined); // 选中项目 cwd
+  const [recvDir, setRecvDir] = useState(""); // 该项目的接收目录输入
+  const [newProj, setNewProj] = useState(""); // 下拉里「新建」的项目路径输入
+  const [recvSaving, setRecvSaving] = useState(false);
+
+  const saveRecvDir = () => {
+    if (!recvSel) {
+      message.warning("请先选择或新建一个项目");
+      return;
+    }
+    setRecvSaving(true);
+    setDingtalkRecvDir(recvSel, recvDir.trim())
+      .then((res) => {
+        if (res.code !== 0) return message.error(res.msg ?? "保存失败");
+        message.success(recvDir.trim() ? "已保存" : "已清除，回落默认 tmp");
+        setRecvProjects((list) => {
+          const exists = list.some((p) => p.cwd === recvSel);
+          const dir = recvDir.trim();
+          return exists
+            ? list.map((p) => (p.cwd === recvSel ? { ...p, dir } : p))
+            : [...list, { cwd: recvSel, name: shortName(recvSel), dir }];
+        });
+      })
+      .catch(() => message.error("保存失败，请检查网络"))
+      .finally(() => setRecvSaving(false));
+  };
 
   const load = useCallback(() => {
     getIntegrations()
@@ -271,49 +302,118 @@ const IntegrationsPanel: React.FC = () => {
         </div>
       ))}
 
-      {/* 钉钉文件接收目录（按项目）：发给机器人的文件默认落到 <项目>/tmp，可按项目改 */}
+      {/* 钉钉文件接收目录（按项目）：选/新建项目 → 设目录；留空回落默认 tmp */}
       <div className={styles.recvSection}>
-        <div className={styles.recvTitle}>钉钉文件接收目录（按项目）</div>
-        <div className={styles.recvHint}>
-          发给机器人的文件，随下一条任务落到对应会话的这个目录。留空 = 默认{" "}
-          <code>项目/tmp</code>；可填相对子路径（如 <code>uploads</code>）或绝对路径。
-        </div>
-        {recvProjects.length === 0 ? (
-          <div className={styles.recvEmpty}>暂无项目（有活跃会话后自动出现在这里）</div>
-        ) : (
-          recvProjects.map((p) => (
-            <div key={p.cwd} className={styles.recvRow}>
-              <span className={styles.recvName} title={p.cwd}>
-                {p.name}
-              </span>
-              <Input
-                className={styles.recvInput}
-                placeholder="tmp（默认）"
-                value={p.dir}
-                onChange={(v) =>
-                  setRecvProjects((list) =>
-                    list.map((x) => (x.cwd === p.cwd ? { ...x, dir: v } : x))
-                  )
-                }
-              />
-              <Button
-                size="small"
-                loading={recvSaving === p.cwd}
-                onClick={() => {
-                  setRecvSaving(p.cwd);
-                  setDingtalkRecvDir(p.cwd, p.dir.trim())
-                    .then((res) => {
-                      if (res.code === 0) message.success("已保存");
-                      else message.error(res.msg ?? "保存失败");
-                    })
-                    .catch(() => message.error("保存失败"))
-                    .finally(() => setRecvSaving(null));
-                }}
-              >
-                保存
-              </Button>
+        <div className={styles.recvHead}>
+          <span className={styles.recvIcon}>
+            <FolderOutlined />
+          </span>
+          <div className={styles.recvHeadText}>
+            <div className={styles.recvTitle}>钉钉文件接收目录</div>
+            <div className={styles.recvSub}>
+              发给机器人的文件，随下一条任务落到对应会话项目的这个目录
             </div>
-          ))
+          </div>
+        </div>
+
+        <div className={styles.recvForm}>
+          <Select
+            className={styles.recvSelect}
+            showSearch
+            allowClear
+            placeholder="选择项目（可搜索）"
+            value={recvSel}
+            filterOption={(input, opt) =>
+              String(opt?.label ?? "").toLowerCase().includes(input.toLowerCase())
+            }
+            options={recvProjects.map((p) => ({
+              label: p.dir ? `${p.name}  ·  ${p.dir}` : p.name,
+              value: p.cwd,
+            }))}
+            onChange={(v) => {
+              const cwd = v as string | undefined;
+              setRecvSel(cwd);
+              setRecvDir(recvProjects.find((p) => p.cwd === cwd)?.dir ?? "");
+            }}
+            dropdownRender={(menu) => (
+              <>
+                {menu}
+                <div className={styles.recvCreate}>
+                  <Input
+                    placeholder="没有？粘贴项目完整路径新建"
+                    value={newProj}
+                    onChange={(v) => setNewProj(v)}
+                  />
+                  <Button
+                    size="small"
+                    type="primary"
+                    disabled={!newProj.trim()}
+                    onClick={() => {
+                      const cwd = newProj.trim();
+                      if (!recvProjects.some((p) => p.cwd === cwd)) {
+                        setRecvProjects((l) => [
+                          ...l,
+                          { cwd, name: shortName(cwd), dir: "" },
+                        ]);
+                      }
+                      setRecvSel(cwd);
+                      setRecvDir(recvProjects.find((p) => p.cwd === cwd)?.dir ?? "");
+                      setNewProj("");
+                    }}
+                  >
+                    新建
+                  </Button>
+                </div>
+              </>
+            )}
+          />
+          <Input
+            className={styles.recvDirInput}
+            placeholder="接收目录：留空=默认 tmp，可填 uploads 或绝对路径"
+            value={recvDir}
+            disabled={!recvSel}
+            onChange={(v) => setRecvDir(v)}
+          />
+          <Button
+            type="primary"
+            loading={recvSaving}
+            disabled={!recvSel}
+            onClick={saveRecvDir}
+          >
+            保存
+          </Button>
+        </div>
+
+        {recvProjects.filter((p) => p.dir).length > 0 && (
+          <div className={styles.recvList}>
+            {recvProjects
+              .filter((p) => p.dir)
+              .map((p) => (
+                <div key={p.cwd} className={styles.recvChip} title={p.cwd}>
+                  <span className={styles.recvChipName}>{p.name}</span>
+                  <span className={styles.recvChipDir}>{p.dir}</span>
+                  <span
+                    className={styles.recvChipDel}
+                    role="button"
+                    tabIndex={0}
+                    aria-label="清除"
+                    onClick={() => {
+                      setDingtalkRecvDir(p.cwd, "").then((res) => {
+                        if (res.code === 0) {
+                          message.success("已清除");
+                          setRecvProjects((l) =>
+                            l.map((x) => (x.cwd === p.cwd ? { ...x, dir: "" } : x))
+                          );
+                          if (recvSel === p.cwd) setRecvDir("");
+                        }
+                      });
+                    }}
+                  >
+                    <CloseOutlined />
+                  </span>
+                </div>
+              ))}
+          </div>
         )}
       </div>
 
