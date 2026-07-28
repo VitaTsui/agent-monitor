@@ -211,8 +211,6 @@ pub enum EventKind {
     Finished,
     NewSession,
     Device,
-    /// 非钉钉来源（网页）下发的任务：同步告知，让钉钉侧也知道刚发了什么
-    Dispatch,
     /// 会话进入「等待选择」（交互式选择/权限确认）：提醒去作答
     Select,
 }
@@ -225,7 +223,6 @@ impl DingtalkNotify {
             EventKind::NewSession => self.new_session,
             EventKind::Device => self.device,
             // 群 webhook 复用「等待输入」开关；企业应用 OTO 一律推（见 deliver）
-            EventKind::Dispatch => self.waiting,
             EventKind::Select => self.waiting,
         }
     }
@@ -265,7 +262,6 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
             EventKind::NewSession
                 | EventKind::Waiting
                 | EventKind::Finished
-                | EventKind::Dispatch
                 | EventKind::Select
         ) {
             let app = state.registry.read().await.dingtalk_app_of(&ev.owner);
