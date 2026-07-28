@@ -10,6 +10,46 @@ struct MsgCache {
     inner: HashMap<String, (u64, Vec<am_core::model::MessageBrief>)>,
 }
 
+/// 下发后「待确认是否真的提交」的记录。Cursor 内嵌终端粘贴态会吞掉提交回车，表现为
+/// 「任务贴进去了但只换行没发出」。下发后盯会话 jsonl：下一轮扫描里若该会话最新用户
+/// 消息不是这条文本，就确认没提交、经桥接补一个回车（最多 MAX_RESUBMIT 次）。只在
+/// **正向确认没提交**时补——不盲发，避免误提交/误确认交互式选择框。
+struct PendingSubmit {
+    text: String,
+    shell_pid: u32,
+    last_ms: u64,
+    retries: u8,
+}
+
+/// 待确认提交表：session_id → 记录。跨 execute()（下发）与 report 循环（检测）共享。
+static PENDING_SUBMITS: std::sync::Mutex<Option<HashMap<String, PendingSubmit>>> =
+    std::sync::Mutex::new(None);
+
+/// 确认没提交后，等多久补第一个回车 / 两次补回车之间的间隔
+const RESUBMIT_WAIT_MS: u64 = 2000;
+/// 最多补几次回车，仍不提交就放弃（避免无限补）
+const MAX_RESUBMIT: u8 = 2;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 判断会话最新用户提示词是否就是刚下发的这条文本（= 已提交）。
+/// scanner 对长文本可能截断，故用「归一化空白后取较短者前 40 字比较」容错。
+fn submit_landed(prompt: &str, dispatched: &str) -> bool {
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (p, d) = (norm(prompt), norm(dispatched));
+    if p.is_empty() || d.is_empty() {
+        return false;
+    }
+    let n = 40.min(p.chars().count()).min(d.chars().count());
+    let head = |s: &str| s.chars().take(n).collect::<String>();
+    head(&p) == head(&d)
+}
+
 pub async fn report_loop(state: SharedState, hub_url: String) {
     let hub = hub_url.trim_end_matches('/').to_string();
     let owner = std::env::var("AM_USER").ok().filter(|s| !s.is_empty());
@@ -143,6 +183,8 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
 
         // 始终本地扫描（仅用于本机托盘展示终端列表）；但未信任前不外发任何会话
         let mut scanned = crate::state::local_scan(&state).await;
+        // 下发后检测：本轮扫到的会话里，之前下发但只换行没提交的，补一个回车
+        check_pending_submits(&state, &scanned);
         // 本轮本机真实存在的会话 pid：hub 下发的命令只允许作用于这些 pid
         let known_pids: std::collections::HashSet<u32> =
             scanned.iter().filter_map(|t| t.pid).collect();
@@ -401,6 +443,50 @@ fn describe_reject(code: u16, body: &str) -> String {
     }
 }
 
+/// 下发后检测「是否真的提交」，没提交则补回车（见 PendingSubmit）。
+/// 每轮扫描调用一次：拿本轮各会话最新用户提示词，与待确认表逐条比对。
+fn check_pending_submits(state: &SharedState, tasks: &[Task]) {
+    let mut guard = PENDING_SUBMITS.lock().unwrap();
+    let Some(pending) = guard.as_mut() else { return };
+    if pending.is_empty() {
+        return;
+    }
+    let now = now_ms();
+    let prompt_of: HashMap<&str, &str> =
+        tasks.iter().map(|t| (t.id.as_str(), t.prompt.as_str())).collect();
+    pending.retain(|sid, p| {
+        match prompt_of.get(sid.as_str()) {
+            // 会话最新用户消息就是这条 → 已提交，清除
+            Some(prompt) if submit_landed(prompt, &p.text) => false,
+            // 会话在本轮扫描里（能确认它当前状态），且最新消息不是这条 → 没提交
+            Some(_) => {
+                if now.saturating_sub(p.last_ms) < RESUBMIT_WAIT_MS {
+                    return true; // 还没到补发时机，继续等
+                }
+                if p.retries >= MAX_RESUBMIT {
+                    crate::state::client_log(&format!(
+                        "补回车 {} 次后会话 {sid} 仍未提交，放弃",
+                        p.retries
+                    ));
+                    return false;
+                }
+                // 经桥接补一个回车（空文本 → 扩展只送一个提交回车）
+                let sent =
+                    crate::bridge::send_via_extension(&state.config.data_dir, p.shell_pid, "");
+                p.retries += 1;
+                p.last_ms = now;
+                crate::state::client_log(&format!(
+                    "检测到会话 {sid} 只换行未提交，补回车（第 {} 次，发送={sent}）",
+                    p.retries
+                ));
+                true
+            }
+            // 本轮没扫到该会话（配对暂缺/已结束）：无从确认，超时(~10s)后放弃，不盲补
+            None => now.saturating_sub(p.last_ms) < 5 * RESUBMIT_WAIT_MS,
+        }
+    });
+}
+
 /// 给「活跃」任务（有进程或 10 分钟内有写入）附带最近对话消息
 async fn attach_messages(state: &SharedState, tasks: &mut [Task], cache: &mut MsgCache) {
     let now_ms = std::time::SystemTime::now()
@@ -502,6 +588,20 @@ async fn execute(state: &SharedState, cmd: ControlCmd, known_pids: &std::collect
                 crate::state::client_log(&format!(
                     "注入输入：经 Cursor/VSCode 扩展桥接（终端 pid={shell_pid}，{preview}…）"
                 ));
+                // 记一笔待确认提交：下一轮扫描若该会话没出现这条用户消息，就确认没提交、补回车。
+                // 只对桥接（Cursor 内嵌终端）路径记——它才有粘贴态吞回车的问题。
+                if !text.trim().is_empty() {
+                    let mut g = PENDING_SUBMITS.lock().unwrap();
+                    g.get_or_insert_with(HashMap::new).insert(
+                        cmd.task_id.clone(),
+                        PendingSubmit {
+                            text: text.trim().to_string(),
+                            shell_pid,
+                            last_ms: now_ms(),
+                            retries: 0,
+                        },
+                    );
+                }
                 return;
             }
         }
