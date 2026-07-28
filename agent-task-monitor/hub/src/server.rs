@@ -1944,6 +1944,22 @@ async fn report(
             })
             .map(|t| t.id.clone())
             .collect();
+        // 诊断（临时）：排查「等待选择没推送」。对每个会话记末条对话消息 role，
+        // 以及是否被判为 selecting / 是否已通知过。复现时看日志即知卡在哪一步。
+        for t in &tasks {
+            if let Some(m) = msgs_map.get(&t.id).and_then(|ms| last_convo(ms)) {
+                if m.role == "select" || m.role == "plan" {
+                    tracing::info!(
+                        "钉钉诊断 会话={} 末条role={} 判为selecting={} 已通知={} 消息数={}",
+                        t.id,
+                        m.role,
+                        now_selecting.contains(&t.id),
+                        entry.select_notified.contains(&t.id),
+                        msgs_map.get(&t.id).map(|v| v.len()).unwrap_or(0),
+                    );
+                }
+            }
+        }
         for t in &tasks {
             if now_selecting.contains(&t.id) && !entry.select_notified.contains(&t.id) {
                 let opts = msgs_map
@@ -1951,6 +1967,7 @@ async fn report(
                     .and_then(|ms| last_convo(ms))
                     .map(|m| select_options_text(&m.content))
                     .unwrap_or_default();
+                tracing::info!("钉钉诊断 推送 Select 事件 会话={}", t.id);
                 events.push(NotifyEvent {
                     owner: owner.clone(),
                     kind: EventKind::Select,

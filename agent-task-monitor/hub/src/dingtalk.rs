@@ -330,9 +330,19 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
                     && !app.app_secret.is_empty()
                     && !app.staff_id.is_empty()
                 {
-                    if let Err(e) = push_oto(&app, &text, ev.full_content.as_deref(), now_ms).await {
-                        tracing::warn!("钉钉 OTO 主动推送失败（{}）: {e}", ev.owner);
+                    let kind = match ev.kind {
+                        EventKind::Select => "Select",
+                        EventKind::Waiting => "Waiting",
+                        EventKind::Finished => "Finished",
+                        EventKind::NewSession => "NewSession",
+                        _ => "?",
+                    };
+                    match push_oto(&app, &text, ev.full_content.as_deref(), now_ms).await {
+                        Ok(_) => tracing::info!("钉钉 OTO 已推送 kind={kind}（{}）", ev.owner),
+                        Err(e) => tracing::warn!("钉钉 OTO 推送失败 kind={kind}（{}）: {e}", ev.owner),
                     }
+                } else {
+                    tracing::warn!("钉钉 OTO 跳过：未绑定 staffId（{}）", ev.owner);
                 }
             }
         }
