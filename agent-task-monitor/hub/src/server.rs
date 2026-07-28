@@ -1257,27 +1257,50 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
     let Some(user) = auth_user(&state, &headers).await else {
         return err(401, "未登录");
     };
-    // 钉钉文件接收目录（按项目）：已配置的 + 当前活跃会话涉及的项目（供 UI 列出可配的项目）
+    // 机器人文件接收目录（所有渠道通用，按项目存）：按「设备 → 项目」层级列出，供弹窗配置。
+    // 每个项目附一个活跃会话 taskId，网页据此调 /dirs 浏览该项目目录树来选接收目录。
     let recv_dirs = state.registry.read().await.dingtalk_recv_dirs_of(&user);
-    let mut projects: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    // machine_id → (hostname, 项目 cwd → (name, taskId))
+    let mut devs: std::collections::BTreeMap<
+        String,
+        (String, std::collections::BTreeMap<String, (String, Option<String>)>),
+    > = std::collections::BTreeMap::new();
+    let mut seen_cwd: std::collections::HashSet<String> = std::collections::HashSet::new();
     for t in state.tasks_for(&user).await {
-        if !t.project.is_empty() {
-            projects.insert(t.project.clone(), t.project_name.clone());
+        if t.project.is_empty() {
+            continue;
+        }
+        seen_cwd.insert(t.project.clone());
+        let d = devs
+            .entry(t.machine_id.clone())
+            .or_insert_with(|| (t.hostname.clone(), std::collections::BTreeMap::new()));
+        let p = d.1.entry(t.project.clone()).or_insert_with(|| (t.project_name.clone(), None));
+        if p.1.is_none() && !t.id.is_empty() {
+            p.1 = Some(t.id.clone());
         }
     }
-    // 已配置但当前无活跃会话的项目也要能看到/改
+    // 已配置但当前无活跃会话的项目：归到「未在线」分组（无 taskId → 只能手输，不能浏览）
     for k in recv_dirs.keys() {
-        projects.entry(k.clone()).or_insert_with(|| {
-            k.trim_end_matches(['/', '\\'])
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(k)
-                .to_string()
-        });
+        if !seen_cwd.contains(k) {
+            let name =
+                k.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(k).to_string();
+            devs.entry(String::new())
+                .or_insert_with(|| ("（未在线项目）".to_string(), std::collections::BTreeMap::new()))
+                .1
+                .insert(k.clone(), (name, None));
+        }
     }
-    let project_list: Vec<Value> = projects
+    let recv_dir_devices: Vec<Value> = devs
         .into_iter()
-        .map(|(cwd, name)| json!({ "cwd": cwd, "name": name, "dir": recv_dirs.get(&cwd) }))
+        .map(|(machine_id, (hostname, projs))| {
+            json!({
+                "machineId": machine_id,
+                "hostname": hostname,
+                "projects": projs.into_iter().map(|(cwd, (name, task_id))| json!({
+                    "cwd": cwd, "name": name, "dir": recv_dirs.get(&cwd), "taskId": task_id,
+                })).collect::<Vec<_>>(),
+            })
+        })
         .collect();
 
     let reg = state.registry.read().await;
@@ -1286,7 +1309,7 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
     let wecom = reg.wecom_app_of(&user);
     let dt_app = reg.dingtalk_app_of(&user);
     ok(json!({
-        "recvDirProjects": project_list,
+        "recvDirDevices": recv_dir_devices,
         "dingtalkRobot": robot.map(|c| json!({
             "webhook": c.webhook, "hasSecret": !c.secret.is_empty(),
             "waiting": c.waiting, "finished": c.finished,

@@ -3,7 +3,6 @@ import React, { useCallback, useEffect, useState } from "react";
 import { Tooltip, message } from "antd";
 import {
   CheckOutlined,
-  CloseOutlined,
   CopyOutlined,
   DingtalkOutlined,
   FolderOutlined,
@@ -11,11 +10,12 @@ import {
   WechatOutlined,
 } from "@ant-design/icons";
 
-import { Button, Input, Modal, Select, Switch } from "@hsu-react/ui";
+import { Button, Input, Modal, Switch } from "@hsu-react/ui";
 
 import {
   IntegrationsInfo,
   getIntegrations,
+  getTaskDirs,
   setDingtalkApp,
   setDingtalkRecvDir,
   setDingtalkRobot,
@@ -23,10 +23,6 @@ import {
   testDingtalkRobot,
 } from "@/services/apis/portal";
 import styles from "./index.module.scss";
-
-/** 从项目 cwd 取末段目录名 */
-const shortName = (cwd: string) =>
-  cwd.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || cwd;
 
 const CopyBtn: React.FC<{ text: string }> = ({ text }) => {
   const [done, setDone] = useState(false);
@@ -83,35 +79,76 @@ const IntegrationsPanel: React.FC = () => {
   const [dingUrl, setDingUrl] = useState("");
   const [dingSaving, setDingSaving] = useState(false);
 
-  // 钉钉文件接收目录（按项目）
-  const [recvProjects, setRecvProjects] = useState<
-    { cwd: string; name: string; dir: string }[]
+  // 机器人文件接收目录（通用）：按设备分组的项目
+  type RecvProj = { cwd: string; name: string; dir: string; taskId?: string | null };
+  const [recvDevices, setRecvDevices] = useState<
+    { machineId: string; hostname: string; projects: RecvProj[] }[]
   >([]);
-  const [recvSel, setRecvSel] = useState<string | undefined>(undefined); // 选中项目 cwd
-  const [recvDir, setRecvDir] = useState(""); // 该项目的接收目录输入
-  const [newProj, setNewProj] = useState(""); // 下拉里「新建」的项目路径输入
-  const [recvSaving, setRecvSaving] = useState(false);
+  const [recvModalOpen, setRecvModalOpen] = useState(false);
+  const recvConfiguredCount = recvDevices.reduce(
+    (n, d) => n + d.projects.filter((p) => p.dir).length,
+    0
+  );
+  // 目录选择器：为哪个项目开着 + 浏览态
+  const [picker, setPicker] = useState<{
+    cwd: string;
+    name: string;
+    taskId: string;
+  } | null>(null);
+  const [pickRel, setPickRel] = useState("");
+  const [pickDirs, setPickDirs] = useState<string[]>([]);
+  const [pickLoading, setPickLoading] = useState(false);
+  const pickSeq = React.useRef(0);
 
-  const saveRecvDir = () => {
-    if (!recvSel) {
-      message.warning("请先选择或新建一个项目");
+  const loadPickDirs = useCallback(
+    (taskId: string, rel: string, attempt = 0) => {
+      const seq = ++pickSeq.current;
+      setPickLoading(true);
+      getTaskDirs(taskId, rel)
+        .then((res) => {
+          if (seq !== pickSeq.current) return;
+          if (res.code !== 0) {
+            setPickLoading(false);
+            message.error(res.msg ?? "读取目录失败");
+            return;
+          }
+          if (res.data?.pending && attempt < 8) {
+            window.setTimeout(() => loadPickDirs(taskId, rel, attempt + 1), 1200);
+            return;
+          }
+          setPickDirs(res.data?.dirs ?? []);
+          setPickLoading(false);
+        })
+        .catch(() => seq === pickSeq.current && setPickLoading(false));
+    },
+    []
+  );
+
+  const openPicker = (p: { cwd: string; name: string; taskId?: string | null }) => {
+    if (!p.taskId) {
+      message.info("该项目当前无活跃会话，无法浏览目录；可等它有会话后再选");
       return;
     }
-    setRecvSaving(true);
-    setDingtalkRecvDir(recvSel, recvDir.trim())
+    setPicker({ cwd: p.cwd, name: p.name, taskId: p.taskId });
+    setPickRel("");
+    setPickDirs([]);
+    loadPickDirs(p.taskId, "");
+  };
+
+  const commitRecvDir = (cwd: string, dir: string) => {
+    setDingtalkRecvDir(cwd, dir)
       .then((res) => {
         if (res.code !== 0) return message.error(res.msg ?? "保存失败");
-        message.success(recvDir.trim() ? "已保存" : "已清除，回落默认 tmp");
-        setRecvProjects((list) => {
-          const exists = list.some((p) => p.cwd === recvSel);
-          const dir = recvDir.trim();
-          return exists
-            ? list.map((p) => (p.cwd === recvSel ? { ...p, dir } : p))
-            : [...list, { cwd: recvSel, name: shortName(recvSel), dir }];
-        });
+        message.success(dir ? "已保存" : "已清除，回落默认 tmp");
+        setRecvDevices((devs) =>
+          devs.map((d) => ({
+            ...d,
+            projects: d.projects.map((x) => (x.cwd === cwd ? { ...x, dir } : x)),
+          }))
+        );
+        setPicker(null);
       })
-      .catch(() => message.error("保存失败，请检查网络"))
-      .finally(() => setRecvSaving(false));
+      .catch(() => message.error("保存失败，请检查网络"));
   };
 
   const load = useCallback(() => {
@@ -138,11 +175,16 @@ const IntegrationsPanel: React.FC = () => {
           });
           setDingUrl(d.dingtalkApp.callbackUrl);
         }
-        setRecvProjects(
-          (d.recvDirProjects ?? []).map((p) => ({
-            cwd: p.cwd,
-            name: p.name,
-            dir: p.dir ?? "",
+        setRecvDevices(
+          (d.recvDirDevices ?? []).map((dev) => ({
+            machineId: dev.machineId,
+            hostname: dev.hostname,
+            projects: dev.projects.map((p) => ({
+              cwd: p.cwd,
+              name: p.name,
+              dir: p.dir ?? "",
+              taskId: p.taskId,
+            })),
           }))
         );
       })
@@ -271,151 +313,195 @@ const IntegrationsPanel: React.FC = () => {
     },
   ];
 
+  const renderCard = (c: (typeof cards)[number]) => (
+    <div
+      key={c.key}
+      className={styles.card}
+      role="button"
+      tabIndex={0}
+      onClick={() => setEditing(c.key)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          setEditing(c.key);
+        }
+      }}
+    >
+      <span className={`${styles.icon} ${c.iconCls}`}>{c.icon}</span>
+      <div className={styles.headText}>
+        <div className={styles.headTitle}>
+          {c.title}
+          <span className={`${styles.typeTag} ${c.typeCls}`}>{c.type}</span>
+        </div>
+        <div className={styles.headSub}>{c.sub}</div>
+      </div>
+      <span className={`${styles.status} ${c.on ? styles.on : ""}`}>
+        {c.on ? "已启用" : "未配置"}
+      </span>
+      <RightOutlined className={styles.arrow} />
+    </div>
+  );
+
   return (
     <div className={styles.IntegrationsPanel}>
-      {cards.map((c) => (
-        <div
-          key={c.key}
-          className={styles.card}
-          role="button"
-          tabIndex={0}
-          onClick={() => setEditing(c.key)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              setEditing(c.key);
-            }
-          }}
-        >
-          <span className={`${styles.icon} ${c.iconCls}`}>{c.icon}</span>
-          <div className={styles.headText}>
-            <div className={styles.headTitle}>
-              {c.title}
-              <span className={`${styles.typeTag} ${c.typeCls}`}>{c.type}</span>
-            </div>
-            <div className={styles.headSub}>{c.sub}</div>
-          </div>
-          <span className={`${styles.status} ${c.on ? styles.on : ""}`}>
-            {c.on ? "已启用" : "未配置"}
-          </span>
-          <RightOutlined className={styles.arrow} />
-        </div>
-      ))}
+      {/* 钉钉 */}
+      <div className={styles.groupTitle}>钉钉</div>
+      {cards.filter((c) => c.key === "robot" || c.key === "ding").map(renderCard)}
 
-      {/* 钉钉文件接收目录（按项目）：选/新建项目 → 设目录；留空回落默认 tmp */}
-      <div className={styles.recvSection}>
-        <div className={styles.recvHead}>
-          <span className={styles.recvIcon}>
-            <FolderOutlined />
-          </span>
-          <div className={styles.recvHeadText}>
-            <div className={styles.recvTitle}>钉钉文件接收目录</div>
-            <div className={styles.recvSub}>
-              发给机器人的文件，随下一条任务落到对应会话项目的这个目录
-            </div>
+      {/* 企业微信 */}
+      <div className={styles.groupTitle}>企业微信</div>
+      {cards.filter((c) => c.key === "wecom").map(renderCard)}
+
+      {/* 文件接收目录（所有渠道通用，弹窗按 设备→项目 配置） */}
+      <div className={styles.groupTitle}>文件接收目录</div>
+      <div
+        className={styles.card}
+        role="button"
+        tabIndex={0}
+        onClick={() => setRecvModalOpen(true)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setRecvModalOpen(true);
+          }
+        }}
+      >
+        <span className={`${styles.icon} ${styles.folder}`}>
+          <FolderOutlined />
+        </span>
+        <div className={styles.headText}>
+          <div className={styles.headTitle}>机器人文件接收目录</div>
+          <div className={styles.headSub}>
+            发给机器人的文件落到哪 · 按设备/项目配置 · 默认 tmp
           </div>
         </div>
+        <span className={styles.status}>
+          {recvConfiguredCount ? `已配 ${recvConfiguredCount}` : "默认"}
+        </span>
+        <RightOutlined className={styles.arrow} />
+      </div>
 
-        <div className={styles.recvForm}>
-          <Select
-            className={styles.recvSelect}
-            showSearch
-            allowClear
-            placeholder="选择项目（可搜索）"
-            value={recvSel}
-            filterOption={(input, opt) =>
-              String(opt?.label ?? "").toLowerCase().includes(input.toLowerCase())
-            }
-            options={recvProjects.map((p) => ({
-              label: p.dir ? `${p.name}  ·  ${p.dir}` : p.name,
-              value: p.cwd,
-            }))}
-            onChange={(v) => {
-              const cwd = v as string | undefined;
-              setRecvSel(cwd);
-              setRecvDir(recvProjects.find((p) => p.cwd === cwd)?.dir ?? "");
-            }}
-            dropdownRender={(menu) => (
-              <>
-                {menu}
-                <div className={styles.recvCreate}>
-                  <Input
-                    placeholder="没有？粘贴项目完整路径新建"
-                    value={newProj}
-                    onChange={(v) => setNewProj(v)}
-                  />
-                  <Button
-                    size="small"
-                    type="primary"
-                    disabled={!newProj.trim()}
-                    onClick={() => {
-                      const cwd = newProj.trim();
-                      if (!recvProjects.some((p) => p.cwd === cwd)) {
-                        setRecvProjects((l) => [
-                          ...l,
-                          { cwd, name: shortName(cwd), dir: "" },
-                        ]);
-                      }
-                      setRecvSel(cwd);
-                      setRecvDir(recvProjects.find((p) => p.cwd === cwd)?.dir ?? "");
-                      setNewProj("");
-                    }}
-                  >
-                    新建
-                  </Button>
-                </div>
-              </>
-            )}
-          />
-          <Input
-            className={styles.recvDirInput}
-            placeholder="接收目录：留空=默认 tmp，可填 uploads 或绝对路径"
-            value={recvDir}
-            disabled={!recvSel}
-            onChange={(v) => setRecvDir(v)}
-          />
-          <Button
-            type="primary"
-            loading={recvSaving}
-            disabled={!recvSel}
-            onClick={saveRecvDir}
-          >
-            保存
-          </Button>
+      {/* 接收目录配置弹窗：设备 → 项目 层级列全 */}
+      <Modal
+        title="机器人文件接收目录"
+        open={recvModalOpen}
+        onCancel={() => setRecvModalOpen(false)}
+        footer={null}
+        width={560}
+        centered
+      >
+        <div className={styles.recvModalHint}>
+          发给机器人（钉钉/企业微信）的文件，随下一条任务落到对应会话项目的这个目录。
+          留空 = 默认 <code>项目/tmp</code>。点「浏览」在项目目录树里选。
         </div>
-
-        {recvProjects.filter((p) => p.dir).length > 0 && (
-          <div className={styles.recvList}>
-            {recvProjects
-              .filter((p) => p.dir)
-              .map((p) => (
-                <div key={p.cwd} className={styles.recvChip} title={p.cwd}>
-                  <span className={styles.recvChipName}>{p.name}</span>
-                  <span className={styles.recvChipDir}>{p.dir}</span>
-                  <span
-                    className={styles.recvChipDel}
-                    role="button"
-                    tabIndex={0}
-                    aria-label="清除"
-                    onClick={() => {
-                      setDingtalkRecvDir(p.cwd, "").then((res) => {
-                        if (res.code === 0) {
-                          message.success("已清除");
-                          setRecvProjects((l) =>
-                            l.map((x) => (x.cwd === p.cwd ? { ...x, dir: "" } : x))
-                          );
-                          if (recvSel === p.cwd) setRecvDir("");
-                        }
-                      });
-                    }}
-                  >
-                    <CloseOutlined />
+        {recvDevices.length === 0 ? (
+          <div className={styles.recvEmpty}>暂无项目（有活跃会话后自动出现）</div>
+        ) : (
+          recvDevices.map((dev) => (
+            <div key={dev.machineId || dev.hostname} className={styles.recvDev}>
+              <div className={styles.recvDevName}>💻 {dev.hostname}</div>
+              {dev.projects.map((p) => (
+                <div key={p.cwd} className={styles.recvProjRow}>
+                  <span className={styles.recvProjName} title={p.cwd}>
+                    {p.name}
                   </span>
+                  <span
+                    className={`${styles.recvProjDir} ${p.dir ? styles.set : ""}`}
+                  >
+                    {p.dir || "tmp（默认）"}
+                  </span>
+                  <Button size="small" onClick={() => openPicker(p)}>
+                    浏览
+                  </Button>
+                  {p.dir ? (
+                    <Button
+                      size="small"
+                      type="text"
+                      danger
+                      onClick={() => commitRecvDir(p.cwd, "")}
+                    >
+                      清除
+                    </Button>
+                  ) : null}
                 </div>
               ))}
-          </div>
+            </div>
+          ))
         )}
-      </div>
+      </Modal>
+
+      {/* 目录浏览选择弹窗（复用会话目录树浏览） */}
+      <Modal
+        title={picker ? `选择接收目录 · ${picker.name}` : "选择接收目录"}
+        open={!!picker}
+        onCancel={() => setPicker(null)}
+        onOk={() => picker && commitRecvDir(picker.cwd, pickRel)}
+        okText={`选此目录（${pickRel || "项目根"}）`}
+        cancelText="取消"
+        width={480}
+        centered
+      >
+        <div className={styles.pickPath}>
+          <span
+            className={styles.pickCrumb}
+            role="button"
+            tabIndex={0}
+            onClick={() => {
+              setPickRel("");
+              picker && loadPickDirs(picker.taskId, "");
+            }}
+          >
+            项目根
+          </span>
+          {pickRel
+            ? pickRel.split("/").map((seg, i, arr) => {
+                const rel = arr.slice(0, i + 1).join("/");
+                return (
+                  <span key={rel}>
+                    <span className={styles.pickSep}>/</span>
+                    <span
+                      className={styles.pickCrumb}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        setPickRel(rel);
+                        picker && loadPickDirs(picker.taskId, rel);
+                      }}
+                    >
+                      {seg}
+                    </span>
+                  </span>
+                );
+              })
+            : null}
+        </div>
+        <div className={styles.pickList}>
+          {pickLoading ? (
+            <div className={styles.pickLoading}>读取中…</div>
+          ) : pickDirs.length === 0 ? (
+            <div className={styles.pickEmpty}>此目录下没有子目录</div>
+          ) : (
+            pickDirs.map((name) => (
+              <div
+                key={name}
+                className={styles.pickItem}
+                role="button"
+                tabIndex={0}
+                onClick={() => {
+                  const next = pickRel ? `${pickRel}/${name}` : name;
+                  setPickRel(next);
+                  picker && loadPickDirs(picker.taskId, next);
+                }}
+              >
+                <FolderOutlined className={styles.pickIcon} />
+                <span className={styles.pickItemName}>{name}</span>
+                <RightOutlined className={styles.pickArrow} />
+              </div>
+            ))
+          )}
+        </div>
+      </Modal>
+
 
       {/* 钉钉群机器人 */}
       <Modal

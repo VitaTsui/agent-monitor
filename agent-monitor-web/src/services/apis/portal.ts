@@ -294,11 +294,16 @@ export interface IntegrationsInfo {
     stream?: boolean;
     callbackUrl: string;
   } | null;
-  /** 钉钉文件接收目录（按项目）：cwd/名称/已配目录（未配为 null，默认 tmp） */
-  recvDirProjects?: {
-    cwd: string;
-    name: string;
-    dir?: string | null;
+  /** 机器人文件接收目录（所有渠道通用）：按「设备 → 项目」层级列出 */
+  recvDirDevices?: {
+    machineId: string;
+    hostname: string;
+    projects: {
+      cwd: string;
+      name: string;
+      dir?: string | null;
+      taskId?: string | null;
+    }[];
   }[];
 }
 
