@@ -182,16 +182,9 @@ const IntegrationsPanel: React.FC = () => {
       {/* 已绑定的钉钉：机器人由管理员在后管统一配置，用户经机器人回的登录链接绑定自己的钉钉号 */}
       <div className={styles.groupTitle}>钉钉</div>
       <div className={styles.boundCard}>
-        <div className={styles.boundHead}>
-          <span className={`${styles.icon} ${styles.ding}`}>
-            <DingtalkOutlined />
-          </span>
-          <div className={styles.headText}>
-            <div className={styles.headTitle}>钉钉机器人</div>
-            <div className={styles.headSub}>
-              给机器人发消息 → 按回复的登录链接绑定本账号，之后任务通知私聊推给你、也能发指令遥控会话
-            </div>
-          </div>
+        <div className={styles.boundTitle}>
+          <DingtalkOutlined className={styles.boundTitleIcon} />
+          钉钉机器人
         </div>
         {boundIds.length === 0 ? (
           <div className={styles.boundEmpty}>
