@@ -1411,11 +1411,46 @@ fn ensure_bridge_extension(hub: &str, data_dir: &std::path::Path, force: bool) -
             ulog(&format!("[bridge] 已安装桥接扩展到 {cli}"));
         }
     }
-    // 只要装成功过一个就打标记（避免每次启动重复下载/安装）
-    if installed > 0 {
+    // 校验实际已装版本 == 期望版本，才打标记。否则——hub 上的 vsix 可能还是旧版（发版时漏了
+    // 重新打包部署），install --force 装的仍是旧内容，若照 BRIDGE_EXT_VERSION 直接打标记就会
+    // 「标记说装了新版、实际还是旧版」，从此再不重试。不打标记 → 下次启动继续重试，直到 hub
+    // 真的提供了该版本，自纠正。
+    let ver_ok = installed > 0
+        && ["cursor", "code"]
+            .iter()
+            .any(|c| installed_ext_version(c).as_deref() == Some(BRIDGE_EXT_VERSION));
+    if ver_ok {
         let _ = std::fs::write(&marker, BRIDGE_EXT_VERSION);
+    } else if installed > 0 {
+        ulog(&format!(
+            "[bridge] 已装但版本非 {BRIDGE_EXT_VERSION}（hub vsix 可能未更新），不打标记、下次重试"
+        ));
     }
     installed
+}
+
+/// 查已装的桥接扩展版本：`<cli> --list-extensions --show-versions` 里找
+/// `vitahsu.agent-monitor-bridge@x.y.z`。取不到（CLI 不在/未装）返回 None。
+fn installed_ext_version(cli: &str) -> Option<String> {
+    #[cfg(windows)]
+    let out = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("cmd")
+            .args(["/C", cli, "--list-extensions", "--show-versions"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok()?
+    };
+    #[cfg(not(windows))]
+    let out = std::process::Command::new(cli)
+        .args(["--list-extensions", "--show-versions"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("vitahsu.agent-monitor-bridge@"))
+        .map(|v| v.trim().to_string())
 }
 
 /// 调 `<cli> --install-extension <vsix> --force`。CLI 不在 PATH / 未装编辑器 → 返回 false。
