@@ -318,6 +318,8 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             terminal_set_excluded,
             update_status,
             update_start,
+            plugin_status,
+            plugin_update,
             win_minimize,
             win_close
         ])
@@ -969,6 +971,53 @@ fn update_start(
     ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>,
 ) {
     spawn_self_update_inner(app, ctx.web_base.clone(), false);
+}
+
+/// 网页端 IPC：桥接插件（Cursor/VSCode 扩展）版本状态 —— 与「客户端版本」对应。
+/// `installed` = 编辑器里实际已装的版本（任一编辑器；null = 未装或 CLI 不在 PATH）；
+/// `latest` = 本客户端将安装到的目标版本（BRIDGE_EXT_VERSION）。二者不等即有更新。
+/// 跑子进程查版本，放 spawn_blocking 免阻塞异步执行器。
+#[tauri::command]
+async fn plugin_status() -> Result<serde_json::Value, String> {
+    let v = tauri::async_runtime::spawn_blocking(|| {
+        let editors: Vec<serde_json::Value> = [("cursor", "Cursor"), ("code", "VSCode")]
+            .iter()
+            .map(|(cli, name)| {
+                serde_json::json!({
+                    "cli": cli, "name": name, "installed": installed_ext_version(cli),
+                })
+            })
+            .collect();
+        // 任一编辑器已装即取其版本（多编辑器版本一致）
+        let installed =
+            editors.iter().find_map(|e| e["installed"].as_str().map(str::to_string));
+        serde_json::json!({
+            "installed": installed,
+            "latest": BRIDGE_EXT_VERSION,
+            "editors": editors,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(v)
+}
+
+/// 网页端 IPC：检查并（强制）更新桥接插件 —— 从 hub 拉最新 vsix 重装到 Cursor/VSCode。
+/// 返回安装到的编辑器个数与装后实际版本，供页面提示。
+#[tauri::command]
+async fn plugin_update(
+    ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>,
+) -> Result<serde_json::Value, String> {
+    let hub = ctx.web_base.clone();
+    let dd = ctx.state.config.data_dir.clone();
+    let (installed, version) = tauri::async_runtime::spawn_blocking(move || {
+        let n = ensure_bridge_extension(&hub, &dd, true);
+        let version = ["cursor", "code"].iter().find_map(|c| installed_ext_version(c));
+        (n, version)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "installed": installed, "version": version }))
 }
 
 /// 网页端 IPC：查询开机自启状态。

@@ -374,7 +374,13 @@ impl AppState {
                     online,
                     is_hub: e.is_hub,
                     last_report_at: None,
-                    session_count: e.tasks.len(),
+                    // 与侧栏设备计数一致：只数活跃会话（非 Finished），否则 7 天窗口里
+                    // 堆积的已结束会话会把「会话数」撑到几十条，跟左侧对不上。
+                    session_count: e
+                        .tasks
+                        .iter()
+                        .filter(|t| t.status != TaskStatus::Finished)
+                        .count(),
                     running_count: e
                         .tasks
                         .iter()
@@ -432,7 +438,9 @@ impl AppState {
                 online,
                 is_hub: false,
                 last_report_at: None,
-                session_count: live.map(|e| e.tasks.len()).unwrap_or(0),
+                session_count: live
+                    .map(|e| e.tasks.iter().filter(|t| t.status != TaskStatus::Finished).count())
+                    .unwrap_or(0),
                 running_count: live
                     .map(|e| e.tasks.iter().filter(|t| online && t.status == TaskStatus::Running).count())
                     .unwrap_or(0),

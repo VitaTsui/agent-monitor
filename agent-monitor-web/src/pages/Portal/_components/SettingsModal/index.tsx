@@ -97,6 +97,12 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
     progress?: UpdateProgress | null;
   } | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  // 桥接插件（Cursor/VSCode 扩展）版本与更新（仅客户端窗口内；旧客户端无此 IPC → 保持 null 不渲染）
+  const [pluginVer, setPluginVer] = useState<{
+    installed: string | null;
+    latest: string;
+  } | null>(null);
+  const [checkingPlugin, setCheckingPlugin] = useState(false);
 
   const loadClientVersion = () => {
     tauriInvoke?.("update_status")
@@ -106,6 +112,46 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
         ),
       )
       .catch(() => setClientVer(null));
+  };
+
+  const loadPluginVersion = () => {
+    tauriInvoke?.("plugin_status")
+      .then((v) => setPluginVer(v as { installed: string | null; latest: string }))
+      .catch(() => setPluginVer(null));
+  };
+
+  // 强制重装插件（从 hub 拉最新 vsix）；用于「安装 / 更新到 vX」
+  const updatePlugin = () => {
+    setCheckingPlugin(true);
+    tauriInvoke?.("plugin_update")
+      .then((v) => {
+        const r = v as { installed: number; version: string | null };
+        setPluginVer((p) => (p ? { ...p, installed: r.version } : p));
+        if (r.installed > 0) {
+          message.success(`已安装桥接插件 v${r.version ?? ""} 到 ${r.installed} 个编辑器，重载编辑器窗口即生效`);
+        } else {
+          message.warning("未检测到 Cursor/VSCode 命令行（在编辑器里执行「Shell Command: Install 'code'/'cursor' command in PATH」后重试）");
+        }
+      })
+      .catch(() => message.error("插件安装失败"))
+      .finally(() => setCheckingPlugin(false));
+  };
+
+  // 检查插件更新：重新读状态，已是最新给提示，有更新则按钮切成「更新到 vX」
+  const checkPluginUpdate = () => {
+    setCheckingPlugin(true);
+    tauriInvoke?.("plugin_status")
+      .then((v) => {
+        const s = v as { installed: string | null; latest: string };
+        setPluginVer(s);
+        if (!s.installed) {
+          message.info("未检测到已安装的桥接插件，点「安装插件」装上");
+        } else if (s.installed === s.latest) {
+          message.success(`桥接插件已是最新（v${s.installed}）`);
+        }
+      })
+      .catch(() => message.error("检查失败"))
+      .finally(() => setCheckingPlugin(false));
   };
   // 「更新中」必须是「确有新版本 + 有进度」才算——否则辅助下载（如桥接扩展 vsix）
   // 遗留的进度状态会把按钮卡在「更新中」不可点（客户端已是最新却显示更新中）。
@@ -194,6 +240,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
         .catch(() => setAutostart(null));
       loadTerminals();
       loadClientVersion();
+      loadPluginVersion();
     }
     // tauriInvoke 是宿主环境常量，不会在会话中途变化
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -595,6 +642,49 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                       </Button>
                     )}
                   </div>
+                  {/* 插件版本（Cursor/VSCode 桥接扩展）：旧客户端无 plugin_status IPC → pluginVer 为 null，整行不渲染 */}
+                  {pluginVer ? (
+                    <div className={styles.device}>
+                      <div className={styles.devInfo}>
+                        <div className={styles.devName}>
+                          插件版本
+                          <Tag
+                            color={
+                              pluginVer.installed === pluginVer.latest
+                                ? "green"
+                                : pluginVer.installed
+                                  ? "warning"
+                                  : "default"
+                            }
+                          >
+                            {pluginVer.installed ? `v${pluginVer.installed}` : "未安装"}
+                          </Tag>
+                        </div>
+                        <div className={styles.devMeta}>
+                          Cursor/VSCode 桥接扩展，内嵌终端下发靠它
+                        </div>
+                      </div>
+                      {pluginVer.installed !== pluginVer.latest ? (
+                        <Button
+                          size="small"
+                          className={styles.updateNowBtn}
+                          loading={checkingPlugin}
+                          onClick={updatePlugin}
+                        >
+                          {pluginVer.installed ? `更新到 v${pluginVer.latest}` : "安装插件"}
+                        </Button>
+                      ) : (
+                        <Button
+                          size="small"
+                          className={styles.checkUpdateBtn}
+                          loading={checkingPlugin}
+                          onClick={checkPluginUpdate}
+                        >
+                          检查更新
+                        </Button>
+                      )}
+                    </div>
+                  ) : null}
                   <div className={styles.termScope}>
                     <div className={styles.sectionTitle}>监控范围</div>
                     {terminals.length === 0 ? (
