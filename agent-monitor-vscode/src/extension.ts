@@ -46,10 +46,18 @@ export function activate(context: vscode.ExtensionContext) {
   // 缓存本窗口各终端的 shell pid（processId 是 Promise，异步刷新）
   const termPids = new Map<vscode.Terminal, number>();
   const refreshPids = async () => {
+    // 先清掉已不在的终端：onDidCloseTerminal 偶尔不触发，脏条目会让 findTerminal 命中
+    // 已关闭的终端、sendText 石沉大海（下发进 outbox 却送不到）。
+    const live = new Set(vscode.window.terminals);
+    for (const t of [...termPids.keys()]) {
+      if (!live.has(t)) termPids.delete(t);
+    }
     for (const t of vscode.window.terminals) {
       try {
         const pid = await t.processId;
-        if (pid) termPids.set(t, pid);
+        // 只存已解析出的真实 pid：processId 未就绪时可能是 undefined/0/-1，存进去会污染
+        // 心跳与匹配、且永不纠正（下一轮 refresh 会重试，就绪后再存）。
+        if (pid && pid > 0) termPids.set(t, pid);
       } catch {
         /* ignore */
       }
@@ -85,8 +93,15 @@ export function activate(context: vscode.ExtensionContext) {
         safeUnlink(fp);
         continue;
       }
-      // 30s 前没人认领的命令清掉（多为目标终端所在窗口已关）
+      // 30s 前没人认领的命令清掉（多为目标终端所在窗口已关）。这也是「下发进 outbox 却没
+      // 送到终端」的失败信号：记一条（带本窗口已知终端 pids），下次排查一眼看出目标 pid 到底
+      // 有没有被任何窗口认到——区分「没匹配上终端」与「匹配了但 sendText 没到」。
       if (cmd.ts && Date.now() - cmd.ts > 30000) {
+        if (typeof cmd.pid === "number") {
+          appendLog(
+            `命令超时未送达 pid=${cmd.pid}（本窗口终端 pids=[${Array.from(termPids.values()).join(",")}]）`,
+          );
+        }
         safeUnlink(fp);
         continue;
       }
