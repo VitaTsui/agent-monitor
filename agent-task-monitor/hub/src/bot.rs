@@ -583,23 +583,28 @@ fn render_monitor_push(msgs: &[&am_core::model::MessageBrief]) -> String {
     out
 }
 
-/// 会话在「发 N / 暂停 N」里的序号：与 resolve_task 同源 —— 优先用最近「会话」列出的顺序，
-/// 没有就即时按同排序补一份。用于钉钉推送里带上编号，让人能直接「发 N」回应。
+/// 会话在「发 N / 暂停 N」里的序号：与 resolve_task **完全同源** —— 序号表不存在就即时用当前
+/// 排序**冻结一份**（和 resolve_task 一样），再取位置。用于钉钉推送里带上编号让人「发 N」回应。
+///
+/// 关键：这里必须和 resolve_task 一样「不存在就冻结落盘」，不能只临时算个位置。否则——推送在
+/// T1 用实时排序算出编号给用户看、却没冻结；用户随后「发 N」在 T2 才冻结一份，若 T1→T2 排序
+/// 变了（新会话出现 / has_content 翻转等），两份就对不上 → 发 N 打到别的终端（用户实测的错位）。
 pub(crate) async fn session_number(
     state: &SharedState,
     username: &str,
     task_id: &str,
 ) -> Option<usize> {
-    if let Some(ids) = state.bot_last_list.read().await.get(username) {
-        if let Some(i) = ids.iter().position(|x| x == task_id) {
-            return Some(i + 1);
-        }
+    // 序号表还没建时即时冻结一份（与 resolve_task 同一逻辑、同一排序）
+    if !state.bot_last_list.read().await.contains_key(username) {
+        let ids: Vec<String> =
+            sorted_active_tasks(state, username).await.into_iter().map(|t| t.id).collect();
+        state.bot_last_list.write().await.insert(username.to_string(), ids);
     }
-    sorted_active_tasks(state, username)
-        .await
-        .iter()
-        .position(|t| t.id == task_id)
-        .map(|i| i + 1)
+    let list = state.bot_last_list.read().await;
+    let ids = list.get(username)?;
+    // 已冻结列表里没有 = 冻结之后才新建的会话：不给它编号（返回 None → 推送里 {NO} 留空），
+    // 免得显示一个「发 N」解析不到、或指向别人的编号。用户发「会话」刷新即可纳入。
+    ids.iter().position(|x| x == task_id).map(|i| i + 1)
 }
 
 /// 活跃会话按「设备名 → 终端 → 项目 → 有内容优先 → 会话标题 → id」**稳定**排序。「会话」
