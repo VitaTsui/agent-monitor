@@ -1260,34 +1260,49 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
     // 机器人文件接收目录（所有渠道通用，按项目存）：按「设备 → 项目」层级列出，供弹窗配置。
     // 每个项目附一个活跃会话 taskId，网页据此调 /dirs 浏览该项目目录树来选接收目录。
     let recv_dirs = state.registry.read().await.dingtalk_recv_dirs_of(&user);
-    // machine_id → (hostname, 项目 cwd → (name, taskId))
+    // machine_id → (hostname, 项目 key → (代表 cwd, name, taskId))
+    // 分组键用 encode_path（项目 key），与侧栏 selectedGroups / 配对 project_key 同规则：
+    // 同一目录的不同 cwd 形态（占位任务用进程 cwd vs 真实会话用 jsonl cwd、cursor/非
+    // cursor，分隔符/盘符/标点常有细微差异）归并为一项，避免像 sub-centers 那样冒重复行。
     let mut devs: std::collections::BTreeMap<
         String,
-        (String, std::collections::BTreeMap<String, (String, Option<String>)>),
+        (String, std::collections::BTreeMap<String, (String, String, Option<String>)>),
     > = std::collections::BTreeMap::new();
-    let mut seen_cwd: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     for t in state.tasks_for(&user).await {
         if t.project.is_empty() {
             continue;
         }
-        seen_cwd.insert(t.project.clone());
+        // 与侧栏一致：只列活跃会话的项目，隐藏已结束会话（否则旧会话的项目会多冒出来、
+        // 跟左侧列表对不上）。list_tasks 也是这个过滤。
+        if t.status == TaskStatus::Finished {
+            continue;
+        }
+        let key = am_core::scanner::encode_path(&t.project);
+        seen_keys.insert(key.clone());
         let d = devs
             .entry(t.machine_id.clone())
             .or_insert_with(|| (t.hostname.clone(), std::collections::BTreeMap::new()));
-        let p = d.1.entry(t.project.clone()).or_insert_with(|| (t.project_name.clone(), None));
-        if p.1.is_none() && !t.id.is_empty() {
-            p.1 = Some(t.id.clone());
+        let p = d
+            .1
+            .entry(key)
+            .or_insert_with(|| (t.project.clone(), t.project_name.clone(), None));
+        // 代表 cwd/taskId 优先取带活跃会话 id 的那条（网页据此浏览目录树）
+        if p.2.is_none() && !t.id.is_empty() {
+            p.0 = t.project.clone();
+            p.2 = Some(t.id.clone());
         }
     }
     // 已配置但当前无活跃会话的项目：归到「未在线」分组（无 taskId → 只能手输，不能浏览）
     for k in recv_dirs.keys() {
-        if !seen_cwd.contains(k) {
+        let key = am_core::scanner::encode_path(k);
+        if !seen_keys.contains(&key) {
             let name =
                 k.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(k).to_string();
             devs.entry(String::new())
                 .or_insert_with(|| ("（未在线项目）".to_string(), std::collections::BTreeMap::new()))
                 .1
-                .insert(k.clone(), (name, None));
+                .insert(key, (k.clone(), name, None));
         }
     }
     let recv_dir_devices: Vec<Value> = devs
@@ -1296,8 +1311,14 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
             json!({
                 "machineId": machine_id,
                 "hostname": hostname,
-                "projects": projs.into_iter().map(|(cwd, (name, task_id))| json!({
-                    "cwd": cwd, "name": name, "dir": recv_dirs.get(&cwd), "taskId": task_id,
+                "projects": projs.into_iter().map(|(key, (cwd, name, task_id))| json!({
+                    "cwd": cwd,
+                    "name": name,
+                    // 配置按 encode_path 匹配（存储键可能是同目录的另一种 cwd 形态）
+                    "dir": recv_dirs.iter()
+                        .find(|(k, _)| am_core::scanner::encode_path(k) == key)
+                        .map(|(_, v)| v.clone()),
+                    "taskId": task_id,
                 })).collect::<Vec<_>>(),
             })
         })

@@ -521,12 +521,16 @@ impl Registry {
     }
 
     /// 某项目配置的钉钉文件接收目录（未配置返回 None → 调用方回落 `<cwd>/tmp`）。
+    /// 按 `encode_path`（项目 key）匹配、而非裸 cwd 字符串：同一目录的不同形态
+    /// （占位任务用进程 cwd vs 真实会话用 jsonl cwd、cursor/非 cursor，其分隔符/盘符/
+    /// 标点常有细微差异）都能命中同一份配置——与前端分组、与配对 project_key 同规则。
     pub fn dingtalk_recv_dir(&self, username: &str, project_cwd: &str) -> Option<String> {
-        self.dingtalk_recv_dirs
-            .get(username)
-            .and_then(|m| m.get(project_cwd))
+        let m = self.dingtalk_recv_dirs.get(username)?;
+        let target = am_core::scanner::encode_path(project_cwd);
+        m.iter()
+            .find(|(k, _)| am_core::scanner::encode_path(k) == target)
+            .map(|(_, v)| v.clone())
             .filter(|s| !s.trim().is_empty())
-            .cloned()
     }
 
     /// 该用户已配置的全部「项目 → 接收目录」。
@@ -535,11 +539,13 @@ impl Registry {
     }
 
     /// 设置某项目的接收目录；dir 为空则清除该项目的配置（回落默认 tmp）。
+    /// 按 `encode_path` 归一：同一目录的不同 cwd 形态只保留一份，避免残留旧形态键
+    /// 导致查目录时命中不到（与 [`dingtalk_recv_dir`](Self::dingtalk_recv_dir) 同规则）。
     pub fn set_dingtalk_recv_dir(&mut self, username: &str, project_cwd: &str, dir: &str) {
         let entry = self.dingtalk_recv_dirs.entry(username.to_string()).or_default();
-        if dir.trim().is_empty() {
-            entry.remove(project_cwd);
-        } else {
+        let target = am_core::scanner::encode_path(project_cwd);
+        entry.retain(|k, _| am_core::scanner::encode_path(k) != target);
+        if !dir.trim().is_empty() {
             entry.insert(project_cwd.to_string(), dir.trim().to_string());
         }
         if entry.is_empty() {
