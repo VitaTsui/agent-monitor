@@ -53,6 +53,11 @@ pub struct ProcessInfo {
     /// 配对的稳定锚。扫描时算好，供持久化/配对复用（见 process::ProcessScanner::nearest_shell）。
     #[serde(default)]
     pub shell_pid: Option<u32>,
+    /// 终端锚 shell 的启动时间（epoch 秒）。与 shell_pid 一起唯一确定「同一个 shell」——
+    /// Windows 会重用 pid：关掉终端再开一个可能拿到同一个 shell pid，光比 pid 会把新终端
+    /// 错配到旧会话。配对恢复时须 pid + start 都对上才算同一 shell。
+    #[serde(default)]
+    pub shell_start: Option<u64>,
 }
 
 /// 会话内一条简要消息（用于详情展示）

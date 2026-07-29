@@ -213,52 +213,68 @@ fn pairs_file(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("session-pairs.json")
 }
 
-/// 写盘：内存缓存本身就是「终端锚(shell) → session」，直接落盘。
-fn save_anchor_pairs(data_dir: &std::path::Path, anchors: &std::collections::HashMap<u32, String>) {
+/// 进程的「终端锚身份」= (锚 pid, 锚 start)：有 shell 祖先则 (shell_pid, shell_start)，否则
+/// 回退 (claude 自身 pid, claude start_time)。start 一并进 key 用于区分「同一个 shell」与
+/// 「pid 被重用的新 shell/进程」——Windows 会重用 pid（关掉终端再开一个可能拿到同一 shell pid），
+/// 光比 pid 会把新终端错配到旧会话。缓存/恢复都以「pid + start 都对上」为准。
+fn anchor_key(p: &am_core::model::ProcessInfo) -> (u32, u64) {
+    match (p.shell_pid, p.shell_start) {
+        (Some(sp), Some(ss)) => (sp, ss),
+        _ => (p.pid, p.start_time),
+    }
+}
+
+/// 写盘：内存缓存「终端锚 → (session, 锚 start)」，直接落盘（锚 start 一并存，恢复时防 pid 重用）。
+fn save_anchor_pairs(
+    data_dir: &std::path::Path,
+    anchors: &std::collections::HashMap<u32, (String, u64)>,
+) {
     let mut obj = serde_json::Map::new();
-    for (anchor, sid) in anchors {
-        obj.insert(anchor.to_string(), serde_json::json!({ "sid": sid }));
+    for (anchor, (sid, sstart)) in anchors {
+        obj.insert(anchor.to_string(), serde_json::json!({ "sid": sid, "sstart": sstart }));
     }
     let _ = std::fs::write(pairs_file(data_dir), serde_json::Value::Object(obj).to_string());
 }
 
-/// 把「终端锚(shell) → session」翻译成「当前该终端下的**主 claude** pid → session」。
-/// 每个活进程取其终端锚(ProcessInfo.shell_pid，找不到回退自身 pid)，命中锚表即候选——claude
-/// 换 pid（/clear、--resume、重启）后仍在同一终端 shell 下，据此把配对接回；锚表里没有对应活
-/// 进程的条目（死终端/被非-shell 重用）自然翻不出配对，防 pid 重用错配。
+/// 把「终端锚 → (session, 锚 start)」翻译成「当前该终端下的**主 claude** pid → session」。
+/// 每个活进程取其终端锚身份 (pid, start)，命中锚表且 **start 也对上** 才算——claude 换 pid
+/// (/clear、--resume、重启) 后仍在同一 shell 下即接回；死终端/被重用的 pid（start 不同）翻不出
+/// 配对，防 pid 重用把新终端错配到旧会话。
 ///
 /// 同一终端锚可能有**多个 claude**：主 claude 与它用 Task 工具派生的子 agent（子 agent 是主
-/// claude 的子进程、同一终端 shell 的孙进程，终端锚相同）。若两个 pid 都映射到同一会话，会话
-/// 可能被配到子 agent，导致控制动作（暂停/中断/杀）误打到子 agent、子 agent 结束后配对又跳。
-/// 故同一锚**只认最早启动的那个** = 主 claude（子 agent 总在会话进行中才派生、启动更晚）。
+/// claude 的子进程、同一 shell 的孙进程，终端锚相同）。故同一锚**只认最早启动的那个** = 主
+/// claude（子 agent 总在会话进行中才派生、启动更晚），免得会话被配到子 agent。
 fn translate_anchors(
-    anchors: &std::collections::HashMap<u32, String>,
+    anchors: &std::collections::HashMap<u32, (String, u64)>,
     procs: &[am_core::model::ProcessInfo],
 ) -> std::collections::HashMap<u32, String> {
-    // 每个终端锚先挑出主 claude（start_time 最小）
     let mut main_of: std::collections::HashMap<u32, &am_core::model::ProcessInfo> =
         std::collections::HashMap::new();
     for p in procs {
-        let anchor = p.shell_pid.unwrap_or(p.pid);
-        if !anchors.contains_key(&anchor) {
-            continue;
+        let (apid, astart) = anchor_key(p);
+        // 锚 pid 命中、且 start 也对上（同一个 shell/进程，非 pid 重用）
+        match anchors.get(&apid) {
+            Some((_, s)) if *s == astart => {}
+            _ => continue,
         }
-        match main_of.get(&anchor) {
+        match main_of.get(&apid) {
             Some(cur) if cur.start_time <= p.start_time => {} // 已有更早启动的，保留
             _ => {
-                main_of.insert(anchor, p);
+                main_of.insert(apid, p);
             }
         }
     }
     main_of
         .into_iter()
-        .map(|(anchor, p)| (p.pid, anchors[&anchor].clone()))
+        .map(|(apid, p)| (p.pid, anchors[&apid].0.clone()))
         .collect()
 }
 
-/// 读盘：直接读回「终端锚(shell) → session」。校验推迟到每轮翻译时做（只有当前真有 claude
-/// 在该终端下的锚才会翻译成配对），故这里无需活进程；死终端/被非-shell 重用的锚翻不出配对。
-fn load_anchor_pairs(data_dir: &std::path::Path) -> std::collections::HashMap<u32, String> {
+/// 读盘：读回「终端锚 → (session, 锚 start)」。校验推迟到每轮翻译（pid + start 都对上才配），
+/// 故这里无需活进程；死终端/被重用的 pid 翻不出配对。缺 sstart 的旧格式按 0 处理（不会误配）。
+fn load_anchor_pairs(
+    data_dir: &std::path::Path,
+) -> std::collections::HashMap<u32, (String, u64)> {
     let mut out = std::collections::HashMap::new();
     let Ok(txt) = std::fs::read_to_string(pairs_file(data_dir)) else {
         return out;
@@ -270,7 +286,8 @@ fn load_anchor_pairs(data_dir: &std::path::Path) -> std::collections::HashMap<u3
         if let (Ok(anchor), Some(sid)) =
             (anchor_s.parse::<u32>(), ent.get("sid").and_then(|x| x.as_str()))
         {
-            out.insert(anchor, sid.to_string());
+            let sstart = ent.get("sstart").and_then(|x| x.as_u64()).unwrap_or(0);
+            out.insert(anchor, (sid.to_string(), sstart));
         }
     }
     out
@@ -475,8 +492,10 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
     // claude 经 /clear、--resume、重启会换 pid，但所在终端 shell 不变——每轮把「终端锚→会话」
     // 翻译成「该终端现在的 claude pid → 会话」，claude 换 pid（含客户端重启）也接得回，消除
     // 空闲/并发会话落到 mtime 启发式而下发错位。这份缓存直接持久化到盘、重启读回。
-    static ANCHOR_PAIRS: std::sync::Mutex<Option<std::collections::HashMap<u32, String>>> =
-        std::sync::Mutex::new(None);
+    // 值 = (session_id, 锚 start)：锚 start 一并存，恢复/翻译时防 shell pid 重用把新终端错配旧会话。
+    static ANCHOR_PAIRS: std::sync::Mutex<
+        Option<std::collections::HashMap<u32, (String, u64)>>,
+    > = std::sync::Mutex::new(None);
     static PAIRS_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     // 首轮：从盘恢复终端锚→会话
     if !PAIRS_LOADED.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -486,7 +505,7 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
             *ANCHOR_PAIRS.lock().unwrap() = Some(restored);
         }
     }
-    // 翻译：为每个活 claude 取终端锚，命中锚缓存 → 该 claude 配上那条会话（claude 换 pid 也接得回）
+    // 翻译：为每个活 claude 取终端锚，命中锚缓存且锚 start 对上 → 该 claude 配上那条会话
     let cached: std::collections::HashMap<u32, String> = {
         let guard = ANCHOR_PAIRS.lock().unwrap();
         match guard.as_ref() {
@@ -502,18 +521,16 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         &active_ids,
         &cached,
     );
-    // 用本轮真实配对刷新锚缓存：把「claude_pid → 会话」按终端锚归账（有 pid、非 pid- 占位）
+    // 用本轮真实配对刷新锚缓存：把「claude_pid → 会话」按终端锚身份 (pid,start) 归账（非 pid- 占位）
     {
-        let shell_of: std::collections::HashMap<u32, u32> = processes
-            .iter()
-            .map(|p| (p.pid, p.shell_pid.unwrap_or(p.pid)))
-            .collect();
+        let key_of: std::collections::HashMap<u32, (u32, u64)> =
+            processes.iter().map(|p| (p.pid, anchor_key(p))).collect();
         let mut new_anchors = std::collections::HashMap::new();
         for t in &tasks {
             if let Some(pid) = t.pid {
                 if !t.id.starts_with("pid-") {
-                    if let Some(&anchor) = shell_of.get(&pid) {
-                        new_anchors.insert(anchor, t.id.clone());
+                    if let Some(&(apid, astart)) = key_of.get(&pid) {
+                        new_anchors.insert(apid, (t.id.clone(), astart));
                     }
                 }
             }
@@ -620,12 +637,23 @@ mod anchor_tests {
     use am_core::model::{IdeKind, ProcessInfo};
     use std::collections::HashMap;
 
-    /// 造一个带终端锚(shell_pid)的 claude 进程；shell=None 表示找不到 shell 祖先。
+    const SHELL_START: u64 = 500; // 测试里 shell 的固定启动时间
+
+    /// 造一个带终端锚(shell_pid + 固定 shell_start)的 claude 进程；shell=None 表示找不到 shell。
     fn proc(pid: u32, shell: Option<u32>) -> ProcessInfo {
-        proc_at(pid, shell, 0)
+        proc_full(pid, shell, shell.map(|_| SHELL_START), 0)
     }
-    /// 带指定启动时间（用于区分主 claude / 子 agent）。
+    /// 带指定 claude 启动时间（用于区分主 claude / 子 agent）。
     fn proc_at(pid: u32, shell: Option<u32>, start_time: u64) -> ProcessInfo {
+        proc_full(pid, shell, shell.map(|_| SHELL_START), start_time)
+    }
+    /// 完全指定（含 shell_start，用于 pid 重用测试）。
+    fn proc_full(
+        pid: u32,
+        shell: Option<u32>,
+        shell_start: Option<u64>,
+        start_time: u64,
+    ) -> ProcessInfo {
         ProcessInfo {
             pid,
             agent: "claude".into(),
@@ -638,34 +666,48 @@ mod anchor_tests {
             memory: 0,
             command: "claude".into(),
             shell_pid: shell,
+            shell_start,
         }
     }
 
-    fn anchors(pairs: &[(u32, &str)]) -> HashMap<u32, String> {
-        pairs.iter().map(|(a, s)| (*a, s.to_string())).collect()
+    /// 锚表：(锚 pid, sid, 锚 start)。
+    fn anchors(pairs: &[(u32, &str, u64)]) -> HashMap<u32, (String, u64)> {
+        pairs.iter().map(|(a, s, st)| (*a, (s.to_string(), *st))).collect()
     }
 
     /// 核心：claude 换了 pid（100→200），但仍在同一终端 shell(2244) 下 —— 锚表存的是
     /// 「2244→sess」，翻译后新 pid 200 照样接回该会话。这就是「claude 换 pid 也接得回」。
     #[test]
     fn reconnects_after_claude_pid_change() {
-        let a = anchors(&[(2244, "sess-A")]);
+        let a = anchors(&[(2244, "sess-A", SHELL_START)]);
         let got = translate_anchors(&a, &[proc(200, Some(2244))]);
         assert_eq!(got.get(&200), Some(&"sess-A".to_string()));
+    }
+
+    /// pid 重用回归：关掉终端 A(shell 2244,start 500,会话 sess-A)、再开终端 B，Windows 把
+    /// 2244 重用给 B 的 shell（start 变成 900）。锚 pid 同为 2244 但 start 不同 → 不该接回
+    /// sess-A（否则新终端错配旧会话，用户实测的"关了再开还显示旧会话"）。
+    #[test]
+    fn reused_shell_pid_with_different_start_is_rejected() {
+        let a = anchors(&[(2244, "sess-A", 500)]);
+        // B 的 claude 在同 pid 2244 但 start=900 的新 shell 下
+        let b = proc_full(200, Some(2244), Some(900), 0);
+        let got = translate_anchors(&a, &[b]);
+        assert!(got.is_empty(), "shell pid 重用(start 不同)不该接回旧会话");
     }
 
     /// 锚表里的终端此刻没有活 claude（死终端/换项目）→ 翻不出配对，不会硬配。
     #[test]
     fn stale_anchor_without_live_proc_is_dropped() {
-        let a = anchors(&[(9999, "sess-A")]);
+        let a = anchors(&[(9999, "sess-A", SHELL_START)]);
         let got = translate_anchors(&a, &[proc(200, Some(2244))]);
         assert!(got.is_empty());
     }
 
-    /// 找不到 shell 祖先(shell_pid=None) → 回退用 claude 自身 pid 当锚匹配。
+    /// 找不到 shell 祖先(shell_pid=None) → 回退用 claude 自身 (pid,start) 当锚匹配。
     #[test]
     fn falls_back_to_self_pid_when_no_shell() {
-        let a = anchors(&[(200, "sess-A")]);
+        let a = anchors(&[(200, "sess-A", 0)]); // 回退锚 = (claude pid 200, claude start 0)
         let got = translate_anchors(&a, &[proc(200, None)]);
         assert_eq!(got.get(&200), Some(&"sess-A".to_string()));
     }
@@ -673,7 +715,7 @@ mod anchor_tests {
     /// 多终端各自接回，互不串。
     #[test]
     fn multiple_terminals_map_independently() {
-        let a = anchors(&[(2244, "sess-A"), (3355, "sess-B")]);
+        let a = anchors(&[(2244, "sess-A", SHELL_START), (3355, "sess-B", SHELL_START)]);
         let got = translate_anchors(&a, &[proc(200, Some(2244)), proc(201, Some(3355))]);
         assert_eq!(got.get(&200), Some(&"sess-A".to_string()));
         assert_eq!(got.get(&201), Some(&"sess-B".to_string()));
@@ -683,7 +725,7 @@ mod anchor_tests {
     /// (pid=999,后启动)，两者终端锚相同。会话只能配到**主 claude**，不能配到子 agent。
     #[test]
     fn same_shell_picks_earliest_started_main_claude() {
-        let a = anchors(&[(2244, "sess-A")]);
+        let a = anchors(&[(2244, "sess-A", SHELL_START)]);
         let main = proc_at(200, Some(2244), 1000); // 先启动
         let sub = proc_at(999, Some(2244), 2000); // 会话进行中才派生，启动更晚
         // 两种进程顺序都要稳定挑主 claude（不受 Vec/HashMap 顺序影响）

@@ -71,19 +71,30 @@ impl ProcessScanner {
                 memory: proc_.memory(),
                 command: proc_.cmd().join(" "),
                 shell_pid: None,
+                shell_start: None,
             });
         }
-        // 终端锚：各 agent 最近的 shell 祖先 pid（复用本轮 self.sys，不额外扫描）
+        // 终端锚：各 agent 最近的 shell 祖先 (pid, start)（复用本轮 self.sys，不额外扫描）
         for r in &mut result {
-            r.shell_pid = self.nearest_shell(r.pid);
+            match self.nearest_shell(r.pid) {
+                Some((sp, ss)) => {
+                    r.shell_pid = Some(sp);
+                    r.shell_start = Some(ss);
+                }
+                None => {
+                    r.shell_pid = None;
+                    r.shell_start = None;
+                }
+            }
         }
         result.sort_by_key(|p| p.start_time);
         result
     }
 
-    /// 该进程最近的 shell 祖先 pid（powershell/bash…），即它所在终端的 shell。
-    /// 终端 shell 的 pid 跨 claude 的 /clear/--resume/重启都不变，用作配对稳定锚。
-    fn nearest_shell(&self, pid: u32) -> Option<u32> {
+    /// 该进程最近的 shell 祖先 (pid, 启动时间)（powershell/bash…），即它所在终端的 shell。
+    /// 终端 shell 的 pid 跨 claude 的 /clear/--resume/重启都不变，用作配对稳定锚；start 一并
+    /// 返回，供配对恢复时区分「同一个 shell」与「pid 被重用的新 shell」（Windows 会重用 pid）。
+    fn nearest_shell(&self, pid: u32) -> Option<(u32, u64)> {
         let is_shell = |n: &str| {
             matches!(
                 n,
@@ -96,7 +107,7 @@ impl ProcessScanner {
         for _ in 0..24 {
             let p = self.sys.process(Pid::from_u32(cur))?;
             if is_shell(&p.name().to_lowercase()) {
-                return Some(cur);
+                return Some((cur, p.start_time()));
             }
             match p.parent().map(|pp| pp.as_u32()) {
                 Some(pp) if pp != cur && pp > 1 => cur = pp,
