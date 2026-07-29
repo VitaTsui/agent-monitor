@@ -245,6 +245,11 @@ async fn run_command(
             monitor_stop(state, username, arg).await
         }
         "撤回" | "recall" => recall_last(state, username, arg).await,
+        "文件" | "附件" | "files" => list_pending_files(state, username).await,
+        "清空文件" | "清空附件" | "清空" => clear_pending_files(state, username).await,
+        "删除文件" | "删文件" | "删附件" | "删除附件" => {
+            remove_pending_file(state, username, arg).await
+        }
         _ => format!("未知指令「{cmd}」。发「帮助」看用法。"),
     }
 }
@@ -470,7 +475,8 @@ fn help_text() -> String {
      • 帮助 —— 显示本说明\n\
      速记：@N 后接内容或任意会话指令 —— @2 重启服务 / @2 暂停 / @2 排队 / @2 撤回\n\
      多目标：@1 @2 重启服务（同一任务发给多个会话）\n\
-     发文件：直接发文件/图片给我 → 随下一条任务(如「@2 处理这个文件」)落到该会话 tmp/ 并把路径拼到开头\n\
+     发文件：直接发文件/图片给我 → 随下一条任务(如「@2 处理这些文件」)落到该会话 tmp/ 并把路径拼到开头\n\
+     • 文件 —— 查看当前挂起待发的文件；删除文件 N —— 删某个；清空文件 —— 全部丢弃\n\
      （序号以最近一次「会话」列出的为准）"
         .to_string()
 }
@@ -793,6 +799,51 @@ async fn attach_pending_file(
         .map(|r| format!("./{}", r.replace('\\', "/")))
         .unwrap_or(target);
     Ok(rel)
+}
+
+/// 「文件」：列出当前挂起待发的文件（随下一条任务一起落到会话目录）。
+async fn list_pending_files(state: &SharedState, username: &str) -> String {
+    let files = state.bot_pending_files.read().await.get(username).cloned().unwrap_or_default();
+    if files.is_empty() {
+        return "当前没有挂起待发的文件。发文件/图片给我即可暂存，随下一条任务一起发出。".to_string();
+    }
+    let mut lines = vec![format!("📎 待发文件（{} 个，随下一条任务发出）：", files.len())];
+    for (i, f) in files.iter().enumerate() {
+        lines.push(format!("{}. {}", i + 1, f.file_name));
+    }
+    lines.push("发「删除文件 N」删某个、「清空文件」清空。".to_string());
+    lines.join("\n")
+}
+
+/// 「清空文件」：丢弃全部挂起待发文件。
+async fn clear_pending_files(state: &SharedState, username: &str) -> String {
+    let n = state.bot_pending_files.write().await.remove(username).map(|v| v.len()).unwrap_or(0);
+    if n > 0 {
+        format!("已清空 {n} 个待发文件。")
+    } else {
+        "当前没有挂起待发的文件。".to_string()
+    }
+}
+
+/// 「删除文件 N」：删掉第 N 个挂起待发文件（序号以「文件」列出的为准）。
+async fn remove_pending_file(state: &SharedState, username: &str, arg: &str) -> String {
+    let n: usize = match arg.trim().parse() {
+        Ok(n) if n >= 1 => n,
+        _ => return "用法：删除文件 <序号>，如「删除文件 2」。发「文件」看序号。".to_string(),
+    };
+    let mut map = state.bot_pending_files.write().await;
+    let Some(list) = map.get_mut(username) else {
+        return "当前没有挂起待发的文件。".to_string();
+    };
+    if n > list.len() {
+        return format!("没有第 {n} 个文件，发「文件」看列表。");
+    }
+    let removed = list.remove(n - 1);
+    let remaining = list.len();
+    if list.is_empty() {
+        map.remove(username);
+    }
+    format!("已删除「{}」。剩 {remaining} 个待发文件。", removed.file_name)
 }
 
 async fn send_input(
