@@ -237,7 +237,9 @@ async fn run_command(
         "发" | "发送" | "回复" | "输入" => send_input(state, username, arg, reply).await,
         "排队" | "队列" | "queue" => list_queued(state, username, arg).await,
         "监控" | "watch" => monitor_start(state, username, arg, reply).await,
-        "停止监控" | "取消监控" | "结束监控" | "unwatch" => monitor_stop(state, username).await,
+        "停止监控" | "取消监控" | "结束监控" | "unwatch" => {
+            monitor_stop(state, username, arg).await
+        }
         "撤回" | "recall" => recall_last(state, username, arg).await,
         "绑定" | "bind" => bind_recipient(state, username, reply).await,
         "解绑" | "unbind" => unbind_recipient(state, username).await,
@@ -288,18 +290,51 @@ async fn monitor_start(
     // 起点定在「当前最后一条」，避免一上来把历史全推一遍；之后只推新增
     let msgs = state.bot_task_messages(&id).await;
     let last_ts = msgs.last().map(|m| m.timestamp.clone()).unwrap_or_default();
-    state.bot_monitors.write().await.insert(
-        username.to_string(),
-        crate::state::BotMonitor {
-            task_id: id,
+    {
+        let mut map = state.bot_monitors.write().await;
+        let list = map.entry(username.to_string()).or_default();
+        // 同一会话重复「监控」→ 覆盖旧的（刷新 webhook/起点），不叠加
+        list.retain(|m| m.task_id != id);
+        list.push(crate::state::BotMonitor {
+            task_id: id.clone(),
             webhook: ctx.webhook.clone(),
             expiry_ms: ctx.expiry_ms,
             last_ts,
-        },
-    );
-    "已开始监控该会话，有新内容会自动推到这里（约每 20s 检查一次）。发「停止监控」结束。\n\
-     注：受钉钉会话地址时效/条数限制，长时间监控可能中断，届时再发「监控 N」即可。"
-        .to_string()
+        });
+    }
+    let label = session_label(state, username, &id).await;
+    format!(
+        "已开始监控{label}，有新内容会自动推到这里（约每 20s，仅推对话内容、跳过执行过程）。\n\
+         可同时监控多个；发「停止监控 N」停某个、「停止监控」停全部。\n\
+         注：受钉钉会话地址时效/条数限制，长时间监控可能中断，届时再发「监控 N」即可。"
+    )
+}
+
+/// 把一个会话描述成「会话 N（标题）」，用于监控开始/停止的回执。
+async fn session_label(state: &SharedState, username: &str, task_id: &str) -> String {
+    let n = session_number(state, username, task_id).await;
+    let title = state
+        .tasks_for(username)
+        .await
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .map(|t| {
+            if !t.title.is_empty() {
+                t.title
+            } else if !t.prompt.is_empty() {
+                t.prompt
+            } else {
+                t.project_name
+            }
+        })
+        .unwrap_or_default();
+    let title: String = title.chars().take(20).collect();
+    match (n, title.is_empty()) {
+        (Some(n), false) => format!("会话 {n}（{title}）"),
+        (Some(n), true) => format!("会话 {n}"),
+        (None, false) => format!("会话「{title}」"),
+        (None, true) => "该会话".to_string(),
+    }
 }
 
 /// 「撤回 N」：撤回第 N 个会话最近一条排队中的任务。还在 hub 队列就直接出队；
@@ -339,12 +374,59 @@ async fn recall_last(state: &SharedState, username: &str, arg: &str) -> String {
     format!("已注入撤回 ↑（会话 {arg}）。Terminal.app 需在终端手动按 ↑。")
 }
 
-async fn monitor_stop(state: &SharedState, username: &str) -> String {
-    if state.bot_monitors.write().await.remove(username).is_some() {
-        "已停止监控。".to_string()
-    } else {
-        "当前没有在监控的会话。".to_string()
+/// 「停止监控 [N]」：带序号停某个会话；不带序号停该用户全部监控。
+async fn monitor_stop(state: &SharedState, username: &str, arg: &str) -> String {
+    // 不带序号 → 停全部
+    if arg.trim().is_empty() {
+        let n = state.bot_monitors.write().await.remove(username).map(|v| v.len()).unwrap_or(0);
+        return if n > 0 {
+            format!("已停止监控全部 {n} 个会话。")
+        } else {
+            "当前没有在监控的会话。".to_string()
+        };
     }
+    // 带序号 → 只停该会话
+    let id = match resolve_task(state, username, arg).await {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    let removed = remove_monitor(state, username, &id).await;
+    let label = session_label(state, username, &id).await;
+    if removed {
+        format!("已停止监控{label}。")
+    } else {
+        format!("{label}当前未在监控。")
+    }
+}
+
+/// 移除某用户对某会话的监控；用户名下监控清空则连键一起删。返回是否真的移除了一条。
+async fn remove_monitor(state: &SharedState, username: &str, task_id: &str) -> bool {
+    let mut map = state.bot_monitors.write().await;
+    let Some(list) = map.get_mut(username) else {
+        return false;
+    };
+    let before = list.len();
+    list.retain(|m| m.task_id != task_id);
+    let removed = list.len() != before;
+    if list.is_empty() {
+        map.remove(username);
+    }
+    removed
+}
+
+/// 推进某会话监控的增量游标（已推送到的最后时间戳）。
+async fn advance_monitor_ts(state: &SharedState, username: &str, task_id: &str, ts: &str) {
+    if let Some(list) = state.bot_monitors.write().await.get_mut(username) {
+        if let Some(m) = list.iter_mut().find(|m| m.task_id == task_id) {
+            m.last_ts = ts.to_string();
+        }
+    }
+}
+
+/// 监控推送只保留「对话内容」：用户提示、助手回复、方案、待选择；过滤掉执行过程
+/// （工具调用/结果、todos、后台任务）——用户要的是对话，不是一屏工具执行流水。
+fn is_monitor_content(role: &str) -> bool {
+    matches!(role, "user" | "assistant" | "plan" | "select")
 }
 
 fn split_cmd(text: &str) -> (String, String) {
@@ -363,8 +445,8 @@ fn help_text() -> String {
      • 发 N 内容 —— 向第 N 个会话发布一条输入（排队则回队列，执行后主动通知）\n\
      • 排队 [N] —— 查看排队中的任务（不带 N 汇总所有会话）\n\
      • 撤回 N —— 撤回第 N 个会话最近一条排队中的任务\n\
-     • 监控 N —— 持续把第 N 个会话的新内容推到这里\n\
-     • 停止监控 —— 结束监控\n\
+     • 监控 N —— 持续把第 N 个会话的对话内容推到这里（可同时监控多个，跳过执行过程）\n\
+     • 停止监控 [N] —— 停某个会话的监控；不带序号停全部\n\
      • 绑定 / 解绑 —— 设为/取消「任务完成·会话结束」主动私聊推送的接收人\n\
      • 帮助 —— 显示本说明\n\
      速记：@N 后接内容或任意会话指令 —— @2 重启服务 / @2 暂停 / @2 排队 / @2 撤回\n\
@@ -380,16 +462,17 @@ pub async fn monitor_loop(state: SharedState) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(20)).await;
         let now = crate::state::now_secs() * 1000;
+        // 拍平成 (user, 单个监控) —— 每用户可监控多个会话
         let monitors: Vec<(String, crate::state::BotMonitor)> = state
             .bot_monitors
             .read()
             .await
             .iter()
-            .map(|(u, m)| (u.clone(), m.clone()))
+            .flat_map(|(u, ms)| ms.iter().map(|m| (u.clone(), m.clone())).collect::<Vec<_>>())
             .collect();
         for (user, mon) in monitors {
             if mon.expiry_ms > 0 && now >= mon.expiry_ms {
-                state.bot_monitors.write().await.remove(&user);
+                remove_monitor(&state, &user, &mon.task_id).await;
                 let _ = push_webhook(
                     &mon.webhook,
                     "监控已到期（钉钉会话地址时效结束）。如需继续，请再发「监控 N」。",
@@ -398,23 +481,29 @@ pub async fn monitor_loop(state: SharedState) {
                 continue;
             }
             let msgs = state.bot_task_messages(&mon.task_id).await;
-            let fresh: Vec<&am_core::model::MessageBrief> = msgs
+            let all_new: Vec<&am_core::model::MessageBrief> = msgs
                 .iter()
                 .filter(|m| m.timestamp.as_str() > mon.last_ts.as_str())
                 .collect();
-            if fresh.is_empty() {
+            if all_new.is_empty() {
                 continue;
             }
-            let text = render_monitor_push(&fresh);
+            // 游标推进到「本轮见到的最后一条」，含被过滤的执行过程 —— 否则下轮反复重扫
+            let new_last = all_new.last().map(|x| x.timestamp.clone()).unwrap_or_default();
+            // 只推对话内容，跳过执行过程（工具/todos/后台任务）
+            let content: Vec<&am_core::model::MessageBrief> =
+                all_new.iter().copied().filter(|m| is_monitor_content(&m.role)).collect();
+            if content.is_empty() {
+                // 本轮全是执行过程：不推送，但推进游标
+                advance_monitor_ts(&state, &user, &mon.task_id, &new_last).await;
+                continue;
+            }
+            let text = render_monitor_push(&content);
             match push_webhook(&mon.webhook, &text).await {
-                Ok(true) => {
-                    if let Some(m) = state.bot_monitors.write().await.get_mut(&user) {
-                        m.last_ts = fresh.last().map(|x| x.timestamp.clone()).unwrap_or_default();
-                    }
-                }
-                // 钉钉返回错误（多为会话地址限流/过期）：停掉监控，避免空转刷错误
+                Ok(true) => advance_monitor_ts(&state, &user, &mon.task_id, &new_last).await,
+                // 钉钉返回错误（多为会话地址限流/过期）：停掉该会话监控，避免空转刷错误
                 Ok(false) => {
-                    state.bot_monitors.write().await.remove(&user);
+                    remove_monitor(&state, &user, &mon.task_id).await;
                 }
                 Err(_) => { /* 网络抖动：留着下轮重试 */ }
             }

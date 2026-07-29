@@ -259,7 +259,8 @@ pub struct AppState {
     /// 让「暂停 3」这类按序号操作能对上会话。
     pub bot_last_list: RwLock<HashMap<String, Vec<String>>>,
     /// 机器人「监控中」的会话：用户名 → 监控态。后台循环据此把新内容推到钉钉会话 webhook。
-    pub bot_monitors: RwLock<HashMap<String, BotMonitor>>,
+    /// 钉钉「监控」：user → 其监控中的多个会话（每会话一份）。支持同时监控多个、单独停止。
+    pub bot_monitors: RwLock<HashMap<String, Vec<BotMonitor>>>,
     /// 钉钉「挂起待发」的文件：用户名 → 待随下一条任务一起发的文件。
     /// 用户先发文件（或图文一起发图片）→ 暂存于此 → 下一条发任务的指令把它落到会话 tmp 目录、
     /// 并把相对路径回填到任务文字开头。
