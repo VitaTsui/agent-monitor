@@ -222,9 +222,13 @@ class PortalStore {
     const groups = [...byProject.values()];
     const taskKey = (t: PortalTaskData) =>
       t.title || t.prompt || t.projectName || t.id || "";
+    // 有真实内容（标题/提示词）= 真正在用的会话，排在「刚开还没输入的空占位」前
+    const hasContent = (t: PortalTaskData) => !!(t.title || t.prompt);
     groups.sort((a, b) => a.title.localeCompare(b.title, "zh"));
     for (const g of groups) {
       g.tasks.sort((a, b) => {
+        const hc = Number(hasContent(b)) - Number(hasContent(a));
+        if (hc !== 0) return hc; // 有内容的在前
         const c = taskKey(a).localeCompare(taskKey(b), "zh");
         return c !== 0 ? c : (a.id ?? "").localeCompare(b.id ?? "");
       });

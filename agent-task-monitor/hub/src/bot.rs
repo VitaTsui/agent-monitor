@@ -473,16 +473,19 @@ pub(crate) async fn session_number(
         .map(|i| i + 1)
 }
 
-/// 活跃会话按「设备名 → 终端 → 项目 → 会话标题 → id」**稳定**排序。「会话」列表顺序、以及
-/// 「发 N / 暂停 N …」的序号都以它为准 —— 两处共用同一份排序，序号才不会对不上。
+/// 活跃会话按「设备名 → 终端 → 项目 → 有内容优先 → 会话标题 → id」**稳定**排序。「会话」
+/// 列表顺序、以及「发 N / 暂停 N …」的序号都以它为准 —— 两处共用同一份排序，序号才不会对不上。
 ///
-/// 排序键刻意全用「不随运行时变化」的字段：不再按状态排（Running 优先）——否则会话一
-/// Running↔Idle 切换，序号就整体重排，「发 N」指向的会话跟着变，用户容易发错。标题+id
-/// 兜底保证同项目内也定序。与网页会话列表的「项目→标题」稳定字母序对齐，两端序号一致。
+/// 排序键刻意全用「不随运行时变化」的字段：不按状态排（Running 优先）——否则会话一
+/// Running↔Idle 切换序号就整体重排、「发 N」指向的会话跟着变。**有内容优先**：有真实标题/
+/// 提示词的会话排在「刚开还没输入的空占位（标题退化成终端名 Claude Code）」前面，免得空会话
+/// 顶在前面、真正在用的会话垫底。has_content 只在会话「首次有内容」时翻一次，仍足够稳定。
 async fn sorted_active_tasks(state: &SharedState, username: &str) -> Vec<am_core::model::Task> {
     let mut tasks = state.tasks_for(username).await;
     // 已结束的会话不列出——机器人只关心还能操作的活跃会话
     tasks.retain(|t| t.status != TaskStatus::Finished);
+    // 有真实内容（标题或提示词非空）= 真正在用的会话，排在空占位前
+    let has_content = |t: &am_core::model::Task| !t.title.is_empty() || !t.prompt.is_empty();
     // 会话标题：与网页 taskKey 同源（标题→提示词→终端名），空则退终端名
     let title_key = |t: &am_core::model::Task| -> String {
         if !t.title.is_empty() {
@@ -498,6 +501,8 @@ async fn sorted_active_tasks(state: &SharedState, username: &str) -> Vec<am_core
             .cmp(&b.hostname)
             .then(a.provider_dsr.cmp(&b.provider_dsr))
             .then(a.project_name.cmp(&b.project_name))
+            // 有内容的在前：true 排前，故比较 b vs a
+            .then(has_content(b).cmp(&has_content(a)))
             .then(title_key(a).cmp(&title_key(b)))
             .then(a.id.cmp(&b.id))
     });
