@@ -207,20 +207,12 @@ pub async fn admin_gate(
     state: &SharedState,
     headers: &axum::http::HeaderMap,
 ) -> Result<String, Json<Value>> {
+    // 后管准入 = 已登录 + 是超级管理员即可（不再要求部署令牌 X-Admin-Token）。
     let Some(username) = auth_user(state, headers).await else {
         return Err(err(401, "未登录"));
     };
     if !state.registry.read().await.is_super_user(&username) {
         return Err(err(403, "后管仅限管理员使用"));
-    }
-    let token = headers
-        .get("x-admin-token")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if !crate::state::token_eq(token, &state.config.admin_token) {
-        // 失败延迟，减缓对任意 /sys/* 接口的令牌爆破
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        return Err(err(4031, "后管访问令牌无效"));
     }
     Ok(username)
 }
