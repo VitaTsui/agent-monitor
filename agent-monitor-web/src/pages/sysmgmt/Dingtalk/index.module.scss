@@ -1,9 +1,15 @@
+// DefaultPanel 本身不加内边距（内层 .content 白卡已自带 10px），避免多套一层 padding。
 .Dingtalk {
-  padding: 16px 20px;
+}
+
+// 内容白卡：三段配置超高时在卡内滚动（min-height:0 让 flex:1 的它能收缩出滚动区）。
+.content {
+  min-height: 0;
+  overflow-y: auto;
 
   .section {
     max-width: 640px;
-    margin-bottom: 28px;
+    margin-bottom: 24px;
 
     .sectionTitle {
       font-size: 15px;

@@ -157,7 +157,7 @@ const Dingtalk: React.FC = () => {
   };
 
   return (
-    <Panel.Default className={styles.Dingtalk}>
+    <Panel.Default className={styles.Dingtalk} contentClassName={styles.content}>
       {/* 钉钉企业应用 */}
       <div className={styles.section}>
         <div className={styles.sectionTitle}>钉钉企业应用（双向 · 全局机器人）</div>
