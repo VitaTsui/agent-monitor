@@ -64,6 +64,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/sys/wecom/app", get(admin::wecom_app_admin_get))
         .route("/sys/wecom/app", post(admin::wecom_app_admin_set))
         // ---- 任务监控 API（前台公开使用）----
+        .route("/monitor/me", get(me_info))
         .route("/monitor/tasks", get(list_tasks))
         .route("/monitor/tasks/page", get(page_tasks))
         .route("/monitor/tasks/detail/:id", get(task_detail))
@@ -433,6 +434,24 @@ fn status_key(s: TaskStatus) -> &'static str {
 }
 
 /// GET /monitor/tasks —— 前台会话列表（登录用户可见 + 只显示活跃会话）
+/// GET /monitor/me —— 当前登录用户信息（含实时 isSuper）。前端每次加载调一次刷新本地缓存，
+/// 让「改了权限（如设成超级管理员）」无需重新登录即可生效。
+async fn me_info(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
+    let Some(username) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let reg = state.registry.read().await;
+    let is_super = reg.is_super_user(&username);
+    let (id, nickname) = reg
+        .user_by_name(&username)
+        .map(|u| {
+            let nick = if u.display.is_empty() { u.username.clone() } else { u.display.clone() };
+            (u.id.clone(), nick)
+        })
+        .unwrap_or_default();
+    ok(json!({ "id": id, "username": username, "nickname": nickname, "isSuper": is_super }))
+}
+
 async fn list_tasks(
     State(state): State<SharedState>,
     headers: HeaderMap,

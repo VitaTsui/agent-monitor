@@ -5,7 +5,7 @@ import { Badge, ConfigProvider, Popover, Tooltip } from "antd";
 import { useNativeBack } from "./_hooks/useNativeBack";
 import { useApkUpdateCheck } from "./_hooks/useApkUpdateCheck";
 import { useClientUpdateToast } from "./_hooks/useClientUpdateToast";
-import { claimPairDevice, bindDingtalkId } from "@/services/apis/portal";
+import { claimPairDevice, bindDingtalkId, getMe } from "@/services/apis/portal";
 import { consumeDtbindToken } from "@/utils/dtbind";
 import { message as antdMessage } from "antd";
 import {
@@ -28,7 +28,7 @@ import {
 } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
-import { getAccessToken, getUserInfo, removeToken } from "@/utils/auth";
+import { getAccessToken, getUserInfo, removeToken, setUserInfo } from "@/utils/auth";
 import { clientSilentLogin, inDesktopClient, localMachineId } from "@/utils/clientAuth";
 import PortalStore from "./PortalStore";
 import { ShareReceiveModal } from "./_hooks/useShareReceive";
@@ -165,6 +165,16 @@ const Portal: React.FC = observer(() => {
     }
     init();
 
+    // 刷新当前用户信息（含实时 isSuper）：改了权限无需重新登录，下次加载即生效
+    getMe()
+      .then((res) => {
+        if (res.code === 0 && res.data) {
+          setUserInfo(res.data);
+          setUser(res.data);
+        }
+      })
+      .catch(() => void 0);
+
     // 钉钉绑定：登录后凭 ?dtbind= 暂存的一次性 token，把发起绑定的钉钉号绑到当前账号
     const dtToken = consumeDtbindToken();
     if (dtToken) {
@@ -253,11 +263,13 @@ const Portal: React.FC = observer(() => {
   }
 
   const paneCount = openTasks.length;
-  const user = (getUserInfo() as {
+  // 用 state 承载用户信息：每次加载调 /monitor/me 刷新（含实时 isSuper），
+  // 这样管理员改了别人的权限，对方不必重新登录、下次加载即生效。
+  const [user, setUser] = useState<{
     nickname?: string;
     username?: string;
     isSuper?: boolean;
-  }) ?? {};
+  }>(() => (getUserInfo() as { nickname?: string; username?: string; isSuper?: boolean }) ?? {});
   const nickname = user.nickname ?? user.username ?? "";
 
   const openSettings = (tab: SettingsTab) => {

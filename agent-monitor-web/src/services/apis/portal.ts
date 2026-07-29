@@ -68,6 +68,17 @@ export type PortalTaskData = Partial<IPortalTaskData>;
 
 export type PortalControlAction = "pause" | "resume" | "interrupt" | "stop" | "kill";
 
+/** 当前登录用户信息（含实时 isSuper）；前端每次加载调一次刷新本地缓存，改权限无需重登 */
+export interface MeInfo {
+  id: string;
+  username: string;
+  nickname: string;
+  isSuper: boolean;
+}
+export const getMe = async () => {
+  return await get<MeInfo>("/monitor/me");
+};
+
 // 会话列表（平铺参数过滤）
 export const getPortalTaskList = async (params?: {
   status?: string;
