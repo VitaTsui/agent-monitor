@@ -11,6 +11,17 @@ interface TauriBridge {
 export const inDesktopClient = (): boolean =>
   !!(window as unknown as { __TAURI__?: TauriBridge }).__TAURI__?.core?.invoke;
 
+/** 是否运行在移动端原生壳（Capacitor）里；浏览器里无 Capacitor 桥 */
+export const inMobileApp = (): boolean =>
+  !!(
+    window as unknown as {
+      Capacitor?: { isNativePlatform?: () => boolean };
+    }
+  ).Capacitor?.isNativePlatform?.();
+
+/** 是否在原生壳（桌面客户端 或 移动端 App）内——用于隐藏只在浏览器里可用的入口（如后台管理） */
+export const inNativeShell = (): boolean => inDesktopClient() || inMobileApp();
+
 interface ClientCred {
   machineId?: string;
   deviceToken?: string;

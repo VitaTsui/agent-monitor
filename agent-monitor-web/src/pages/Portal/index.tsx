@@ -29,7 +29,12 @@ import {
 import { observer } from "mobx-react-lite";
 
 import { getAccessToken, getUserInfo, removeToken, setUserInfo } from "@/utils/auth";
-import { clientSilentLogin, inDesktopClient, localMachineId } from "@/utils/clientAuth";
+import {
+  clientSilentLogin,
+  inDesktopClient,
+  inNativeShell,
+  localMachineId,
+} from "@/utils/clientAuth";
 import PortalStore from "./PortalStore";
 import { ShareReceiveModal } from "./_hooks/useShareReceive";
 import GitDiffModal from "./_components/GitDiffModal";
@@ -306,7 +311,8 @@ const Portal: React.FC = observer(() => {
         <SafetyOutlined />
         <span>安全防护</span>
       </div>
-      {user.isSuper ? (
+      {/* 后台管理只在浏览器里显示：客户端 / 移动端原生壳内隐藏（那里开新标签打不开后管） */}
+      {user.isSuper && !inNativeShell() ? (
         <div
           className={styles.userMenuItem}
           onClick={() => {
