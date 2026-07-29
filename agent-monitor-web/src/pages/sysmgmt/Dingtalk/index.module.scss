@@ -10,10 +10,9 @@
   background: transparent;
   border: none;
 
-  // 每个机器人一张卡片
+  // 每个机器人一张卡片：流式铺满容器宽度，左对齐不居中
   .section {
-    max-width: 720px;
-    margin: 0 auto 14px;
+    margin: 0 0 14px;
     padding: 18px 20px;
     background: var(--cf-surface, #fff);
     border: 1px solid var(--cf-border, rgba(0, 0, 0, 0.08));
