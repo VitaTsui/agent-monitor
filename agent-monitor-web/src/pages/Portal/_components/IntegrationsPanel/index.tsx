@@ -15,12 +15,13 @@ import { Button, Input, Modal, Switch } from "@hsu-react/ui";
 import {
   IntegrationsInfo,
   getIntegrations,
+  getDingtalkIds,
   getTaskDirs,
-  setDingtalkApp,
   setDingtalkRecvDir,
   setDingtalkRobot,
   setWecomApp,
   testDingtalkRobot,
+  unbindDingtalkId,
 } from "@/services/apis/portal";
 import styles from "./index.module.scss";
 
@@ -45,7 +46,7 @@ const CopyBtn: React.FC<{ text: string }> = ({ text }) => {
   );
 };
 
-type Editing = "robot" | "wecom" | "ding" | null;
+type Editing = "robot" | "wecom" | null;
 
 /**
  * 机器人接入：外层三个精简卡片，点击卡片打开对应弹窗配置。
@@ -69,15 +70,16 @@ const IntegrationsPanel: React.FC = () => {
   const [wecom, setWecom] = useState({ corpId: "", token: "", aesKey: "", hasAesKey: false });
   const [wecomUrl, setWecomUrl] = useState("");
   const [wecomSaving, setWecomSaving] = useState(false);
-  // 钉钉企业应用
-  const [ding, setDing] = useState({
-    appSecret: "",
-    hasSecret: false,
-    appKey: "",
-    stream: false,
-  });
-  const [dingUrl, setDingUrl] = useState("");
-  const [dingSaving, setDingSaving] = useState(false);
+  // 已绑定的钉钉 id（钉钉企业应用改由后管统一配置；用户端只查看/解绑自己绑的号）
+  const [boundIds, setBoundIds] = useState<string[]>([]);
+
+  const loadBoundIds = useCallback(() => {
+    getDingtalkIds()
+      .then((res) => {
+        if (res.code === 0) setBoundIds((res.data?.list ?? []).map((x) => x.staffId));
+      })
+      .catch(() => void 0);
+  }, []);
 
   // 机器人文件接收目录（通用）：按设备分组的项目
   type RecvProj = { cwd: string; name: string; dir: string; taskId?: string | null };
@@ -174,15 +176,6 @@ const IntegrationsPanel: React.FC = () => {
           });
           setWecomUrl(d.wecomApp.callbackUrl);
         }
-        if (d.dingtalkApp) {
-          setDing({
-            appSecret: "",
-            hasSecret: d.dingtalkApp.hasSecret,
-            appKey: d.dingtalkApp.appKey ?? "",
-            stream: !!d.dingtalkApp.stream,
-          });
-          setDingUrl(d.dingtalkApp.callbackUrl);
-        }
         const devs = (d.recvDirDevices ?? []).map((dev) => ({
           machineId: dev.machineId,
           hostname: dev.hostname,
@@ -204,6 +197,7 @@ const IntegrationsPanel: React.FC = () => {
       .catch(() => void 0);
   }, []);
   useEffect(() => load(), [load]);
+  useEffect(() => loadBoundIds(), [loadBoundIds]);
 
   const saveRobot = (thenTest?: boolean) => {
     if (!robot.webhook.trim()) {
@@ -258,30 +252,14 @@ const IntegrationsPanel: React.FC = () => {
       .finally(() => setWecomSaving(false));
   };
 
-  const saveDing = () => {
-    if (!ding.appSecret.trim() && !ding.hasSecret) {
-      message.warning("请填写钉钉应用的 AppSecret");
-      return;
-    }
-    const useStream = !!ding.appKey.trim();
-    setDingSaving(true);
-    setDingtalkApp({
-      appSecret: ding.appSecret.trim() || undefined,
-      // AppKey 是可见字段，始终以当前输入为准（清空即切回 HTTP 回调模式）
-      appKey: ding.appKey.trim(),
-    })
+  const removeBound = (staffId: string) => {
+    unbindDingtalkId(staffId)
       .then((res) => {
-        if (res.code !== 0) return message.error(res.msg ?? "保存失败");
-        message.success(
-          useStream
-            ? "已保存并启用 Stream 长连接，无需公网回调地址，去钉钉里 @机器人 试试"
-            : "已保存，把下方回调地址填进钉钉应用的消息接收",
-        );
-        setDing((d) => ({ ...d, appSecret: "", hasSecret: true, stream: useStream }));
-        if (res.data?.callbackUrl) setDingUrl(res.data.callbackUrl);
+        if (res.code !== 0) return message.error(res.msg ?? "解绑失败");
+        message.success("已解绑");
+        setBoundIds((ids) => ids.filter((x) => x !== staffId));
       })
-      .catch(() => message.error("保存失败，请检查网络"))
-      .finally(() => setDingSaving(false));
+      .catch(() => message.error("解绑失败，请检查网络"));
   };
 
   const cards: {
@@ -303,16 +281,6 @@ const IntegrationsPanel: React.FC = () => {
       typeCls: styles.push,
       sub: "会话状态变化时主动推到你的钉钉群",
       on: !!robot.webhook,
-    },
-    {
-      key: "ding",
-      icon: <DingtalkOutlined />,
-      iconCls: styles.ding,
-      title: "钉钉企业应用",
-      type: "双向遥控",
-      typeCls: styles.two,
-      sub: "在钉钉里 @机器人 发指令遥控会话",
-      on: !!dingUrl,
     },
     {
       key: "wecom",
@@ -359,7 +327,40 @@ const IntegrationsPanel: React.FC = () => {
     <div className={styles.IntegrationsPanel}>
       {/* 钉钉 */}
       <div className={styles.groupTitle}>钉钉</div>
-      {cards.filter((c) => c.key === "robot" || c.key === "ding").map(renderCard)}
+      {cards.filter((c) => c.key === "robot").map(renderCard)}
+
+      {/* 已绑定的钉钉：企业应用由管理员统一配置，用户经机器人回的登录链接绑定自己的钉钉号 */}
+      <div className={styles.boundCard}>
+        <div className={styles.boundHead}>
+          <span className={`${styles.icon} ${styles.ding}`}>
+            <DingtalkOutlined />
+          </span>
+          <div className={styles.headText}>
+            <div className={styles.headTitle}>已绑定的钉钉</div>
+            <div className={styles.headSub}>
+              给企业应用机器人发消息 → 按回复的登录链接绑定本账号，之后任务通知私聊推给你、也能发指令遥控会话
+            </div>
+          </div>
+        </div>
+        {boundIds.length === 0 ? (
+          <div className={styles.boundEmpty}>
+            还没绑定钉钉。去钉钉里给机器人发条消息，按回复的链接登录即可绑定。
+          </div>
+        ) : (
+          <div className={styles.boundList}>
+            {boundIds.map((id) => (
+              <div key={id} className={styles.boundRow}>
+                <span className={styles.boundId} title={id}>
+                  {id}
+                </span>
+                <Button size="small" onClick={() => removeBound(id)}>
+                  解绑
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* 企业微信 */}
       <div className={styles.groupTitle}>企业微信</div>
@@ -634,58 +635,6 @@ const IntegrationsPanel: React.FC = () => {
           <div className={styles.actions}>
             <Button type="primary" className={styles.actBtn} loading={wecomSaving} onClick={saveWecom}>
               保存并生成回调地址
-            </Button>
-          </div>
-        </div>
-      </Modal>
-
-      {/* 钉钉企业应用 */}
-      <Modal
-        title="钉钉企业应用 · 双向遥控"
-        open={editing === "ding"}
-        onCancel={() => setEditing(null)}
-        footer={null}
-        width={540}
-        centered
-      >
-        <div className={styles.form}>
-          <div className={styles.desc}>
-            钉钉开放平台建企业内部应用机器人。<b>推荐 Stream 模式</b>：填 AppKey + AppSecret，
-            服务端主动连钉钉收消息，<b>无需公网回调地址</b>（海外服务器也能用，绕开「消息接收
-            地址校验失败」）。若留空 AppKey，则回退 HTTP 回调模式，需把下方回调地址填进「消息
-            接收模式 · HTTP」。
-          </div>
-          <div className={styles.field}>
-            <label className={styles.label}>AppKey / ClientID（Stream 模式）</label>
-            <Input
-              placeholder="填了走 Stream 长连接；留空则用下方 HTTP 回调地址"
-              value={ding.appKey}
-              onChange={(v) => setDing((d) => ({ ...d, appKey: v }))}
-            />
-          </div>
-          <div className={styles.field}>
-            <label className={styles.label}>AppSecret</label>
-            <Input
-              placeholder={ding.hasSecret ? "已设置，留空不改" : "钉钉企业内部应用的 AppSecret"}
-              value={ding.appSecret}
-              onChange={(v) => setDing((d) => ({ ...d, appSecret: v }))}
-            />
-          </div>
-          {ding.appKey.trim() ? (
-            <div className={styles.desc}>
-              ✅ Stream 模式：保存后服务端会自动建立长连接，钉钉里 @机器人 发指令即可，
-              回调地址可忽略。
-            </div>
-          ) : dingUrl ? (
-            <div className={styles.urlRow}>
-              <span className={styles.urlLabel}>回调地址</span>
-              <span className={styles.urlValue}>{dingUrl}</span>
-              <CopyBtn text={dingUrl} />
-            </div>
-          ) : null}
-          <div className={styles.actions}>
-            <Button type="primary" className={styles.actBtn} loading={dingSaving} onClick={saveDing}>
-              {ding.appKey.trim() ? "保存并启用 Stream" : "保存并生成回调地址"}
             </Button>
           </div>
         </div>

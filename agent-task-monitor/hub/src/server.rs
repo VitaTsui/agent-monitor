@@ -56,6 +56,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/sys/version/minimum", post(admin::version_set_minimum))
         .route("/sys/version/changelog", post(admin::changelog_add))
         .route("/sys/version/changelog/del", post(admin::changelog_del))
+        .route("/sys/dingtalk/app", get(admin::dingtalk_app_admin_get))
+        .route("/sys/dingtalk/app", post(admin::dingtalk_app_admin_set))
         // ---- 任务监控 API（前台公开使用）----
         .route("/monitor/tasks", get(list_tasks))
         .route("/monitor/tasks/page", get(page_tasks))
@@ -92,7 +94,6 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/integrations/dingtalk-robot", post(set_dingtalk_robot))
         .route("/monitor/integrations/dingtalk-robot/test", post(test_dingtalk_robot))
         .route("/monitor/integrations/wecom-app", post(set_wecom_app))
-        .route("/monitor/integrations/dingtalk-app", post(set_dingtalk_app))
         .route("/monitor/integrations/dingtalk-recv-dir", post(set_dingtalk_recv_dir))
         .route("/monitor/integrations/dingtalk-bind", post(dingtalk_bind))
         .route("/monitor/integrations/dingtalk-ids", get(dingtalk_ids_get))
@@ -1331,7 +1332,8 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
     let base = public_base();
     let robot = reg.dingtalk_of(&user);
     let wecom = reg.wecom_app_of(&user);
-    let dt_app = reg.dingtalk_app_of(&user);
+    // 钉钉企业应用改由后管统一配置（/sys/dingtalk/app），用户端不再返回也不可配置；
+    // 用户只需经机器人回的登录链接绑定自己的钉钉 id（见 /monitor/integrations/dingtalk-ids）。
     ok(json!({
         "recvDirDevices": recv_dir_devices,
         "dingtalkRobot": robot.map(|c| json!({
@@ -1342,12 +1344,6 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
         "wecomApp": wecom.map(|a| json!({
             "corpId": a.corp_id, "token": a.token, "hasAesKey": !a.aes_key.is_empty(),
             "callbackUrl": format!("{base}/monitor/int/wecom/{}", a.channel),
-        })),
-        "dingtalkApp": dt_app.map(|a| json!({
-            "hasSecret": !a.app_secret.is_empty(),
-            "appKey": a.app_key,
-            "stream": !a.app_key.is_empty(),
-            "callbackUrl": format!("{base}/monitor/int/dingtalk/{}", a.channel),
         })),
     }))
 }
@@ -1554,43 +1550,7 @@ async fn set_wecom_app(
     }
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DingtalkAppReq {
-    #[serde(default)]
-    app_secret: String,
-    /// Stream 模式的 AppKey/ClientID（填了才走长连接）；空字符串=清空回 HTTP 回调模式
-    #[serde(default)]
-    app_key: String,
-}
-
-/// POST /monitor/integrations/dingtalk-app —— 保存钉钉企业应用配置。填了 appKey 则走
-/// Stream 长连接（无需公网回调地址）；否则仍是 HTTP 回调模式，返回回调地址。
-async fn set_dingtalk_app(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-    Json(req): Json<DingtalkAppReq>,
-) -> Json<Value> {
-    let Some(user) = auth_user(&state, &headers).await else {
-        return err(401, "未登录");
-    };
-    let existing = state.registry.read().await.dingtalk_app_of(&user);
-    // 密钥留空=沿用已存的（前端不回显密钥）；AppKey 是可见字段，直接以请求为准
-    let secret = if req.app_secret.trim().is_empty() {
-        existing.as_ref().map(|a| a.app_secret.clone()).unwrap_or_default()
-    } else {
-        req.app_secret.trim().to_string()
-    };
-    let app_key = req.app_key.trim().to_string();
-    let channel = state.registry.write().await.set_dingtalk_app(&user, &secret, &app_key);
-    match channel {
-        Some(ch) => ok(json!({
-            "callbackUrl": format!("{}/monitor/int/dingtalk/{ch}", public_base()),
-            "stream": !app_key.is_empty(),
-        })),
-        None => ok(json!({ "callbackUrl": null, "stream": false })),
-    }
-}
+// 钉钉企业应用配置已迁到后管（admin::dingtalk_app_admin_set，/sys/dingtalk/app），此处不再有用户端入口。
 
 // ---------- 协助共享 ----------
 

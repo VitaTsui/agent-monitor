@@ -285,6 +285,8 @@ impl Registry {
         if migrated {
             reg.save();
         }
+        // 归一钉钉企业应用到 super_user（后管统一管理）
+        reg.migrate_dingtalk_app_to_super();
         reg
     }
 
@@ -449,6 +451,54 @@ impl Registry {
 
     /// 保存钉钉企业应用配置；app_secret 为空则删除。app_key 填了则走 Stream 长连接。
     /// 返回回调 channel（HTTP 回调模式用；Stream 模式用不到但保留兼容）。
+    /// 全局（后管管理员配置的）钉钉企业应用 —— 存在 super_user 名下，全体用户共用这一个。
+    pub fn global_dingtalk_app(&self) -> Option<DingtalkApp> {
+        self.dingtalk_apps.get(&self.super_user).cloned()
+    }
+
+    /// 后管设置全局钉钉企业应用（存到 super_user 名下）。
+    pub fn set_global_dingtalk_app(&mut self, app_secret: &str, app_key: &str) -> Option<String> {
+        let su = self.super_user.clone();
+        self.set_dingtalk_app(&su, app_secret, app_key)
+    }
+
+    /// 归一：把「当前配置的钉钉企业应用」迁到 super_user 名下（后管统一管理），并把所有钉钉
+    /// id 绑定的 app_user 指向 super_user（全体共用这一个应用）。启动时跑一次，幂等。
+    fn migrate_dingtalk_app_to_super(&mut self) {
+        let su = self.super_user.clone();
+        let mut dirty = false;
+        // super 名下没有应用，但别人配过 → 迁过来
+        if !self.dingtalk_apps.contains_key(&su) {
+            if let Some(key) = self
+                .dingtalk_apps
+                .iter()
+                .find(|(_, a)| !a.app_key.is_empty() || !a.app_secret.is_empty())
+                .map(|(k, _)| k.clone())
+            {
+                if let Some(app) = self.dingtalk_apps.remove(&key) {
+                    self.dingtalk_apps.insert(su.clone(), app);
+                    dirty = true;
+                }
+            }
+        }
+        // 只保留 super 名下这一个应用（其余是历史 per-user 配置，归一后删掉）
+        let before = self.dingtalk_apps.len();
+        self.dingtalk_apps.retain(|k, _| k == &su);
+        if self.dingtalk_apps.len() != before {
+            dirty = true;
+        }
+        // 所有绑定都指向 super 的应用（现在只有一个）
+        for b in self.dingtalk_ids.values_mut() {
+            if b.app_user != su {
+                b.app_user = su.clone();
+                dirty = true;
+            }
+        }
+        if dirty {
+            self.save();
+        }
+    }
+
     pub fn set_dingtalk_app(&mut self, user: &str, app_secret: &str, app_key: &str) -> Option<String> {
         if app_secret.trim().is_empty() {
             self.dingtalk_apps.remove(user);

@@ -266,6 +266,11 @@ pub async fn menus(State(state): State<SharedState>, headers: axum::http::Header
             "id": "2", "nm": "版本管理", "pid": null, "seq": 2, "level": 1, "children": null,
             "path": "sysmgmt/version", "url": "sysmgmt/Version/index", "perm": "sysmgmt:version:list",
             "icon": "carbon:upgrade", "status": null
+        },
+        {
+            "id": "3", "nm": "机器人接入", "pid": null, "seq": 3, "level": 1, "children": null,
+            "path": "sysmgmt/dingtalk", "url": "sysmgmt/Dingtalk/index", "perm": "sysmgmt:dingtalk:list",
+            "icon": "carbon:bot", "status": null
         }
     ]);
     ok(json!({ "topMenuList": [], "menuList": menu_list, "topId": null, "topList": null }))
@@ -287,7 +292,9 @@ pub async fn permissions(
             "permit:user:resetPwd",
             "permit:user:del",
             "sysmgmt:version:list",
-            "sysmgmt:version:upd"
+            "sysmgmt:version:upd",
+            "sysmgmt:dingtalk:list",
+            "sysmgmt:dingtalk:upd"
         ]
     }))
 }
@@ -525,6 +532,64 @@ pub async fn version_admin_info(
         "androidMin": pick("/android/minVersion"),
         "changelog": read_changelog(&state),
     }))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DingtalkAppAdminReq {
+    #[serde(default)]
+    pub app_secret: String,
+    #[serde(default)]
+    pub app_key: String,
+}
+
+/// GET /sys/dingtalk/app —— 后管查看全局钉钉企业应用配置（密钥不回显；全体用户共用这一个）
+pub async fn dingtalk_app_admin_get(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+) -> Json<Value> {
+    if let Err(e) = admin_gate(&state, &headers).await {
+        return e;
+    }
+    let app = state.registry.read().await.global_dingtalk_app();
+    let base = crate::server::public_base();
+    ok(json!({
+        "hasSecret": app.as_ref().map(|a| !a.app_secret.is_empty()).unwrap_or(false),
+        "appKey": app.as_ref().map(|a| a.app_key.clone()).unwrap_or_default(),
+        "stream": app.as_ref().map(|a| !a.app_key.is_empty()).unwrap_or(false),
+        "callbackUrl": app
+            .as_ref()
+            .filter(|a| !a.channel.is_empty())
+            .map(|a| format!("{base}/monitor/int/dingtalk/{}", a.channel)),
+    }))
+}
+
+/// POST /sys/dingtalk/app —— 后管设置全局钉钉企业应用。填 appKey 走 Stream（免公网回调），
+/// 否则 HTTP 回调模式返回回调地址。密钥留空=沿用已存的（不回显）。
+pub async fn dingtalk_app_admin_set(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<DingtalkAppAdminReq>,
+) -> Json<Value> {
+    if let Err(e) = admin_gate(&state, &headers).await {
+        return e;
+    }
+    let existing = state.registry.read().await.global_dingtalk_app();
+    let secret = if req.app_secret.trim().is_empty() {
+        existing.as_ref().map(|a| a.app_secret.clone()).unwrap_or_default()
+    } else {
+        req.app_secret.trim().to_string()
+    };
+    let app_key = req.app_key.trim().to_string();
+    let channel = state.registry.write().await.set_global_dingtalk_app(&secret, &app_key);
+    let base = crate::server::public_base();
+    match channel {
+        Some(ch) => ok(json!({
+            "callbackUrl": format!("{base}/monitor/int/dingtalk/{ch}"),
+            "stream": !app_key.is_empty(),
+        })),
+        None => ok(json!({ "callbackUrl": null, "stream": false })),
+    }
 }
 
 #[derive(Deserialize)]
