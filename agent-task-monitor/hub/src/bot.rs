@@ -92,7 +92,7 @@ pub async fn dingtalk_message(
     headers: HeaderMap,
     body: String,
 ) -> Json<Value> {
-    let Some((owner, app)) = state.registry.read().await.dingtalk_app_by_channel(&channel) else {
+    let Some((app_owner, app)) = state.registry.read().await.dingtalk_app_by_channel(&channel) else {
         return Json(json!({}));
     };
     // 验签：header timestamp + sign
@@ -120,7 +120,11 @@ pub async fn dingtalk_message(
             .unwrap_or("")
             .to_string(),
     };
-    let reply = dispatch(&state, &owner, &content, Some(&ctx)).await;
+    // 按 staffId 找归属账号；未绑定 → 回登录链接（不按渠道 owner 兜底）
+    let reply = match resolve_account(&state, &app_owner, &ctx.staff_id, &ctx.robot_code).await {
+        Ok(account) => dispatch(&state, &account, &content, Some(&ctx)).await,
+        Err(link_reply) => link_reply,
+    };
     // 同步回复：钉钉直接把响应体当作机器人回复消息
     Json(json!({ "msgtype": "text", "text": { "content": reply } }))
 }
@@ -241,33 +245,49 @@ async fn run_command(
             monitor_stop(state, username, arg).await
         }
         "撤回" | "recall" => recall_last(state, username, arg).await,
-        "绑定" | "bind" => bind_recipient(state, username, reply).await,
-        "解绑" | "unbind" => unbind_recipient(state, username).await,
         _ => format!("未知指令「{cmd}」。发「帮助」看用法。"),
     }
 }
 
-/// 「绑定」：把当前发信人设为本账号主动推送（任务完成/会话结束）的接收人。
-async fn bind_recipient(state: &SharedState, username: &str, reply: Option<&ReplyCtx>) -> String {
-    let staff = reply.map(|c| c.staff_id.as_str()).unwrap_or("");
-    if staff.is_empty() {
-        return "拿不到你的 staffId，无法绑定（请在钉钉里私聊本企业应用机器人再发「绑定」）。".to_string();
+/// 渠道收到消息后先按 staffId 找归属账号：
+/// - 找到 → Ok(账号)，按该账号身份执行指令 / 收推送；
+/// - 没找到（未绑定的钉钉 id）→ Err(登录链接回复)：生成一次性 token、回一段带登录链接的文案，
+///   用户登录后带 token 调 bind 接口，把这个 staffId 绑到登录进的账号。
+/// `app_owner` = 消息经由的钉钉应用配置账号（推送凭据/robotCode 来源）。
+pub(crate) async fn resolve_account(
+    state: &SharedState,
+    app_owner: &str,
+    staff_id: &str,
+    robot_code: &str,
+) -> Result<String, String> {
+    if staff_id.is_empty() {
+        return Err("拿不到你的钉钉身份（senderStaffId 为空），无法关联账号。".to_string());
     }
-    let robot = reply.map(|c| c.robot_code.as_str()).unwrap_or("");
-    if state.registry.write().await.bind_dingtalk_staff(username, staff, robot) {
-        format!("✅ 已把你（staffId {staff}）绑定为推送接收人。\n任务完成 / 会话结束会私聊推给你。发「解绑」取消。")
-    } else {
-        "绑定失败：未找到本账号的钉钉应用配置。".to_string()
+    // 顺手把应用的 robotCode 记新（推送要用）
+    if !robot_code.is_empty() {
+        state.registry.write().await.capture_dingtalk_robot_code(app_owner, robot_code);
     }
-}
-
-/// 「解绑」：取消主动推送接收人。
-async fn unbind_recipient(state: &SharedState, username: &str) -> String {
-    if state.registry.write().await.unbind_dingtalk_staff(username) {
-        "已解绑，不再主动私聊推送。需要时再发「绑定」。".to_string()
-    } else {
-        "当前没有绑定推送接收人。".to_string()
+    if let Some(account) = state.registry.read().await.dingtalk_user_of(staff_id) {
+        return Ok(account);
     }
+    // 未绑定 → 生成一次性 token，回登录链接
+    let token = crate::state::new_bind_token();
+    state.dingtalk_binds.write().await.insert(
+        token.clone(),
+        crate::state::PendingDingtalkBind {
+            staff_id: staff_id.to_string(),
+            app_user: app_owner.to_string(),
+            robot_code: robot_code.to_string(),
+            at: crate::state::now_secs(),
+        },
+    );
+    let link = format!("{}/?dtbind={token}", crate::server::public_base());
+    Err(format!(
+        "👋 你的钉钉还没关联 agent-monitor 账号。\n\
+         点下面链接登录，即可把当前钉钉号绑定到你的账号（绑定后：任务完成/需要操作会私聊推给你，\
+         也能在这直接发指令遥控会话）：\n{link}\n\
+         链接 30 分钟内有效。"
+    ))
 }
 
 /// 「监控 N」：注册对第 N 个会话的持续监控，新内容由后台循环推到当前钉钉会话
@@ -447,7 +467,6 @@ fn help_text() -> String {
      • 撤回 N —— 撤回第 N 个会话最近一条排队中的任务\n\
      • 监控 N —— 持续把第 N 个会话的对话内容推到这里（可同时监控多个，跳过执行过程）\n\
      • 停止监控 [N] —— 停某个会话的监控；不带序号停全部\n\
-     • 绑定 / 解绑 —— 设为/取消「任务完成·会话结束」主动私聊推送的接收人\n\
      • 帮助 —— 显示本说明\n\
      速记：@N 后接内容或任意会话指令 —— @2 重启服务 / @2 暂停 / @2 排队 / @2 撤回\n\
      多目标：@1 @2 重启服务（同一任务发给多个会话）\n\
@@ -727,11 +746,12 @@ async fn attach_pending_file(
     pf: &crate::state::BotPendingFile,
 ) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    // 下载要用「收到该文件的那个应用」的凭据（多租户下 app_user 可能 != 归属账号）
     let app = state
         .registry
         .read()
         .await
-        .dingtalk_app_of(username)
+        .dingtalk_app_of(&pf.app_user)
         .ok_or("未配置钉钉应用")?;
     let now_ms = crate::state::now_secs() * 1000;
     let bytes = crate::dingtalk::download_bot_file(&app, &pf.download_code, now_ms).await?;
@@ -789,15 +809,21 @@ async fn send_input(
         Ok(id) => id,
         Err(e) => return e,
     };
-    // 挂起待发文件：随本条任务落到会话目录的 tmp/ 下，相对路径拼到任务开头（加空格隔开）。
+    // 挂起待发文件（可多个）：随本条任务落到会话目录，相对路径按序拼到任务开头（空格隔开）。
     // 超 20 分钟没跟任务的挂起文件视为过期，丢弃不附。
-    if let Some(pf) = state.bot_pending_files.write().await.remove(username) {
-        if crate::state::now_secs().saturating_sub(pf.at) <= 20 * 60 {
-            match attach_pending_file(state, username, &task_id, &pf).await {
-                Ok(rel) => text = format!("{rel} {text}"),
-                Err(e) => return format!("附带文件下发失败：{e}"),
-            }
+    let pending = state.bot_pending_files.write().await.remove(username).unwrap_or_default();
+    let mut rels: Vec<String> = Vec::new();
+    for pf in &pending {
+        if crate::state::now_secs().saturating_sub(pf.at) > 20 * 60 {
+            continue;
         }
+        match attach_pending_file(state, username, &task_id, pf).await {
+            Ok(rel) => rels.push(rel),
+            Err(e) => return format!("附带文件下发失败：{e}"),
+        }
+    }
+    if !rels.is_empty() {
+        text = format!("{} {text}", rels.join(" "));
     }
     if let Err(e) =
         queue_command(state, username, &task_id, ControlAction::Input, Some(text.clone())).await
@@ -871,13 +897,15 @@ async fn confirm_and_watch(
     }
 }
 
-/// OTO 主动私聊给某账号本人（网页/客户端下发的状态推送用；无 sessionWebhook 可回）。
+/// OTO 主动私聊给某账号绑定的所有钉钉 id（网页/客户端下发的状态推送用；无 sessionWebhook 可回）。
 async fn push_oto_owner(state: &SharedState, owner: &str, text: &str) {
-    let app = state.registry.read().await.dingtalk_app_of(owner);
-    if let Some(app) = app {
-        if !app.app_key.is_empty() && !app.app_secret.is_empty() && !app.staff_id.is_empty() {
-            let now_ms = crate::state::now_secs() * 1000;
-            let _ = crate::dingtalk::push_oto(&app, text, None, now_ms).await;
+    let now_ms = crate::state::now_secs() * 1000;
+    for (staff_id, app_user) in state.registry.read().await.dingtalk_ids_of(owner) {
+        let Some(app) = state.registry.read().await.dingtalk_app_of(&app_user) else {
+            continue;
+        };
+        if !app.app_key.is_empty() && !app.app_secret.is_empty() {
+            let _ = crate::dingtalk::push_oto(&app, &staff_id, text, None, now_ms).await;
         }
     }
 }

@@ -94,6 +94,9 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/integrations/wecom-app", post(set_wecom_app))
         .route("/monitor/integrations/dingtalk-app", post(set_dingtalk_app))
         .route("/monitor/integrations/dingtalk-recv-dir", post(set_dingtalk_recv_dir))
+        .route("/monitor/integrations/dingtalk-bind", post(dingtalk_bind))
+        .route("/monitor/integrations/dingtalk-ids", get(dingtalk_ids_get))
+        .route("/monitor/integrations/dingtalk-unbind", post(dingtalk_unbind))
         // 回调（每用户 channel 路由）
         .route(
             "/monitor/int/wecom/:channel",
@@ -1242,7 +1245,7 @@ async fn delete_device(
 }
 
 /// hub 对外公网地址（拼回调 URL 用），取自 AM_PUBLIC_URL，默认线上域名
-fn public_base() -> String {
+pub(crate) fn public_base() -> String {
     std::env::var("AM_PUBLIC_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -1377,6 +1380,85 @@ async fn set_dingtalk_recv_dir(
         .await
         .set_dingtalk_recv_dir(&user, req.project.trim(), &req.dir);
     ok(json!({ "result": "已保存" }))
+}
+
+#[derive(Deserialize)]
+struct DingtalkBindReq {
+    token: String,
+}
+
+/// POST /monitor/integrations/dingtalk-bind —— 登录后带一次性 token 绑定钉钉 id。
+/// 未记录的 staffId 给机器人发消息时，hub 回一段带 `?dtbind=<token>` 的登录链接；
+/// 页面登录后把 token 提交到这里，把该 staffId 绑到当前登录账号。
+async fn dingtalk_bind(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<DingtalkBindReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let token = req.token.trim();
+    if token.is_empty() {
+        return err(400, "缺少绑定 token");
+    }
+    // 取出待绑定上下文（一次性；30 分钟过期）
+    let pending = state.dingtalk_binds.write().await.remove(token);
+    let Some(p) = pending else {
+        return err(400, "绑定链接无效或已过期，请在钉钉里重新发一条消息获取新链接");
+    };
+    if crate::state::now_secs().saturating_sub(p.at) > 30 * 60 {
+        return err(400, "绑定链接已过期（超过 30 分钟），请在钉钉里重新发一条消息获取新链接");
+    }
+    state
+        .registry
+        .write()
+        .await
+        .bind_dingtalk_id(&p.staff_id, &user, &p.app_user, &p.robot_code);
+    ok(json!({ "result": "已绑定", "staffId": p.staff_id }))
+}
+
+/// GET /monitor/integrations/dingtalk-ids —— 当前账号已绑定的钉钉 id 列表（设置页展示/解绑用）
+async fn dingtalk_ids_get(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let ids: Vec<Value> = state
+        .registry
+        .read()
+        .await
+        .dingtalk_ids_of(&user)
+        .into_iter()
+        .map(|(staff_id, _app_user)| json!({ "staffId": staff_id }))
+        .collect();
+    ok(json!({ "list": ids }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DingtalkUnbindReq {
+    staff_id: String,
+}
+
+/// POST /monitor/integrations/dingtalk-unbind —— 解绑当前账号的某个钉钉 id
+async fn dingtalk_unbind(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<DingtalkUnbindReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    // 只能解绑属于自己的 id
+    if state.registry.read().await.dingtalk_user_of(&req.staff_id).as_deref() != Some(user.as_str())
+    {
+        return err(403, "该钉钉 id 不属于当前账号");
+    }
+    state.registry.write().await.unbind_dingtalk_id(&req.staff_id);
+    ok(json!({ "result": "已解绑" }))
 }
 
 #[derive(Deserialize)]

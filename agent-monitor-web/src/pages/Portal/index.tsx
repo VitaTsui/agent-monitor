@@ -5,7 +5,8 @@ import { Badge, ConfigProvider, Popover, Tooltip } from "antd";
 import { useNativeBack } from "./_hooks/useNativeBack";
 import { useApkUpdateCheck } from "./_hooks/useApkUpdateCheck";
 import { useClientUpdateToast } from "./_hooks/useClientUpdateToast";
-import { claimPairDevice } from "@/services/apis/portal";
+import { claimPairDevice, bindDingtalkId } from "@/services/apis/portal";
+import { consumeDtbindToken } from "@/utils/dtbind";
 import { message as antdMessage } from "antd";
 import {
   CodeOutlined,
@@ -163,6 +164,20 @@ const Portal: React.FC = observer(() => {
       return;
     }
     init();
+
+    // 钉钉绑定：登录后凭 ?dtbind= 暂存的一次性 token，把发起绑定的钉钉号绑到当前账号
+    const dtToken = consumeDtbindToken();
+    if (dtToken) {
+      bindDingtalkId(dtToken)
+        .then((res) => {
+          if (res.code === 0) {
+            antdMessage.success("已把你的钉钉绑定到当前账号，之后任务通知会私聊推给你");
+          } else {
+            antdMessage.error(res.msg || "钉钉绑定失败，请在钉钉里重新发条消息拿新链接");
+          }
+        })
+        .catch(() => antdMessage.error("钉钉绑定失败，请检查网络后重试"));
+    }
 
     return () => {
       stopPolling();

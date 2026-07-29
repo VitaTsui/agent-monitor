@@ -168,8 +168,8 @@ async fn connect_once(
                 } else {
                     m.pointer("/text/content").and_then(Value::as_str).unwrap_or("").trim().to_string()
                 };
-                // 文件/图片：file(带 fileName) / picture / richText 内嵌图片 → 暂存待发
-                let (dl_code, file_name) = extract_file(&m, msgtype);
+                // 文件/图片：file(带 fileName) / picture / richText 内嵌多图 → 全部暂存待发
+                let files = extract_files(&m, msgtype);
                 let session_webhook =
                     m.get("sessionWebhook").and_then(Value::as_str).unwrap_or("").to_string();
                 let webhook_expiry =
@@ -184,16 +184,6 @@ async fn connect_once(
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                if !staff_id.is_empty() {
-                    let changed = state
-                        .registry
-                        .write()
-                        .await
-                        .set_dingtalk_identity(user, &staff_id, &robot_code);
-                    if changed {
-                        tracing::info!("钉钉 Stream 捕获推送身份 user={user} staffId={staff_id}");
-                    }
-                }
                 tracing::info!(
                     "钉钉 Stream 收到机器人消息 user={user} 内容={content:?} 有回发地址={}",
                     !session_webhook.is_empty()
@@ -202,22 +192,33 @@ async fn connect_once(
                 // 先 ACK 该帧（钉钉据此认为已消费）
                 ack(&mut ws, &message_id).await?;
 
-                // 带文件/图片：暂存为「挂起待发」，随下一条任务一起发出（见 bot::send_input）
-                if let Some(code) = dl_code {
-                    let fname = if file_name.trim().is_empty() {
-                        format!("钉钉文件-{}", &code[..code.len().min(8)])
-                    } else {
-                        file_name.clone()
-                    };
-                    state.bot_pending_files.write().await.insert(
-                        user.to_string(),
-                        crate::state::BotPendingFile {
-                            download_code: code,
-                            file_name: fname.clone(),
-                            at: crate::state::now_secs(),
-                        },
-                    );
-                    tracing::info!("钉钉 Stream 暂存待发文件 user={user} name={fname}");
+                // 按 staffId 找归属账号；未绑定 → 回登录链接（不落文件、不 dispatch）
+                let account =
+                    crate::bot::resolve_account(&state, user, &staff_id, &robot_code).await;
+
+                // 带文件/图片：仅对已绑定账号暂存（按账号存，send_input 也按账号取）。
+                // 多张图片/文件全部累积，落盘名去重避免互相覆盖（原来只取一张就是同名覆盖导致）。
+                if !files.is_empty() {
+                    if let Ok(acct) = &account {
+                        let now = crate::state::now_secs();
+                        let mut map = state.bot_pending_files.write().await;
+                        let list = map.entry(acct.clone()).or_default();
+                        for (code, name) in files {
+                            let base = if name.trim().is_empty() {
+                                format!("钉钉文件-{}", &code[..code.len().min(8)])
+                            } else {
+                                name
+                            };
+                            let fname = unique_name(list, &base);
+                            list.push(crate::state::BotPendingFile {
+                                download_code: code,
+                                file_name: fname.clone(),
+                                app_user: user.to_string(),
+                                at: now,
+                            });
+                            tracing::info!("钉钉 Stream 暂存待发文件 account={acct} name={fname}");
+                        }
+                    }
                 }
                 // 文件-only（没带文字指令）：回执提示，不进 dispatch
                 let file_only = content.is_empty();
@@ -225,32 +226,35 @@ async fn connect_once(
                 // dispatch + 通过 sessionWebhook 回发，另起任务避免阻塞收帧（心跳要及时）
                 if !session_webhook.is_empty() {
                     let st = state.clone();
-                    let u = user.to_string();
                     let cl = client.clone();
+                    let sw = session_webhook.clone();
                     tokio::spawn(async move {
                         let ctx = crate::bot::ReplyCtx {
-                            webhook: session_webhook.clone(),
+                            webhook: sw.clone(),
                             expiry_ms: webhook_expiry,
-                            staff_id: staff_id.clone(),
-                            robot_code: robot_code.clone(),
+                            staff_id,
+                            robot_code,
                         };
-                        let reply = if file_only {
-                            "📎 已收到文件，随下一条任务一起发出（如「@2 处理这个文件」），\
-                             会存到该会话目录的 tmp/ 下并把路径拼到任务开头。"
-                                .to_string()
-                        } else {
-                            crate::bot::dispatch(&st, &u, &content, Some(&ctx)).await
+                        let reply = match account {
+                            // 未绑定：回登录链接
+                            Err(link) => link,
+                            Ok(acct) if file_only => {
+                                let _ = &acct;
+                                "📎 已收到文件，随下一条任务一起发出（如「@2 处理这个文件」），\
+                                 会存到该会话目录的 tmp/ 下并把路径拼到任务开头。"
+                                    .to_string()
+                            }
+                            Ok(acct) => crate::bot::dispatch(&st, &acct, &content, Some(&ctx)).await,
                         };
                         match cl
-                            .post(&session_webhook)
+                            .post(&sw)
                             .json(&json!({ "msgtype": "text", "text": { "content": reply } }))
                             .send()
                             .await
                         {
-                            Ok(resp) => tracing::info!(
-                                "钉钉 Stream 已回发 user={u} http={}",
-                                resp.status()
-                            ),
+                            Ok(resp) => {
+                                tracing::info!("钉钉 Stream 已回发 http={}", resp.status())
+                            }
                             Err(e) => tracing::warn!("钉钉 Stream 回发失败: {e}"),
                         }
                     });
@@ -291,31 +295,59 @@ where
 
 /// 从机器人消息里抽取文件/图片的 (downloadCode, fileName)。支持 file / picture / richText 内嵌图片。
 /// 无附件返回 (None, "")。
-fn extract_file(m: &Value, msgtype: &str) -> (Option<String>, String) {
+/// 从一条消息里抽出**全部**待发文件：(downloadCode, 建议文件名)。richText 内嵌多图会全取，
+/// 不再只取第一张。名字可能重复（多张「图片.jpg」），去重交由存储时的 `unique_name`。
+fn extract_files(m: &Value, msgtype: &str) -> Vec<(String, String)> {
     match msgtype {
-        "file" => {
-            let code = m.pointer("/content/downloadCode").and_then(Value::as_str);
-            let name = m
-                .pointer("/content/fileName")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            (code.map(String::from), name)
+        "file" => m
+            .pointer("/content/downloadCode")
+            .and_then(Value::as_str)
+            .map(|c| {
+                let name = m
+                    .pointer("/content/fileName")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                vec![(c.to_string(), name)]
+            })
+            .unwrap_or_default(),
+        "picture" => m
+            .pointer("/content/downloadCode")
+            .or_else(|| m.pointer("/content/pictureDownloadCode"))
+            .and_then(Value::as_str)
+            .map(|c| vec![(c.to_string(), "图片.jpg".to_string())])
+            .unwrap_or_default(),
+        "richText" => m
+            .pointer("/content/richText")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|it| it.get("downloadCode").and_then(Value::as_str))
+                    .enumerate()
+                    .map(|(i, c)| (c.to_string(), format!("图片{}.jpg", i + 1)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// 文件名去重：已存在同名就在扩展名前加 -2/-3…，避免多张「图片.jpg」落盘时互相覆盖。
+fn unique_name(existing: &[crate::state::BotPendingFile], name: &str) -> String {
+    let taken = |n: &str| existing.iter().any(|f| f.file_name == n);
+    if !taken(name) {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    let mut i = 2;
+    loop {
+        let cand = format!("{stem}-{i}{ext}");
+        if !taken(&cand) {
+            return cand;
         }
-        "picture" => {
-            let code = m
-                .pointer("/content/downloadCode")
-                .or_else(|| m.pointer("/content/pictureDownloadCode"))
-                .and_then(Value::as_str);
-            (code.map(String::from), "图片.jpg".to_string())
-        }
-        "richText" => {
-            // richText 数组里找第一个带 downloadCode 的图片项
-            let code = m.pointer("/content/richText").and_then(Value::as_array).and_then(|arr| {
-                arr.iter().find_map(|it| it.get("downloadCode").and_then(Value::as_str))
-            });
-            (code.map(String::from), "图片.jpg".to_string())
-        }
-        _ => (None, String::new()),
+        i += 1;
     }
 }

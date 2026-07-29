@@ -162,13 +162,14 @@ fn robot_code_of(app: &crate::registry::DingtalkApp) -> &str {
 /// 发一条 OTO 消息（msgKey + msgParam 由调用方给），复用已取的 token。
 async fn oto_send(
     app: &crate::registry::DingtalkApp,
+    staff_id: &str,
     token: &str,
     msg_key: &str,
     msg_param: serde_json::Value,
 ) -> Result<(), String> {
     let body = serde_json::json!({
         "robotCode": robot_code_of(app),
-        "userIds": [app.staff_id],
+        "userIds": [staff_id],
         "msgKey": msg_key,
         "msgParam": serde_json::to_string(&msg_param).map_err(|e| e.to_string())?,
     });
@@ -249,18 +250,20 @@ async fn upload_media(token: &str, filename: &str, content: &[u8]) -> Result<Str
 /// full 非空且比正文长时，额外把完整内容作为 .txt 文件发在下面（正文被截断的兜底）。
 pub async fn push_oto(
     app: &crate::registry::DingtalkApp,
+    staff_id: &str,
     text: &str,
     full: Option<&str>,
     now_ms: u64,
 ) -> Result<(), String> {
-    if app.staff_id.is_empty() {
-        return Err("未捕获 staffId（先给机器人发一条消息以登记身份）".into());
+    if staff_id.is_empty() {
+        return Err("空 staffId".into());
     }
     let token = access_token(&app.app_key, &app.app_secret, now_ms).await?;
     // msgParam 是 JSON 字符串（钉钉要求）；sampleMarkdown 让结果里的 md 正常渲染
     // （手机端正常；桌面端 OTO 可能显示成代码块，属客户端差异）。
     oto_send(
         app,
+        staff_id,
         &token,
         "sampleMarkdown",
         serde_json::json!({ "title": md_title(text), "text": text }),
@@ -275,7 +278,7 @@ pub async fn push_oto(
                     "fileName": "完整内容.txt",
                     "fileType": "txt",
                 });
-                if let Err(e) = oto_send(app, &token, "sampleFile", param).await {
+                if let Err(e) = oto_send(app, staff_id, &token, "sampleFile", param).await {
                     tracing::warn!("钉钉 OTO 完整内容文件发送失败: {e}");
                 }
             }
@@ -356,25 +359,30 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
                 | EventKind::Finished
                 | EventKind::Select
         ) {
-            let app = state.registry.read().await.dingtalk_app_of(&ev.owner);
-            if let Some(app) = app {
-                if !app.app_key.is_empty()
-                    && !app.app_secret.is_empty()
-                    && !app.staff_id.is_empty()
-                {
-                    let kind = match ev.kind {
-                        EventKind::Select => "Select",
-                        EventKind::Waiting => "Waiting",
-                        EventKind::Finished => "Finished",
-                        EventKind::NewSession => "NewSession",
-                        _ => "?",
-                    };
-                    match push_oto(&app, &text, ev.full_content.as_deref(), now_ms).await {
-                        Ok(_) => tracing::info!("钉钉 OTO 已推送 kind={kind}（{}）", ev.owner),
-                        Err(e) => tracing::warn!("钉钉 OTO 推送失败 kind={kind}（{}）: {e}", ev.owner),
+            let kind = match ev.kind {
+                EventKind::Select => "Select",
+                EventKind::Waiting => "Waiting",
+                EventKind::Finished => "Finished",
+                EventKind::NewSession => "NewSession",
+                _ => "?",
+            };
+            // 该账号名下已绑定的所有钉钉 id，各推一份 —— 每个 id 用其「来源应用」的凭据/robotCode。
+            let binds = state.registry.read().await.dingtalk_ids_of(&ev.owner);
+            if binds.is_empty() {
+                tracing::warn!("钉钉 OTO 跳过：账号未绑定任何钉钉 id（{}）", ev.owner);
+            }
+            for (staff_id, app_user) in binds {
+                let Some(app) = state.registry.read().await.dingtalk_app_of(&app_user) else {
+                    continue;
+                };
+                if app.app_key.is_empty() || app.app_secret.is_empty() {
+                    continue;
+                }
+                match push_oto(&app, &staff_id, &text, ev.full_content.as_deref(), now_ms).await {
+                    Ok(_) => tracing::info!("钉钉 OTO 已推送 kind={kind}（{}→{staff_id}）", ev.owner),
+                    Err(e) => {
+                        tracing::warn!("钉钉 OTO 推送失败 kind={kind}（{}→{staff_id}）: {e}", ev.owner)
                     }
-                } else {
-                    tracing::warn!("钉钉 OTO 跳过：未绑定 staffId（{}）", ev.owner);
                 }
             }
         }

@@ -156,6 +156,10 @@ struct Persisted {
     /// 未配置的项目默认落到 `<项目 cwd>/tmp`。
     #[serde(default)]
     dingtalk_recv_dirs: HashMap<String, HashMap<String, String>>,
+    /// 钉钉 id 绑定（多租户）：staffId → 绑定信息。收到消息按 staffId 找账号；
+    /// 未绑定的 staffId 走「登录链接」流程绑定到登录进的账号。
+    #[serde(default)]
+    dingtalk_ids: HashMap<String, DingtalkIdBinding>,
 }
 
 /// 企业微信自建应用（用户自助接入，双向遥控）
@@ -182,9 +186,19 @@ pub struct DingtalkApp {
     /// 但以消息里带的为准。
     #[serde(default)]
     pub robot_code: String,
-    /// 用户本人的 staffId（收到消息时捕获）。主动推送就发给这个人。
+    /// 【已弃用】旧版单一 staffId；现由全局 `dingtalk_ids`（多绑定）承载，
+    /// 仅保留以兼容旧文件、启动时迁移进 `dingtalk_ids`。
     #[serde(default)]
     pub staff_id: String,
+}
+
+/// 钉钉 id 绑定（多租户）：一个 staffId 唯一归属一个账号；一个账号可绑多个 staffId。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DingtalkIdBinding {
+    /// 归属的 agent-monitor 账号
+    pub user: String,
+    /// 该 staffId 是经哪个账号的钉钉应用（Stream/回调）进来的 —— 主动 OTO 推送要用它的凭据/robotCode
+    pub app_user: String,
 }
 
 pub struct Registry {
@@ -196,6 +210,7 @@ pub struct Registry {
     wecom_apps: HashMap<String, WecomApp>,
     dingtalk_apps: HashMap<String, DingtalkApp>,
     dingtalk_recv_dirs: HashMap<String, HashMap<String, String>>,
+    dingtalk_ids: HashMap<String, DingtalkIdBinding>,
 }
 
 impl Registry {
@@ -225,7 +240,17 @@ impl Registry {
             } else {
                 p.super_user
             };
-            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk: p.dingtalk, wecom_apps: p.wecom_apps, dingtalk_apps: p.dingtalk_apps, dingtalk_recv_dirs: p.dingtalk_recv_dirs }
+            // 旧文件迁移：把各钉钉应用里遗留的单一 staff_id 收拢进全局 dingtalk_ids
+            let mut dingtalk_ids = p.dingtalk_ids;
+            for (owner, app) in &p.dingtalk_apps {
+                if !app.staff_id.is_empty() {
+                    dingtalk_ids.entry(app.staff_id.clone()).or_insert_with(|| DingtalkIdBinding {
+                        user: owner.clone(),
+                        app_user: owner.clone(),
+                    });
+                }
+            }
+            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk: p.dingtalk, wecom_apps: p.wecom_apps, dingtalk_apps: p.dingtalk_apps, dingtalk_recv_dirs: p.dingtalk_recv_dirs, dingtalk_ids }
         } else {
             Registry {
                 dir,
@@ -236,6 +261,7 @@ impl Registry {
                 wecom_apps: HashMap::new(),
                 dingtalk_apps: HashMap::new(),
                 dingtalk_recv_dirs: HashMap::new(),
+                dingtalk_ids: HashMap::new(),
             }
         };
         if reg.users.is_empty() {
@@ -270,6 +296,7 @@ impl Registry {
             wecom_apps: self.wecom_apps.clone(),
             dingtalk_apps: self.dingtalk_apps.clone(),
             dingtalk_recv_dirs: self.dingtalk_recv_dirs.clone(),
+            dingtalk_ids: self.dingtalk_ids.clone(),
             quota_limit: 0,
             super_user: self.super_user.clone(),
         };
@@ -446,46 +473,57 @@ impl Registry {
     /// staffId「首次捕获即绑定」，之后不因别的发信人自动改绑（防止他人私聊机器人把推送劫持走）；
     /// 要改绑用 `bind_dingtalk_staff` 显式覆盖。robotCode 是机器人自身编码、与发信人无关，可随时更新。
     /// 仅在有变化时落盘。返回是否发生了变更。
-    pub fn set_dingtalk_identity(&mut self, user: &str, staff_id: &str, robot_code: &str) -> bool {
-        let Some(app) = self.dingtalk_apps.get_mut(user) else { return false };
-        let mut changed = false;
-        if !staff_id.is_empty() && app.staff_id.is_empty() {
-            app.staff_id = staff_id.to_string();
-            changed = true;
+    /// 捕获钉钉应用的 robotCode（收消息时；主动 OTO 推送要用）。first-capture 不够——
+    /// robotCode 可能变，按最新的存。
+    pub fn capture_dingtalk_robot_code(&mut self, app_user: &str, robot_code: &str) -> bool {
+        if robot_code.is_empty() {
+            return false;
         }
-        if !robot_code.is_empty() && app.robot_code != robot_code {
-            app.robot_code = robot_code.to_string();
-            changed = true;
+        let Some(app) = self.dingtalk_apps.get_mut(app_user) else { return false };
+        if app.robot_code == robot_code {
+            return false;
         }
-        if changed {
+        app.robot_code = robot_code.to_string();
+        self.save();
+        true
+    }
+
+    /// 按 staffId 找归属账号（收到消息时用；找不到 → 走登录绑定流程）。
+    pub fn dingtalk_user_of(&self, staff_id: &str) -> Option<String> {
+        self.dingtalk_ids.get(staff_id).map(|b| b.user.clone())
+    }
+
+    /// 某账号名下已绑定的全部钉钉 id：(staff_id, app_user)。主动推送按此逐个 OTO。
+    pub fn dingtalk_ids_of(&self, user: &str) -> Vec<(String, String)> {
+        self.dingtalk_ids
+            .iter()
+            .filter(|(_, b)| b.user == user)
+            .map(|(sid, b)| (sid.clone(), b.app_user.clone()))
+            .collect()
+    }
+
+    /// 绑定一个钉钉 id 到账号（登录后由 bind 接口调用）。app_user = 消息经由的应用账号。
+    /// 同时把该应用的 robotCode 记下（推送用）。
+    pub fn bind_dingtalk_id(&mut self, staff_id: &str, user: &str, app_user: &str, robot_code: &str) {
+        if !robot_code.is_empty() {
+            if let Some(app) = self.dingtalk_apps.get_mut(app_user) {
+                app.robot_code = robot_code.to_string();
+            }
+        }
+        self.dingtalk_ids.insert(
+            staff_id.to_string(),
+            DingtalkIdBinding { user: user.to_string(), app_user: app_user.to_string() },
+        );
+        self.save();
+    }
+
+    /// 解绑某个钉钉 id。返回原本是否绑过。
+    pub fn unbind_dingtalk_id(&mut self, staff_id: &str) -> bool {
+        let existed = self.dingtalk_ids.remove(staff_id).is_some();
+        if existed {
             self.save();
         }
-        changed
-    }
-
-    /// 显式（重新）绑定推送接收人：把发信人 staffId 强制绑到该账号（「绑定」指令用）。
-    pub fn bind_dingtalk_staff(&mut self, user: &str, staff_id: &str, robot_code: &str) -> bool {
-        let Some(app) = self.dingtalk_apps.get_mut(user) else { return false };
-        if staff_id.is_empty() {
-            return false;
-        }
-        app.staff_id = staff_id.to_string();
-        if !robot_code.is_empty() {
-            app.robot_code = robot_code.to_string();
-        }
-        self.save();
-        true
-    }
-
-    /// 解绑推送接收人（「解绑」指令用）。返回原本是否有绑定。
-    pub fn unbind_dingtalk_staff(&mut self, user: &str) -> bool {
-        let Some(app) = self.dingtalk_apps.get_mut(user) else { return false };
-        if app.staff_id.is_empty() {
-            return false;
-        }
-        app.staff_id.clear();
-        self.save();
-        true
+        existed
     }
 
     /// 所有配了 Stream（app_key+app_secret 都非空）的钉钉应用：(user, app_key, app_secret)

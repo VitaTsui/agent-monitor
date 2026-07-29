@@ -319,6 +319,29 @@ export const setDingtalkRecvDir = async (project: string, dir: string) => {
   );
 };
 
+/** 登录后凭一次性 token 把发起绑定的钉钉 id 绑到当前账号（钉钉机器人回的 ?dtbind= 链接用） */
+export const bindDingtalkId = async (token: string) => {
+  return await post<{ result: string; staffId: string }>(
+    "/monitor/integrations/dingtalk-bind",
+    { token }
+  );
+};
+
+/** 当前账号已绑定的钉钉 id 列表 */
+export const getDingtalkIds = async () => {
+  return await get<ListRes<{ staffId: string }>>(
+    "/monitor/integrations/dingtalk-ids"
+  );
+};
+
+/** 解绑当前账号的某个钉钉 id */
+export const unbindDingtalkId = async (staffId: string) => {
+  return await post<{ result: string }>(
+    "/monitor/integrations/dingtalk-unbind",
+    { staffId }
+  );
+};
+
 /** 钉钉群机器人（主动推送） */
 export const setDingtalkRobot = async (data: {
   webhook: string;
