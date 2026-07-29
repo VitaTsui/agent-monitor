@@ -327,9 +327,9 @@ export const bindDingtalkId = async (token: string) => {
   );
 };
 
-/** 当前账号已绑定的钉钉 id 列表 */
+/** 当前账号已绑定的钉钉 id 列表（nick = 钉钉昵称，空则回退显示 staffId） */
 export const getDingtalkIds = async () => {
-  return await get<ListRes<{ staffId: string }>>(
+  return await get<ListRes<{ staffId: string; nick: string }>>(
     "/monitor/integrations/dingtalk-ids"
   );
 };

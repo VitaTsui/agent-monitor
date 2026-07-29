@@ -592,6 +592,143 @@ pub async fn dingtalk_app_admin_set(
     }
 }
 
+// ---------- 钉钉群机器人（webhook 推送，全局，后管配置） ----------
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DingtalkRobotAdminReq {
+    pub webhook: String,
+    #[serde(default)]
+    pub secret: String,
+    #[serde(default)]
+    pub waiting: bool,
+    #[serde(default)]
+    pub finished: bool,
+    #[serde(default)]
+    pub new_session: bool,
+    #[serde(default)]
+    pub device: bool,
+}
+
+/// GET /sys/dingtalk/robot —— 后管查看全局钉钉群机器人配置（密钥不回显）
+pub async fn dingtalk_robot_admin_get(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+) -> Json<Value> {
+    if let Err(e) = admin_gate(&state, &headers).await {
+        return e;
+    }
+    let cfg = state.registry.read().await.global_dingtalk_notify();
+    ok(json!({
+        "webhook": cfg.as_ref().map(|c| c.webhook.clone()).unwrap_or_default(),
+        "hasSecret": cfg.as_ref().map(|c| !c.secret.is_empty()).unwrap_or(false),
+        "waiting": cfg.as_ref().map(|c| c.waiting).unwrap_or(true),
+        "finished": cfg.as_ref().map(|c| c.finished).unwrap_or(true),
+        "newSession": cfg.as_ref().map(|c| c.new_session).unwrap_or(true),
+        "device": cfg.as_ref().map(|c| c.device).unwrap_or(false),
+    }))
+}
+
+/// POST /sys/dingtalk/robot —— 后管保存全局钉钉群机器人配置
+pub async fn dingtalk_robot_admin_set(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<DingtalkRobotAdminReq>,
+) -> Json<Value> {
+    if let Err(e) = admin_gate(&state, &headers).await {
+        return e;
+    }
+    let secret = if req.secret.is_empty() {
+        state.registry.read().await.global_dingtalk_notify().map(|c| c.secret).unwrap_or_default()
+    } else {
+        req.secret
+    };
+    let cfg = crate::dingtalk::DingtalkNotify {
+        webhook: req.webhook.trim().to_string(),
+        secret,
+        waiting: req.waiting,
+        finished: req.finished,
+        new_session: req.new_session,
+        device: req.device,
+    };
+    state.registry.write().await.set_global_dingtalk_notify(cfg);
+    ok(json!(true))
+}
+
+/// POST /sys/dingtalk/robot/test —— 发测试推送
+pub async fn dingtalk_robot_admin_test(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+) -> Json<Value> {
+    if let Err(e) = admin_gate(&state, &headers).await {
+        return e;
+    }
+    let Some(cfg) = state.registry.read().await.global_dingtalk_notify() else {
+        return err(400, "尚未配置钉钉群机器人");
+    };
+    let now_ms = crate::state::now_secs() * 1000;
+    match crate::dingtalk::push_text(&cfg, "✅ 终端任务监控 · 钉钉推送测试成功", now_ms).await {
+        Ok(_) => ok(json!(true)),
+        Err(e) => err(400, &e),
+    }
+}
+
+// ---------- 企业微信自建应用（全局，后管配置） ----------
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WecomAppAdminReq {
+    pub corp_id: String,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub aes_key: String,
+}
+
+/// GET /sys/wecom/app —— 后管查看全局企业微信自建应用配置（密钥不回显）
+pub async fn wecom_app_admin_get(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+) -> Json<Value> {
+    if let Err(e) = admin_gate(&state, &headers).await {
+        return e;
+    }
+    let app = state.registry.read().await.global_wecom_app();
+    let base = crate::server::public_base();
+    ok(json!({
+        "corpId": app.as_ref().map(|a| a.corp_id.clone()).unwrap_or_default(),
+        "token": app.as_ref().map(|a| a.token.clone()).unwrap_or_default(),
+        "hasAesKey": app.as_ref().map(|a| !a.aes_key.is_empty()).unwrap_or(false),
+        "callbackUrl": app
+            .as_ref()
+            .filter(|a| !a.channel.is_empty())
+            .map(|a| format!("{base}/monitor/int/wecom/{}", a.channel)),
+    }))
+}
+
+/// POST /sys/wecom/app —— 后管保存全局企业微信自建应用，返回回调地址
+pub async fn wecom_app_admin_set(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<WecomAppAdminReq>,
+) -> Json<Value> {
+    if let Err(e) = admin_gate(&state, &headers).await {
+        return e;
+    }
+    let aes_key = if req.aes_key.trim().is_empty() {
+        state.registry.read().await.global_wecom_app().map(|a| a.aes_key).unwrap_or_default()
+    } else {
+        req.aes_key.trim().to_string()
+    };
+    let channel =
+        state.registry.write().await.set_global_wecom_app(&req.corp_id, &req.token, &aes_key);
+    let base = crate::server::public_base();
+    match channel {
+        Some(ch) => ok(json!({ "callbackUrl": format!("{base}/monitor/int/wecom/{ch}") })),
+        None => ok(json!({ "callbackUrl": null })),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetMinReq {

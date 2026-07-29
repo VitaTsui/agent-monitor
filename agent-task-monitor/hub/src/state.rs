@@ -286,6 +286,8 @@ pub struct BotPendingFile {
 pub struct PendingDingtalkBind {
     /// 待绑定的钉钉 staffId
     pub staff_id: String,
+    /// 钉钉用户昵称（供界面显示）
+    pub nick: String,
     /// 消息经由的钉钉应用账号（推送凭据来源）
     pub app_user: String,
     /// 该应用的 robotCode（推送用）

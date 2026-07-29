@@ -341,8 +341,8 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
                 .replace("{N}", &n.to_string()),
             None => ev.text.replace("{NO}", "").replace("{N}", "N"),
         };
-        // 1) 群自定义机器人 Webhook（按用户逐事件开关，原有行为）
-        let cfg = state.registry.read().await.dingtalk_of(&ev.owner);
+        // 1) 群自定义机器人 Webhook（后管统一配置的全局群，按事件开关推送）
+        let cfg = state.registry.read().await.global_dingtalk_notify();
         if let Some(cfg) = cfg {
             if cfg.enabled() && cfg.wants(ev.kind) {
                 if let Err(e) = push_text(&cfg, &text, now_ms).await {

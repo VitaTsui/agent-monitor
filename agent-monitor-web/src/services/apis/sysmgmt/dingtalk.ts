@@ -26,3 +26,53 @@ export const setDingtalkAppAdmin = (data: {
     data
   );
 };
+
+/** 全局钉钉群机器人（webhook 推送）配置 */
+export interface DingtalkRobotAdminInfo {
+  webhook: string;
+  hasSecret: boolean;
+  waiting: boolean;
+  finished: boolean;
+  newSession: boolean;
+  device: boolean;
+}
+
+export const getDingtalkRobotAdmin = () => {
+  return get<DingtalkRobotAdminInfo>("/sys/dingtalk/robot");
+};
+
+export const setDingtalkRobotAdmin = (data: {
+  webhook: string;
+  secret?: string;
+  waiting: boolean;
+  finished: boolean;
+  newSession: boolean;
+  device: boolean;
+}) => {
+  return post<boolean>("/sys/dingtalk/robot", data);
+};
+
+export const testDingtalkRobotAdmin = () => {
+  return post<boolean>("/sys/dingtalk/robot/test", {});
+};
+
+/** 全局企业微信自建应用配置 */
+export interface WecomAppAdminInfo {
+  corpId: string;
+  token: string;
+  hasAesKey: boolean;
+  callbackUrl: string | null;
+}
+
+export const getWecomAppAdmin = () => {
+  return get<WecomAppAdminInfo>("/sys/wecom/app");
+};
+
+/** aesKey 留空=沿用已存 */
+export const setWecomAppAdmin = (data: {
+  corpId: string;
+  token?: string;
+  aesKey?: string;
+}) => {
+  return post<{ callbackUrl: string | null }>("/sys/wecom/app", data);
+};

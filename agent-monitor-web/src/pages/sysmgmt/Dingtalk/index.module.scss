@@ -60,6 +60,21 @@
       }
     }
 
+    .events {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      margin: 4px 0 16px;
+
+      .event {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+    }
+
     .actions {
       display: flex;
       align-items: center;

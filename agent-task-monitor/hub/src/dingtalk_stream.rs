@@ -178,6 +178,8 @@ async fn connect_once(
                 // robotCode 缺省回落到 app_key（Stream 机器人一般二者一致）。
                 let staff_id =
                     m.get("senderStaffId").and_then(Value::as_str).unwrap_or("").to_string();
+                let sender_nick =
+                    m.get("senderNick").and_then(Value::as_str).unwrap_or("").to_string();
                 let robot_code = m
                     .get("robotCode")
                     .or_else(|| m.get("chatbotUserId"))
@@ -194,7 +196,8 @@ async fn connect_once(
 
                 // 按 staffId 找归属账号；未绑定 → 回登录链接（不落文件、不 dispatch）
                 let account =
-                    crate::bot::resolve_account(&state, user, &staff_id, &robot_code).await;
+                    crate::bot::resolve_account(&state, user, &staff_id, &robot_code, &sender_nick)
+                        .await;
 
                 // 带文件/图片：仅对已绑定账号暂存（按账号存，send_input 也按账号取）。
                 // 多张图片/文件全部累积，落盘名去重避免互相覆盖（原来只取一张就是同名覆盖导致）。

@@ -58,6 +58,11 @@ pub fn router(state: SharedState) -> Router {
         .route("/sys/version/changelog/del", post(admin::changelog_del))
         .route("/sys/dingtalk/app", get(admin::dingtalk_app_admin_get))
         .route("/sys/dingtalk/app", post(admin::dingtalk_app_admin_set))
+        .route("/sys/dingtalk/robot", get(admin::dingtalk_robot_admin_get))
+        .route("/sys/dingtalk/robot", post(admin::dingtalk_robot_admin_set))
+        .route("/sys/dingtalk/robot/test", post(admin::dingtalk_robot_admin_test))
+        .route("/sys/wecom/app", get(admin::wecom_app_admin_get))
+        .route("/sys/wecom/app", post(admin::wecom_app_admin_set))
         // ---- 任务监控 API（前台公开使用）----
         .route("/monitor/tasks", get(list_tasks))
         .route("/monitor/tasks/page", get(page_tasks))
@@ -91,9 +96,6 @@ pub fn router(state: SharedState) -> Router {
         // ---- 用户自助机器人集成 ----
         // 配置读写（登录用户，返回各渠道配置 + 专属回调地址）
         .route("/monitor/integrations", get(integrations_get))
-        .route("/monitor/integrations/dingtalk-robot", post(set_dingtalk_robot))
-        .route("/monitor/integrations/dingtalk-robot/test", post(test_dingtalk_robot))
-        .route("/monitor/integrations/wecom-app", post(set_wecom_app))
         .route("/monitor/integrations/dingtalk-recv-dir", post(set_dingtalk_recv_dir))
         .route("/monitor/integrations/dingtalk-bind", post(dingtalk_bind))
         .route("/monitor/integrations/dingtalk-ids", get(dingtalk_ids_get))
@@ -1328,23 +1330,11 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
         })
         .collect();
 
-    let reg = state.registry.read().await;
-    let base = public_base();
-    let robot = reg.dingtalk_of(&user);
-    let wecom = reg.wecom_app_of(&user);
-    // 钉钉企业应用改由后管统一配置（/sys/dingtalk/app），用户端不再返回也不可配置；
-    // 用户只需经机器人回的登录链接绑定自己的钉钉 id（见 /monitor/integrations/dingtalk-ids）。
+    // 钉钉企业应用 / 群机器人 / 企业微信 均改由后管统一配置（/sys/dingtalk/* · /sys/wecom/*），
+    // 用户端不再返回也不可配置；用户只需经机器人回的登录链接绑定自己的钉钉 id
+    // （见 /monitor/integrations/dingtalk-ids）。这里只回「文件接收目录」。
     ok(json!({
         "recvDirDevices": recv_dir_devices,
-        "dingtalkRobot": robot.map(|c| json!({
-            "webhook": c.webhook, "hasSecret": !c.secret.is_empty(),
-            "waiting": c.waiting, "finished": c.finished,
-            "newSession": c.new_session, "device": c.device,
-        })),
-        "wecomApp": wecom.map(|a| json!({
-            "corpId": a.corp_id, "token": a.token, "hasAesKey": !a.aes_key.is_empty(),
-            "callbackUrl": format!("{base}/monitor/int/wecom/{}", a.channel),
-        })),
     }))
 }
 
@@ -1406,12 +1396,14 @@ async fn dingtalk_bind(
     if crate::state::now_secs().saturating_sub(p.at) > 30 * 60 {
         return err(400, "绑定链接已过期（超过 30 分钟），请在钉钉里重新发一条消息获取新链接");
     }
-    state
-        .registry
-        .write()
-        .await
-        .bind_dingtalk_id(&p.staff_id, &user, &p.app_user, &p.robot_code);
-    ok(json!({ "result": "已绑定", "staffId": p.staff_id }))
+    state.registry.write().await.bind_dingtalk_id(
+        &p.staff_id,
+        &user,
+        &p.app_user,
+        &p.robot_code,
+        &p.nick,
+    );
+    ok(json!({ "result": "已绑定", "staffId": p.staff_id, "nick": p.nick }))
 }
 
 /// GET /monitor/integrations/dingtalk-ids —— 当前账号已绑定的钉钉 id 列表（设置页展示/解绑用）
@@ -1426,9 +1418,9 @@ async fn dingtalk_ids_get(
         .registry
         .read()
         .await
-        .dingtalk_ids_of(&user)
+        .dingtalk_ids_detail_of(&user)
         .into_iter()
-        .map(|(staff_id, _app_user)| json!({ "staffId": staff_id }))
+        .map(|(staff_id, nick)| json!({ "staffId": staff_id, "nick": nick }))
         .collect();
     ok(json!({ "list": ids }))
 }
@@ -1457,100 +1449,8 @@ async fn dingtalk_unbind(
     ok(json!({ "result": "已解绑" }))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DingtalkRobotReq {
-    webhook: String,
-    #[serde(default)]
-    secret: String,
-    #[serde(default)]
-    waiting: bool,
-    #[serde(default)]
-    finished: bool,
-    #[serde(default)]
-    new_session: bool,
-    #[serde(default)]
-    device: bool,
-}
 
-/// POST /monitor/integrations/dingtalk-robot —— 保存钉钉群机器人推送配置
-async fn set_dingtalk_robot(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-    Json(req): Json<DingtalkRobotReq>,
-) -> Json<Value> {
-    let Some(user) = auth_user(&state, &headers).await else {
-        return err(401, "未登录");
-    };
-    let secret = if req.secret.is_empty() {
-        state.registry.read().await.dingtalk_of(&user).map(|c| c.secret).unwrap_or_default()
-    } else {
-        req.secret
-    };
-    let cfg = crate::dingtalk::DingtalkNotify {
-        webhook: req.webhook.trim().to_string(),
-        secret,
-        waiting: req.waiting,
-        finished: req.finished,
-        new_session: req.new_session,
-        device: req.device,
-    };
-    state.registry.write().await.set_dingtalk(&user, cfg);
-    ok(json!(true))
-}
-
-/// POST /monitor/integrations/dingtalk-robot/test —— 发测试推送
-async fn test_dingtalk_robot(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
-    let Some(user) = auth_user(&state, &headers).await else {
-        return err(401, "未登录");
-    };
-    let Some(cfg) = state.registry.read().await.dingtalk_of(&user) else {
-        return err(400, "尚未配置钉钉群机器人");
-    };
-    let now_ms = crate::state::now_secs() * 1000;
-    match crate::dingtalk::push_text(&cfg, "✅ 终端任务监控 · 钉钉推送测试成功", now_ms).await {
-        Ok(_) => ok(json!(true)),
-        Err(e) => err(400, &e),
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WecomAppReq {
-    corp_id: String,
-    #[serde(default)]
-    token: String,
-    #[serde(default)]
-    aes_key: String,
-}
-
-/// POST /monitor/integrations/wecom-app —— 保存企业微信自建应用配置，返回回调地址
-async fn set_wecom_app(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-    Json(req): Json<WecomAppReq>,
-) -> Json<Value> {
-    let Some(user) = auth_user(&state, &headers).await else {
-        return err(401, "未登录");
-    };
-    // aes_key 留空视为不改（前端不回传已存密钥）
-    let aes_key = if req.aes_key.trim().is_empty() {
-        state.registry.read().await.wecom_app_of(&user).map(|a| a.aes_key).unwrap_or_default()
-    } else {
-        req.aes_key.trim().to_string()
-    };
-    let channel = state
-        .registry
-        .write()
-        .await
-        .set_wecom_app(&user, &req.corp_id, &req.token, &aes_key);
-    match channel {
-        Some(ch) => ok(json!({ "callbackUrl": format!("{}/monitor/int/wecom/{ch}", public_base()) })),
-        None => ok(json!({ "callbackUrl": null })),
-    }
-}
-
-// 钉钉企业应用配置已迁到后管（admin::dingtalk_app_admin_set，/sys/dingtalk/app），此处不再有用户端入口。
+// 钉钉群机器人 / 企业微信 / 企业应用配置均已迁到后管（admin::*，/sys/dingtalk/* · /sys/wecom/*），此处不再有用户端入口。
 
 // ---------- 协助共享 ----------
 

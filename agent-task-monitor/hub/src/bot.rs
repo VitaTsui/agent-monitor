@@ -121,7 +121,9 @@ pub async fn dingtalk_message(
             .to_string(),
     };
     // 按 staffId 找归属账号；未绑定 → 回登录链接（不按渠道 owner 兜底）
-    let reply = match resolve_account(&state, &app_owner, &ctx.staff_id, &ctx.robot_code).await {
+    let nick = payload.get("senderNick").and_then(Value::as_str).unwrap_or("");
+    let reply = match resolve_account(&state, &app_owner, &ctx.staff_id, &ctx.robot_code, nick).await
+    {
         Ok(account) => dispatch(&state, &account, &content, Some(&ctx)).await,
         Err(link_reply) => link_reply,
     };
@@ -264,6 +266,7 @@ pub(crate) async fn resolve_account(
     app_owner: &str,
     staff_id: &str,
     robot_code: &str,
+    nick: &str,
 ) -> Result<String, String> {
     if staff_id.is_empty() {
         return Err("拿不到你的钉钉身份（senderStaffId 为空），无法关联账号。".to_string());
@@ -281,6 +284,7 @@ pub(crate) async fn resolve_account(
         token.clone(),
         crate::state::PendingDingtalkBind {
             staff_id: staff_id.to_string(),
+            nick: nick.to_string(),
             app_user: app_owner.to_string(),
             robot_code: robot_code.to_string(),
             at: crate::state::now_secs(),
