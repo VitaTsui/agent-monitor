@@ -2,25 +2,29 @@
 .Dingtalk {
 }
 
-// 外层只作滚动容器：透明、无边框、无内边距，让每个机器人各自成卡片。
+// 外层只作滚动容器：透明、无边框；两列网格铺卡片，窄屏回退单列。
 .content {
   min-height: 0;
   overflow-y: auto;
   padding: 0;
   background: transparent;
   border: none;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-content: start;
 
-  // 每个机器人一张卡片：流式铺满容器宽度，左对齐不居中
+  @media (max-width: 900px) {
+    grid-template-columns: 1fr;
+  }
+
+  // 每个机器人一张卡片
   .section {
-    margin: 0 0 14px;
+    margin: 0;
     padding: 18px 20px;
     background: var(--cf-surface, #fff);
     border: 1px solid var(--cf-border, rgba(0, 0, 0, 0.08));
     border-radius: 12px;
-
-    &:last-child {
-      margin-bottom: 4px;
-    }
 
     .sectionTitle {
       font-size: 15px;
