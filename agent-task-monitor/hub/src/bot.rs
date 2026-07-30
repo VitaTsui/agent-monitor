@@ -152,7 +152,7 @@ pub(crate) struct ReplyCtx {
     pub robot_code: String,
 }
 
-/// 会话级指令（吃一个会话序号 N）：`@x` 速记与多目标都只对这些指令 + 「内容(=发)」生效。
+/// 会话级指令（吃一个会话号位 N）：`@x` 速记与多目标都只对这些指令 + 「内容(=发)」生效。
 const SESSION_CMDS: &[&str] = &[
     "暂停", "恢复", "继续", "中断", "终止", "停止", "撤回", "监控", "watch", "排队", "队列", "queue",
 ];
@@ -210,7 +210,7 @@ pub(crate) async fn dispatch(
     // 「@N …」速记（多目标 + 全部会话级指令）：逐条 run_command，回复拼接
     if let Some(cmds) = parse_at_commands(text) {
         if cmds.is_empty() {
-            return "用法：@序号 接内容或会话指令，可多个。\n\
+            return "用法：@号位 接内容或会话指令，可多个。\n\
                     例：@1 @2 重启服务 / @1 排队 / @2 暂停 / @1 撤回"
                 .to_string();
         }
@@ -403,9 +403,9 @@ async fn recall_last(state: &SharedState, username: &str, arg: &str) -> String {
     format!("已注入撤回 ↑（会话 {arg}）。Terminal.app 需在终端手动按 ↑。")
 }
 
-/// 「停止监控 [N]」：带序号停某个会话；不带序号停该用户全部监控。
+/// 「停止监控 [N]」：带号位停某个会话；不带号位停该用户全部监控。
 async fn monitor_stop(state: &SharedState, username: &str, arg: &str) -> String {
-    // 不带序号 → 停全部
+    // 不带号位 → 停全部
     if arg.trim().is_empty() {
         let n = state.bot_monitors.write().await.remove(username).map(|v| v.len()).unwrap_or(0);
         return if n > 0 {
@@ -414,7 +414,7 @@ async fn monitor_stop(state: &SharedState, username: &str, arg: &str) -> String 
             "当前没有在监控的会话。".to_string()
         };
     }
-    // 带序号 → 只停该会话
+    // 带号位 → 只停该会话
     let id = match resolve_task(state, username, arg).await {
         Ok(id) => id,
         Err(e) => return e,
@@ -467,22 +467,23 @@ fn split_cmd(text: &str) -> (String, String) {
 }
 
 fn help_text() -> String {
-    "终端监控机器人 · 指令（N = 会话序号，发「会话」看）\n\
+    "终端监控机器人 · 指令（N = 会话号位，发「会话」看）\n\
+     号位跟着终端窗口固定：终端不关，号就一直是它，可能不连号。\n\
      \n\
      【查看】\n\
-     • 会话 —— 列出当前会话（带序号）\n\
+     • 会话 —— 列出当前会话（带号位）\n\
      • 设备 —— 列出名下设备\n\
      • 排队 [N] —— 查看排队中的任务（不带 N 汇总全部）\n\
      • 文件 —— 查看挂起待发的文件\n\
      \n\
      【控制会话】\n\
-     • 暂停 N / 恢复 N / 中断 N / 终止 N —— 控制第 N 个会话\n\
-     • 发 N 内容 —— 向第 N 个会话发一条输入（排队则回队列，执行后通知）\n\
-     • 撤回 N —— 撤回第 N 个会话最近一条排队中的任务\n\
+     • 暂停 N / 恢复 N / 中断 N / 终止 N —— 控制 N 号会话\n\
+     • 发 N 内容 —— 向 N 号会话发一条输入（排队则回队列，执行后通知）\n\
+     • 撤回 N —— 撤回 N 号会话最近一条排队中的任务\n\
      \n\
      【监控】\n\
-     • 监控 N —— 把第 N 个会话的对话内容持续推到这里（可多个，跳过执行过程）\n\
-     • 停止监控 [N] —— 停某个会话；不带序号停全部\n\
+     • 监控 N —— 把 N 号会话的对话内容持续推到这里（可多个，跳过执行过程）\n\
+     • 停止监控 [N] —— 停某个会话；不带号位停全部\n\
      \n\
      【文件】\n\
      • 直接发文件/图片给我 → 暂存，随下一条任务（如「@2 处理这些文件」）落到会话 tmp/ 并把路径拼到开头\n\
@@ -583,64 +584,74 @@ fn render_monitor_push(msgs: &[&am_core::model::MessageBrief]) -> String {
     out
 }
 
-/// 会话在「发 N / 暂停 N」里的序号：与 resolve_task **完全同源** —— 序号表不存在就即时用当前
-/// 排序**冻结一份**（和 resolve_task 一样），再取位置。用于钉钉推送里带上编号让人「发 N」回应。
+/// 会话的号位（「发 N / 暂停 N」里的 N），用于钉钉推送里带上号让人「@N」回应。
 ///
-/// 关键：这里必须和 resolve_task 一样「不存在就冻结落盘」，不能只临时算个位置。否则——推送在
-/// T1 用实时排序算出编号给用户看、却没冻结；用户随后「发 N」在 T2 才冻结一份，若 T1→T2 排序
-/// 变了（新会话出现 / has_content 翻转等），两份就对不上 → 发 N 打到别的终端（用户实测的错位）。
+/// 按**终端锚**反查而不是 task_id：同一个终端窗口在 /clear、--resume 前后是不同的会话 id，
+/// 却该报出同一个号。锚下的代表会话被去重掉时也照样能拿到号。
 pub(crate) async fn session_number(
     state: &SharedState,
     username: &str,
     task_id: &str,
 ) -> Option<usize> {
-    // 序号表还没建时即时冻结一份（与 resolve_task 同一逻辑、同一排序）
-    if !state.bot_last_list.read().await.contains_key(username) {
-        let ids: Vec<String> =
-            sorted_active_tasks(state, username).await.into_iter().map(|t| t.id).collect();
-        state.bot_last_list.write().await.insert(username.to_string(), ids);
+    let list = sorted_active_tasks(state, username).await;
+    // 常见路径：会话本身就在列表里
+    if let Some((_, no)) = list.iter().find(|(t, _)| t.id == task_id) {
+        return Some(*no as usize);
     }
-    let list = state.bot_last_list.read().await;
-    let ids = list.get(username)?;
-    // 已冻结列表里没有 = 冻结之后才新建的会话：不给它编号（返回 None → 推送里 {NO} 留空），
-    // 免得显示一个「发 N」解析不到、或指向别人的编号。用户发「会话」刷新即可纳入。
-    ids.iter().position(|x| x == task_id).map(|i| i + 1)
+    // 没命中 = 它被同锚去重掉了（/clear 前后两条会话短暂并存）：报它所在终端的号
+    let anchor = state
+        .tasks_for(username)
+        .await
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .map(|t| crate::slots::anchor_of(&t))?;
+    list.into_iter().find(|(t, _)| crate::slots::anchor_of(t) == anchor).map(|(_, no)| no as usize)
 }
 
-/// 活跃会话按「设备名 → 终端 → 项目 → 有内容优先 → 会话标题 → id」**稳定**排序。「会话」
-/// 列表顺序、以及「发 N / 暂停 N …」的序号都以它为准 —— 两处共用同一份排序，序号才不会对不上。
+/// 活跃会话 + 各自号位，按「设备名 → 终端 → 项目 → 号位」排序。「会话」列表、「@N / 发 N /
+/// 暂停 N」、推送里的 `#N` 全部以它为准。
 ///
-/// 排序键刻意全用「不随运行时变化」的字段：不按状态排（Running 优先）——否则会话一
-/// Running↔Idle 切换序号就整体重排、「发 N」指向的会话跟着变。**有内容优先**：有真实标题/
-/// 提示词的会话排在「刚开还没输入的空占位（标题退化成终端名 Claude Code）」前面，免得空会话
-/// 顶在前面、真正在用的会话垫底。has_content 只在会话「首次有内容」时翻一次，仍足够稳定。
-async fn sorted_active_tasks(state: &SharedState, username: &str) -> Vec<am_core::model::Task> {
+/// 号位来自 [`crate::slots`]：绑定终端窗口（shell pid + start）并落盘，所以它既不随
+/// title/prompt 变化漂移，也不随会话增减、hub 重启重排 —— 位置序号那套正是「@2 打到列表
+/// 第 5 位」错位的根因。排序也直接用号位，于是同组内号是递增的、好扫视。
+///
+/// 同一终端锚下若有多个活跃会话（罕见：/clear 后旧会话短暂并存），只留最近活动的那条：
+/// 一个终端窗口一个号，否则同号出现两行、用户没法指名。
+async fn sorted_active_tasks(
+    state: &SharedState,
+    username: &str,
+) -> Vec<(am_core::model::Task, u32)> {
     let mut tasks = state.tasks_for(username).await;
     // 已结束的会话不列出——机器人只关心还能操作的活跃会话
     tasks.retain(|t| t.status != TaskStatus::Finished);
-    // 有真实内容（标题或提示词非空）= 真正在用的会话，排在空占位前
-    let has_content = |t: &am_core::model::Task| !t.title.is_empty() || !t.prompt.is_empty();
-    // 会话标题：与网页 taskKey 同源（标题→提示词→终端名），空则退终端名
-    let title_key = |t: &am_core::model::Task| -> String {
-        if !t.title.is_empty() {
-            t.title.clone()
-        } else if !t.prompt.is_empty() {
-            t.prompt.clone()
-        } else {
-            t.provider_dsr.clone()
-        }
-    };
+    // 同锚去重：先按活动时间降序，再按锚首见保留 → 留下的是每个终端最近活动的会话
+    tasks.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms).then(a.id.cmp(&b.id)));
+    let mut seen = std::collections::HashSet::new();
+    tasks.retain(|t| seen.insert(crate::slots::anchor_of(t)));
+    // 号位首次分配的顺序 = 用户在列表里看到的分组顺序（全用不随运行时变化的字段），
+    // 这样同一分组里新终端拿到的号也是从小到大接着来的
     tasks.sort_by(|a, b| {
         a.hostname
             .cmp(&b.hostname)
             .then(a.provider_dsr.cmp(&b.provider_dsr))
             .then(a.project_name.cmp(&b.project_name))
-            // 有内容的在前：true 排前，故比较 b vs a
-            .then(has_content(b).cmp(&has_content(a)))
-            .then(title_key(a).cmp(&title_key(b)))
             .then(a.id.cmp(&b.id))
     });
-    tasks
+    let nos = crate::slots::ensure(state, username, &tasks).await;
+    // ensure 一定给了号（锚就是从这批会话来的）；真没拿到就宁可不列出，也不显示一个
+    // 解析不到的「0.」让用户去发「@0」。
+    let mut out: Vec<(am_core::model::Task, u32)> = tasks
+        .into_iter()
+        .filter_map(|t| nos.get(&crate::slots::anchor_of(&t)).copied().map(|no| (t, no)))
+        .collect();
+    out.sort_by(|(a, na), (b, nb)| {
+        a.hostname
+            .cmp(&b.hostname)
+            .then(a.provider_dsr.cmp(&b.provider_dsr))
+            .then(a.project_name.cmp(&b.project_name))
+            .then(na.cmp(nb))
+    });
+    out
 }
 
 async fn list_sessions(state: &SharedState, username: &str) -> String {
@@ -648,11 +659,10 @@ async fn list_sessions(state: &SharedState, username: &str) -> String {
     if tasks.is_empty() {
         return "当前没有活跃会话。".to_string();
     }
-    let mut ids = Vec::with_capacity(tasks.len());
     let mut lines = vec![format!("共 {} 个活跃会话：", tasks.len())];
     let mut cur_dev = String::new();
     let mut cur_group = String::new(); // 终端·项目 子分组
-    for t in &tasks {
+    for (t, no) in &tasks {
         if t.hostname != cur_dev {
             cur_dev = t.hostname.clone();
             cur_group.clear(); // 换设备后子分组重置，第一条必出子标题
@@ -663,14 +673,13 @@ async fn list_sessions(state: &SharedState, username: &str) -> String {
             cur_group = group.clone();
             lines.push(format!("  〔{group}〕"));
         }
-        ids.push(t.id.clone());
         // 子标题里已带终端·项目，行内只留状态 + 会话标题
         let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
         let title: String = title.chars().take(24).collect();
-        lines.push(format!("  {}. [{}] {}", ids.len(), status_zh(t.status), title));
+        lines.push(format!("  {}. [{}] {}", no, status_zh(t.status), title));
     }
-    state.bot_last_list.write().await.insert(username.to_string(), ids);
-    lines.push("\n操作示例：暂停 1 / 发 1 继续".to_string());
+    // 号位绑终端窗口、不随列表刷新重排，所以中间可能有空号（终端关掉了）——那是正常的
+    lines.push("\n号位跟着终端窗口固定不变，可能不连号。操作示例：@2 继续 / 暂停 2".to_string());
     lines.join("\n")
 }
 
@@ -701,22 +710,24 @@ fn status_zh(s: TaskStatus) -> &'static str {
 }
 
 async fn resolve_task(state: &SharedState, username: &str, arg: &str) -> Result<String, String> {
-    let n: usize = arg
+    let n: u32 = arg
         .trim()
         .parse()
-        .map_err(|_| "请给会话序号，如「暂停 1」。发「会话」看序号。".to_string())?;
-    // 序号表还没建（从没发过「会话」，或 hub 重启清空了它）时即时补一份：
-    // 用与「会话」完全相同的排序，让「发 N / 暂停 N」不必先发「会话」也能用。
-    if !state.bot_last_list.read().await.contains_key(username) {
-        let ids: Vec<String> =
-            sorted_active_tasks(state, username).await.into_iter().map(|t| t.id).collect();
-        state.bot_last_list.write().await.insert(username.to_string(), ids);
+        .map_err(|_| "请给会话号位，如「暂停 2」。发「会话」看号位。".to_string())?;
+    if n == 0 {
+        return Err("号位从 1 开始。发「会话」看号位。".to_string());
     }
-    let list = state.bot_last_list.read().await;
-    let ids = list.get(username).ok_or("当前没有活跃会话。".to_string())?;
-    ids.get(n.wrapping_sub(1))
-        .cloned()
-        .ok_or(format!("没有第 {n} 个会话，发「会话」看最新列表。"))
+    // 号位由终端锚决定并已落盘，这里直接按号反查即可 —— 不再依赖「上次列过什么」，
+    // 所以不必先发「会话」，hub 重启也不会让号位改指向。
+    let tasks = sorted_active_tasks(state, username).await;
+    if tasks.is_empty() {
+        return Err("当前没有活跃会话。".to_string());
+    }
+    tasks
+        .into_iter()
+        .find(|(_, no)| *no == n)
+        .map(|(t, _)| t.id)
+        .ok_or(format!("没有 {n} 号会话（终端可能已关）。发「会话」看当前号位。"))
 }
 
 async fn control(
@@ -874,7 +885,7 @@ async fn send_input(
 ) -> String {
     let (idx, mut text) = split_cmd(arg);
     if text.is_empty() {
-        return "用法：发 <序号> <内容>，如「发 1 继续」。".to_string();
+        return "用法：发 <号位> <内容>，如「发 2 继续」。发「会话」看号位。".to_string();
     }
     let task_id = match resolve_task(state, username, &idx).await {
         Ok(id) => id,
@@ -1103,19 +1114,17 @@ async fn list_queued(state: &SharedState, username: &str, arg: &str) -> String {
         }
         return lines.join("\n");
     }
-    // 汇总：按「会话」序号遍历，列出各会话的排队
+    // 汇总：按「会话」号位遍历，列出各会话的排队
     let tasks = sorted_active_tasks(state, username).await;
-    let ids: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
-    state.bot_last_list.write().await.insert(username.to_string(), ids);
     let mut out: Vec<String> = Vec::new();
-    for (i, t) in tasks.iter().enumerate() {
+    for (t, no) in tasks.iter() {
         if let Some((hub_pending, term_q)) = read_queue(state, username, &t.id).await {
             let mut list = term_q.clone();
             list.extend(hub_pending);
             if !list.is_empty() {
                 let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
                 let title: String = title.chars().take(20).collect();
-                out.push(format!("【{}. {}】{} 条：", i + 1, title, list.len()));
+                out.push(format!("【{}. {}】{} 条：", no, title, list.len()));
                 for (n, x) in list.iter().enumerate() {
                     out.push(format!("  {}. {}", n + 1, x));
                 }

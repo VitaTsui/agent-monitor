@@ -9,6 +9,7 @@ mod dingtalk_stream;
 mod oauth;
 mod registry;
 mod server;
+mod slots;
 mod state;
 mod bot;
 mod wecom;

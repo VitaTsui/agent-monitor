@@ -255,9 +255,11 @@ pub struct AppState {
     pub started_at: chrono::DateTime<chrono::Local>,
     /// 会话表有未落盘变更（tick 循环定期 flush 到 sessions.json）
     pub sessions_dirty: std::sync::atomic::AtomicBool,
-    /// 机器人「最近一次列出的会话」：用户名 → 有序 task_id，
-    /// 让「暂停 3」这类按序号操作能对上会话。
-    pub bot_last_list: RwLock<HashMap<String, Vec<String>>>,
+    /// 机器人会话号位（「@2 / 发 2 / 暂停 2」里的 2）：用户名 → 号位表。
+    /// 号绑定终端窗口而非列表位置，跨排序变化与 hub 重启都不变 —— 见 crate::slots。
+    pub bot_slots: RwLock<HashMap<String, crate::slots::SlotTable>>,
+    /// 号位表有未落盘变更（tick 循环定期 flush 到 bot_slots.json）
+    pub bot_slots_dirty: std::sync::atomic::AtomicBool,
     /// 机器人「监控中」的会话：用户名 → 监控态。后台循环据此把新内容推到钉钉会话 webhook。
     /// 钉钉「监控」：user → 其监控中的多个会话（每会话一份）。支持同时监控多个、单独停止。
     pub bot_monitors: RwLock<HashMap<String, Vec<BotMonitor>>>,
@@ -320,6 +322,8 @@ impl AppState {
         let (tx, _) = broadcast::channel(64);
         // 会话持久化：重启不掉线（网页 / 移动端 / 客户端一体生效）
         let sessions = load_sessions(&config.data_dir);
+        // 号位持久化：hub 重启后「@2」还是同一个终端（重启丢表正是序号错位的成因之一）
+        let slots = crate::slots::load(&config.data_dir);
         Arc::new(Self {
             machines: RwLock::new(HashMap::new()),
             tokens: RwLock::new(sessions),
@@ -331,7 +335,8 @@ impl AppState {
             tx,
             started_at: chrono::Local::now(),
             sessions_dirty: std::sync::atomic::AtomicBool::new(false),
-            bot_last_list: RwLock::new(HashMap::new()),
+            bot_slots: RwLock::new(slots),
+            bot_slots_dirty: std::sync::atomic::AtomicBool::new(false),
             bot_monitors: RwLock::new(HashMap::new()),
             bot_pending_files: RwLock::new(HashMap::new()),
             dingtalk_binds: RwLock::new(HashMap::new()),
@@ -508,6 +513,10 @@ pub async fn tick_loop(state: SharedState) {
         // 会话变更定期落盘（~60s 一次）：登录/登出/活动续期都只标脏，这里统一写
         if tick % 40 == 0 && state.sessions_dirty.swap(false, Ordering::Relaxed) {
             save_sessions(&state).await;
+        }
+        // 机器人号位同上：分配/回收只标脏，这里统一写（丢一轮也只是号位重排一次）
+        if tick % 40 == 0 && state.bot_slots_dirty.swap(false, Ordering::Relaxed) {
+            crate::slots::save(&state).await;
         }
         // 设备离线边沿检测（每 ~3s）：曾在线、现超阈值未上报 → 推「离线」
         if tick % 2 == 0 {
