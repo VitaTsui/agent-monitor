@@ -187,14 +187,12 @@ fn parse_at_commands(text: &str) -> Option<Vec<(String, String)>> {
         return Some(vec![]);
     }
     let (first, tail) = split_cmd(rest);
-    let cmds = if SESSION_CMDS.contains(&first.as_str()) {
-        targets
-            .iter()
-            .map(|n| {
-                let arg = if tail.is_empty() { n.clone() } else { format!("{n} {tail}") };
-                (first.clone(), arg)
-            })
-            .collect()
+    // 首词是会话指令、**且后面没有别的内容**时才当指令。这些指令都不吃额外参数（序号已经由
+    // `@N` 给出），所以「@3 继续」是恢复会话，而「@3 继续修复登录 bug」是发一条任务 ——
+    // 「继续 / 暂停 / 停止」都是很自然的任务开头，只看首词会把正文整条吞掉（实测：发
+    // 「@3 继续…」收到的回复是「已恢复（会话 3）」，任务根本没下发）。
+    let cmds = if SESSION_CMDS.contains(&first.as_str()) && tail.is_empty() {
+        targets.iter().map(|n| (first.clone(), n.clone())).collect()
     } else {
         targets.iter().map(|n| ("发".to_string(), format!("{n} {rest}"))).collect()
     };
@@ -1199,6 +1197,16 @@ mod tests {
             c("@1 @2 暂停"),
             Some(vec![("暂停".into(), "1".into()), ("暂停".into(), "2".into())])
         );
+        // 指令词开头、但后面还有正文 → 是任务内容，不是指令（实测踩过：「@3 继续…」
+        // 被当成「恢复 3」，任务整条丢失）
+        assert_eq!(
+            c("@3 继续修复登录 bug"),
+            Some(vec![("发".into(), "3 继续修复登录 bug".into())])
+        );
+        assert_eq!(c("@3 暂停一下再说"), Some(vec![("发".into(), "3 暂停一下再说".into())]));
+        assert_eq!(c("@3 停止服务后重启"), Some(vec![("发".into(), "3 停止服务后重启".into())]));
+        // 单独的指令词仍是指令
+        assert_eq!(c("@3 继续"), Some(vec![("继续".into(), "3".into())]));
         // 去重目标
         assert_eq!(c("@1 @1 x"), Some(vec![("发".into(), "1 x".into())]));
         // 非 @ → None（走常规分发）；无效目标/空 → Some(空)（提示用法）
