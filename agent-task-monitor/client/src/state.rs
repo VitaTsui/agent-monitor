@@ -408,17 +408,54 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         }
     }
     let paused = state.paused.read().await.clone();
-    // 按「进程打开着哪个会话文件」得出确定配对；lsof/RmGetList 有开销，节流每 4 轮算
-    // 一次、其余复用缓存（会话与文件的对应关系很稳定）。失败则空表，build_tasks 退回
-    // mtime 启发式，行为不变。
+    // 「claude pid → 会话 id」的**权威**配对累积表。
+    //
+    // pin 是**瞬态信号**：CLAUDE_PID / CLAUDE_CODE_SESSION_ID 只出现在 claude 临时派生的工具
+    // 子进程（bash / cargo / conhost…）的 env 里，跑完就没了；常驻的 cmd.exe 子进程并不带这
+    // 两个变量。所以空闲等待输入的 claude 一个 candidate 都抓不到（实测同机 5 个 claude，只
+    // 有正在执行工具的那个有）。
+    //
+    // 但「这个 claude 属于哪个会话」是**持久事实** —— 抓到一次就该一直有效。早先这里用本轮
+    // 结果直接覆盖缓存：claude 一进入空闲 fresh 就是空的，把已抓到的配对一起清掉 → 退回
+    // mtime 启发式 → 会话串到别的终端（钉钉里标题错位、下发打错终端的根因）。
+    // 改为累积：只增不删，失效只由「进程是否还是原来那个」决定。
     let pinned = {
         use std::sync::atomic::Ordering;
-        static PIN_CACHE: std::sync::Mutex<Option<std::collections::HashMap<u32, String>>> =
-            std::sync::Mutex::new(None);
+        // 值 = (会话 id, 该 claude 的启动时间)。带 start_time 是为了防 pid 重用 —— 进程退出后
+        // pid 被别的进程占用时启动时间对不上，条目立即失效（与终端锚 shell_start 同一思路）。
+        static PIN_ACC: std::sync::Mutex<
+            Option<std::collections::HashMap<u32, (String, u64)>>,
+        > = std::sync::Mutex::new(None);
         let tick = SCAN_TICKS.load(Ordering::Relaxed);
-        // 每 20 轮（约 30s）算一次，其余复用缓存；会话↔进程对应关系很稳定，够用。
-        // 首轮（tick==1，诊断块已 fetch_add 过所以从 1 起）也算：否则要等 ~80s 才有 pinned，
-        // 其间只能靠 mtime（易错位），正是「刚开客户端就下发」时最容易配错的窗口。
+        // 本轮扫描到的活进程身份（pid → 启动时间），用来淘汰失效条目
+        let alive: std::collections::HashMap<u32, u64> =
+            processes.iter().map(|p| (p.pid, p.start_time)).collect();
+        // /clear 会让同一个 claude 换到新会话，但换会话本身**不产生新 pin**（除非它随后又跑了
+        // 工具）。累积表若还记着旧 sid，会以「第一优先」(scanner::build_tasks) 把进程粘回清空前
+        // 的会话、压过 clear-follow 迁移层 —— 表现为网页/钉钉的标题内容定格在 /clear 之前。
+        // 判据同 clear-follow：同项目里出现了 created 更晚的 cleared 会话，就说明这条 pin 过期，
+        // 丢弃它、把配对交还给迁移层。查不到该会话时保守保留（信息不足，且 build_tasks 找不到
+        // sid 本来也不会用它）。
+        let sess_by_id: std::collections::HashMap<&str, &am_core::scanner::SessionSummary> =
+            sessions.iter().map(|s| (s.session_id.as_str(), s)).collect();
+        let superseded_by_clear = |sid: &str| -> bool {
+            let Some(cur) = sess_by_id.get(sid) else { return false };
+            sessions.iter().any(|s| {
+                s.cleared
+                    && s.provider == cur.provider
+                    && s.project_key == cur.project_key
+                    && s.created_ms > cur.created_ms
+            })
+        };
+        let mut guard = PIN_ACC.lock().unwrap();
+        let acc = guard.get_or_insert_with(std::collections::HashMap::new);
+        // 每轮淘汰（很便宜）：进程已退出 / pid 被重用 / 会话已被 /clear 取代
+        acc.retain(|pid, (sid, start)| {
+            alive.get(pid) == Some(&*start) && !superseded_by_clear(sid)
+        });
+        // env/句柄扫描开销大，仍每 20 轮（约 30s）跑一次。首轮（tick==1，诊断块已 fetch_add
+        // 过所以从 1 起）也跑：否则启动后 ~80s 内累积表还是空的，只能靠 mtime（易错位），
+        // 正是「刚开客户端就下发」时最容易配错的窗口。
         if tick == 1 || tick % 20 == 0 {
             let pids: Vec<u32> = processes.iter().map(|p| p.pid).collect();
             let dirs = {
@@ -442,8 +479,17 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                 tokio::task::block_in_place(|| crate::openfiles::pin_sessions(&pids, &dirs));
             let file_n = fresh.len();
             fresh.extend(env_pins); // env 权威，覆盖句柄扫描结果
-            // 诊断：pinned 是最可靠的配对来源。每 ~30s 记一次命中情况（env 权威 / 文件句柄
-            // 各多少），长期 env=0 说明会话都没有活子进程、只能靠缓存+mtime 兜底。
+            // 并入累积表：只收当前存活进程的 pin，顺手记下启动时间当身份。
+            // 同一 pid 再次抓到就以最新为准（同一进程换会话 = /clear 后新建会话）。
+            let mut added = 0usize;
+            for (pid, sid) in fresh {
+                let Some(&start) = alive.get(&pid) else { continue };
+                if acc.insert(pid, (sid, start)).is_none() {
+                    added += 1;
+                }
+            }
+            // 诊断：每 ~30s 记一次。env权威=0 是常态且**不再要紧** —— 只要累积表非空，
+            // 配对就仍然可靠；真正该警惕的是 pinned 长期为 0（那才会退回 mtime 启发式）。
             {
                 static LAST_LOG: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
                 let now = std::time::SystemTime::now()
@@ -454,20 +500,21 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                 if now.saturating_sub(*l) > 30 {
                     *l = now;
                     client_log(&format!(
-                        "配对来源 pinned={} 条（env权威={} 文件句柄={}）：{:?}（进程数 {}）",
-                        fresh.len(),
+                        "配对来源 pinned={} 条（累积 · 本轮新增 {} · env权威={} 文件句柄={}）：{:?}（进程数 {}）",
+                        acc.len(),
+                        added,
                         env_n,
                         file_n,
-                        fresh,
+                        acc,
                         pids.len()
                     ));
                 }
             }
-            *PIN_CACHE.lock().unwrap() = Some(fresh.clone());
-            fresh
-        } else {
-            PIN_CACHE.lock().unwrap().clone().unwrap_or_default()
         }
+        // 累积表 → build_tasks 要的 pid→sid（丢掉只用于校验身份的启动时间）
+        let out: std::collections::HashMap<u32, String> =
+            acc.iter().map(|(pid, (sid, _))| (*pid, sid.clone())).collect();
+        out
     };
     // 「本轮相比上轮 mtime 有推进」的会话 = 此刻正在被写的活跃会话。用于兜底配对时
     // 区分「正在生成输出的活跃会话」与「刚关闭、mtime 虽新但已冻结的旧会话」。
