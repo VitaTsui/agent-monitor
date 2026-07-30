@@ -1893,6 +1893,11 @@ async fn report(
                 })
                 .unwrap_or((String::new(), None))
         };
+        // 「占位会话」：从没出现过真实内容（标题与提示词都空，列表里只显示成终端名
+        // 「Claude Code」）。多是刚开终端还没输入、或没配对上 jsonl 的空壳 —— 它结束时推一条
+        // 「会话已结束」纯属噪音（认不出是哪个、也没有任何结果可看），所以不推。
+        // 只挡推送，基线仍要照常清理，否则会被后面的「消失」判定再推一次。
+        let is_placeholder = |t: &am_core::model::Task| t.title.is_empty() && t.prompt.is_empty();
         // 「等待选择」判定：从末尾回看最近一条实质消息 —— 若先遇到 select（其后没有 user/
         // tool_result 应答），说明仍在等你选。比「末条恰好是 select」稳健：AskUserQuestion 记录
         // 常不在绝对末尾（后面可能还跟 assistant 文本），但只要没被应答就仍算等待。
@@ -1934,14 +1939,17 @@ async fn report(
                             full_content: full,
                         });
                     } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
-                        let (res, full) = result(&t.id);
-                        events.push(NotifyEvent {
-                            owner: owner.clone(),
-                            kind: EventKind::Finished,
-                            task_id: Some(t.id.clone()),
-                            text: format!("**✅ 会话已结束**\n\n{}{}", body(t), res),
-                            full_content: full,
-                        });
+                        // 空壳占位会话结束不推（噪音）；基线照常清理
+                        if !is_placeholder(t) {
+                            let (res, full) = result(&t.id);
+                            events.push(NotifyEvent {
+                                owner: owner.clone(),
+                                kind: EventKind::Finished,
+                                task_id: Some(t.id.clone()),
+                                text: format!("**✅ 会话已结束**\n\n{}{}", body(t), res),
+                                full_content: full,
+                            });
+                        }
                         known_removes.push(t.id.clone()); // 已结束：移出基线，别再被「消失」判一次
                     }
                 }
@@ -1993,14 +2001,17 @@ async fn report(
                 .map(|t| t.elapsed().as_secs())
                 .unwrap_or(u64::MAX);
             if gone >= crate::state::FINISH_GRACE_SECS {
-                let (res, full) = result(id);
-                events.push(NotifyEvent {
-                    owner: owner.clone(),
-                    kind: EventKind::Finished,
-                    task_id: Some(id.clone()),
-                    text: format!("**✅ 会话已结束**\n\n{}{}", body(task), res),
-                    full_content: full,
-                });
+                // 同上：空壳占位会话消失不推，只清基线
+                if !is_placeholder(task) {
+                    let (res, full) = result(id);
+                    events.push(NotifyEvent {
+                        owner: owner.clone(),
+                        kind: EventKind::Finished,
+                        task_id: Some(id.clone()),
+                        text: format!("**✅ 会话已结束**\n\n{}{}", body(task), res),
+                        full_content: full,
+                    });
+                }
                 known_removes.push(id.clone());
             }
         }
