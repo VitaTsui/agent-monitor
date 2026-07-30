@@ -453,62 +453,81 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         acc.retain(|pid, (sid, start)| {
             alive.get(pid) == Some(&*start) && !superseded_by_clear(sid)
         });
-        // env/句柄扫描开销大，仍每 20 轮（约 30s）跑一次。首轮（tick==1，诊断块已 fetch_add
-        // 过所以从 1 起）也跑：否则启动后 ~80s 内累积表还是空的，只能靠 mtime（易错位），
-        // 正是「刚开客户端就下发」时最容易配错的窗口。
-        if tick == 1 || tick % 20 == 0 {
-            let pids: Vec<u32> = processes.iter().map(|p| p.pid).collect();
-            let dirs = {
-                let scanner = state.scanner.lock().await;
-                let home = dirs::home_dir().unwrap_or_default();
-                vec![
-                    scanner.projects_dir().to_path_buf(),
-                    home.join(".codex/sessions"),
-                ]
-            };
-            // 权威来源：claude 派生子进程的 env 里带 CLAUDE_PID + CLAUDE_CODE_SESSION_ID，
-            // 直接给出「会话 ↔ claude pid」（见 ProcessScanner::session_pins）。这是 Windows
-            // 上唯一可靠的 pinned 来源——claude 写一行开一次就关，句柄扫描（RmGetList/lsof）
-            // 抓不到。openfiles::pin_sessions 留作补充（Unix lsof；Windows 已默认空），env 优先。
+        // 采集节奏分两路，因为两个来源的开销差着数量级：
+        //
+        // · env 扫描便宜（实测 449 个进程 ~50ms），而 pin 是**瞬态**的 —— 只在 claude 执行工具
+        //   的那几秒有子进程可抓。所以只要还有 claude 没配上，就**每轮**扫（约 1.5s 一轮，占用
+        //   ~3%），尽量抓住那个窗口；一次抓到就永久钉死，之后自然降频。实测教训：原先每 20 轮
+        //   （~30s）才扫一次，撞上工具执行窗口的概率太低，客户端重启后累积表长时间填不上、
+        //   `pinned=0` 持续，等于修复没生效。
+        // · 文件句柄扫描（Unix lsof；Windows 恒空）很贵，保持每 20 轮。
+        //
+        // 首轮（tick==1，诊断块已 fetch_add 过所以从 1 起）两路都跑：否则启动后那段时间只能靠
+        // mtime 启发式（易错位），正是「刚开客户端就下发」最容易配错的窗口。
+        let unpaired = processes.iter().any(|p| !acc.contains_key(&p.pid));
+        let maintain = tick == 1 || tick % 20 == 0;
+        let mut env_n = 0usize;
+        let mut file_n = 0usize;
+        let mut added = 0usize;
+        // 并入累积表：只收当前存活进程的 pin，顺手记下启动时间当身份。
+        // 同一 pid 再次抓到就以最新为准（同一进程换会话 = /clear 后新建了会话）。
+        let mut merge = |acc: &mut std::collections::HashMap<u32, (String, u64)>,
+                         pins: std::collections::HashMap<u32, String>,
+                         added: &mut usize| {
+            for (pid, sid) in pins {
+                let Some(&start) = alive.get(&pid) else { continue };
+                if acc.insert(pid, (sid, start)).is_none() {
+                    *added += 1;
+                }
+            }
+        };
+        // 权威来源：claude 派生子进程的 env 里带 CLAUDE_PID + CLAUDE_CODE_SESSION_ID，
+        // 直接给出「会话 ↔ claude pid」（见 ProcessScanner::session_pins）。这是 Windows 上
+        // 唯一可靠的 pinned 来源 —— claude 写一行开一次就关，句柄扫描（RmGetList/lsof）抓不到。
+        if unpaired || maintain {
             let env_pins = {
                 let mut procs = state.procs.lock().await;
                 tokio::task::block_in_place(|| procs.session_pins())
             };
-            let env_n = env_pins.len();
-            let mut fresh =
+            env_n = env_pins.len();
+            merge(acc, env_pins, &mut added);
+        }
+        // 句柄扫描留作补充（env 优先级更高，上面先并入、这里不覆盖已有条目）
+        if maintain {
+            let pids: Vec<u32> = processes.iter().map(|p| p.pid).collect();
+            let dirs = {
+                let scanner = state.scanner.lock().await;
+                let home = dirs::home_dir().unwrap_or_default();
+                vec![scanner.projects_dir().to_path_buf(), home.join(".codex/sessions")]
+            };
+            let file_pins =
                 tokio::task::block_in_place(|| crate::openfiles::pin_sessions(&pids, &dirs));
-            let file_n = fresh.len();
-            fresh.extend(env_pins); // env 权威，覆盖句柄扫描结果
-            // 并入累积表：只收当前存活进程的 pin，顺手记下启动时间当身份。
-            // 同一 pid 再次抓到就以最新为准（同一进程换会话 = /clear 后新建会话）。
-            let mut added = 0usize;
-            for (pid, sid) in fresh {
-                let Some(&start) = alive.get(&pid) else { continue };
-                if acc.insert(pid, (sid, start)).is_none() {
-                    added += 1;
-                }
-            }
-            // 诊断：每 ~30s 记一次。env权威=0 是常态且**不再要紧** —— 只要累积表非空，
-            // 配对就仍然可靠；真正该警惕的是 pinned 长期为 0（那才会退回 mtime 启发式）。
-            {
-                static LAST_LOG: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let mut l = LAST_LOG.lock().unwrap();
-                if now.saturating_sub(*l) > 30 {
-                    *l = now;
-                    client_log(&format!(
-                        "配对来源 pinned={} 条（累积 · 本轮新增 {} · env权威={} 文件句柄={}）：{:?}（进程数 {}）",
-                        acc.len(),
-                        added,
-                        env_n,
-                        file_n,
-                        acc,
-                        pids.len()
-                    ));
-                }
+            file_n = file_pins.len();
+            let only_new: std::collections::HashMap<u32, String> =
+                file_pins.into_iter().filter(|(pid, _)| !acc.contains_key(pid)).collect();
+            merge(acc, only_new, &mut added);
+        }
+        // 诊断：每 ~30s 记一次。env权威=0 是常态且**不再要紧** —— 只要累积表非空，配对就仍然
+        // 可靠；真正该警惕的是 pinned 长期为 0（那才会退回 mtime 启发式）。
+        {
+            static LAST_LOG: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let mut l = LAST_LOG.lock().unwrap();
+            if now.saturating_sub(*l) > 30 {
+                *l = now;
+                client_log(&format!(
+                    "配对来源 pinned={} 条（累积 · 本轮新增 {} · env权威={} 文件句柄={} · 未配对={}）：{:?}（进程数 {}）",
+                    acc.len(),
+                    added,
+                    env_n,
+                    file_n,
+                    unpaired,
+                    acc,
+                    processes.len()
+                ));
             }
         }
         // 累积表 → build_tasks 要的 pid→sid（丢掉只用于校验身份的启动时间）

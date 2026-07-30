@@ -10,7 +10,15 @@ use sysinfo::{ProcessRefreshKind, System, UpdateKind};
 
 fn main() {
     let mut sys = System::new();
+    // 计时：这套扫描要不要放进客户端的每轮循环，取决于它到底多贵
+    let t0 = std::time::Instant::now();
     sys.refresh_processes_specifics(ProcessRefreshKind::new().with_environ(UpdateKind::Always));
+    let scan_ms = t0.elapsed().as_millis();
+    // 第二次（缓存预热后）更接近稳态循环里的实际开销
+    let t1 = std::time::Instant::now();
+    sys.refresh_processes_specifics(ProcessRefreshKind::new().with_environ(UpdateKind::Always));
+    let scan2_ms = t1.elapsed().as_millis();
+    println!("env 扫描耗时：首次 {scan_ms} ms，二次 {scan2_ms} ms");
 
     let mut total = 0usize;
     let mut with_env = 0usize;
