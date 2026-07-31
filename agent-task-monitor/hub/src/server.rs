@@ -1801,6 +1801,7 @@ async fn report(
                 known_sessions: HashMap::new(),
                 session_last_seen: HashMap::new(),
                 last_select_at: HashMap::new(),
+                new_session_pending: HashMap::new(),
             }
         });
     // 设备上线边沿：新登记 或 之前已判离线（超阈值）
@@ -1831,6 +1832,9 @@ async fn report(
     // 本轮要落到 known_sessions 的增改 / 删除（owner 块内只收集，块后统一 apply，避开借用冲突）
     let mut known_updates: Vec<am_core::model::Task> = Vec::new();
     let mut known_removes: Vec<String> = Vec::new();
+    // 同理：new_session_pending 的增删也在块内收集、块后 apply
+    let mut pending_sets: Vec<(String, String)> = Vec::new(); // (会话 id, 终端锚)
+    let mut pending_removes: Vec<String> = Vec::new();
     if let Some(owner) = &notify_owner {
         use crate::dingtalk::{EventKind, NotifyEvent};
         let old: std::collections::HashMap<&str, TaskStatus> =
@@ -1962,13 +1966,36 @@ async fn report(
                 && online_secs >= NEW_SESSION_SETTLE_SECS
                 && freshly_started(t)
             {
-                events.push(NotifyEvent {
-                    owner: owner.clone(),
-                    kind: EventKind::NewSession,
-                    task_id: Some(t.id.clone()),
-                    text: format!("**🆕 会话开始**\n\n{}", body(t)),
-                    full_content: None,
-                });
+                // 再加一道**配对沉降**：新会话刚扫到时客户端的配对多半还没稳定（权威 pin 要等
+                // claude 跑起工具才抓得到，在那之前 mtime 启发式可能把它配到隔壁终端），此刻
+                // 推出去的 {NO} 会指向别人 —— 实测给 9 号下发后收到的「会话开始」写着 #11。
+                // 要求终端锚连续稳定 NEW_SESSION_PAIR_SETTLE_SECS 才推；锚一变就重新计时。
+                // 沉降期内**不进基线**（下面 continue 跳过 known_updates），否则下一轮
+                // `!known_sessions.contains_key` 不成立，这条会话就永远不会再被判为「新」。
+                let anchor = crate::slots::anchor_of(t);
+                match entry.new_session_pending.get(&t.id) {
+                    Some((since, a))
+                        if a == &anchor
+                            && since.elapsed().as_secs()
+                                >= crate::state::NEW_SESSION_PAIR_SETTLE_SECS =>
+                    {
+                        pending_removes.push(t.id.clone());
+                        events.push(NotifyEvent {
+                            owner: owner.clone(),
+                            kind: EventKind::NewSession,
+                            task_id: Some(t.id.clone()),
+                            text: format!("**🆕 会话开始**\n\n{}", body(t)),
+                            full_content: None,
+                        });
+                    }
+                    // 锚相同但还没到时间 → 继续等（不重置计时）
+                    Some((_, a)) if a == &anchor => continue,
+                    // 首次见到，或锚变了（配对还在抖）→ (重新)计时
+                    _ => {
+                        pending_sets.push((t.id.clone(), anchor));
+                        continue;
+                    }
+                }
             }
             known_updates.push(t.clone());
         }
@@ -2067,7 +2094,18 @@ async fn report(
         entry.known_sessions.remove(id);
         entry.session_last_seen.remove(id);
         entry.last_select_at.remove(id);
+        entry.new_session_pending.remove(id);
     }
+    // 「会话开始」的配对沉降表：登记/重新计时的写在这里落，已推的移除
+    for (id, anchor) in pending_sets {
+        entry.new_session_pending.insert(id, (now_i, anchor));
+    }
+    for id in &pending_removes {
+        entry.new_session_pending.remove(id);
+    }
+    // 兜底清理：会话没等到锚稳定就消失、或早已过了「真实年龄」闸门（5 分钟）不会再推的，
+    // 留着只会让表无限长。10 分钟一刀切即可。
+    entry.new_session_pending.retain(|_, (since, _)| since.elapsed().as_secs() < 10 * 60);
     entry.tasks = tasks;
     // 缓存 agent 回传的 git 对比结果
     for r in payload.dir_results {
