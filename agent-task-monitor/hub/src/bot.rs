@@ -154,7 +154,7 @@ pub(crate) struct ReplyCtx {
 
 /// 会话级指令（吃一个会话号位 N）：`@x` 速记与多目标都只对这些指令 + 「内容(=发)」生效。
 const SESSION_CMDS: &[&str] = &[
-    "暂停", "恢复", "继续", "中断", "终止", "停止", "撤回", "监控", "watch", "排队", "队列", "queue",
+    "暂停", "恢复", "中断", "终止", "停止", "撤回", "监控", "watch", "排队", "队列", "queue",
 ];
 
 /// 解析「@N …」速记为一组 (cmd, arg)。支持多目标：`@1 @2 xxx`、`@1 @2 暂停`、`@x 排队`。
@@ -188,9 +188,9 @@ fn parse_at_commands(text: &str) -> Option<Vec<(String, String)>> {
     }
     let (first, tail) = split_cmd(rest);
     // 首词是会话指令、**且后面没有别的内容**时才当指令。这些指令都不吃额外参数（序号已经由
-    // `@N` 给出），所以「@3 继续」是恢复会话，而「@3 继续修复登录 bug」是发一条任务 ——
-    // 「继续 / 暂停 / 停止」都是很自然的任务开头，只看首词会把正文整条吞掉（实测：发
-    // 「@3 继续…」收到的回复是「已恢复（会话 3）」，任务根本没下发）。
+    // `@N` 给出），所以「@3 暂停」是暂停会话，而「@3 暂停一下再继续」是发一条任务 ——
+    // 「暂停 / 停止」这类词也是很自然的任务开头，只看首词会把正文整条吞掉。
+    // （注：「继续」已不作指令 —— 它是最常见的「让 agent 接着做」输入，一律当内容发。）
     let cmds = if SESSION_CMDS.contains(&first.as_str()) && tail.is_empty() {
         targets.iter().map(|n| (first.clone(), n.clone())).collect()
     } else {
@@ -235,7 +235,7 @@ async fn run_command(
         "会话" | "列表" | "ls" | "任务" => list_sessions(state, username).await,
         "设备" | "devices" => list_devices(state, username).await,
         "暂停" => control(state, username, arg, ControlAction::Pause, "已暂停").await,
-        "恢复" | "继续" => control(state, username, arg, ControlAction::Resume, "已恢复").await,
+        "恢复" => control(state, username, arg, ControlAction::Resume, "已恢复").await,
         "中断" => control(state, username, arg, ControlAction::Interrupt, "已中断").await,
         "终止" | "停止" => control(state, username, arg, ControlAction::Stop, "已终止").await,
         "发" | "发送" | "回复" | "输入" => send_input(state, username, arg, reply).await,
@@ -942,9 +942,10 @@ async fn confirm_and_watch(
     idx: String,
 ) {
     let tn = norm(&text);
-    // 判定阶段：轮询最多 ~9s，等客户端取走并上报回队列状态（活跃机约 1.5s 一轮）
+    // 判定阶段：轮询最多 ~6s，等客户端取走并上报回队列状态（活跃机约 1.5s 一轮，留 ~4 轮
+    // 足够可靠地判出「排队」；判出排队会提前 break，只有「已执行」才等满窗口）。检到排队即推。
     let mut queued_list: Option<Vec<String>> = None;
-    for _ in 0..6 {
+    for _ in 0..4 {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         if expiry_ms > 0 && crate::state::now_secs() * 1000 >= expiry_ms {
             return;
