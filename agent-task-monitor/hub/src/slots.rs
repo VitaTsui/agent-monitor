@@ -44,6 +44,10 @@ pub struct SlotTable {
     /// 都要重新 `@N` 一次。
     #[serde(default)]
     sticky: Option<u32>,
+    /// 锁定的会话最近一次「说过话」的 epoch 秒。超过 STICKY_COOLDOWN_SECS 没动静，
+    /// 下一条不带 `@` 的消息先确认再下发（见 sticky_cooled）。
+    #[serde(default)]
+    sticky_at: u64,
 }
 
 impl SlotTable {
@@ -142,17 +146,38 @@ pub async fn ensure(state: &SharedState, username: &str, tasks: &[Task]) -> Hash
     out
 }
 
+/// 连续对话的「冷却」阈值：锁定的会话这么久没说过话，下一条不带 `@` 的消息不直接下发，
+/// 先回一句「当前锁的是 N 号」等确认。
+///
+/// 隔了小半天随手发一句时，很可能已经忘了当前锁着哪个终端 —— 这一次确认，比事后发现任务
+/// 打进了别的项目便宜得多。活跃对话期间完全无感（每条消息都会续期）。
+const STICKY_COOLDOWN_SECS: u64 = 2 * 3600;
+
 /// 读「连续对话」当前锁定的号位
 pub async fn sticky_of(state: &SharedState, username: &str) -> Option<u32> {
     state.bot_slots.read().await.get(username)?.sticky
 }
 
-/// 设「连续对话」锁定的号位（与当前值相同则不标脏，免得每条消息都写盘）
+/// 锁定是否已「冷却」：太久没对话，下发前该先确认一次。没有锁定时返回 false。
+pub async fn sticky_cooled(state: &SharedState, username: &str) -> bool {
+    let all = state.bot_slots.read().await;
+    let Some(t) = all.get(username) else { return false };
+    if t.sticky.is_none() {
+        return false;
+    }
+    now_secs().saturating_sub(t.sticky_at) > STICKY_COOLDOWN_SECS
+}
+
+/// 设「连续对话」锁定的号位，并续期活跃时间。
+/// 号位没变、且上次续期就在不久前时不标脏，免得每条消息都写盘。
 pub async fn set_sticky(state: &SharedState, username: &str, no: u32) {
+    let now = now_secs();
     let mut all = state.bot_slots.write().await;
     let t = all.entry(username.to_string()).or_default();
-    if t.sticky != Some(no) {
-        t.sticky = Some(no);
+    let changed = t.sticky != Some(no) || now.saturating_sub(t.sticky_at) > 600;
+    t.sticky = Some(no);
+    t.sticky_at = now;
+    if changed {
         state.bot_slots_dirty.store(true, Ordering::Relaxed);
     }
 }

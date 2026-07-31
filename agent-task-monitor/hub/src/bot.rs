@@ -219,48 +219,104 @@ pub(crate) async fn dispatch(
         }
         let mut out = Vec::new();
         for (cmd, arg) in cmds {
-            out.push(run_command(state, username, &cmd, &arg, reply).await);
+            let r = run_command(state, username, &cmd, &arg, reply).await;
+            out.push(r.unwrap_or_else(|| format!("未知指令「{cmd}」。发「帮助」看用法。")));
         }
         return out.join("\n\n");
     }
     let (cmd, arg) = split_cmd(text);
-    // 连续对话：发过一次「@N」之后，不带 @ 的普通文本直接投给那个会话，不用每条都带号。
-    // 指令词照常执行**且不解除锁定** —— 中途查个「会话」「排队」不该打断对话。
-    if !KNOWN_CMDS.contains(&cmd.as_str()) {
-        if let Some(n) = crate::slots::sticky_of(state, username).await {
-            return send_input(state, username, &format!("{n} {text}"), reply).await;
-        }
+    // 先当指令试 —— 不认识时 run_command 返回 None 且不产生任何副作用。
+    // 指令照常执行**且不解除锁定**：中途查个「会话」「排队」不该打断对话。
+    if let Some(out) = run_command(state, username, &cmd, &arg, reply).await {
+        return out;
     }
-    run_command(state, username, &cmd, &arg, reply).await
+    // 不是指令 → 连续对话：投给锁定的会话，不用每条都带 @
+    sticky_send(state, username, text, reply).await
 }
 
-/// run_command 认识的全部指令词。用于判断「这条消息是指令还是要发给会话的内容」——
-/// **改 run_command 的 match 时必须同步这里**，否则新指令会被当成聊天内容发进终端。
-const KNOWN_CMDS: &[&str] = &[
-    "帮助", "help", "?", "？", "菜单", "",
-    "会话", "列表", "ls", "任务",
-    "设备", "devices",
-    "暂停", "恢复", "中断", "终止", "停止",
-    "发", "发送", "回复", "输入",
-    "排队", "队列", "queue",
-    "监控", "watch",
-    "停止监控", "取消监控", "结束监控", "unwatch",
-    "撤回", "recall",
-    "文件", "附件", "files",
-    "清空文件", "清空附件", "清空",
-    "删除文件", "删文件", "删附件", "删除附件",
-    "锁定",
-];
+/// 把一条普通文本投给「连续对话」锁定的会话。
+///
+/// 锁定冷却（久未对话）时不直接下发：先回一句「当前锁的是 N 号」并把内容暂存，用户回
+/// 「确认」即发出 —— 隔了小半天随手发一句，很容易忘了当前锁着哪个终端。
+async fn sticky_send(
+    state: &SharedState,
+    username: &str,
+    text: &str,
+    reply: Option<&ReplyCtx>,
+) -> String {
+    let Some(n) = crate::slots::sticky_of(state, username).await else {
+        return "未知指令。发「帮助」看用法，或用「@号位 内容」下发任务。".to_string();
+    };
+    // 冷却后的第一条：确认流程
+    if crate::slots::sticky_cooled(state, username).await {
+        let confirming = matches!(text.trim(), "确认" | "确定" | "是" | "y" | "Y" | "ok" | "OK");
+        let pending = state.bot_sticky_pending.write().await.remove(username);
+        match (confirming, pending) {
+            // 回「确认」→ 发暂存的那条（20 分钟内有效），省得重打一遍
+            (true, Some((held, at))) if crate::state::now_secs().saturating_sub(at) < 20 * 60 => {
+                return send_input(state, username, &format!("{n} {held}"), reply).await;
+            }
+            // 回「确认」但没有有效暂存 → 只解除冷却，等下一条内容
+            (true, _) => {
+                crate::slots::set_sticky(state, username, n).await;
+                return format!("好的，继续对话会话 {n}，直接发内容即可。");
+            }
+            // 其它内容：说明用户已看过提示、知道在跟谁说话 → 直接发（不再要求确认）
+            (false, Some(_)) => {
+                return send_input(state, username, &format!("{n} {text}"), reply).await;
+            }
+            // 冷却后的第一条内容 → 暂存 + 提示确认
+            (false, None) => {}
+        }
+        let now = crate::state::now_secs();
+        state
+            .bot_sticky_pending
+            .write()
+            .await
+            .insert(username.to_string(), (text.to_string(), now));
+        let label = sticky_label(state, username, n).await;
+        let preview: String = text.chars().take(40).collect();
+        return format!(
+            "⏸ 距上次对话已有一段时间，先确认下目标会话：\n\
+             当前锁定 {label}\n\
+             待发内容：{preview}\n\n\
+             确认无误回「确认」即发出；要换会话发「@号位」；发「会话」看列表。"
+        );
+    }
+    send_input(state, username, &format!("{n} {text}"), reply).await
+}
+
+/// 「N 号（项目 · 标题）」——冷却确认时用，让人一眼认出是哪个终端
+async fn sticky_label(state: &SharedState, username: &str, no: u32) -> String {
+    let Ok(task_id) = resolve_task(state, username, &no.to_string()).await else {
+        return format!("{no} 号（该会话可能已结束）");
+    };
+    state
+        .tasks_for(username)
+        .await
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .map(|t| {
+            let s = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
+            format!("{no} 号（{} · {}）", t.project_name, s.chars().take(24).collect::<String>())
+        })
+        .unwrap_or_else(|| format!("{no} 号"))
+}
 
 /// 单条指令分发（@N 速记逐条走这里，常规消息也走这里）。
+///
+/// 返回 `None` = 这个词不是指令 —— 由调用方决定拿它怎么办（连续对话时当内容发给锁定的
+/// 会话，否则回「未知指令」）。**不认识时不产生任何副作用**，所以可以先试着当指令跑。
+/// 刻意用返回值而不是另维护一份「已知指令清单」：清单和 match 分支迟早会不同步，届时新加的
+/// 指令会被当成聊天内容直接发进终端。
 async fn run_command(
     state: &SharedState,
     username: &str,
     cmd: &str,
     arg: &str,
     reply: Option<&ReplyCtx>,
-) -> String {
-    match cmd {
+) -> Option<String> {
+    Some(match cmd {
         "帮助" | "help" | "?" | "？" | "菜单" | "" => help_text(),
         "会话" | "列表" | "ls" | "任务" => list_sessions(state, username).await,
         "设备" | "devices" => list_devices(state, username).await,
@@ -281,8 +337,8 @@ async fn run_command(
         "删除文件" | "删文件" | "删附件" | "删除附件" => {
             remove_pending_file(state, username, arg).await
         }
-        _ => format!("未知指令「{cmd}」。发「帮助」看用法。"),
-    }
+        _ => return None,
+    })
 }
 
 /// 渠道收到消息后先按 staffId 找归属账号：

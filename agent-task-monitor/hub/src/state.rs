@@ -276,6 +276,10 @@ pub struct AppState {
     /// 机器人「监控中」的会话：用户名 → 监控态。后台循环据此把新内容推到钉钉会话 webhook。
     /// 钉钉「监控」：user → 其监控中的多个会话（每会话一份）。支持同时监控多个、单独停止。
     pub bot_monitors: RwLock<HashMap<String, Vec<BotMonitor>>>,
+    /// 连续对话「待确认」的内容：用户名 → (原文, 暂存时刻秒)。
+    /// 锁定的会话冷却后（久未对话），第一条不带 `@` 的消息不直接下发，先回一句确认、把内容
+    /// 存在这里；用户回「确认」就发它，省得重打一遍。短期数据，不落盘。
+    pub bot_sticky_pending: RwLock<HashMap<String, (String, u64)>>,
     /// 钉钉「挂起待发」的文件：用户名 → 待随下一条任务一起发的文件。
     /// 用户先发文件（或图文一起发图片）→ 暂存于此 → 下一条发任务的指令把它落到会话 tmp 目录、
     /// 并把相对路径回填到任务文字开头。
@@ -351,6 +355,7 @@ impl AppState {
             bot_slots: RwLock::new(slots),
             bot_slots_dirty: std::sync::atomic::AtomicBool::new(false),
             bot_monitors: RwLock::new(HashMap::new()),
+            bot_sticky_pending: RwLock::new(HashMap::new()),
             bot_pending_files: RwLock::new(HashMap::new()),
             dingtalk_binds: RwLock::new(HashMap::new()),
         })
