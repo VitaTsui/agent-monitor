@@ -183,8 +183,13 @@ fn parse_at_commands(text: &str) -> Option<Vec<(String, String)>> {
         return Some(vec![]);
     }
     let rest = rest.trim();
+    // 只发「@9」不带内容 = 把连续对话切到 9 号（之后不带 @ 的文本都投给它）。
+    // 多目标时没有「当前会话」可言，退回用法提示。
     if rest.is_empty() {
-        return Some(vec![]);
+        return match targets.as_slice() {
+            [n] => Some(vec![("锁定".to_string(), n.clone())]),
+            _ => Some(vec![]),
+        };
     }
     let (first, tail) = split_cmd(rest);
     // 首词是会话指令、**且后面没有别的内容**时才当指令。这些指令都不吃额外参数（序号已经由
@@ -219,8 +224,33 @@ pub(crate) async fn dispatch(
         return out.join("\n\n");
     }
     let (cmd, arg) = split_cmd(text);
+    // 连续对话：发过一次「@N」之后，不带 @ 的普通文本直接投给那个会话，不用每条都带号。
+    // 指令词照常执行**且不解除锁定** —— 中途查个「会话」「排队」不该打断对话。
+    if !KNOWN_CMDS.contains(&cmd.as_str()) {
+        if let Some(n) = crate::slots::sticky_of(state, username).await {
+            return send_input(state, username, &format!("{n} {text}"), reply).await;
+        }
+    }
     run_command(state, username, &cmd, &arg, reply).await
 }
+
+/// run_command 认识的全部指令词。用于判断「这条消息是指令还是要发给会话的内容」——
+/// **改 run_command 的 match 时必须同步这里**，否则新指令会被当成聊天内容发进终端。
+const KNOWN_CMDS: &[&str] = &[
+    "帮助", "help", "?", "？", "菜单", "",
+    "会话", "列表", "ls", "任务",
+    "设备", "devices",
+    "暂停", "恢复", "中断", "终止", "停止",
+    "发", "发送", "回复", "输入",
+    "排队", "队列", "queue",
+    "监控", "watch",
+    "停止监控", "取消监控", "结束监控", "unwatch",
+    "撤回", "recall",
+    "文件", "附件", "files",
+    "清空文件", "清空附件", "清空",
+    "删除文件", "删文件", "删附件", "删除附件",
+    "锁定",
+];
 
 /// 单条指令分发（@N 速记逐条走这里，常规消息也走这里）。
 async fn run_command(
@@ -245,6 +275,7 @@ async fn run_command(
             monitor_stop(state, username, arg).await
         }
         "撤回" | "recall" => recall_last(state, username, arg).await,
+        "锁定" => lock_session(state, username, arg).await,
         "文件" | "附件" | "files" => list_pending_files(state, username).await,
         "清空文件" | "清空附件" | "清空" => clear_pending_files(state, username).await,
         "删除文件" | "删文件" | "删附件" | "删除附件" => {
@@ -487,8 +518,11 @@ fn help_text() -> String {
      • 直接发文件/图片给我 → 暂存，随下一条任务（如「@2 处理这些文件」）落到会话 tmp/ 并把路径拼到开头\n\
      • 删除文件 N —— 删某个；清空文件 —— 全部丢弃\n\
      \n\
-     【速记】\n\
+     【速记 / 连续对话】\n\
      • @N 接内容或任意会话指令 —— @2 重启服务 / @2 暂停 / @2 排队\n\
+     • 发过一次 @N 后，直接发内容就一直发给它，不用再带 @\n\
+     • @N（单独发）—— 切换到 N 号继续对话\n\
+     • 查指令（帮助/会话/排队…）不会打断对话，之后继续直接发即可\n\
      • @1 @2 内容 —— 同一任务发给多个会话\n\
      \n\
      • 帮助 —— 显示本说明"
@@ -657,6 +691,8 @@ async fn list_sessions(state: &SharedState, username: &str) -> String {
     if tasks.is_empty() {
         return "当前没有活跃会话。".to_string();
     }
+    // 当前连续对话锁定的号位：列表里标出来，免得「不带 @ 直接发」时不知道会进哪个终端
+    let sticky = crate::slots::sticky_of(state, username).await;
     let mut lines = vec![format!("共 {} 个活跃会话：", tasks.len())];
     let mut cur_dev = String::new();
     let mut cur_group = String::new(); // 终端·项目 子分组
@@ -674,10 +710,17 @@ async fn list_sessions(state: &SharedState, username: &str) -> String {
         // 子标题里已带终端·项目，行内只留状态 + 会话标题
         let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
         let title: String = title.chars().take(24).collect();
-        lines.push(format!("  {}. [{}] {}", no, status_zh(t.status), title));
+        let mark = if sticky == Some(*no) { " ← 当前" } else { "" };
+        lines.push(format!("  {}. [{}] {}{}", no, status_zh(t.status), title, mark));
     }
     // 号位绑终端窗口、不随列表刷新重排，所以中间可能有空号（终端关掉了）——那是正常的
-    lines.push("\n号位跟着终端窗口固定不变，可能不连号。操作示例：@2 继续 / 暂停 2".to_string());
+    lines.push("\n号位跟着终端窗口固定不变，可能不连号。".to_string());
+    match sticky {
+        Some(n) => lines.push(format!(
+            "当前对话：{n} 号 —— 直接发内容即可，不用带 @；发「@其它号」可切换。"
+        )),
+        None => lines.push("发「@2 内容」下发任务，之后直接发内容就一直发给 2 号。".to_string()),
+    }
     lines.join("\n")
 }
 
@@ -875,6 +918,30 @@ async fn remove_pending_file(state: &SharedState, username: &str, arg: &str) -> 
     format!("已删除「{}」。剩 {remaining} 个待发文件。", removed.file_name)
 }
 
+/// 「@N」（不带内容）：把连续对话切到 N 号，之后不带 @ 的文本都投给它。
+async fn lock_session(state: &SharedState, username: &str, arg: &str) -> String {
+    // 先解析一次，确认这个号确实有会话 —— 免得锁到一个空号上，后面每条消息都报错
+    let task_id = match resolve_task(state, username, arg).await {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    let Ok(n) = arg.trim().parse::<u32>() else {
+        return "请给会话号位，如「@2」。发「会话」看号位。".to_string();
+    };
+    crate::slots::set_sticky(state, username, n).await;
+    let title = state
+        .tasks_for(username)
+        .await
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .map(|t| {
+            let s = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
+            format!("（{} · {}）", t.project_name, s.chars().take(20).collect::<String>())
+        })
+        .unwrap_or_default();
+    format!("✅ 已锁定会话 {n}{title}\n之后直接发内容即可，不用带 @。发「@其它号」可切换。")
+}
+
 async fn send_input(
     state: &SharedState,
     username: &str,
@@ -889,6 +956,10 @@ async fn send_input(
         Ok(id) => id,
         Err(e) => return e,
     };
+    // 下发成功即锁定该会话：后续不带 @ 的文本都投给它（连续对话）
+    if let Ok(n) = idx.trim().parse::<u32>() {
+        crate::slots::set_sticky(state, username, n).await;
+    }
     // 挂起待发文件（可多个）：随本条任务落到会话目录，相对路径按序拼到任务开头（空格隔开）。
     // 超 20 分钟没跟任务的挂起文件视为过期，丢弃不附。
     let pending = state.bot_pending_files.write().await.remove(username).unwrap_or_default();
@@ -1211,9 +1282,11 @@ mod tests {
         assert_eq!(c("@3 继续"), Some(vec![("发".into(), "3 继续".into())]));
         // 去重目标
         assert_eq!(c("@1 @1 x"), Some(vec![("发".into(), "1 x".into())]));
-        // 非 @ → None（走常规分发）；无效目标/空 → Some(空)（提示用法）
+        // 非 @ → None（走常规分发）；无效目标 → Some(空)（提示用法）
         assert_eq!(c("发 2 继续"), None);
         assert_eq!(c("@abc"), Some(vec![]));
-        assert_eq!(c("@2"), Some(vec![]));
+        // 单发「@N」= 切到 N 号继续对话；多目标时没有「当前会话」可言，退回用法提示
+        assert_eq!(c("@2"), Some(vec![("锁定".into(), "2".into())]));
+        assert_eq!(c("@1 @2"), Some(vec![]));
     }
 }

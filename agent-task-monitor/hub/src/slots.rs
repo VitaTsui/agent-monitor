@@ -39,6 +39,11 @@ pub struct SlotTable {
     /// 锚 → 最近一次见到它的 epoch 秒（锚消失后据此延迟回收号位）
     #[serde(default)]
     seen: HashMap<String, u64>,
+    /// 当前「连续对话」锁定的号位：发过一次 `@N` 之后，不带 `@` 的普通文本都投给它。
+    /// 只被下一个 `@M` 改变，不超时。跟着号位表一起落盘 —— 否则 hub 每次重启（部署）
+    /// 都要重新 `@N` 一次。
+    #[serde(default)]
+    sticky: Option<u32>,
 }
 
 impl SlotTable {
@@ -135,6 +140,21 @@ pub async fn ensure(state: &SharedState, username: &str, tasks: &[Task]) -> Hash
         state.bot_slots_dirty.store(true, Ordering::Relaxed);
     }
     out
+}
+
+/// 读「连续对话」当前锁定的号位
+pub async fn sticky_of(state: &SharedState, username: &str) -> Option<u32> {
+    state.bot_slots.read().await.get(username)?.sticky
+}
+
+/// 设「连续对话」锁定的号位（与当前值相同则不标脏，免得每条消息都写盘）
+pub async fn set_sticky(state: &SharedState, username: &str, no: u32) {
+    let mut all = state.bot_slots.write().await;
+    let t = all.entry(username.to_string()).or_default();
+    if t.sticky != Some(no) {
+        t.sticky = Some(no);
+        state.bot_slots_dirty.store(true, Ordering::Relaxed);
+    }
 }
 
 /// 从数据目录加载号位表（读不到/解析失败都当空表：号位会重新分配，不影响可用性）
