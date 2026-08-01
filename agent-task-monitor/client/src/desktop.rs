@@ -419,11 +419,27 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             // 轮询拿到 device_token，内嵌 webview 随即自动重载并静默登录（见后台线程
             // reload-on-token）。内嵌页仍保留登录入口作兜底。
             if need_onboard {
-                let u = portal_url.clone();
-                // 稍延后：先让主窗露出来，再弹浏览器，避免一上来就抢焦点
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    open_external(&u);
+                let st = state_setup.clone();
+                let base = web_base.clone();
+                tauri::async_runtime::spawn(async move {
+                    // 稍延后：先让主窗露出来，再弹浏览器，避免一上来就抢焦点
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    // 必须等配对码真到手再开浏览器。领码是一次网络请求，启动这一瞬
+                    // 往往还没回来 —— 那时 portal_url 就退化成不带 ?pair= 的裸地址，
+                    // 用户在浏览器里登录了本机也绑不上，现象是「弹了网页却说没有配对码」。
+                    // 所以这里读**当下**的 pair_info，而不是启动瞬间的快照。
+                    for _ in 0..40 {
+                        let code = st.pair_info.read().await.as_ref().map(|(c, _)| c.clone());
+                        if let Some(code) = code {
+                            open_external(&format!("{base}/portal?pair={code}"));
+                            return;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    // 等了 ~20s 还没领到（离线/hub 不可达）：退回裸地址，
+                    // 至少让用户看见登录页和失败原因，而不是什么都不弹
+                    tracing::warn!("配对码迟迟未就绪，先打开登录页（本机需稍后从托盘重新登录绑定）");
+                    open_external(&format!("{base}/portal"));
                 });
             }
             // 兜底：远程页面加载失败/超时也要露出主窗（白屏好过永远的启动窗）
@@ -571,6 +587,10 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                     });
                     if paired_now && !was_paired {
                         was_paired = true;
+                        // 授权完成 = 该把人接回客户端了。原先只是悄悄重载内嵌页，
+                        // 用户在浏览器里点完授权，客户端那边毫无动静，得自己想起来切回去。
+                        // 这里连带把窗口显示并聚焦，「回到客户端」这一步才是闭合的。
+                        show_main(&handle_bg);
                         reload_main(&handle_bg);
                     }
                     let (terminals, excluded, hub_err, upd) = tauri::async_runtime::block_on(async {
