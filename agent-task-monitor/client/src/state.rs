@@ -194,6 +194,11 @@ pub fn client_log(msg: &str) {
 
 static SCAN_TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// hook 自报记录的有效期。取 12 小时：hook 只在 claude 起会话/调工具时写一次，之后即使
+/// 会话空闲一整天，那条配对仍然成立（进程还在，pid+start 校验会兜住 pid 重用）。
+/// 太短反而会让长时间挂着的会话失去最权威的配对信号、退回启发式。
+const HOOK_REPORT_TTL_SECS: u64 = 12 * 3600;
+
 /// 终端的排除键：unix 用 tty（一个终端标签一个 tty）；
 /// Windows 拿不到 tty，退而用工作目录 —— 语义变成「排除该项目目录的终端」，
 /// 且跨进程重启稳定（此前 Windows 上终端列表永远为空，监控范围形同虚设）。
@@ -471,7 +476,7 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         let mut added = 0usize;
         // 并入累积表：只收当前存活进程的 pin，顺手记下启动时间当身份。
         // 同一 pid 再次抓到就以最新为准（同一进程换会话 = /clear 后新建了会话）。
-        let mut merge = |acc: &mut std::collections::HashMap<u32, (String, u64)>,
+        let merge = |acc: &mut std::collections::HashMap<u32, (String, u64)>,
                          pins: std::collections::HashMap<u32, String>,
                          added: &mut usize| {
             for (pid, sid) in pins {
@@ -481,6 +486,22 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                 }
             }
         };
+        // **最高优先：hook 自报**。Claude Code 的 hook 在 stdin 里直接给出 session_id，由
+        // `am-client hook` 落到 <data_dir>/hooks/<pid>.json（见 hookrec）。这条不用碰运气 ——
+        // env pin 只在 claude 正跑工具时存在，而 hook 是 claude 主动报的，空闲会话照样有。
+        // 每轮都读（就是列一个小目录，比 env 扫描还便宜），并覆盖其它来源：它最权威。
+        let hook_reports = crate::hookrec::read_reports(&state.config.data_dir, HOOK_REPORT_TTL_SECS);
+        let hook_n = hook_reports.len();
+        for r in hook_reports {
+            // 只认当前存活的进程；死 pid 的记录顺手删掉，免得 pid 重用后张冠李戴
+            let Some(&start) = alive.get(&r.claude_pid) else {
+                crate::hookrec::drop_report(&state.config.data_dir, r.claude_pid);
+                continue;
+            };
+            if acc.insert(r.claude_pid, (r.session_id, start)).is_none() {
+                added += 1;
+            }
+        }
         // 权威来源：claude 派生子进程的 env 里带 CLAUDE_PID + CLAUDE_CODE_SESSION_ID，
         // 直接给出「会话 ↔ claude pid」（见 ProcessScanner::session_pins）。这是 Windows 上
         // 唯一可靠的 pinned 来源 —— claude 写一行开一次就关，句柄扫描（RmGetList/lsof）抓不到。
@@ -519,9 +540,10 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
             if now.saturating_sub(*l) > 30 {
                 *l = now;
                 client_log(&format!(
-                    "配对来源 pinned={} 条（累积 · 本轮新增 {} · env权威={} 文件句柄={} · 未配对={}）：{:?}（进程数 {}）",
+                    "配对来源 pinned={} 条（累积 · 本轮新增 {} · hook自报={} env权威={} 文件句柄={} · 未配对={}）：{:?}（进程数 {}）",
                     acc.len(),
                     added,
+                    hook_n,
                     env_n,
                     file_n,
                     unpaired,

@@ -5,6 +5,8 @@
 mod agent;
 /// Cursor/VSCode 扩展桥接（文件 IPC）——全平台内嵌终端都靠它下发
 mod bridge;
+/// Claude Code hook 上报：让 agent 自报会话身份，取代猜配对
+mod hookrec;
 mod secrets;
 mod openfiles;
 mod state;
@@ -40,6 +42,13 @@ fn main() -> Result<()> {
         .unwrap_or_else(|_| default_data_dir());
     migrate_legacy_data_dir(&data_dir);
     let _ = std::fs::create_dir_all(&data_dir);
+
+    // `am-client hook`：Claude Code 的 hook 以子进程方式调它，从 stdin 收会话身份后立即退出。
+    // 必须抢在 GUI/托盘/上报循环之前分流 —— hook 是同步阻塞 claude 的，起一整个客户端就砸了。
+    if std::env::args().nth(1).as_deref() == Some("hook") {
+        hookrec::run_hook_cli(&data_dir);
+        return Ok(());
+    }
 
     // Windows GUI 子系统没有控制台：panic 会无声消失，用户只觉得「双击没反应」。
     // 落崩溃日志 + 弹系统对话框；另记启动阶段面包屑，出问题能定位到哪一步。
