@@ -332,6 +332,7 @@ async fn run_command(
         }
         "撤回" | "recall" => recall_last(state, username, arg).await,
         "锁定" => lock_session(state, username, arg).await,
+        "历史" | "history" => list_history(state, username, arg).await,
         "文件" | "附件" | "files" => list_pending_files(state, username).await,
         "清空文件" | "清空附件" | "清空" => clear_pending_files(state, username).await,
         "删除文件" | "删文件" | "删附件" | "删除附件" => {
@@ -598,6 +599,7 @@ fn help_text() -> String {
      • 会话 —— 列出当前会话（带号位）\n\
      • 设备 —— 列出名下设备\n\
      • 排队 [N] —— 查看排队中的任务（不带 N 汇总全部）\n\
+     • 历史 [N] —— 回看最近结束的会话及其结果（默认 5 条）\n\
      • 文件 —— 查看挂起待发的文件\n\
      \n\
      【控制会话】\n\
@@ -1011,6 +1013,35 @@ async fn remove_pending_file(state: &SharedState, username: &str, arg: &str) -> 
         map.remove(username);
     }
     format!("已删除「{}」。剩 {remaining} 个待发文件。", removed.file_name)
+}
+
+/// 「历史 [N]」：回看最近结束的会话都出了什么结果。默认 5 条，最多 20。
+/// 会话结束时才留记录，所以这里看到的都是「已经收工」的活。
+async fn list_history(state: &SharedState, username: &str, arg: &str) -> String {
+    let n = arg.trim().parse::<usize>().unwrap_or(5).clamp(1, 20);
+    let list = crate::history::list_for(state, username, n).await;
+    if list.is_empty() {
+        return "还没有已结束的会话记录。会话结束后会自动留一条，可在这里或网页回看。".to_string();
+    }
+    let mut lines = vec![format!("最近 {} 条已结束会话：", list.len())];
+    for r in &list {
+        let when = chrono::DateTime::from_timestamp(r.ended_at as i64, 0)
+            .map(|t| {
+                t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()
+            })
+            .unwrap_or_default();
+        let title: String = if r.title.is_empty() { r.provider.clone() } else { r.title.clone() };
+        lines.push(format!(
+            "\n【{when}】{} · {}\n{}\n{}",
+            r.hostname,
+            r.project,
+            title.chars().take(40).collect::<String>(),
+            // 结果只给前两行，完整内容去网页看 —— 钉钉里堆全文没法翻
+            r.result.lines().filter(|l| !l.trim().is_empty()).take(2).collect::<Vec<_>>().join("\n"),
+        ));
+    }
+    lines.push("\n完整结果可在网页「历史」里查看。".to_string());
+    lines.join("\n")
 }
 
 /// 「@N」（不带内容）：把连续对话切到 N 号，之后不带 @ 的文本都投给它。

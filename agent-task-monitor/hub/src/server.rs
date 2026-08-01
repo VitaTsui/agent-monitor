@@ -68,6 +68,7 @@ pub fn router(state: SharedState) -> Router {
         // ---- 任务监控 API（前台公开使用）----
         .route("/monitor/me", get(me_info))
         .route("/monitor/tasks", get(list_tasks))
+        .route("/monitor/history", get(list_history))
         .route("/monitor/tasks/page", get(page_tasks))
         .route("/monitor/tasks/detail/:id", get(task_detail))
         .route("/monitor/tasks/:id/messages", get(task_messages))
@@ -1395,6 +1396,28 @@ struct DingtalkBindReq {
 }
 
 /// POST /monitor/integrations/dingtalk-bind —— 登录后带一次性 token 绑定钉钉 id。
+#[derive(serde::Deserialize)]
+struct HistoryQuery {
+    /// 返回条数上限（默认 50，最多 200）
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// GET /monitor/history —— 本账号的会话历史（最新在前）。
+/// 每个会话结束时留一条最终产出，终端关了、机器关机后仍可回看。
+async fn list_history(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<HistoryQuery>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let list = crate::history::list_for(&state, &user, limit).await;
+    ok(json!({ "list": list, "total": list.len() }))
+}
+
 /// 未记录的 staffId 给机器人发消息时，hub 回一段带 `?dtbind=<token>` 的登录链接；
 /// 页面登录后把 token 提交到这里，把该 staffId 绑到当前登录账号。
 async fn dingtalk_bind(
@@ -1837,6 +1860,8 @@ async fn report(
     // 同理：new_session_pending 的增删也在块内收集、块后 apply
     let mut pending_sets: Vec<(String, String)> = Vec::new(); // (会话 id, 终端锚)
     let mut pending_removes: Vec<String> = Vec::new();
+    // 会话结束时要落的历史记录（同样块内收集、块后写，避开借用冲突）
+    let mut history_records: Vec<crate::history::SessionRecord> = Vec::new();
     if let Some(owner) = &notify_owner {
         use crate::dingtalk::{EventKind, NotifyEvent};
         let old: std::collections::HashMap<&str, TaskStatus> =
@@ -1906,6 +1931,30 @@ async fn report(
         // 「会话已结束」纯属噪音（认不出是哪个、也没有任何结果可看），所以不推。
         // 只挡推送，基线仍要照常清理，否则会被后面的「消失」判定再推一次。
         let is_placeholder = |t: &am_core::model::Task| t.title.is_empty() && t.prompt.is_empty();
+        // 会话结束时留一条历史记录。正文优先用完整原文（未截断时 full 为 None，退回展示版并
+        // 去掉「最后结果」抬头），由 history::record 统一按上限截断。
+        let make_record = |t: &am_core::model::Task,
+                           owner: &str,
+                           full: Option<&str>,
+                           shown: &str|
+         -> crate::history::SessionRecord {
+            let result = match full {
+                Some(f) => f.to_string(),
+                None => shown.trim_start_matches("\n\n**最后结果**\n\n").to_string(),
+            };
+            crate::history::SessionRecord {
+                id: t.id.clone(),
+                owner: owner.to_string(),
+                hostname: t.hostname.clone(),
+                project: t.project_name.clone(),
+                title: t.title.clone(),
+                prompt: t.prompt.clone(),
+                result,
+                provider: t.provider_dsr.clone(),
+                started_at: t.started_at.clone(),
+                ended_at: crate::state::now_secs(),
+            }
+        };
         // 「等待选择」判定：从末尾回看最近一条实质消息 —— 若先遇到 select（其后没有 user/
         // tool_result 应答），说明仍在等你选。比「末条恰好是 select」稳健：AskUserQuestion 记录
         // 常不在绝对末尾（后面可能还跟 assistant 文本），但只要没被应答就仍算等待。
@@ -1950,6 +1999,8 @@ async fn report(
                         // 空壳占位会话结束不推（噪音）；基线照常清理
                         if !is_placeholder(t) {
                             let (res, full) = result(&t.id);
+                            // 留一条历史：终端关了、机器关机后仍能回看这个会话最后出了什么
+                            history_records.push(make_record(t, owner, full.as_deref(), &res));
                             events.push(NotifyEvent {
                                 owner: owner.clone(),
                                 kind: EventKind::Finished,
@@ -2035,6 +2086,7 @@ async fn report(
                 // 同上：空壳占位会话消失不推，只清基线
                 if !is_placeholder(task) {
                     let (res, full) = result(id);
+                    history_records.push(make_record(task, owner, full.as_deref(), &res));
                     events.push(NotifyEvent {
                         owner: owner.clone(),
                         kind: EventKind::Finished,
@@ -2111,6 +2163,8 @@ async fn report(
     // 留着只会让表无限长。10 分钟一刀切即可。
     entry.new_session_pending.retain(|_, (since, _)| since.elapsed().as_secs() < 10 * 60);
     entry.tasks = tasks;
+    // 会话历史（需要 &state，故在释放 machines 锁之后写 —— 见函数末尾）
+    let pending_history = history_records;
     // 缓存 agent 回传的 git 对比结果
     for r in payload.dir_results {
         entry.dir_cache.insert((r.task_id.clone(), r.rel.clone()), (r.dirs, r.files));
@@ -2140,6 +2194,11 @@ async fn report(
     let dir_queries: Vec<am_core::model::DirQuery> = entry.pending_dir.drain(..).collect();
     let fs_ops: Vec<am_core::model::FsOp> = entry.pending_fsop.drain(..).collect();
     drop(machines);
+
+    // 会话历史：锁已释放，这里统一落（record 内部去重 + 截断 + 标脏，tick 循环负责写盘）
+    for rec in pending_history {
+        crate::history::record(&state, rec).await;
+    }
 
     // 钉钉推送：不阻塞上报响应，后台异步发
     if !events.is_empty() {

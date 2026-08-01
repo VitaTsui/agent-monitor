@@ -268,6 +268,11 @@ pub struct AppState {
     pub started_at: chrono::DateTime<chrono::Local>,
     /// 会话表有未落盘变更（tick 循环定期 flush 到 sessions.json）
     pub sessions_dirty: std::sync::atomic::AtomicBool,
+    /// 会话历史：每个会话结束时留一条最终产出（见 crate::history）。全用户合用一张表，
+    /// 查询时按 owner 过滤。
+    pub history: RwLock<Vec<crate::history::SessionRecord>>,
+    /// 历史有未落盘变更（tick 循环定期 flush 到 history.json）
+    pub history_dirty: std::sync::atomic::AtomicBool,
     /// 机器人会话号位（「@2 / 发 2 / 暂停 2」里的 2）：用户名 → 号位表。
     /// 号绑定终端窗口而非列表位置，跨排序变化与 hub 重启都不变 —— 见 crate::slots。
     pub bot_slots: RwLock<HashMap<String, crate::slots::SlotTable>>,
@@ -341,6 +346,8 @@ impl AppState {
         let sessions = load_sessions(&config.data_dir);
         // 号位持久化：hub 重启后「@2」还是同一个终端（重启丢表正是序号错位的成因之一）
         let slots = crate::slots::load(&config.data_dir);
+        // 会话历史持久化：hub 重启后仍能回看之前派出去的活的结果
+        let history = crate::history::load(&config.data_dir);
         Arc::new(Self {
             machines: RwLock::new(HashMap::new()),
             tokens: RwLock::new(sessions),
@@ -352,6 +359,8 @@ impl AppState {
             tx,
             started_at: chrono::Local::now(),
             sessions_dirty: std::sync::atomic::AtomicBool::new(false),
+            history: RwLock::new(history),
+            history_dirty: std::sync::atomic::AtomicBool::new(false),
             bot_slots: RwLock::new(slots),
             bot_slots_dirty: std::sync::atomic::AtomicBool::new(false),
             bot_monitors: RwLock::new(HashMap::new()),
