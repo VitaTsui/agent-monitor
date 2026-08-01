@@ -289,12 +289,15 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
         // 用内容指纹做 key：执行中 → 完成态切换时 key 不变，避免整块重挂载闪烁；
         // 且不随消息裁剪而漂移（下标会）。
         const keyed = turn.items.map((m) => ({ m, k: msgKey(m) }));
-        // 执行中只铺 Q&A，不铺工具流水（工具过程等回合结束后一次性完整呈现）；
-        // 方案是待批准的计划而非过程噪音，需随时同步显示。
-        // （清单与后台任务是「当前状态」，已由 ChatPane 抽出去单独成面板；
-        //   选择卡则由 ChatPane 挂在输入框上方，不进内容流。）
+        // 执行中什么过程都不铺，只留底部那行「执行中…」——中途的说明、工具流水
+        // 都是转瞬即逝的噪音，一条条冒出来还会不停把视图往下推。等这一轮结束，
+        // 过程折成一行、结论展开，一次看个清楚。
+        //
+        // 唯一例外是待批准的方案（plan）：它在等你点头，藏起来就等于把要办的事
+        // 藏了。（清单与后台任务是「当前状态」，已由 ChatPane 抽成单独面板；
+        // 选择卡同理挂在输入框上方，都不进内容流。）
         const visibleItems = inProgress
-          ? keyed.filter(({ m }) => ["assistant", "plan"].includes(m.role))
+          ? keyed.filter(({ m }) => m.role === "plan")
           : keyed;
         // 执行中时给一条「最近动作」预览（最后一条工具调用）
         const lastTool = inProgress
