@@ -56,130 +56,135 @@ const fmtTime = (ts?: string) => (ts ? dayjs(ts).format("MM-DD HH:mm") : "");
 /**
  * 交互式选择卡（AskUserQuestion）。除了同步预设选项，补上一条「自行输入」——
  * AskUserQuestion 始终隐含一个「其它/自定义」项，终端里能自己敲答案，远端也要能。
- * 输入即走 onAnswer（等价在对话框里发一行自定义答案）。
+ *
+ * **一次只问一题**。AskUserQuestion 可以带多道题，终端里也是逐题问的：答完第一题
+ * 才轮到第二题。而答案注入回去就是一行文本（选项序号或自定义内容），本身不带
+ * 「这是第几题」的信息 —— 所以只能按终端的节奏一题一题发，顺序即身份。
+ *
+ * 早先把所有题平铺出来是错的：每题的选项都发同一个序号，终端无从分辨；
+ * 更糟的是答完任意一题整张卡就收起，后面的题根本没机会回答。
  */
 export const SelectCard: React.FC<{
   data: SelectPayload;
   onAnswer?: (text: string) => void;
-}> = ({ data, onAnswer }) => {
+  /** 所有题都答完了（父组件据此收起卡片） */
+  onDone?: () => void;
+}> = ({ data, onAnswer, onDone }) => {
   const [custom, setCustom] = useState("");
-  // 已回应的选项下标。点一下就发一次答案，没有反馈的话手机上很容易连点两下 ——
-  // 第二次会被终端当成「下一个问题」的答案，后果比不作反馈严重得多。
-  // 所以：提交后立刻锁卡 + 高亮已选，等真实消息同步回来这张卡自然被替换。
-  const [answered, setAnswered] = useState<number | null>(null);
+  const [step, setStep] = useState(0);
+  // 刚提交的那一下：防手机上连点两次。不能只靠 step 变化后的重渲染 ——
+  // 两次点击可能落在同一帧里，那时第二下打的已经是**下一题**的同位置选项了。
+  const busy = React.useRef(false);
+  React.useEffect(() => {
+    busy.current = false;
+  }, [step]);
 
-  const locked = answered !== null;
-  const pick = (oi: number) => {
-    if (locked || !onAnswer) return;
-    setAnswered(oi);
-    onAnswer(String(oi + 1));
-  };
+  const questions = data.questions ?? [];
+  const total = questions.length;
+  const q = questions[step];
 
-  const submitCustom = () => {
-    const t = custom.trim();
-    if (t && onAnswer && !locked) {
-      setAnswered(-1); // -1 = 自定义答案
-      onAnswer(t);
-      setCustom("");
+  const submit = (text: string) => {
+    if (busy.current || !onAnswer || !text) return;
+    busy.current = true;
+    onAnswer(text);
+    setCustom("");
+    if (step + 1 < total) {
+      setStep(step + 1);
+    } else {
+      onDone?.();
     }
   };
 
+  const submitCustom = () => submit(custom.trim());
+
+  if (!q) return null;
+
   return (
-    <div className={`${styles.selectCard} ${locked ? styles.selectLocked : ""}`}>
+    <div className={styles.selectCard}>
       <div className={styles.selectHead}>
-        {locked ? "✓ 已回应，等待终端继续" : "⌨︎ 终端等待选择"}
+        <span>⌨︎ 终端等待选择</span>
+        {/* 多题时把进度说清楚，否则答完一题卡片换了内容，会以为是出了什么岔子 */}
+        {total > 1 ? (
+          <span className={styles.selectStep}>
+            第 {step + 1} / {total} 题
+          </span>
+        ) : null}
       </div>
-      {(data.questions ?? []).map((q, qi) => (
-        <div key={qi} className={styles.selectQ}>
-          {q.question ? (
-            <div className={styles.selectQuestion}>{q.question}</div>
-          ) : null}
-          <div className={styles.selectOpts}>
-            {(q.options ?? []).map((o, oi) => (
-              <div
-                key={oi}
-                className={`${styles.selectOpt} ${
-                  onAnswer && !locked ? styles.clickable : ""
-                } ${answered === oi ? styles.selectOptPicked : ""}`}
-                role={onAnswer && !locked ? "button" : undefined}
-                tabIndex={onAnswer && !locked ? 0 : undefined}
-                aria-pressed={answered === oi}
-                onClick={() => pick(oi)}
+      <div className={styles.selectQ}>
+        {q.question ? (
+          <div className={styles.selectQuestion}>{q.question}</div>
+        ) : null}
+        <div className={styles.selectOpts}>
+          {(q.options ?? []).map((o, oi) => (
+            <div
+              key={oi}
+              className={`${styles.selectOpt} ${onAnswer ? styles.clickable : ""}`}
+              role={onAnswer ? "button" : undefined}
+              tabIndex={onAnswer ? 0 : undefined}
+              onClick={() => submit(String(oi + 1))}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  submit(String(oi + 1));
+                }
+              }}
+            >
+              <span className={styles.selectOptIdx}>{oi + 1}</span>
+              <span className={styles.selectOptBody}>
+                <span className={styles.selectOptLabel}>{o.label}</span>
+                {o.description ? (
+                  <span className={styles.selectOptDesc}>{o.description}</span>
+                ) : null}
+              </span>
+            </div>
+          ))}
+          {/* 自行输入：AskUserQuestion 隐含的「其它」，输入后回车 / 点发送提交。
+              它只回答**当前这一题**，发完照样进入下一题。 */}
+          <div className={`${styles.selectOpt} ${styles.selectOptCustom}`}>
+            <span className={styles.selectOptIdx}>✎</span>
+            <span className={styles.selectOptBody}>
+              <input
+                className={styles.selectCustomInput}
+                placeholder="自行输入答案…"
+                value={custom}
+                disabled={!onAnswer}
+                onChange={(e) => setCustom(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    submitCustom();
+                  }
+                }}
+              />
+              <span
+                className={`${styles.selectCustomSend} ${
+                  onAnswer && custom.trim() ? styles.clickable : styles.disabled
+                }`}
+                role="button"
+                tabIndex={0}
+                onClick={submitCustom}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    pick(oi);
+                    submitCustom();
                   }
                 }}
               >
-                <span className={styles.selectOptIdx}>{oi + 1}</span>
-                <span className={styles.selectOptBody}>
-                  <span className={styles.selectOptLabel}>{o.label}</span>
-                  {o.description ? (
-                    <span className={styles.selectOptDesc}>{o.description}</span>
-                  ) : null}
-                </span>
-              </div>
-            ))}
-            {/* 自行输入：AskUserQuestion 隐含的「其它」，输入后回车 / 点发送提交 */}
-            <div
-              className={`${styles.selectOpt} ${styles.selectOptCustom} ${
-                answered === -1 ? styles.selectOptPicked : ""
-              }`}
-            >
-              <span className={styles.selectOptIdx}>✎</span>
-              <span className={styles.selectOptBody}>
-                <input
-                  className={styles.selectCustomInput}
-                  placeholder="自行输入答案…"
-                  value={custom}
-                  disabled={!onAnswer || locked}
-                  onChange={(e) => setCustom(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      submitCustom();
-                    }
-                  }}
-                />
-                <span
-                  className={`${styles.selectCustomSend} ${
-                    onAnswer && custom.trim() && !locked
-                      ? styles.clickable
-                      : styles.disabled
-                  }`}
-                  role="button"
-                  tabIndex={0}
-                  onClick={submitCustom}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      submitCustom();
-                    }
-                  }}
-                >
-                  发送
-                </span>
+                发送
               </span>
-            </div>
+            </span>
           </div>
         </div>
-      ))}
+      </div>
       {/* 「回车」在手机虚拟键盘上不成立（那是「换行/完成」），所以窄屏改说「点发送」。
           两条文案同时渲染、靠 CSS 择一显示 —— 免得为一句提示引一套设备判断。 */}
       <div className={styles.selectHint}>
-        {locked ? (
-          "已把你的选择发到终端，稍等它继续"
-        ) : (
-          <>
-            <span className={styles.hintDesktop}>
-              点选项直接回应；或在「✎ 自行输入」里敲自定义答案后回车
-            </span>
-            <span className={styles.hintMobile}>
-              点选项直接回应；或在「✎ 自行输入」里写答案后点发送
-            </span>
-          </>
-        )}
+        <span className={styles.hintDesktop}>
+          点选项直接回应；或在「✎ 自行输入」里敲自定义答案后回车
+        </span>
+        <span className={styles.hintMobile}>
+          点选项直接回应；或在「✎ 自行输入」里写答案后点发送
+        </span>
       </div>
     </div>
   );

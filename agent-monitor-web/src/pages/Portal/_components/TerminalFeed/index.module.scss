@@ -492,11 +492,22 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     overflow: hidden;
 
     .selectHead {
+      display: flex;
+      align-items: center;
+      gap: 8px;
       padding: 5px 10px;
       background: rgba(217, 164, 65, 0.16);
       color: #f0c674;
       font-size: 12px;
       font-weight: 600;
+
+      // 多题时的进度：答完一题卡片内容整个换掉，没有它会以为是出岔子了
+      .selectStep {
+        margin-left: auto;
+        font-weight: 500;
+        font-size: 11.5px;
+        opacity: 0.85;
+      }
     }
 
     .selectQ {
@@ -541,16 +552,6 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           }
         }
 
-        // 已选中的那一项：留住「我选了哪个」，别让卡片看起来啥也没发生
-        &.selectOptPicked {
-          background: rgba(217, 164, 65, 0.22);
-          border-color: rgba(217, 164, 65, 0.65);
-
-          .selectOptIdx {
-            background: #d9a441;
-            color: #1c1c1c;
-          }
-        }
 
         .selectOptIdx {
           flex: none;
@@ -653,19 +654,6 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       }
     }
 
-    // 已回应：整卡降饱和 + 停掉交互，视觉上「这题过去了」
-    &.selectLocked {
-      border-color: rgba(217, 164, 65, 0.28);
-
-      .selectHead {
-        background: rgba(56, 178, 106, 0.16);
-        color: #7fd6a0;
-      }
-
-      .selectOpt:not(.selectOptPicked) {
-        opacity: 0.45;
-      }
-    }
   }
 
 // 移动端：选择卡是「人不在电脑前时唯一能替终端做决定」的入口，

@@ -488,17 +488,14 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
               {/* key 必须跟着题目走：连着问两题时，React 会复用同一个 SelectCard
                   实例，它内部记「已回应」的 state 不会重置 —— 新题一弹出来就是
                   灰的锁定态，根本点不了。换 key 强制重挂载。 */}
+              {/* 收起的时机是 onDone（所有题都答完），不是 onAnswer ——
+                  AskUserQuestion 可以带多道题，答完第一题就把卡收了，
+                  后面的题就再也没机会回答了。 */}
               <SelectCard
                 key={pendingKey}
                 data={task.pendingSelect}
-                onAnswer={
-                  canSend
-                    ? (text) => {
-                        setAnsweredKey(pendingKey);
-                        sendInput(id, text);
-                      }
-                    : undefined
-                }
+                onAnswer={canSend ? (text) => sendInput(id, text) : undefined}
+                onDone={() => setAnsweredKey(pendingKey)}
               />
             </div>
           ) : null}

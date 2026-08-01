@@ -178,14 +178,21 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 // `:global(.tool)` 匹配不到 —— 必须用属性前缀选择器。这一点实测踩过。
 .Composer :global(ul[class^="tool"]),
 .chatInput :global(ul[class^="tool"]) {
-  > :global(.ant-btn) {
-    order: 0; // buttonGroup 按钮排最前
-  }
   > :global(ul) {
-    order: 1; // 内层 ul 仍 flex:1 撑开剩余空间，把发送键顶到最右
+    order: 1; // 内层 ul 仍 flex:1 撑开剩余空间，把右侧那组顶到最右
+  }
+  > :global(.ant-btn) {
+    order: 2; // 文件选择 / 上传：跟发送键同侧，保持原样在右
+  }
+  // 只有 buttonGroup 的**第一个**按钮（会话历史）挪到最左。
+  // 它跟当前会话状态无关（没进程、没 cwd 时照样要能翻记录），
+  // 和右侧那两个「对当前会话动手」的按钮不是一类，分开放才不容易误点。
+  // 早先这里写的是所有 .ant-btn 都 order:0，把文件选择和上传一起带过去了。
+  > :global(.ant-btn:first-of-type) {
+    order: 0;
   }
   > :global(li) {
-    order: 2; // 发送键等固定项留在最后
+    order: 3; // 发送键等固定项留在最后
   }
 }
 
