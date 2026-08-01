@@ -102,6 +102,15 @@ async function doSilentLogin(): Promise<boolean> {
       deviceToken: cred.deviceToken,
     })) as SessionRes;
     if (res.code !== 0 || !res.data?.token) {
+      // 设备令牌被 hub 判无效（换服务器 / 设备被删 / 数据重建）→ 让客户端清掉本地令牌
+      // （含 device-token.dpapi），下轮 agent 循环自动重新配对，用户无需手动删文件。
+      if (res.code === 401) {
+        try {
+          await invoke("clear_device_token");
+        } catch {
+          /* 忽略：清理失败不影响回退登录页 */
+        }
+      }
       return false;
     }
     setToken(res.data.token);

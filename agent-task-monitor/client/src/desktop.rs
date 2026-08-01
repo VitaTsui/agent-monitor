@@ -314,6 +314,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             autostart_set,
             client_auth,
             local_machine_id,
+            clear_device_token,
             terminals_get,
             terminal_set_excluded,
             update_status,
@@ -951,6 +952,19 @@ fn client_auth(
 #[tauri::command]
 fn local_machine_id(ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>) -> String {
     ctx.state.config.machine_id.clone()
+}
+
+/// 网页端 IPC：设备令牌被 hub 判为无效（换了服务器 / 设备被删 / 数据重建）时，
+/// 清掉本地令牌（含 device-token.dpapi），让 agent 循环回到配对流程重新绑定。
+/// —— 用户无需再手动去找并删除那个文件（静默续登拿到 401 时页面会调这里）。
+#[tauri::command]
+async fn clear_device_token(
+    ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>,
+) -> Result<(), String> {
+    *ctx.state.device_token.write().await = None;
+    crate::secrets::clear(&ctx.state.config.data_dir);
+    tracing::info!("设备令牌被判无效，已清除本地令牌，将自动重新配对");
+    Ok(())
 }
 
 /// 网页端 IPC：本机探测到的终端列表（含排除状态），设置页「监控范围」用
