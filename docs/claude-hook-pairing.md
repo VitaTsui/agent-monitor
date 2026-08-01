@@ -62,6 +62,18 @@ Claude Code 的 hook 在 stdin 里**直接给出** `session_id` 和 `cwd`，环�
 
 macOS/Linux 把 `command` 换成对应路径即可（例如 `/Applications/AgentMonitor.app/Contents/MacOS/agent-monitor hook`）。
 
+> ⚠️ **Windows 路径必须用正斜杠**。hook 命令是交给 bash 执行的，反斜杠会被当成转义符吃掉：
+>
+> ```
+> D:\AgentMonitor\AgentMonitor.exe   →  D:AgentMonitorAgentMonitor.exe   （找不到）
+> D:/AgentMonitor/AgentMonitor.exe   →  正常
+> ```
+>
+> 这个坑**完全静默**：hook 找不到命令不会报错、不会阻断会话，只是 `<data_dir>/hooks/` 里
+> 一直空着，看起来像「功能没生效」而不是「配置写错了」。实测踩过一次 —— 配置、实现、
+> 客户端版本全都对，就是路径里的反斜杠被吞了。排查时先手工跑一遍
+> `echo '{"session_id":"t","cwd":"/x"}' | <你配的命令>`，能落盘就说明路径没问题。
+
 ## 安全性
 
 hook 是**同步阻塞** claude 的，所以 `run_hook_cli` 的设计原则是「绝不失败、绝不拖慢」：
