@@ -70,6 +70,8 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     let mut client = build_client();
     let mut msg_cache = MsgCache { inner: HashMap::new() };
     let mut hub_ok = false;
+    // 连续网络失败次数：用于给失败日志限流（首次必打，之后每 ~60s 一条）
+    let mut net_fail_streak: u32 = 0;
     // 未被 hub 信任前，只发送心跳（设备登记），绝不上报任何会话/终端数据
     let mut trusted = false;
     // 待随下一轮上报回传的 git 对比结果
@@ -261,6 +263,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                     tracing::info!("已连上 hub: {hub}");
                     hub_ok = true;
                 }
+                net_fail_streak = 0;
                 state
                     .hub_connected
                     .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -366,13 +369,22 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                 }
             }
             Err(e) => {
-                if hub_ok {
-                    tracing::warn!("上报 hub 失败: {e}");
+                // 连不上 hub 也必须留痕。原先只在 `hub_ok` 为真时打日志 ——
+                // 也就是「本来连着、突然断了」才记一条；而**从来没连上过**的客户端
+                // （hub_ok 恒为 false）一条都不打，托盘也没有原因可显示。
+                // 实际后果：换服务器后客户端拿着作废的设备令牌空转，日志里干干净净，
+                // 用户只看到网页上什么都没有，无从查起（这个 bug 就是这么被发现的）。
+                // 首次失败必打，之后每 ~60s 一条，既不刷屏也不至于全无痕迹。
+                if hub_ok || net_fail_streak == 0 || net_fail_streak % 40 == 0 {
+                    tracing::warn!("上报 hub 失败（第 {} 次）: {e}", net_fail_streak + 1);
                 }
+                net_fail_streak = net_fail_streak.saturating_add(1);
                 hub_ok = false;
                 state
                     .hub_connected
                     .store(false, std::sync::atomic::Ordering::Relaxed);
+                // 托盘要能说出「为什么连不上」，而不是永远停在「连接中…」
+                *state.hub_error.write().await = Some(format!("连不上 hub（{hub}）：{e}"));
             }
         }
 
@@ -435,21 +447,25 @@ pub(crate) fn version_newer(a: &str, b: &str) -> bool {
 /// 这些都是「配置错了」而非「网络抖动」：重试再多次也不会自愈，
 /// 必须让托盘上的用户看到该改哪里。
 fn describe_reject(code: u16, body: &str) -> String {
+    // 400/401 的具体原因 hub 已经在 body 里说清了（且比这里的猜测准），原样带出。
+    // 401 尤其要这样：现在它的主因是**设备令牌失效**（换了 hub、设备被删），
+    // hub 会答「设备未绑定账号：打开客户端窗口登录一次即可自动绑定」——正是该做的事；
+    // 而原先硬编码成「核对 AM_AGENT_TOKEN」，会把人引去查一个多数机器上根本没设的变量。
+    let from_body = |fallback: &str| -> String {
+        let msg = body.trim();
+        if msg.is_empty() {
+            fallback.to_string()
+        } else {
+            // 按字符截断（不是字节），中文原因不会被切出半个字
+            let short: String = msg.chars().take(60).collect();
+            format!("上报被拒：{short}")
+        }
+    };
     match code {
-        401 => "上报令牌不对（请核对 AM_AGENT_TOKEN 与 hub 一致）".into(),
+        401 => from_body("上报令牌无效（设备未绑定或令牌已失效），打开客户端窗口登录一次即可重新绑定"),
         403 => "hub 拒绝本设备（无权上报）".into(),
         413 => "上报内容过大，已被 hub 拒绝".into(),
-        400 => {
-            // 400 的具体原因在 body 里（如 machineId 与 hub 本机冲突），原样带出更有用
-            let msg = body.trim();
-            if msg.is_empty() {
-                "上报被 hub 拒绝（400）".into()
-            } else {
-                // 按字符截断（不是字节），中文原因不会被切出半个字
-                let short: String = msg.chars().take(60).collect();
-                format!("上报被拒：{short}")
-            }
-        }
+        400 => from_body("上报被 hub 拒绝（400）"),
         c if (500..600).contains(&c) => format!("hub 内部错误（{c}），稍后重试"),
         c => format!("上报被拒绝（HTTP {c}）"),
     }
@@ -681,8 +697,16 @@ mod reject_tests {
     /// 配置类错误必须给出可据以行动的话，而不是笼统的「连接中…」
     #[test]
     fn actionable_messages_for_config_errors() {
+        // 401 空 body：得说清「重新绑定」这条出路。原先这里断言的是
+        // 「核对 AM_AGENT_TOKEN」——那是单用户时代的主因，如今 401 多半是
+        // 设备令牌失效（换了 hub / 设备被删），指去查一个多数机器上没设的
+        // 环境变量只会带偏（这条测试当初就把错误文案给焊死了）。
         let m = describe_reject(401, "");
-        assert!(m.contains("AM_AGENT_TOKEN"), "401 应指出改哪个配置: {m}");
+        assert!(m.contains("登录"), "401 应指出怎么重新绑定: {m}");
+
+        // 401 有 body：hub 的原话比本地猜测准，必须原样带出
+        let m = describe_reject(401, "设备未绑定账号：打开客户端窗口登录一次即可自动绑定");
+        assert!(m.contains("设备未绑定账号"), "401 应带出 hub 的原因: {m}");
 
         // 400 的具体原因在 body 里（如 machineId 冲突），要原样带出
         let m = describe_reject(400, "machineId 与 hub 本机冲突");
