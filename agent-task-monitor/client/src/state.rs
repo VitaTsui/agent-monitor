@@ -427,7 +427,7 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
     // 「终端此刻正等你选」：由 PreToolUse hook 在 AskUserQuestion 执行前落下，
     // 下面读 hook 记录时顺带收上来（session_id → AskUserQuestion 的 input JSON），
     // 扫描完再回填到对应会话上报出去。
-    let mut pending_selects: std::collections::HashMap<String, String> =
+    let mut pending_selects: std::collections::HashMap<String, serde_json::Value> =
         std::collections::HashMap::new();
     let pinned = {
         use std::sync::atomic::Ordering;

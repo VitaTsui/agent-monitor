@@ -916,6 +916,13 @@ $active-bg: rgba(36, 61, 66, 0.09);
       }
     }
 
+    // 不可用的缘由：跟在动作名后面的小字
+    .actWhy {
+      margin-left: auto;
+      font-size: 11.5px;
+      color: rgba(36, 61, 66, 0.3);
+    }
+
     // 不可用（如空闲时的「中断」）：连按下反馈也去掉，免得看着像点了没生效
     &.disabled {
       color: rgba(36, 61, 66, 0.32);

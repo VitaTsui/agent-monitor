@@ -40,7 +40,7 @@ pub struct HookReport {
     /// 从 jsonl 里读到的 select 消息是「事后」的 —— 那条记录要等这一轮落盘才看得见，
     /// 人在终端上选完了远端才亮出选项，等于没用。而 PreToolUse 在工具**执行前**触发，
     /// 拿到的就是即将弹给用户的那些选项，这才是「远程替终端做决定」需要的时机。
-    pub pending_select: Option<String>,
+    pub pending_select: Option<serde_json::Value>,
 }
 
 fn now_secs() -> u64 {
@@ -91,7 +91,7 @@ pub fn run_hook_cli(data_dir: &Path) {
     let event = v.get("hook_event_name").and_then(|x| x.as_str()).unwrap_or("");
     let tool = v.get("tool_name").and_then(|x| x.as_str()).unwrap_or("");
     let pending_select = if event == "PreToolUse" && tool == "AskUserQuestion" {
-        v.get("tool_input").map(|i| i.to_string())
+        v.get("tool_input").cloned()
     } else {
         None
     };
@@ -157,11 +157,7 @@ pub fn read_reports(data_dir: &Path, max_age_secs: u64) -> Vec<HookReport> {
         out.push(HookReport {
             claude_pid: pid as u32,
             session_id: sid.to_string(),
-            pending_select: v
-                .get("pending_select")
-                .filter(|x| !x.is_null())
-                .and_then(|x| x.as_str())
-                .map(str::to_string),
+            pending_select: v.get("pending_select").filter(|x| !x.is_null()).cloned(),
         });
     }
     out

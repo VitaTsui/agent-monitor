@@ -176,6 +176,18 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   const canInterrupt = controllable && running;
   const canSend = controllable && !paused;
   // 禁用时把原因说出来，光是灰掉只会让人反复戳
+  // 题面指纹：既做 SelectCard 的 key，也用来记「这道题我已经答过了」。
+  //
+  // 答完不等 hook 覆盖就先本地收起来：清除信号要等下一次工具调用（或 PostToolUse）
+  // 才到，claude 在这中间若想久一点，一张已经答过的卡就一直杵在输入框上方占地方。
+  // 答案本身会立刻作为 user 气泡出现在内容流里，反馈并不会丢。
+  const pendingKey = React.useMemo(
+    () => (task.pendingSelect ? JSON.stringify(task.pendingSelect) : ""),
+    [task.pendingSelect],
+  );
+  const [answeredKey, setAnsweredKey] = useState("");
+  const showPending = !!task.pendingSelect && pendingKey !== answeredKey;
+
   const interruptHint = !controllable
     ? "该会话没有存活进程"
     : paused
@@ -251,7 +263,9 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                   {
                     key: "interrupt",
                     icon: <ThunderboltOutlined />,
-                    label: interruptHint,
+                    // 菜单项写动作名，禁用的缘由挂 title —— 拿「当前没有正在执行的任务」
+                    // 当条目名，读起来是句状态描述，不像个能点的东西
+                    label: <span title={interruptHint}>中断当前任务</span>,
                     disabled: !canInterrupt,
                     onClick: () => control(id, "interrupt"),
                   },
@@ -465,15 +479,22 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
           {/* 终端正等你选：由 hook 在选项弹出终端**之前**报上来，所以这里是「现在就能
               替它做决定」，而不是对话流里那张事后追认的记录卡。放在输入框正上方 ——
               人回到这个页面时视线本来就落在这儿，且它比打字更该被先处理。 */}
-          {task.pendingSelect ? (
+          {showPending && task.pendingSelect ? (
             <div className={styles.pendingSelect}>
               {/* key 必须跟着题目走：连着问两题时，React 会复用同一个 SelectCard
                   实例，它内部记「已回应」的 state 不会重置 —— 新题一弹出来就是
                   灰的锁定态，根本点不了。换 key 强制重挂载。 */}
               <SelectCard
-                key={task.pendingSelect}
-                content={task.pendingSelect}
-                onAnswer={canSend ? (text) => sendInput(id, text) : undefined}
+                key={pendingKey}
+                data={task.pendingSelect}
+                onAnswer={
+                  canSend
+                    ? (text) => {
+                        setAnsweredKey(pendingKey);
+                        sendInput(id, text);
+                      }
+                    : undefined
+                }
               />
             </div>
           ) : null}

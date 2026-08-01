@@ -34,6 +34,18 @@ export interface PortalMessage {
   delivered?: boolean;
 }
 
+/** AskUserQuestion 的一道题 */
+export interface SelectQuestion {
+  question?: string;
+  header?: string;
+  options?: { label?: string; description?: string }[];
+}
+
+/** AskUserQuestion 的整份 input：终端此刻在等你回答的东西 */
+export interface SelectPayload {
+  questions?: SelectQuestion[];
+}
+
 interface IPortalTaskData {
   id: string;
   title: string;
@@ -70,13 +82,13 @@ interface IPortalTaskData {
   /** 终端里 claude 原生排队、尚未被接受执行的输入（按入队顺序） */
   queuedInputs: string[];
   /**
-   * 终端**此刻正等你选**：AskUserQuestion 的整份 input（questions/options）JSON。
+   * 终端**此刻正等你选**：AskUserQuestion 的整份 input（questions/options）。
    *
    * 由 PreToolUse hook 在选项弹给终端用户**之前**报上来，所以远端能同步弹出选项框、
    * 替终端做决定。（对话流里的 select 消息是事后从 jsonl 读到的 —— 等它出现时，
    * 人早在终端上选完了，那份只能当记录看。）用户选完即由后续 hook 清除。
    */
-  pendingSelect?: string;
+  pendingSelect?: SelectPayload;
 }
 export type PortalTaskData = Partial<IPortalTaskData>;
 

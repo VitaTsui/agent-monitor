@@ -3,7 +3,7 @@ import React, { useState } from "react";
 import dayjs from "dayjs";
 import { Markdown } from "@hsu-react/ui";
 
-import { PortalMessage } from "@/services/apis/portal";
+import { PortalMessage, SelectPayload } from "@/services/apis/portal";
 import styles from "./index.module.scss";
 
 interface TerminalFeedProps {
@@ -59,26 +59,14 @@ const fmtTime = (ts?: string) => (ts ? dayjs(ts).format("MM-DD HH:mm") : "");
  * 输入即走 onAnswer（等价在对话框里发一行自定义答案）。
  */
 export const SelectCard: React.FC<{
-  content: string;
+  data: SelectPayload;
   onAnswer?: (text: string) => void;
-}> = ({ content, onAnswer }) => {
+}> = ({ data, onAnswer }) => {
   const [custom, setCustom] = useState("");
   // 已回应的选项下标。点一下就发一次答案，没有反馈的话手机上很容易连点两下 ——
   // 第二次会被终端当成「下一个问题」的答案，后果比不作反馈严重得多。
   // 所以：提交后立刻锁卡 + 高亮已选，等真实消息同步回来这张卡自然被替换。
   const [answered, setAnswered] = useState<number | null>(null);
-  let data: {
-    questions?: {
-      question?: string;
-      header?: string;
-      options?: { label?: string; description?: string }[];
-    }[];
-  } = {};
-  try {
-    data = JSON.parse(content);
-  } catch {
-    /* 半截 JSON：忽略，按空卡片处理 */
-  }
 
   const locked = answered !== null;
   const pick = (oi: number) => {

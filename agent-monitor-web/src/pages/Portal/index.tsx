@@ -428,8 +428,12 @@ const Portal: React.FC = observer(() => {
                         }`}
                         onClick={canInterrupt ? act(() => control(id0, "interrupt")) : undefined}
                       >
-                        <ThunderboltOutlined />{" "}
-                        {canInterrupt ? "中断" : "中断（当前没在执行）"}
+                        <ThunderboltOutlined /> 中断
+                        {/* 条目名保持动作，不可用的缘由另起一行小字 ——
+                            把状态描述塞进名字里，读着就不像个能点的东西 */}
+                        {canInterrupt ? null : (
+                          <span className={styles.actWhy}>当前没在执行</span>
+                        )}
                       </div>
                       {/* 终止 = 杀进程，这一轮的上下文就没了。桌面端一直有二次确认，
                           移动端却是一点就执行 —— 而手指在紧挨着的菜单项上更容易滑错。 */}
