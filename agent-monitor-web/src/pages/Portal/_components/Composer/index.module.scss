@@ -168,6 +168,27 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   font-size: 20px !important;
 }
 
+// buttonGroup 的按钮挪到工具栏左侧。
+//
+// Chat.Input 的工具栏是 `ul[class^=tool] > (ul | button | li)`，且 justify-content:flex-end
+// （整体靠右），buttonGroup 渲染成中间那些 button，默认全被推到右边贴着发送键。组件没有
+// 左侧插槽，项目规范又禁止 fork 组件库，所以用 order 调视觉顺序，不动 DOM。
+//
+// 注意选择器：组件库用的是 CSS Modules 哈希类名（实际形如 `tool--ZTJk_`），
+// `:global(.tool)` 匹配不到 —— 必须用属性前缀选择器。这一点实测踩过。
+.Composer :global(ul[class^="tool"]),
+.chatInput :global(ul[class^="tool"]) {
+  > :global(.ant-btn) {
+    order: 0; // buttonGroup 按钮排最前
+  }
+  > :global(ul) {
+    order: 1; // 内层 ul 仍 flex:1 撑开剩余空间，把发送键顶到最右
+  }
+  > :global(li) {
+    order: 2; // 发送键等固定项留在最后
+  }
+}
+
 // 上传目录确认弹窗（Modal portal 在外，选择器不可嵌套组件根类）
 .uploadForm {
   display: flex;
