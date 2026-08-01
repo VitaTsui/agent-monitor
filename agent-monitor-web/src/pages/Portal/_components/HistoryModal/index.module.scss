@@ -11,10 +11,18 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   border-bottom: 1px solid rgba(36, 61, 66, 0.08);
 }
 
-// 对话流：旧的在上、新的在下，与聊天记录读法一致
+.loading {
+  display: flex;
+  justify-content: center;
+  padding: 40px 0;
+}
+
+// 对话流：旧的在上、新的在下，与聊天记录读法一致。
+// 这里是唯一的滚动容器 —— 外面不能再套 Spin 之类会加 div 的组件，否则高度链断了滚不动。
 .stream {
-  max-height: 62vh;
+  height: 62vh;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 8px 2px 0;
 }
 
@@ -80,16 +88,70 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 }
 
 .bubbleUser {
-  max-width: 76%;
-  padding: 8px 12px;
+  max-width: 78%;
+  padding: 6px 12px;
   border-radius: 12px 12px 2px 12px;
   background: rgba(15, 155, 173, 0.1);
   color: $text;
   font-size: 13px;
-  line-height: 1.65;
-  // 保留换行；长内容自动换行不撑破气泡
-  white-space: pre-wrap;
+  // 正文交给 Markdown.Views 渲染，这里只管容器：长串（URL/路径）要能断行
   word-break: break-word;
+  overflow-wrap: anywhere;
+
+  // 压紧 markdown 在气泡里的默认间距 —— 它按文档排版，首尾留白在气泡里会显得很空
+  :global {
+    p,
+    ul,
+    ol,
+    pre,
+    blockquote,
+    table {
+      margin: 4px 0;
+    }
+    p:first-child,
+    ul:first-child,
+    ol:first-child,
+    pre:first-child {
+      margin-top: 0;
+    }
+    p:last-child,
+    ul:last-child,
+    ol:last-child,
+    pre:last-child {
+      margin-bottom: 0;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin: 6px 0 4px;
+      font-size: 13.5px;
+      font-weight: 600;
+    }
+    ul, ol {
+      padding-left: 18px;
+    }
+    // 代码块在气泡内自己横向滚动，不要把气泡撑破
+    pre {
+      max-width: 100%;
+      overflow-x: auto;
+      padding: 8px 10px;
+      border-radius: 6px;
+      background: rgba(36, 61, 66, 0.06);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    code {
+      font-family: $mono;
+      font-size: 12px;
+    }
+    table {
+      display: block;
+      max-width: 100%;
+      overflow-x: auto;
+      font-size: 12px;
+    }
+    img {
+      max-width: 100%;
+    }
+  }
 }
 
 .bubbleAgent {
@@ -97,12 +159,6 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   border-radius: 12px 12px 12px 2px;
   background: rgba(36, 61, 66, 0.05);
   color: rgba(36, 61, 66, 0.85);
-  // 回复多是代码/命令输出，等宽更好读
-  font-family: $mono;
-  font-size: 12.5px;
-  // 单条结果可能很长，限高后自身滚动，避免一条淹没整个流
-  max-height: 40vh;
-  overflow-y: auto;
 }
 
 .time {

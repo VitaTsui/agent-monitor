@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 
-import { Modal } from "@hsu-react/ui";
+import { Markdown, Modal } from "@hsu-react/ui";
 import { Empty, Spin, message } from "antd";
 
 import {
@@ -48,7 +48,8 @@ const SOURCE_LABEL: Record<string, string> = {
 const HistoryModal: React.FC<HistoryModalProps> = ({ open, onClose }) => {
   const [list, setList] = useState<SessionHistoryItem[]>([]);
   const [loading, setLoading] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  // 直接持有滚动容器：用 scrollIntoView 会把整个弹窗往上顶，改成设容器的 scrollTop
+  const streamRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -59,11 +60,22 @@ const HistoryModal: React.FC<HistoryModalProps> = ({ open, onClose }) => {
       .finally(() => setLoading(false));
   }, [open]);
 
-  // 数据到位后滚到底 —— 聊天记录最该先看到的是最新那条
+  // 数据到位后滚到底 —— 聊天记录最该先看到的是最新那条。
+  // 放在下一帧：此刻 markdown 尚未完成布局，立即设 scrollTop 会按旧高度算而滚不到底。
   useEffect(() => {
-    if (!loading && list.length > 0) {
-      bottomRef.current?.scrollIntoView({ block: "end" });
-    }
+    if (loading || list.length === 0) return;
+    const el = streamRef.current;
+    if (!el) return;
+    const toBottom = () => {
+      el.scrollTop = el.scrollHeight;
+    };
+    const raf = requestAnimationFrame(toBottom);
+    // markdown / 代码块渲染完还会再撑高一次，补一拍兜底
+    const timer = window.setTimeout(toBottom, 120);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(timer);
+    };
   }, [loading, list]);
 
   return (
@@ -78,11 +90,17 @@ const HistoryModal: React.FC<HistoryModalProps> = ({ open, onClose }) => {
       <div className={styles.hint}>
         经钉钉 / 网页 / MCP 下发的任务与其结果。终端关掉、机器关机后仍可在此回看。
       </div>
-      <Spin spinning={loading}>
-        <div className={styles.stream}>
-          {!loading && list.length === 0 && (
-            <Empty description="还没有远程往来记录" />
-          )}
+      {/* Spin 不能包住滚动容器：它会额外套一层 div，把 max-height 挡在外面导致滚不动 */}
+      {loading && (
+        <div className={styles.loading}>
+          <Spin />
+        </div>
+      )}
+      {!loading && list.length === 0 && (
+        <Empty description="还没有远程往来记录" />
+      )}
+      {!loading && list.length > 0 && (
+        <div className={styles.stream} ref={streamRef}>
           {list.map((it, idx) => {
             // 换会话时插分隔条：多个终端的往来混在一起时，得知道这段是谁的
             const prev = idx > 0 ? list[idx - 1] : null;
@@ -103,8 +121,12 @@ const HistoryModal: React.FC<HistoryModalProps> = ({ open, onClose }) => {
                   </div>
                 )}
                 <div className={isUser ? styles.rowUser : styles.rowAgent}>
-                  <div className={isUser ? styles.bubbleUser : styles.bubbleAgent}>
-                    {it.content}
+                  <div
+                    className={isUser ? styles.bubbleUser : styles.bubbleAgent}
+                  >
+                    {/* 结果里满是代码块/列表/表格，纯文本读不了，交给 markdown 渲染；
+                        我发的指令通常是一句话，但也可能贴了代码，一并渲染保持一致 */}
+                    <Markdown.Views>{it.content}</Markdown.Views>
                   </div>
                   <div className={styles.time}>
                     {fmtTime(it.at)}
@@ -116,9 +138,8 @@ const HistoryModal: React.FC<HistoryModalProps> = ({ open, onClose }) => {
               </React.Fragment>
             );
           })}
-          <div ref={bottomRef} />
         </div>
-      </Spin>
+      )}
     </Modal>
   );
 };
