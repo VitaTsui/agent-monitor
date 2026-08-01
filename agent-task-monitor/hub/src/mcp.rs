@@ -337,7 +337,7 @@ async fn send_to_session(
     text: &str,
 ) -> Result<String, String> {
     let id = resolve(state, user, sess).await?;
-    crate::bot::queue_command(state, user, &id, ControlAction::Input, Some(text.to_string()))
+    crate::bot::queue_command(state, user, &id, ControlAction::Input, Some(text.to_string()), "mcp")
         .await?;
     // 状态只是「下发那一刻」的快照：忙就是会排队。真要确认有没有被吃进去，用 wait_until_idle。
     let busy = state
@@ -404,7 +404,7 @@ async fn control_session(
         "stop" => (ControlAction::Stop, "已终止"),
         other => return Err(format!("未知动作「{other}」，可用：pause / resume / interrupt / stop")),
     };
-    crate::bot::queue_command(state, user, &id, act, None).await?;
+    crate::bot::queue_command(state, user, &id, act, None, "mcp").await?;
     Ok(format!("会话「{sess}」{word}。"))
 }
 

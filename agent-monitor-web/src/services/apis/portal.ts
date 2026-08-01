@@ -87,25 +87,31 @@ export const getPortalTaskList = async (params?: {
   return await get<ListRes<PortalTaskData>>("/monitor/tasks", { params });
 };
 
-/** 一条会话历史：会话结束时留下的最终产出 */
+/** 一条远程交互记录：我发的指令，或它给回的结果 */
 export interface SessionHistoryItem {
   id: string;
   owner: string;
+  /** 所属会话（jsonl id），同一会话的往来会连成一串 */
+  sessionId: string;
+  /** user = 我下发的；assistant = 它给回的 */
+  role: "user" | "assistant";
+  content: string;
+  /** 发生时刻（epoch 秒） */
+  at: number;
+  /** 下发来源：dingtalk / web / mcp；assistant 条为空 */
+  source: string;
+  /** 会话在钉钉里的号位（@N 的 N），终端关太久被回收则为 null */
+  slot: number | null;
   hostname: string;
   project: string;
   title: string;
-  prompt: string;
-  /** 最终产出（末条 assistant 消息，已按上限截断） */
-  result: string;
   provider: string;
-  startedAt: string | null;
-  /** 判定结束的时刻（epoch 秒） */
-  endedAt: number;
-  /** 结束时该会话在钉钉里的号位（@N 的 N），终端关太久被回收则为 null */
-  slot: number | null;
 }
 
-/** 会话历史：每个会话结束时留一条最终产出，终端关了、机器关机后仍可回看 */
+/**
+ * 远程交互历史：把「我发了什么 → 它回了什么」按时间排成一条对话流。
+ * 返回最近 limit 条，且保持正序（旧 → 新），直接从上往下渲染即是聊天记录的读法。
+ */
 export const getSessionHistory = async (limit?: number) => {
   return await get<ListRes<SessionHistoryItem>>("/monitor/history", {
     params: { limit },

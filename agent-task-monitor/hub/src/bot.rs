@@ -879,7 +879,7 @@ async fn control(
         Ok(id) => id,
         Err(e) => return e,
     };
-    match queue_command(state, username, &task_id, action, None).await {
+    match queue_command(state, username, &task_id, action, None, "dingtalk").await {
         Ok(_) => format!("{ok_word}（会话 {arg}）。"),
         Err(e) => e,
     }
@@ -1015,34 +1015,43 @@ async fn remove_pending_file(state: &SharedState, username: &str, arg: &str) -> 
     format!("已删除「{}」。剩 {remaining} 个待发文件。", removed.file_name)
 }
 
-/// 「历史 [N]」：回看最近结束的会话都出了什么结果。默认 5 条，最多 20。
-/// 会话结束时才留记录，所以这里看到的都是「已经收工」的活。
+/// 「历史 [N]」：回看最近的远程往来，按时间正序排成对话流。默认 10 条，最多 30。
 async fn list_history(state: &SharedState, username: &str, arg: &str) -> String {
-    let n = arg.trim().parse::<usize>().unwrap_or(5).clamp(1, 20);
+    let n = arg.trim().parse::<usize>().unwrap_or(10).clamp(1, 30);
     let list = crate::history::list_for(state, username, n).await;
     if list.is_empty() {
-        return "还没有已结束的会话记录。会话结束后会自动留一条，可在这里或网页回看。".to_string();
+        return "还没有远程往来记录。从这里或网页下发任务后，一问一答都会记进来。".to_string();
     }
-    let mut lines = vec![format!("最近 {} 条已结束会话：", list.len())];
-    for r in &list {
-        let when = chrono::DateTime::from_timestamp(r.ended_at as i64, 0)
-            .map(|t| {
-                t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()
-            })
+    let mut lines = vec![format!("最近 {} 条往来（旧 → 新）：", list.len())];
+    let mut last_session = String::new();
+    for e in &list {
+        // 换会话时插一行分隔，否则多个终端的往来混在一起读不出是谁说的
+        if e.session_id != last_session {
+            last_session = e.session_id.clone();
+            let slot = e.slot.map(|n| format!("{n} 号 · ")).unwrap_or_default();
+            let title: String =
+                if e.title.is_empty() { e.provider.clone() } else { e.title.clone() };
+            lines.push(format!(
+                "\n—— {slot}{} · {} ——",
+                e.project,
+                title.chars().take(24).collect::<String>()
+            ));
+        }
+        let when = chrono::DateTime::from_timestamp(e.at as i64, 0)
+            .map(|t| t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
             .unwrap_or_default();
-        let title: String = if r.title.is_empty() { r.provider.clone() } else { r.title.clone() };
-        // 带上号位，和「@N」那套编号对得上 —— 「哦，这是我 9 号终端做的活」
-        let slot = r.slot.map(|n| format!("{n} 号 · ")).unwrap_or_default();
-        lines.push(format!(
-            "\n【{when}】{slot}{} · {}\n{}\n{}",
-            r.hostname,
-            r.project,
-            title.chars().take(40).collect::<String>(),
-            // 结果只给前两行，完整内容去网页看 —— 钉钉里堆全文没法翻
-            r.result.lines().filter(|l| !l.trim().is_empty()).take(2).collect::<Vec<_>>().join("\n"),
-        ));
+        let who = if e.role == "user" { "🧑 我" } else { "🤖" };
+        // 每条只给前 3 行，钉钉里堆全文没法翻；完整内容去网页看
+        let body: String = e
+            .content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("\n");
+        lines.push(format!("{who}（{when}）\n{body}"));
     }
-    lines.push("\n完整结果可在网页「历史」里查看。".to_string());
+    lines.push("\n完整内容可在网页输入框旁的「历史」里查看。".to_string());
     lines.join("\n")
 }
 
@@ -1105,7 +1114,7 @@ async fn send_input(
         text = format!("{} {text}", rels.join(" "));
     }
     if let Err(e) =
-        queue_command(state, username, &task_id, ControlAction::Input, Some(text.clone())).await
+        queue_command(state, username, &task_id, ControlAction::Input, Some(text.clone()), "dingtalk").await
     {
         return e;
     }
@@ -1336,12 +1345,15 @@ async fn list_queued(state: &SharedState, username: &str, arg: &str) -> String {
     }
 }
 
+/// 给会话排一条命令。`source` 标记下发来源（dingtalk / web / mcp），只用于历史记录的展示，
+/// 让你回看时知道「这条是我在手机上发的还是在网页发的」。
 pub(crate) async fn queue_command(
     state: &SharedState,
     username: &str,
     task_id: &str,
     action: ControlAction,
     text: Option<String>,
+    source: &str,
 ) -> Result<(), String> {
     let task = {
         let tasks = state.tasks_for(username).await;
@@ -1361,9 +1373,36 @@ pub(crate) async fn queue_command(
         task_id: task_id.to_string(),
         pid: task.pid,
         action,
-        text,
+        text: text.clone(),
         id: Some(uuid::Uuid::new_v4().to_string()),
     });
+    drop(machines); // 记历史要拿别的锁，先放掉
+
+    // 下发的任务进「远程交互历史」的 user 侧。钉钉 / 网页 / MCP 三个入口都汇到这里，
+    // 所以只需在此记一次；控制类指令（暂停/中断…）不入流，它们不是对话内容。
+    if matches!(action, ControlAction::Input) {
+        if let Some(content) = text {
+            let slot = crate::slots::slot_of(state, username, &crate::slots::anchor_of(&task)).await;
+            crate::history::append(
+                state,
+                crate::history::HistoryEntry {
+                    id: crate::history::new_id(),
+                    owner: username.to_string(),
+                    session_id: task_id.to_string(),
+                    role: "user".into(),
+                    content,
+                    at: crate::state::now_secs(),
+                    source: source.to_string(),
+                    slot,
+                    hostname: task.hostname.clone(),
+                    project: task.project_name.clone(),
+                    title: task.title.clone(),
+                    provider: task.provider_dsr.clone(),
+                },
+            )
+            .await;
+        }
+    }
     Ok(())
 }
 

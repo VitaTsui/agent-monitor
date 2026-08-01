@@ -270,7 +270,7 @@ pub struct AppState {
     pub sessions_dirty: std::sync::atomic::AtomicBool,
     /// 会话历史：每个会话结束时留一条最终产出（见 crate::history）。全用户合用一张表，
     /// 查询时按 owner 过滤。
-    pub history: RwLock<Vec<crate::history::SessionRecord>>,
+    pub history: RwLock<Vec<crate::history::HistoryEntry>>,
     /// 历史有未落盘变更（tick 循环定期 flush 到 history.json）
     pub history_dirty: std::sync::atomic::AtomicBool,
     /// 机器人会话号位（「@2 / 发 2 / 暂停 2」里的 2）：用户名 → 号位表。

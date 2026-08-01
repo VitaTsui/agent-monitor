@@ -896,6 +896,30 @@ async fn input_task(
         id: Some(cmd_id.clone()),
     });
     drop(machines); // 释放锁：下面后台任务会再读 machines
+    // 记进「远程交互历史」的 user 侧。网页这条路径没走 bot::queue_command（它自己压队列），
+    // 所以要单独记一次，否则网页发的任务不会出现在聊天记录里。
+    {
+        let slot =
+            crate::slots::slot_of(&state, &user, &crate::slots::anchor_of(&task)).await;
+        crate::history::append(
+            &state,
+            crate::history::HistoryEntry {
+                id: crate::history::new_id(),
+                owner: user.clone(),
+                session_id: id.clone(),
+                role: "user".into(),
+                content: text_for_notify.clone(),
+                at: crate::state::now_secs(),
+                source: "web".into(),
+                slot,
+                hostname: task.hostname.clone(),
+                project: task.project_name.clone(),
+                title: task.title.clone(),
+                provider: task.provider_dsr.clone(),
+            },
+        )
+        .await;
+    }
     // 网页/客户端（非钉钉）下发的任务，主动把「排队中 / 执行中」状态推到钉钉私聊；
     // 排队的还会盯到执行后再推一条。钉钉自己「发 N」走 queue_command 不经这里，不重复。
     {
@@ -1862,7 +1886,7 @@ async fn report(
     let mut pending_removes: Vec<String> = Vec::new();
     // 会话结束时要落的历史记录（同样块内收集、块后写，避开借用冲突）
     // (记录, 终端锚) —— 号位要在锁外查，见下方 pending_history 处理
-    let mut history_records: Vec<(crate::history::SessionRecord, String)> = Vec::new();
+    let mut history_records: Vec<(crate::history::HistoryEntry, String)> = Vec::new();
     if let Some(owner) = &notify_owner {
         use crate::dingtalk::{EventKind, NotifyEvent};
         let old: std::collections::HashMap<&str, TaskStatus> =
@@ -1932,30 +1956,32 @@ async fn report(
         // 「会话已结束」纯属噪音（认不出是哪个、也没有任何结果可看），所以不推。
         // 只挡推送，基线仍要照常清理，否则会被后面的「消失」判定再推一次。
         let is_placeholder = |t: &am_core::model::Task| t.title.is_empty() && t.prompt.is_empty();
-        // 会话结束时留一条历史记录。正文优先用完整原文（未截断时 full 为 None，退回展示版并
-        // 去掉「最后结果」抬头），由 history::record 统一按上限截断。
-        let make_record = |t: &am_core::model::Task,
-                           owner: &str,
-                           full: Option<&str>,
-                           shown: &str|
-         -> (crate::history::SessionRecord, String) {
-            let result = match full {
+        // 造一条 assistant 侧的交互记录（任务完成 / 会话结束时的结果）。
+        // 正文优先用完整原文（推送里被截断时 full 有值），否则退回展示版并去掉「最后结果」抬头。
+        // 号位要 await 才能查，所以这里带回终端锚，等锁释放后再补。
+        let make_reply = |t: &am_core::model::Task,
+                          owner: &str,
+                          full: Option<&str>,
+                          shown: &str|
+         -> (crate::history::HistoryEntry, String) {
+            let content = match full {
                 Some(f) => f.to_string(),
                 None => shown.trim_start_matches("\n\n**最后结果**\n\n").to_string(),
             };
             (
-                crate::history::SessionRecord {
-                    id: t.id.clone(),
+                crate::history::HistoryEntry {
+                    id: crate::history::new_id(),
                     owner: owner.to_string(),
+                    session_id: t.id.clone(),
+                    role: "assistant".into(),
+                    content,
+                    at: crate::state::now_secs(),
+                    source: String::new(),
+                    slot: None, // 锁外补
                     hostname: t.hostname.clone(),
                     project: t.project_name.clone(),
                     title: t.title.clone(),
-                    prompt: t.prompt.clone(),
-                    result,
                     provider: t.provider_dsr.clone(),
-                    started_at: t.started_at.clone(),
-                    ended_at: crate::state::now_secs(),
-                    slot: None, // 锁外补：查号位要 await
                 },
                 crate::slots::anchor_of(t),
             )
@@ -1993,6 +2019,9 @@ async fn report(
                         && !now_selecting.contains(&t.id)
                     {
                         let (res, full) = result(&t.id);
+                        // 任务完成的结果进历史的 assistant 侧 —— 这是「我发了什么→它回了什么」
+                        // 里最有价值的一半，不能只在会话结束时才记。
+                        history_records.push(make_reply(t, owner, full.as_deref(), &res));
                         events.push(NotifyEvent {
                             owner: owner.clone(),
                             kind: EventKind::Waiting,
@@ -2005,7 +2034,7 @@ async fn report(
                         if !is_placeholder(t) {
                             let (res, full) = result(&t.id);
                             // 留一条历史：终端关了、机器关机后仍能回看这个会话最后出了什么
-                            history_records.push(make_record(t, owner, full.as_deref(), &res));
+                            history_records.push(make_reply(t, owner, full.as_deref(), &res));
                             events.push(NotifyEvent {
                                 owner: owner.clone(),
                                 kind: EventKind::Finished,
@@ -2091,7 +2120,7 @@ async fn report(
                 // 同上：空壳占位会话消失不推，只清基线
                 if !is_placeholder(task) {
                     let (res, full) = result(id);
-                    history_records.push(make_record(task, owner, full.as_deref(), &res));
+                    history_records.push(make_reply(task, owner, full.as_deref(), &res));
                     events.push(NotifyEvent {
                         owner: owner.clone(),
                         kind: EventKind::Finished,
@@ -2202,10 +2231,10 @@ async fn report(
 
     // 会话历史：锁已释放，这里统一落（record 内部去重 + 截断 + 标脏，tick 循环负责写盘）
     for (mut rec, anchor) in pending_history {
-        // 补号位，让网页历史与钉钉里的编号对得上。会话已结束、活跃列表里查不到，
+        // 补号位，让历史里的编号与钉钉的「@N」对得上。会话可能已结束、活跃列表里查不到，
         // 所以按终端锚直接查表（锚要过保留期才回收，多数情况仍在）。
         rec.slot = crate::slots::slot_of(&state, &rec.owner, &anchor).await;
-        crate::history::record(&state, rec).await;
+        crate::history::append(&state, rec).await;
     }
 
     // 钉钉推送：不阻塞上报响应，后台异步发

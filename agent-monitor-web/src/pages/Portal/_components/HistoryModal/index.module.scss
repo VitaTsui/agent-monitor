@@ -11,38 +11,28 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   border-bottom: 1px solid rgba(36, 61, 66, 0.08);
 }
 
-.list {
-  // 弹窗内滚动，避免记录多了把页面撑长
-  max-height: 60vh;
+// 对话流：旧的在上、新的在下，与聊天记录读法一致
+.stream {
+  max-height: 62vh;
   overflow-y: auto;
-  margin-top: 4px;
+  padding: 8px 2px 0;
 }
 
-.item {
-  padding: 10px 2px;
-  border-bottom: 1px solid rgba(36, 61, 66, 0.06);
-
-  &:last-child {
-    border-bottom: none;
-  }
-}
-
-.head {
-  cursor: pointer;
-  user-select: none;
-
-  &:hover .title {
-    color: $accent;
-  }
-}
-
-.titleRow {
+// 换会话的分隔条：多个终端的往来混在一起时，得看得出这段是谁的
+.divider {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin: 14px 0 8px;
+  padding-bottom: 5px;
+  border-bottom: 1px dashed rgba(36, 61, 66, 0.12);
+
+  &:first-child {
+    margin-top: 0;
+  }
 }
 
-// 号位徽标：与钉钉「@N」同一个编号，一眼对上是哪个终端
+// 号位徽标：与钉钉「@N」同一个编号
 .slot {
   flex: none;
   min-width: 20px;
@@ -57,59 +47,67 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   text-align: center;
 }
 
-.title {
+.dividerText {
   flex: 1;
   min-width: 0;
-  font-size: 13.5px;
+  font-size: 12.5px;
   color: $text;
-  // 标题可能很长，单行截断而不是撑破布局
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  transition: color 0.15s;
+}
+
+.dividerMeta {
+  flex: none;
+  font-size: 11.5px;
+  color: $muted;
+}
+
+// 我发的靠右
+.rowUser {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  margin-bottom: 10px;
+}
+
+// 它回的靠左
+.rowAgent {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.bubbleUser {
+  max-width: 76%;
+  padding: 8px 12px;
+  border-radius: 12px 12px 2px 12px;
+  background: rgba(15, 155, 173, 0.1);
+  color: $text;
+  font-size: 13px;
+  line-height: 1.65;
+  // 保留换行；长内容自动换行不撑破气泡
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bubbleAgent {
+  @extend .bubbleUser;
+  border-radius: 12px 12px 12px 2px;
+  background: rgba(36, 61, 66, 0.05);
+  color: rgba(36, 61, 66, 0.85);
+  // 回复多是代码/命令输出，等宽更好读
+  font-family: $mono;
+  font-size: 12.5px;
+  // 单条结果可能很长，限高后自身滚动，避免一条淹没整个流
+  max-height: 40vh;
+  overflow-y: auto;
 }
 
 .time {
-  flex: none;
-  font-size: 12px;
-  color: $muted;
-  font-family: $mono;
-}
-
-.meta {
   margin-top: 3px;
-  font-size: 12px;
+  font-size: 11px;
   color: $muted;
-
-  .dot {
-    margin: 0 6px;
-    opacity: 0.5;
-  }
-}
-
-// 收起态：只露三行，点击展开
-.result {
-  margin-top: 6px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: rgba(36, 61, 66, 0.04);
-  color: rgba(36, 61, 66, 0.75);
-  font-size: 12.5px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  // 保留换行的同时限制高度；长结果整段铺开会淹没列表
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  cursor: pointer;
-}
-
-.resultOpen {
-  @extend .result;
-  -webkit-line-clamp: unset;
-  max-height: 40vh;
-  overflow-y: auto;
-  // 展开后代码/输出居多，等宽更好读
   font-family: $mono;
 }
