@@ -114,6 +114,30 @@ Hermes 文档自己也强调"connect the right thing, with the smallest useful s
 
 ---
 
+## 四·五、MCP 端点：保留（2026-08-01 决定）
+
+**结论：保留，但定位为「对外接口」而非投入重点。**
+
+理由：
+
+1. **成本已经付掉了**。代码写完、协议全链路实测通过（握手 / 工具清单 / 工具调用 / 错误分流 /
+   两种 token 写法），`recall_last` 那个 bug 也修了。删掉是净损失，留着的边际维护成本接近零。
+2. **它不只服务 Hermes**。任何 MCP 客户端都能接，包括你本机的 Claude Code。事实上「让一个
+   会话把子任务派给另一个 agent」这个需求，`send_to_session` + `wait_until_idle` 已经实现了。
+3. **删了要连带回退重构**：`bot::resolve_task` / `sorted_active_tasks` / `read_queue` /
+   `queue_command` 的 `pub(crate)` 开放，以及 `recall_input` 的抽取 —— 而后者本身是正确的
+   重构（钉钉侧「撤回」也在用），不该因为删 MCP 而退回去。
+
+配套决定：
+
+- **不投入**做 SSE、受限 token、工具级审批这些增强，除非真的有人在用。
+- **本机场景别走它**：本机 claude 派活给本机 codex 却绕一趟公网 hub 是绕远路，那条应该做成
+  am-client 的 localhost MCP（暂未做）。
+- **对外开放前必须先做受限 token**：现在用的就是网页登录 token，等于把账号全权交出去。
+  自己用没问题，给别人用之前这是硬门槛。
+
+---
+
 ## 五、风险与不确定性
 
 - **未实测**。上述配置基于 Hermes 官方文档推导，尚未真的把两者接起来跑通。第一步应该是拿一个测试会话验证闭环。
