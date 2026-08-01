@@ -467,7 +467,11 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
               人回到这个页面时视线本来就落在这儿，且它比打字更该被先处理。 */}
           {task.pendingSelect ? (
             <div className={styles.pendingSelect}>
+              {/* key 必须跟着题目走：连着问两题时，React 会复用同一个 SelectCard
+                  实例，它内部记「已回应」的 state 不会重置 —— 新题一弹出来就是
+                  灰的锁定态，根本点不了。换 key 强制重挂载。 */}
               <SelectCard
+                key={task.pendingSelect}
                 content={task.pendingSelect}
                 onAnswer={canSend ? (text) => sendInput(id, text) : undefined}
               />
