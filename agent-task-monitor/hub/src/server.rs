@@ -1425,6 +1425,9 @@ struct HistoryQuery {
     /// 返回条数上限（默认 50，最多 200）
     #[serde(default)]
     limit: Option<usize>,
+    /// 只看某个会话的往来；不给则返回该账号的全部
+    #[serde(default)]
+    session: Option<String>,
 }
 
 /// GET /monitor/history —— 本账号的会话历史（最新在前）。
@@ -1438,7 +1441,8 @@ async fn list_history(
         return err(401, "未登录");
     };
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
-    let list = crate::history::list_for(&state, &user, limit).await;
+    let session = q.session.as_deref().filter(|s| !s.trim().is_empty());
+    let list = crate::history::list_for(&state, &user, session, limit).await;
     ok(json!({ "list": list, "total": list.len() }))
 }
 

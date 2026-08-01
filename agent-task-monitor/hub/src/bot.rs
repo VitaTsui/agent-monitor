@@ -1015,12 +1015,28 @@ async fn remove_pending_file(state: &SharedState, username: &str, arg: &str) -> 
     format!("已删除「{}」。剩 {remaining} 个待发文件。", removed.file_name)
 }
 
-/// 「历史 [N]」：回看最近的远程往来，按时间正序排成对话流。默认 10 条，最多 30。
+/// 「历史 [N]」：回看最近的远程往来，按时间正序排成对话流。
+///
+/// 参数是**号位**（与 `@N` 同源）时只看那个会话；不带参数看全部。
+/// 「@9 历史」经速记展开成「历史 9」，落到这里也是只看 9 号 —— 与「在某个会话里点历史」
+/// 的直觉一致。
 async fn list_history(state: &SharedState, username: &str, arg: &str) -> String {
-    let n = arg.trim().parse::<usize>().unwrap_or(10).clamp(1, 30);
-    let list = crate::history::list_for(state, username, n).await;
+    let arg = arg.trim();
+    // 号位 → 该会话；解析不出号位就当「看全部」，条数仍支持（历史 20）
+    let (session, n) = if arg.is_empty() {
+        (None, 10)
+    } else if let Ok(id) = resolve_task(state, username, arg).await {
+        (Some(id), 30)
+    } else {
+        (None, arg.parse::<usize>().unwrap_or(10).clamp(1, 30))
+    };
+    let list = crate::history::list_for(state, username, session.as_deref(), n).await;
     if list.is_empty() {
-        return "还没有远程往来记录。从这里或网页下发任务后，一问一答都会记进来。".to_string();
+        return if session.is_some() {
+            "这个会话还没有远程往来记录。".to_string()
+        } else {
+            "还没有远程往来记录。从这里或网页下发任务后，一问一答都会记进来。".to_string()
+        };
     }
     let mut lines = vec![format!("最近 {} 条往来（旧 → 新）：", list.len())];
     let mut last_session = String::new();

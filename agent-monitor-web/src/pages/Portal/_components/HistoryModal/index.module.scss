@@ -5,10 +5,19 @@ $accent: #0f9bad;
 $mono: "SF Mono", Menlo, Consolas, monospace;
 
 .hint {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   font-size: 12px;
   color: $muted;
   padding-bottom: 10px;
   border-bottom: 1px solid rgba(36, 61, 66, 0.08);
+
+  // 说明文字可压缩，切换按钮不许被挤变形
+  > span {
+    flex: 1;
+    min-width: 0;
+  }
 }
 
 .loading {

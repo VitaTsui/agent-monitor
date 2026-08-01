@@ -98,9 +98,21 @@ pub fn new_id() -> String {
 
 /// 某账号的交互历史。返回**最近 limit 条**，且保持正序（旧→新），
 /// 前端直接从上往下渲染即是聊天记录的读法。
-pub async fn list_for(state: &SharedState, owner: &str, limit: usize) -> Vec<HistoryEntry> {
+///
+/// `session` 给了就只返回该会话的往来 —— 在某个会话里点开历史，想看的自然是**这个会话**的
+/// 记录（像点开某个人的聊天记录），而不是所有终端的往来混在一起。不给则返回全部。
+pub async fn list_for(
+    state: &SharedState,
+    owner: &str,
+    session: Option<&str>,
+    limit: usize,
+) -> Vec<HistoryEntry> {
     let h = state.history.read().await;
-    let mine: Vec<&HistoryEntry> = h.iter().filter(|e| e.owner == owner).collect();
+    let mine: Vec<&HistoryEntry> = h
+        .iter()
+        .filter(|e| e.owner == owner)
+        .filter(|e| session.is_none_or(|s| e.session_id == s))
+        .collect();
     let start = mine.len().saturating_sub(limit);
     mine[start..].iter().map(|e| (*e).clone()).collect()
 }

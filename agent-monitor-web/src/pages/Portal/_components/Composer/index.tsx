@@ -850,7 +850,11 @@ const Composer: React.FC<ComposerProps> = (props) => {
       </Modal>
 
       {/* 会话历史：已结束会话的最终产出 */}
-      <HistoryModal open={historyOpen} onClose={() => setHistoryOpen(false)} />
+      <HistoryModal
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        taskId={taskId}
+      />
     </div>
   );
 };

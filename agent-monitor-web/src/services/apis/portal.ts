@@ -111,10 +111,12 @@ export interface SessionHistoryItem {
 /**
  * 远程交互历史：把「我发了什么 → 它回了什么」按时间排成一条对话流。
  * 返回最近 limit 条，且保持正序（旧 → 新），直接从上往下渲染即是聊天记录的读法。
+ *
+ * @param session 只看某个会话的往来；不传则返回该账号的全部
  */
-export const getSessionHistory = async (limit?: number) => {
+export const getSessionHistory = async (limit?: number, session?: string) => {
   return await get<ListRes<SessionHistoryItem>>("/monitor/history", {
-    params: { limit },
+    params: { limit, session },
   });
 };
 
