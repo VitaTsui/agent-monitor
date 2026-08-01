@@ -341,6 +341,10 @@ async fn run_command(
     })
 }
 
+/// 待绑定链接的有效期。同一 staffId 在这段时间内重发消息复用同一个 token；
+/// 超期的条目由 tick 循环清掉（否则未绑定的人每发一条消息就留一条，只增不减）。
+pub const BIND_TOKEN_TTL_SECS: u64 = 30 * 60;
+
 /// 渠道收到消息后先按 staffId 找归属账号：
 /// - 找到 → Ok(账号)，按该账号身份执行指令 / 收推送；
 /// - 没找到（未绑定的钉钉 id）→ Err(登录链接回复)：生成一次性 token、回一段带登录链接的文案，
@@ -363,18 +367,33 @@ pub(crate) async fn resolve_account(
     if let Some(account) = state.registry.read().await.dingtalk_user_of(staff_id) {
         return Ok(account);
     }
-    // 未绑定 → 生成一次性 token，回登录链接
-    let token = crate::state::new_bind_token();
-    state.dingtalk_binds.write().await.insert(
-        token.clone(),
-        crate::state::PendingDingtalkBind {
-            staff_id: staff_id.to_string(),
-            nick: nick.to_string(),
-            app_user: app_owner.to_string(),
-            robot_code: robot_code.to_string(),
-            at: crate::state::now_secs(),
-        },
-    );
+    // 未绑定 → 回登录链接。**同一个人反复发消息要给同一个链接**：否则他每说一句就收到一个新
+    // 链接，不知道该点哪个；表里也会堆一串等价的待绑定项（多用户接入时尤其明显）。
+    let now = crate::state::now_secs();
+    let existing = state
+        .dingtalk_binds
+        .read()
+        .await
+        .iter()
+        .find(|(_, p)| p.staff_id == staff_id && now.saturating_sub(p.at) < BIND_TOKEN_TTL_SECS)
+        .map(|(t, _)| t.clone());
+    let token = match existing {
+        Some(t) => t,
+        None => {
+            let t = crate::state::new_bind_token();
+            state.dingtalk_binds.write().await.insert(
+                t.clone(),
+                crate::state::PendingDingtalkBind {
+                    staff_id: staff_id.to_string(),
+                    nick: nick.to_string(),
+                    app_user: app_owner.to_string(),
+                    robot_code: robot_code.to_string(),
+                    at: now,
+                },
+            );
+            t
+        }
+    };
     let link = format!("{}/?dtbind={token}", crate::server::public_base());
     Err(format!(
         "👋 你的钉钉还没关联 agent-monitor 账号。\n\
@@ -458,34 +477,54 @@ async fn recall_last(state: &SharedState, username: &str, arg: &str) -> String {
         Ok(id) => id,
         Err(e) => return e,
     };
-    let task = {
-        let tasks = state.tasks_for(username).await;
-        tasks.into_iter().find(|t| t.id == task_id)
-    };
-    let Some(task) = task else {
-        return "会话不存在（可能已结束）。".to_string();
-    };
+    match recall_input(state, username, &task_id).await {
+        Ok(Recalled::FromHubQueue) => format!("已撤回排队中的任务（会话 {arg}）。"),
+        Ok(Recalled::InjectedUpKey) => {
+            format!("已注入撤回 ↑（会话 {arg}）。Terminal.app 需在终端手动按 ↑。")
+        }
+        Err(e) => e,
+    }
+}
+
+/// 撤回结果：撤的是 hub 队列里还没下发的，还是已进终端、只能注入 ↑
+pub(crate) enum Recalled {
+    FromHubQueue,
+    InjectedUpKey,
+}
+
+/// 撤回该会话最近一条排队中的输入。
+///
+/// 两级：**先撤 hub 队列里还没被客户端取走的**（直接删掉即可，干净），撤不到才说明它已经进了
+/// 终端原生队列，只能注入 ↑ 让终端自己退。顺序不能反 —— 若 hub 侧还压着一条却去按 ↑，
+/// 动到的是终端里**另一条**已排队的输入，等于撤错了人。
+pub(crate) async fn recall_input(
+    state: &SharedState,
+    username: &str,
+    task_id: &str,
+) -> Result<Recalled, String> {
+    let task = state
+        .tasks_for(username)
+        .await
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .ok_or("会话不存在（可能已结束）。")?;
     let mut machines = state.machines.write().await;
-    let Some(entry) = machines.get_mut(&task.machine_id) else {
-        return "会话所属设备已离线。".to_string();
-    };
-    // 先撤 hub 队列里最后一条该会话的输入（还没下发给客户端，可直接撤）
+    let entry = machines.get_mut(&task.machine_id).ok_or("会话所属设备已离线。")?;
     let pos = entry.pending.iter().rposition(|c| {
         c.task_id == task_id && matches!(c.action, am_core::model::ControlAction::Input)
     });
     if let Some(i) = pos {
         entry.pending.remove(i);
-        return format!("已撤回排队中的任务（会话 {arg}）。");
+        return Ok(Recalled::FromHubQueue);
     }
-    // hub 队列里没有 → 已进终端原生队列，注入 ↑ 撤回
     entry.pending.push_back(ControlCmd {
-        task_id: task_id.clone(),
+        task_id: task_id.to_string(),
         pid: task.pid,
         action: am_core::model::ControlAction::TermKey,
         text: Some("up:1".to_string()),
         id: None,
     });
-    format!("已注入撤回 ↑（会话 {arg}）。Terminal.app 需在终端手动按 ↑。")
+    Ok(Recalled::InjectedUpKey)
 }
 
 /// 「停止监控 [N]」：带号位停某个会话；不带号位停该用户全部监控。
@@ -705,7 +744,7 @@ pub(crate) async fn session_number(
 ///
 /// 同一终端锚下若有多个活跃会话（罕见：/clear 后旧会话短暂并存），只留最近活动的那条：
 /// 一个终端窗口一个号，否则同号出现两行、用户没法指名。
-async fn sorted_active_tasks(
+pub(crate) async fn sorted_active_tasks(
     state: &SharedState,
     username: &str,
 ) -> Vec<(am_core::model::Task, u32)> {
@@ -806,7 +845,7 @@ fn status_zh(s: TaskStatus) -> &'static str {
     }
 }
 
-async fn resolve_task(state: &SharedState, username: &str, arg: &str) -> Result<String, String> {
+pub(crate) async fn resolve_task(state: &SharedState, username: &str, arg: &str) -> Result<String, String> {
     let n: u32 = arg
         .trim()
         .parse()
@@ -851,7 +890,7 @@ fn norm(s: &str) -> String {
 
 /// 读某会话当前的排队状态：(hub 待下发队列文本, 终端原生队列文本)。
 /// hub 待下发 = 还没被客户端取走的输入；终端原生 = 已注入终端、claude 排队中。
-async fn read_queue(
+pub(crate) async fn read_queue(
     state: &SharedState,
     username: &str,
     task_id: &str,
@@ -1264,7 +1303,7 @@ async fn list_queued(state: &SharedState, username: &str, arg: &str) -> String {
     }
 }
 
-async fn queue_command(
+pub(crate) async fn queue_command(
     state: &SharedState,
     username: &str,
     task_id: &str,

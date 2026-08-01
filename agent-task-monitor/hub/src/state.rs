@@ -527,6 +527,14 @@ pub async fn tick_loop(state: SharedState) {
                 }
             }
             state.pair_codes.write().await.retain(|_, e| !e.expired());
+            // 待绑定的钉钉链接同样要清 —— 未绑定的人每发一条消息就留一条，不清就只增不减。
+            // 多用户接入时这条尤其要紧：陌生 staffId 给机器人发消息是常态。
+            let now = now_secs();
+            state
+                .dingtalk_binds
+                .write()
+                .await
+                .retain(|_, p| now.saturating_sub(p.at) < crate::bot::BIND_TOKEN_TTL_SECS);
         }
         // 会话变更定期落盘（~60s 一次）：登录/登出/活动续期都只标脏，这里统一写
         if tick % 40 == 0 && state.sessions_dirty.swap(false, Ordering::Relaxed) {

@@ -77,15 +77,26 @@ pub(crate) fn urlencode(s: &str) -> String {
     out
 }
 
-/// markdown 标题：取正文首行、去掉 #/*/空格，截断——钉钉 markdown 消息要一个纯文本 title。
+/// markdown 标题：钉钉 markdown 消息必须带 title（会话列表/通知里显示的就是它）。
 fn md_title(text: &str) -> String {
-    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("终端通知");
-    let t: String = line.trim_matches(|c| c == '#' || c == '*' || c == ' ').chars().take(24).collect();
-    if t.is_empty() { "终端通知".to_string() } else { t }
+    crate::mdfmt::derive_title(text, "终端通知", 24)
 }
 
 /// 推送一条 markdown 到钉钉群机器人 Webhook。now_ms 由调用方给（便于测试）。
+///
+/// 发送前统一降级（表格→列表、去围栏行）并按单条上限分片：agent 输出天然带表格和代码围栏，
+/// 而钉钉手机端基本不渲染这两样，直接推过去就是一堆 `|---|` 和孤立的 ```。
 pub async fn push_text(cfg: &DingtalkNotify, text: &str, now_ms: u64) -> Result<(), String> {
+    let md = crate::mdfmt::downgrade_for_dingtalk(text);
+    let chunks = crate::mdfmt::chunk_text(&md, crate::mdfmt::DINGTALK_MAX_LEN);
+    for chunk in chunks {
+        push_one(cfg, &chunk, now_ms).await?;
+    }
+    Ok(())
+}
+
+/// 发一条（已降级、已分片）markdown
+async fn push_one(cfg: &DingtalkNotify, text: &str, now_ms: u64) -> Result<(), String> {
     let url = signed_url(&cfg.webhook, &cfg.secret, now_ms);
     let body = serde_json::json!({
         "msgtype": "markdown",
@@ -259,16 +270,22 @@ pub async fn push_oto(
         return Err("空 staffId".into());
     }
     let token = access_token(&app.app_key, &app.app_secret, now_ms).await?;
+    // 私聊是「远程继续会话」的主通道，同样要先降级 + 分片：agent 的结果里表格和代码围栏
+    // 最多，手机端渲染不了。完整原文仍由下面的 .txt 附件兜底，降级只影响正文可读性。
+    let md = crate::mdfmt::downgrade_for_dingtalk(text);
+    let chunks = crate::mdfmt::chunk_text(&md, crate::mdfmt::DINGTALK_MAX_LEN);
     // msgParam 是 JSON 字符串（钉钉要求）；sampleMarkdown 让结果里的 md 正常渲染
     // （手机端正常；桌面端 OTO 可能显示成代码块，属客户端差异）。
-    oto_send(
-        app,
-        staff_id,
-        &token,
-        "sampleMarkdown",
-        serde_json::json!({ "title": md_title(text), "text": text }),
-    )
-    .await?;
+    for chunk in &chunks {
+        oto_send(
+            app,
+            staff_id,
+            &token,
+            "sampleMarkdown",
+            serde_json::json!({ "title": md_title(chunk), "text": chunk }),
+        )
+        .await?;
+    }
     // 内容太长被截断：把完整内容作为文件补发（失败只记日志，不影响正文已送达）
     if let Some(full) = full {
         match upload_media(&token, "完整内容.txt", full.as_bytes()).await {

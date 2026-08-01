@@ -8,6 +8,8 @@ mod dingtalk;
 mod dingtalk_stream;
 mod oauth;
 mod registry;
+mod mcp;
+mod mdfmt;
 mod server;
 mod slots;
 mod state;

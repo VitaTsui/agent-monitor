@@ -27,6 +27,8 @@ pub fn router(state: SharedState) -> Router {
     let mut router = Router::new()
         // ---- 版本（供客户端/移动端更新检测）----
         .route("/monitor/version", get(version_info))
+        // ---- MCP（Streamable HTTP）：给 AI 客户端做多会话编排用，鉴权同网页 ----
+        .route("/mcp", post(crate::mcp::mcp_post).get(crate::mcp::mcp_get))
         // ---- vita-admin 契约 ----
         .route("/auth/access/getCryptoKey", get(admin::get_crypto_key))
         .route("/auth/access/isNeedLoginCaptcha", get(admin::is_need_captcha))
@@ -1874,7 +1876,9 @@ async fn report(
         // (推送里展示的截断版, 若被截断则给出完整原文供 OTO 作为文件补发)。
         let msgs_map = &entry.messages;
         let result = |id: &str| -> (String, Option<String>) {
-            const LIMIT: usize = 1500;
+            // 这里只做"要不要附完整原文"的判定，正文的降级与分片交给 dingtalk::push_*。
+            // 留出余量给外层的设备/项目/会话等抬头（正文 + 抬头要一起塞进单条上限）。
+            const LIMIT: usize = crate::mdfmt::DINGTALK_MAX_LEN - 600;
             msgs_map
                 .get(id)
                 .and_then(|ms| ms.iter().rev().find(|m| m.role.as_str() == "assistant"))
