@@ -167,6 +167,22 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
 
   const paused = task.status === "paused";
   const controllable = !!task.pid;
+  const running = task.status === "running";
+  // 操作跟状态绑死，而不是一律「有 pid 就能点」：
+  // - 中断：只有正跑着才有东西可断。空闲时点了没有任何可见效果，人会以为没生效
+  //   而反复点，等下一轮真跑起来时那几下反而把新任务打断了。
+  // - 发消息：暂停中的 claude 是被 SIGSTOP 冻住的进程，输入只会堆在队列里 ——
+  //   看着"已发送"，终端却毫无动静，是最容易让人以为「远程控制坏了」的一种。
+  const canInterrupt = controllable && running;
+  const canSend = controllable && !paused;
+  // 禁用时把原因说出来，光是灰掉只会让人反复戳
+  const interruptHint = !controllable
+    ? "该会话没有存活进程"
+    : paused
+      ? "已暂停，先恢复再中断"
+      : running
+        ? "中断当前任务"
+        : "当前没有正在执行的任务";
 
   return (
     <div className={styles.ChatPane}>
@@ -235,8 +251,8 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                   {
                     key: "interrupt",
                     icon: <ThunderboltOutlined />,
-                    label: "中断当前任务",
-                    disabled: !controllable,
+                    label: interruptHint,
+                    disabled: !canInterrupt,
                     onClick: () => control(id, "interrupt"),
                   },
                   {
@@ -293,14 +309,18 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                   onClick={() => control(id, paused ? "resume" : "pause")}
                 />
               </Tooltip>
-              <Tooltip title="中断当前任务">
-                <Button
-                  size="small"
-                  type="text"
-                  icon={<ThunderboltOutlined />}
-                  disabled={!controllable}
-                  onClick={() => control(id, "interrupt")}
-                />
+              <Tooltip title={interruptHint}>
+                {/* 禁用的 Button 不发事件，Tooltip 就没法解释「为什么不能点」，
+                    所以包一层可悬停的 span */}
+                <span>
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<ThunderboltOutlined />}
+                    disabled={!canInterrupt}
+                    onClick={() => control(id, "interrupt")}
+                  />
+                </span>
               </Tooltip>
               <Popconfirm
                 title="确定终止该任务进程？"
@@ -387,14 +407,19 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 >
                   全部撤回
                 </span>
-                <span
-                  className={styles.recallAll}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => termKey(id, "esc")}
-                >
-                  插入会话
-                </span>
+                {/* 注入 Esc：打断终端当前正在跑的那一轮，排队的内容随即开始执行。
+                    原先叫「插入会话」，看不出会打断什么 —— 而"打断"恰恰是这个按钮
+                    最该让人先知道的后果。 */}
+                <Tooltip title="打断终端当前正在执行的任务，让排队内容立即开始">
+                  <span
+                    className={styles.recallAll}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => termKey(id, "esc")}
+                  >
+                    打断并执行
+                  </span>
+                </Tooltip>
               </span>
             </div>
             <div className={styles.queuedList}>
@@ -409,7 +434,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
             </div>
             {queuedItems.some((q) => !q.recallable) ? (
               <div className={styles.queuedHint}>
-                「全部撤回」注入 ↑、「插入会话」注入 Esc（仅 iTerm2 / Windows）；
+                「全部撤回」注入 ↑、「打断并执行」注入 Esc（仅 iTerm2 / Windows）；
                 Terminal.app 请在终端里手动按 ↑ / Esc（操作后此处自动同步）
               </div>
             ) : null}
@@ -419,6 +444,24 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
 
       <div className={styles.composerWrap}>
         <div className={styles.chatColumn}>
+          {/* 暂停中必须说破。SIGSTOP 冻住的进程从外面看就是「什么都不回」——
+              而人在手机上只看到终端毫无动静，第一反应是远程控制坏了，不会想到
+              是自己（或别人）点过暂停。所以把状态和出路一起摆在输入框正上方。 */}
+          {paused ? (
+            <div className={styles.pausedBar}>
+              <span className={styles.pausedText}>
+                该终端已暂停，发出去的内容不会被执行
+              </span>
+              <Button
+                size="small"
+                type="primary"
+                icon={<PlayCircleOutlined />}
+                onClick={() => control(id, "resume")}
+              >
+                恢复
+              </Button>
+            </div>
+          ) : null}
           {/* 终端正等你选：由 hook 在选项弹出终端**之前**报上来，所以这里是「现在就能
               替它做决定」，而不是对话流里那张事后追认的记录卡。放在输入框正上方 ——
               人回到这个页面时视线本来就落在这儿，且它比打字更该被先处理。 */}
@@ -426,13 +469,16 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
             <div className={styles.pendingSelect}>
               <SelectCard
                 content={task.pendingSelect}
-                onAnswer={controllable ? (text) => sendInput(id, text) : undefined}
+                onAnswer={canSend ? (text) => sendInput(id, text) : undefined}
               />
             </div>
           ) : null}
           <Composer
             taskId={id}
-            disabled={!controllable}
+            disabled={!canSend}
+            disabledHint={
+              paused ? "该终端已暂停，先恢复再发布" : "该会话无存活进程，无法发布"
+            }
             machineId={task.machineId}
             cwd={task.process?.cwd}
             onSend={(text) => {

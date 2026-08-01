@@ -273,6 +273,25 @@ $accent: #0f9bad;
       calc(10px + env(safe-area-inset-bottom)) calc(18px + env(safe-area-inset-left));
   }
 
+  // 暂停横幅：用告警色，且「恢复」就在同一行 —— 看到问题的地方就能解决它
+  .pausedBar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+    padding: 7px 12px;
+    border-radius: 10px;
+    background: rgba(245, 108, 108, 0.1);
+    border: 1px solid rgba(245, 108, 108, 0.28);
+
+    .pausedText {
+      flex: 1;
+      min-width: 0;
+      font-size: 12.5px;
+      color: #b93b32;
+    }
+  }
+
   // 待选卡挂在输入框上方。选项多时不许把输入框顶出屏幕 —— 自己滚。
   .pendingSelect {
     max-height: 46vh;

@@ -692,6 +692,30 @@ $active-bg: rgba(36, 61, 66, 0.09);
         }
       }
 
+      // 「中断」快捷键（仅执行中出现）：告警色，与旁边的 ⋯ 区分开，
+      // 手指目标同样 40px（iOS 可点下限）
+      .mobileStopBtn {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        font-size: 19px;
+        color: #d4380d;
+        border-radius: 10px;
+        cursor: pointer;
+
+        &:active {
+          background: rgba(212, 56, 13, 0.1);
+        }
+
+        // 它已经把右侧空间占住了，后面的 ⋯ 不该再推一次
+        + .mobileMoreBtn {
+          margin-left: 0;
+        }
+      }
+
       // 标题绝对居中（iOS 导航栏惯例），两侧按钮不挤位
       .mobileTitle {
         position: absolute;
@@ -889,6 +913,20 @@ $active-bg: rgba(36, 61, 66, 0.09);
 
       :global(.anticon) {
         color: #d4380d;
+      }
+    }
+
+    // 不可用（如空闲时的「中断」）：连按下反馈也去掉，免得看着像点了没生效
+    &.disabled {
+      color: rgba(36, 61, 66, 0.32);
+      cursor: default;
+
+      &:active {
+        background: transparent;
+      }
+
+      :global(.anticon) {
+        color: rgba(36, 61, 66, 0.28);
       }
     }
   }

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 
 import { Input } from "@hsu-react/ui";
-import { Badge, ConfigProvider, Popover, Tooltip } from "antd";
+import { Badge, ConfigProvider, Modal, Popover, Tooltip } from "antd";
 import { useNativeBack } from "./_hooks/useNativeBack";
 import { useApkUpdateCheck } from "./_hooks/useApkUpdateCheck";
 import { useClientUpdateToast } from "./_hooks/useClientUpdateToast";
@@ -374,6 +374,18 @@ const Portal: React.FC = observer(() => {
             openTasks[0]?.projectName ||
             "终端任务监控"}
         </span>
+        {/* 正在跑的时候「中断」提到一级：手机上想停一下是最急的操作，
+            埋在 ⋯ 里要点两次、还要在小菜单里瞄准。不跑时不占位。 */}
+        {openTasks[0] && openTasks[0].status === "running" && openTasks[0].pid ? (
+          <span
+            className={styles.mobileStopBtn}
+            role="button"
+            aria-label="中断当前任务"
+            onClick={() => control(openTasks[0]!.id ?? "", "interrupt")}
+          >
+            <ThunderboltOutlined />
+          </span>
+        ) : null}
         {openTasks[0] ? (
           <Popover
             open={mobileActs}
@@ -388,6 +400,9 @@ const Portal: React.FC = observer(() => {
                   const t0 = openTasks[0]!;
                   const id0 = t0.id ?? "";
                   const paused = t0.status === "paused";
+                  // 空闲时中断没有可断的东西，点了看不出任何变化，人会反复戳 ——
+                  // 等下一轮真跑起来时那几下反而把新任务打断了（同 ChatPane）
+                  const canInterrupt = !!t0.pid && t0.status === "running";
                   const act = (fn: () => void) => () => {
                     setMobileActs(false);
                     fn();
@@ -407,12 +422,29 @@ const Portal: React.FC = observer(() => {
                         {paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
                         {paused ? " 恢复" : " 暂停"}
                       </div>
-                      <div className={styles.mobileActItem} onClick={act(() => control(id0, "interrupt"))}>
-                        <ThunderboltOutlined /> 中断
+                      <div
+                        className={`${styles.mobileActItem} ${
+                          canInterrupt ? "" : styles.disabled
+                        }`}
+                        onClick={canInterrupt ? act(() => control(id0, "interrupt")) : undefined}
+                      >
+                        <ThunderboltOutlined />{" "}
+                        {canInterrupt ? "中断" : "中断（当前没在执行）"}
                       </div>
+                      {/* 终止 = 杀进程，这一轮的上下文就没了。桌面端一直有二次确认，
+                          移动端却是一点就执行 —— 而手指在紧挨着的菜单项上更容易滑错。 */}
                       <div
                         className={`${styles.mobileActItem} ${styles.danger}`}
-                        onClick={act(() => control(id0, "stop"))}
+                        onClick={act(() =>
+                          Modal.confirm({
+                            title: "确定终止该任务进程？",
+                            content: "终端里这一轮的上下文会一起结束，无法恢复。",
+                            okText: "终止",
+                            cancelText: "取消",
+                            okButtonProps: { danger: true },
+                            onOk: () => control(id0, "stop"),
+                          }),
+                        )}
                       >
                         <StopOutlined /> 终止进程
                       </div>

@@ -29,6 +29,11 @@ import styles from "./index.module.scss";
 interface ComposerProps {
   taskId: string;
   disabled?: boolean;
+  /**
+   * 禁用原因（占位符与拦截提示都用它）。不给就按「没有存活进程」说 ——
+   * 但禁用的理由不止这一个（比如已暂停），说错了会把人引到错误的排查方向。
+   */
+  disabledHint?: string;
   onSend: (text: string) => void;
   /** 会话所在设备（上传文件的目标） */
   machineId?: string;
@@ -42,7 +47,8 @@ interface ComposerProps {
  * - 命中危险模式（类 Claude Code bypass 权限等）时走两步确认。
  */
 const Composer: React.FC<ComposerProps> = (props) => {
-  const { taskId, disabled, onSend, machineId, cwd } = props;
+  const { taskId, disabled, disabledHint, onSend, machineId, cwd } = props;
+  const offHint = disabledHint || "该会话无存活进程，无法发布";
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   const [uploading, setUploading] = useState(false);
   // 会话历史弹窗（与当前会话状态无关，任何时候都能翻）
@@ -416,7 +422,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
     const text = raw.trim();
     if (!text) return;
     if (disabled) {
-      message.warning("该会话无存活进程，无法发布");
+      message.warning(offHint);
       return;
     }
 
@@ -572,7 +578,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
       <Chat.Input
         wrapperClassName={styles.chatInput}
         placeholder={
-          disabled ? "该会话无存活进程，无法发布" : "输入任务，回车发布"
+          disabled ? offHint : "输入任务，回车发布"
         }
         onSend={guardedSend}
         uploadEnabled={false}
