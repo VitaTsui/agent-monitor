@@ -17,7 +17,7 @@ import { observer } from "mobx-react-lite";
 import { PortalTaskData } from "@/services/apis/portal";
 import PortalStore from "../../PortalStore";
 import Composer from "../Composer";
-import TerminalFeed from "../TerminalFeed";
+import TerminalFeed, { SelectCard } from "../TerminalFeed";
 import SessionPanels from "../SessionPanels";
 import GitDiffModal from "../GitDiffModal";
 import styles from "./index.module.scss";
@@ -67,7 +67,12 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
           // 但「已下发到终端」（delivered）的必须留在正文里当用户气泡 —— 否则任务被终端
           // 接受后、真实同步消息还没回来（注入输入常常压根等不到那条 user 记录）这段时间
           // 里，这条任务在正文中彻底消失。留着它，等真实消息回来时 store 会按内容接管去重。
-          !(m.local && m.queued),
+          !(m.local && m.queued) &&
+          // 选择卡一律不进内容流：要选的时候它会弹在输入框上方（那张来自 hook，
+          // 是「此刻」的真问题、可点可答）。流里再放一张只会是重复的历史副本 ——
+          // 长得一模一样却点不得，反而让人分不清哪张才是在等自己。
+          // 选完之后答案本身会作为一条 user 消息进流，记录并不会丢。
+          m.role !== "select",
       ),
     [messages],
   );
@@ -174,6 +179,13 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
             >
               {task.statusDsr}
             </span>
+            {/* 号位：手机上看着这个号去钉钉发「@N …」。移动端头部是唯一能看到它的
+                地方（侧栏是抽屉、看完就收起了），所以这里必须有。 */}
+            {task.slot != null && (
+              <Tooltip title={`钉钉里发「@${task.slot} 内容」即下发到这个终端`}>
+                <span className={styles.slotChip}>@{task.slot}</span>
+              </Tooltip>
+            )}
             <span className={styles.headTitleText}>
               {task.title || task.prompt || task.projectName || "会话"}
             </span>
@@ -327,7 +339,6 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 providerDsr={task.providerDsr}
                 onRecall={(cmdId) => recallInput(id, cmdId)}
                 onRecallDelivered={() => termKey(id, "up", 1)}
-                onAnswer={(text) => sendInput(id, text)}
               />
             </div>
           )}
@@ -408,6 +419,17 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
 
       <div className={styles.composerWrap}>
         <div className={styles.chatColumn}>
+          {/* 终端正等你选：由 hook 在选项弹出终端**之前**报上来，所以这里是「现在就能
+              替它做决定」，而不是对话流里那张事后追认的记录卡。放在输入框正上方 ——
+              人回到这个页面时视线本来就落在这儿，且它比打字更该被先处理。 */}
+          {task.pendingSelect ? (
+            <div className={styles.pendingSelect}>
+              <SelectCard
+                content={task.pendingSelect}
+                onAnswer={controllable ? (text) => sendInput(id, text) : undefined}
+              />
+            </div>
+          ) : null}
           <Composer
             taskId={id}
             disabled={!controllable}

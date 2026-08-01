@@ -853,6 +853,8 @@ pub fn build_tasks(
             process: proc_info,
             recent_messages: Vec::new(),
             queued_inputs: s.queued_inputs.clone(),
+            // hook 侧的实时信号，扫描器看不到；由客户端在配对后回填（见 client/state.rs）
+            pending_select: None,
         });
     }
 
@@ -907,6 +909,8 @@ pub fn build_tasks(
             process: Some(p.clone()),
             recent_messages: Vec::new(),
             queued_inputs: Vec::new(),
+            // 这是「只有进程、没配上会话」的占位任务，压根谈不上等你选
+            pending_select: None,
         });
     }
 

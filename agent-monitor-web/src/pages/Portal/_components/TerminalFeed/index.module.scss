@@ -527,9 +527,28 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           cursor: pointer;
           transition: background 0.12s, border-color 0.12s;
 
-          &:hover {
-            background: rgba(217, 164, 65, 0.16);
-            border-color: rgba(217, 164, 65, 0.5);
+          // 触屏没有 hover，靠按下瞬间的高亮告诉用户「点到了」——
+          // 手机上点完到终端回消息之间有一两秒空窗，没这个反馈就会以为没点上而重复点。
+          &:active {
+            background: rgba(217, 164, 65, 0.28);
+          }
+
+          @media (hover: hover) {
+            &:hover {
+              background: rgba(217, 164, 65, 0.16);
+              border-color: rgba(217, 164, 65, 0.5);
+            }
+          }
+        }
+
+        // 已选中的那一项：留住「我选了哪个」，别让卡片看起来啥也没发生
+        &.selectOptPicked {
+          background: rgba(217, 164, 65, 0.22);
+          border-color: rgba(217, 164, 65, 0.65);
+
+          .selectOptIdx {
+            background: #d9a441;
+            color: #1c1c1c;
           }
         }
 
@@ -627,5 +646,79 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       padding: 4px 10px 8px;
       color: rgba(230, 240, 239, 0.5);
       font-size: 11px;
+
+      // 提示语按端择一（「回车」在手机虚拟键盘上不存在）
+      .hintMobile {
+        display: none;
+      }
+    }
+
+    // 已回应：整卡降饱和 + 停掉交互，视觉上「这题过去了」
+    &.selectLocked {
+      border-color: rgba(217, 164, 65, 0.28);
+
+      .selectHead {
+        background: rgba(56, 178, 106, 0.16);
+        color: #7fd6a0;
+      }
+
+      .selectOpt:not(.selectOptPicked) {
+        opacity: 0.45;
+      }
     }
   }
+
+// 移动端：选择卡是「人不在电脑前时唯一能替终端做决定」的入口，
+// 触摸目标必须够大（44px 是 iOS 的可点击下限），字号也要够看。
+@media (max-width: 760px) {
+  .TerminalFeed .selectCard {
+    .selectQ .selectOpt {
+      padding: 10px 10px;
+      gap: 10px;
+
+      .selectOptIdx {
+        width: 22px;
+        height: 22px;
+        font-size: 12px;
+      }
+
+      .selectOptBody {
+        .selectOptLabel {
+          font-size: 14px;
+          line-height: 1.4;
+        }
+
+        .selectOptDesc {
+          font-size: 12.5px;
+          line-height: 1.45;
+        }
+      }
+
+      &.selectOptCustom {
+        .selectCustomInput {
+          padding: 7px 9px;
+          // 小于 16px 时 iOS 聚焦会自动放大整页，回不去
+          font-size: 16px;
+        }
+
+        .selectCustomSend {
+          padding: 7px 12px;
+          font-size: 13px;
+        }
+      }
+    }
+
+    .selectHint {
+      font-size: 12px;
+      line-height: 1.5;
+
+      .hintDesktop {
+        display: none;
+      }
+
+      .hintMobile {
+        display: inline;
+      }
+    }
+  }
+}

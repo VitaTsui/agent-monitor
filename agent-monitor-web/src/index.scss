@@ -91,12 +91,17 @@ body,
 
 // 极窄窗口布局保护：后管等桌面布局窗口过窄时横向滚动而非挤碎；
 // 移动端（<=760px）改为自适应，前台 Portal / 官网 / 登录页已做响应式。
+//
+// 例外 —— 完全响应式的页面（Portal）在挂载时打 `data-fluid` 标记豁免这条：
+// 桌面客户端窗口可以拖到 960 以下，那时这条 min-width 会让整页横向滚动，
+// 把右上角的暂停/中断等控制键推出可视区（拖窄到 929px 实测复现）。
+// 用属性标记而不是 `:has()`，是为了兼容 Capacitor 安卓壳里较老的 WebView。
 @media (min-width: 761px) {
-  body {
+  body:not([data-fluid]) {
     overflow-x: auto;
   }
 
-  #root {
+  body:not([data-fluid]) #root {
     min-width: 960px;
   }
 }

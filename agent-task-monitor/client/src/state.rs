@@ -424,6 +424,11 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
     // 结果直接覆盖缓存：claude 一进入空闲 fresh 就是空的，把已抓到的配对一起清掉 → 退回
     // mtime 启发式 → 会话串到别的终端（钉钉里标题错位、下发打错终端的根因）。
     // 改为累积：只增不删，失效只由「进程是否还是原来那个」决定。
+    // 「终端此刻正等你选」：由 PreToolUse hook 在 AskUserQuestion 执行前落下，
+    // 下面读 hook 记录时顺带收上来（session_id → AskUserQuestion 的 input JSON），
+    // 扫描完再回填到对应会话上报出去。
+    let mut pending_selects: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let pinned = {
         use std::sync::atomic::Ordering;
         // 值 = (会话 id, 该 claude 的启动时间)。带 start_time 是为了防 pid 重用 —— 进程退出后
@@ -498,6 +503,9 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                 crate::hookrec::drop_report(&state.config.data_dir, r.claude_pid);
                 continue;
             };
+            if let Some(sel) = r.pending_select {
+                pending_selects.insert(r.session_id.clone(), sel);
+            }
             if acc.insert(r.claude_pid, (r.session_id, start)).is_none() {
                 added += 1;
             }
@@ -609,6 +617,15 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         &active_ids,
         &cached,
     );
+    // 回填「正等你选」：hook 是按 session_id 报的，这里对上号挂到会话上。
+    // 没对上（会话已被 /clear 换掉等）就丢弃 —— 一张挂错会话的选项卡比没有更糟。
+    if !pending_selects.is_empty() {
+        for t in &mut tasks {
+            if let Some(sel) = pending_selects.remove(&t.id) {
+                t.pending_select = Some(sel);
+            }
+        }
+    }
     // 用本轮真实配对刷新锚缓存：把「claude_pid → 会话」按终端锚身份 (pid,start) 归账（非 pid- 占位）
     {
         let key_of: std::collections::HashMap<u32, (u32, u64)> =

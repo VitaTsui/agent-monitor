@@ -61,8 +61,22 @@ interface IPortalTaskData {
   version: string | null;
   gitBranch: string | null;
   process: PortalTaskProcess | null;
+  /**
+   * 号位：钉钉里「@N 内容」用的编号，由 hub 按终端锚分配、跨重启保持不变。
+   * 网页/客户端显示同一个号，用户才能在手机上照着网页说「@3 继续」。
+   * 未参与编号（如占位任务）时为空。
+   */
+  slot: number | null;
   /** 终端里 claude 原生排队、尚未被接受执行的输入（按入队顺序） */
   queuedInputs: string[];
+  /**
+   * 终端**此刻正等你选**：AskUserQuestion 的整份 input（questions/options）JSON。
+   *
+   * 由 PreToolUse hook 在选项弹给终端用户**之前**报上来，所以远端能同步弹出选项框、
+   * 替终端做决定。（对话流里的 select 消息是事后从 jsonl 读到的 —— 等它出现时，
+   * 人早在终端上选完了，那份只能当记录看。）用户选完即由后续 hook 清除。
+   */
+  pendingSelect?: string;
 }
 export type PortalTaskData = Partial<IPortalTaskData>;
 

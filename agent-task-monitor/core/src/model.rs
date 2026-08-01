@@ -139,6 +139,13 @@ pub struct Task {
     /// 终端里 claude 原生排队、尚未被接受执行的输入（按入队顺序，供前端底部挂载显示）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued_inputs: Vec<String>,
+    /// **终端此刻正等你选**：AskUserQuestion 的整份 input（questions/options）JSON。
+    ///
+    /// 来自 PreToolUse hook，即在选项弹给终端用户**之前**就已知道 —— 因此远端能同步
+    /// 弹出选项框、替终端做决定。（从 jsonl 读到的 select 消息是事后的，等它出现时
+    /// 人早在终端上选完了。）用户选完即由后续 hook 覆盖清除，见 client/hookrec.rs。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_select: Option<String>,
 }
 
 /// 控制动作

@@ -469,7 +469,39 @@ async fn list_tasks(
         .into_iter()
         .filter(|t| t.status != TaskStatus::Finished && q.matches(t))
         .collect();
-    ok(json!({ "list": filtered }))
+    ok(json!({ "list": with_slots(&state, &user, &filtered).await }))
+}
+
+/// 给会话补上「号位」（钉钉里 `@N` 的 N），让网页/移动端与钉钉看到同一个编号 ——
+/// 否则在网页上看着会话，却不知道该 @ 几号。
+///
+/// 号位的分配与去重统一由 `bot::sorted_active_tasks` 负责（那里保证了分配顺序稳定），
+/// 这里**只按终端锚查、不分配**，避免两处各自分配导致编号不一致。
+async fn with_slots(
+    state: &SharedState,
+    user: &str,
+    tasks: &[am_core::model::Task],
+) -> Vec<Value> {
+    let by_anchor: std::collections::HashMap<String, u32> =
+        crate::bot::sorted_active_tasks(state, user)
+            .await
+            .into_iter()
+            .map(|(t, no)| (crate::slots::anchor_of(&t), no))
+            .collect();
+    tasks
+        .iter()
+        .map(|t| {
+            let mut v = serde_json::to_value(t).unwrap_or_else(|_| json!({}));
+            if let Some(obj) = v.as_object_mut() {
+                // 查不到 = 该会话还没进过号位表（罕见），给 null 让前端不显示徽标
+                obj.insert(
+                    "slot".into(),
+                    json!(by_anchor.get(&crate::slots::anchor_of(t))),
+                );
+            }
+            v
+        })
+        .collect()
 }
 
 // ---------- vita-admin Query 格式（后管 Panel.List 用） ----------
@@ -2354,7 +2386,9 @@ async fn ws_loop(socket: WebSocket, state: SharedState, user: Option<String>, to
         return;
     };
 
-    // 推送当前用户可见的活跃会话快照
+    // 推送当前用户可见的活跃会话快照。
+    // 必须和 `list_tasks` 走同一个 `with_slots`：前端两条通路共用一份快照，
+    // WS 推送若少了 `slot`，一来就把轮询拿到的号位覆盖没了（徽标闪一下就消失）。
     async fn snapshot(state: &SharedState, user: &str) -> String {
         let tasks: Vec<_> = state
             .tasks_for(user)
@@ -2362,7 +2396,8 @@ async fn ws_loop(socket: WebSocket, state: SharedState, user: Option<String>, to
             .into_iter()
             .filter(|t| t.status != TaskStatus::Finished)
             .collect();
-        serde_json::to_string(&json!({ "type": "tasks", "data": tasks })).unwrap_or_default()
+        let data = with_slots(state, user, &tasks).await;
+        serde_json::to_string(&json!({ "type": "tasks", "data": data })).unwrap_or_default()
     }
 
     if tx.send(Message::Text(snapshot(&state, &user).await)).await.is_err() {

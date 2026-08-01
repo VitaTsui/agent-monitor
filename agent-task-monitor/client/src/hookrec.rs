@@ -35,6 +35,12 @@ pub fn hooks_dir(data_dir: &Path) -> PathBuf {
 pub struct HookReport {
     pub claude_pid: u32,
     pub session_id: String,
+    /// 终端**此刻正等着你选**：AskUserQuestion 的整份 input（questions/options）。
+    ///
+    /// 从 jsonl 里读到的 select 消息是「事后」的 —— 那条记录要等这一轮落盘才看得见，
+    /// 人在终端上选完了远端才亮出选项，等于没用。而 PreToolUse 在工具**执行前**触发，
+    /// 拿到的就是即将弹给用户的那些选项，这才是「远程替终端做决定」需要的时机。
+    pub pending_select: Option<String>,
 }
 
 fn now_secs() -> u64 {
@@ -76,11 +82,25 @@ pub fn run_hook_cli(data_dir: &Path) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
+    // 待选项：只有「AskUserQuestion 即将执行」这一刻才记。
+    //
+    // 清除是靠覆盖完成的：这个文件每次 hook 触发都整份重写，而 PreToolUse 挂的是
+    // `*`，所以用户选完、claude 接着调下一个工具时，新记录里没有 pending_select，
+    // 待选状态自然就没了 —— 不必额外维护过期逻辑。
+    // 「选完就收尾、不再调工具」这一种覆盖不到，由 PostToolUse 那条补上。
+    let event = v.get("hook_event_name").and_then(|x| x.as_str()).unwrap_or("");
+    let tool = v.get("tool_name").and_then(|x| x.as_str()).unwrap_or("");
+    let pending_select = if event == "PreToolUse" && tool == "AskUserQuestion" {
+        v.get("tool_input").map(|i| i.to_string())
+    } else {
+        None
+    };
     let rec = serde_json::json!({
         "claude_pid": claude_pid,
         "session_id": session_id,
         "cwd": cwd,
         "at": now_secs(),
+        "pending_select": pending_select,
     });
     let Ok(txt) = serde_json::to_string(&rec) else { return };
     // 原子写：扫描循环随时可能在读，半个文件会解析失败
@@ -137,6 +157,11 @@ pub fn read_reports(data_dir: &Path, max_age_secs: u64) -> Vec<HookReport> {
         out.push(HookReport {
             claude_pid: pid as u32,
             session_id: sid.to_string(),
+            pending_select: v
+                .get("pending_select")
+                .filter(|x| !x.is_null())
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
         });
     }
     out
@@ -150,7 +175,9 @@ pub fn drop_report(data_dir: &Path, claude_pid: u32) {
 // ---------- 自动写入 Claude Code 的 hook 配置 ----------
 
 /// 配置版本：改了写入内容就加一，客户端会重写一次（同 BRIDGE_EXT_VERSION 的套路）
-const HOOK_CONFIG_VERSION: &str = "1";
+///
+/// 2：加挂 PostToolUse(AskUserQuestion)，用于清除「终端正等你选」状态
+const HOOK_CONFIG_VERSION: &str = "2";
 
 /// 标记本条目由 agent-monitor 写入 —— 用它识别自己的旧条目并替换，
 /// 绝不碰用户自己配的其它 hook。
@@ -219,8 +246,16 @@ pub(crate) fn apply_hook_config(root: &mut serde_json::Value, cmd: &str) -> bool
 
     let mut changed = false;
     // SessionStart：会话一开就报身份，不必等它执行工具
-    // PreToolUse：兜底，万一 SessionStart 那次没写成，下次调工具补上
-    for (event, matcher) in [("SessionStart", None), ("PreToolUse", Some("*"))] {
+    // PreToolUse：兜底，万一 SessionStart 那次没写成，下次调工具补上；
+    //             同时它是「终端正等你选」的实时信号来源（见 run_hook_cli）
+    // PostToolUse：只盯 AskUserQuestion —— 用户选完后若 claude 直接收尾、
+    //             不再调任何工具，就没有下一次 PreToolUse 来覆盖掉待选状态，
+    //             远端会一直挂着一张已经作废的选项卡。这条专门来清它。
+    for (event, matcher) in [
+        ("SessionStart", None),
+        ("PreToolUse", Some("*")),
+        ("PostToolUse", Some("AskUserQuestion")),
+    ] {
         let entry = match matcher {
             Some(m) => serde_json::json!({
                 "matcher": m,

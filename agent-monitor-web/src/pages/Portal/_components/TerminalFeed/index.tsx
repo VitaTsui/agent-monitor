@@ -16,8 +16,6 @@ interface TerminalFeedProps {
   onRecall?: (cmdId: string) => void;
   /** 撤回「已入终端队列」的输入（注入 ↑ 到终端） */
   onRecallDelivered?: () => void;
-  /** 回应终端里的交互式选择（点选项 = 发送对应序号到终端） */
-  onAnswer?: (text: string) => void;
 }
 
 /** 一轮对话：一条用户消息 + 其后的助手/工具活动 */
@@ -60,11 +58,15 @@ const fmtTime = (ts?: string) => (ts ? dayjs(ts).format("MM-DD HH:mm") : "");
  * AskUserQuestion 始终隐含一个「其它/自定义」项，终端里能自己敲答案，远端也要能。
  * 输入即走 onAnswer（等价在对话框里发一行自定义答案）。
  */
-const SelectCard: React.FC<{
+export const SelectCard: React.FC<{
   content: string;
   onAnswer?: (text: string) => void;
 }> = ({ content, onAnswer }) => {
   const [custom, setCustom] = useState("");
+  // 已回应的选项下标。点一下就发一次答案，没有反馈的话手机上很容易连点两下 ——
+  // 第二次会被终端当成「下一个问题」的答案，后果比不作反馈严重得多。
+  // 所以：提交后立刻锁卡 + 高亮已选，等真实消息同步回来这张卡自然被替换。
+  const [answered, setAnswered] = useState<number | null>(null);
   let data: {
     questions?: {
       question?: string;
@@ -78,17 +80,27 @@ const SelectCard: React.FC<{
     /* 半截 JSON：忽略，按空卡片处理 */
   }
 
+  const locked = answered !== null;
+  const pick = (oi: number) => {
+    if (locked || !onAnswer) return;
+    setAnswered(oi);
+    onAnswer(String(oi + 1));
+  };
+
   const submitCustom = () => {
     const t = custom.trim();
-    if (t && onAnswer) {
+    if (t && onAnswer && !locked) {
+      setAnswered(-1); // -1 = 自定义答案
       onAnswer(t);
       setCustom("");
     }
   };
 
   return (
-    <div className={styles.selectCard}>
-      <div className={styles.selectHead}>⌨︎ 终端等待选择</div>
+    <div className={`${styles.selectCard} ${locked ? styles.selectLocked : ""}`}>
+      <div className={styles.selectHead}>
+        {locked ? "✓ 已回应，等待终端继续" : "⌨︎ 终端等待选择"}
+      </div>
       {(data.questions ?? []).map((q, qi) => (
         <div key={qi} className={styles.selectQ}>
           {q.question ? (
@@ -98,20 +110,19 @@ const SelectCard: React.FC<{
             {(q.options ?? []).map((o, oi) => (
               <div
                 key={oi}
-                className={`${styles.selectOpt} ${onAnswer ? styles.clickable : ""}`}
-                role={onAnswer ? "button" : undefined}
-                tabIndex={onAnswer ? 0 : undefined}
-                onClick={onAnswer ? () => onAnswer(String(oi + 1)) : undefined}
-                onKeyDown={
-                  onAnswer
-                    ? (e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          onAnswer(String(oi + 1));
-                        }
-                      }
-                    : undefined
-                }
+                className={`${styles.selectOpt} ${
+                  onAnswer && !locked ? styles.clickable : ""
+                } ${answered === oi ? styles.selectOptPicked : ""}`}
+                role={onAnswer && !locked ? "button" : undefined}
+                tabIndex={onAnswer && !locked ? 0 : undefined}
+                aria-pressed={answered === oi}
+                onClick={() => pick(oi)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    pick(oi);
+                  }
+                }}
               >
                 <span className={styles.selectOptIdx}>{oi + 1}</span>
                 <span className={styles.selectOptBody}>
@@ -123,14 +134,18 @@ const SelectCard: React.FC<{
               </div>
             ))}
             {/* 自行输入：AskUserQuestion 隐含的「其它」，输入后回车 / 点发送提交 */}
-            <div className={`${styles.selectOpt} ${styles.selectOptCustom}`}>
+            <div
+              className={`${styles.selectOpt} ${styles.selectOptCustom} ${
+                answered === -1 ? styles.selectOptPicked : ""
+              }`}
+            >
               <span className={styles.selectOptIdx}>✎</span>
               <span className={styles.selectOptBody}>
                 <input
                   className={styles.selectCustomInput}
                   placeholder="自行输入答案…"
                   value={custom}
-                  disabled={!onAnswer}
+                  disabled={!onAnswer || locked}
                   onChange={(e) => setCustom(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
@@ -141,7 +156,9 @@ const SelectCard: React.FC<{
                 />
                 <span
                   className={`${styles.selectCustomSend} ${
-                    onAnswer && custom.trim() ? styles.clickable : styles.disabled
+                    onAnswer && custom.trim() && !locked
+                      ? styles.clickable
+                      : styles.disabled
                   }`}
                   role="button"
                   tabIndex={0}
@@ -160,8 +177,21 @@ const SelectCard: React.FC<{
           </div>
         </div>
       ))}
+      {/* 「回车」在手机虚拟键盘上不成立（那是「换行/完成」），所以窄屏改说「点发送」。
+          两条文案同时渲染、靠 CSS 择一显示 —— 免得为一句提示引一套设备判断。 */}
       <div className={styles.selectHint}>
-        点选项直接回应；或在「✎ 自行输入」里敲自定义答案后回车
+        {locked ? (
+          "已把你的选择发到终端，稍等它继续"
+        ) : (
+          <>
+            <span className={styles.hintDesktop}>
+              点选项直接回应；或在「✎ 自行输入」里敲自定义答案后回车
+            </span>
+            <span className={styles.hintMobile}>
+              点选项直接回应；或在「✎ 自行输入」里写答案后点发送
+            </span>
+          </>
+        )}
       </div>
     </div>
   );
@@ -171,7 +201,7 @@ const SelectCard: React.FC<{
 const RESULT_CLAMP_LINES = 4;
 
 const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
-  const { messages, running, providerDsr, onRecall, onRecallDelivered, onAnswer } = props;
+  const { messages, running, providerDsr, onRecall, onRecallDelivered } = props;
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   const turns = toTurns(messages);
@@ -181,11 +211,6 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
   };
 
   const renderItem = (m: PortalMessage, key: string) => {
-    // 交互式选择/权限确认（AskUserQuestion）：同步问题与选项，成卡片展示。
-    // 终端里需要用户在 TUI 里选；这里让远程也能看到「在等你选什么」并能回应。
-    if (m.role === "select") {
-      return <SelectCard key={key} content={m.content} onAnswer={onAnswer} />;
-    }
     // plan 模式给出的待批准方案：正文是 markdown，单独成卡片
     if (m.role === "plan") {
       return (
@@ -273,9 +298,10 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
         const keyed = turn.items.map((m) => ({ m, k: msgKey(m) }));
         // 执行中只铺 Q&A，不铺工具流水（工具过程等回合结束后一次性完整呈现）；
         // 方案是待批准的计划而非过程噪音，需随时同步显示。
-        // （清单与后台任务是「当前状态」，已由 ChatPane 抽出去单独成面板。）
+        // （清单与后台任务是「当前状态」，已由 ChatPane 抽出去单独成面板；
+        //   选择卡则由 ChatPane 挂在输入框上方，不进内容流。）
         const visibleItems = inProgress
-          ? keyed.filter(({ m }) => ["assistant", "plan", "select"].includes(m.role))
+          ? keyed.filter(({ m }) => ["assistant", "plan"].includes(m.role))
           : keyed;
         // 执行中时给一条「最近动作」预览（最后一条工具调用）
         const lastTool = inProgress
@@ -357,8 +383,6 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                 </div>
                 <div className={styles.termBody}>
                   {(() => {
-                    // 工具流水（tool/tool_result）折叠成摘要行，默认收起 ——
-                    // 连续的一段工具消息归成一组，助手文本/方案保持原位展开。
                     const out: React.ReactNode[] = [];
                     let group: { m: PortalMessage; k: string }[] = [];
                     const flush = () => {
@@ -367,6 +391,8 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                       }
                       const gkey = `tg-${group[0].k}`;
                       const openG = !!expanded[gkey];
+                      // 有工具就按工具步数报数（「查了 6 步」比「6 条消息」更贴近直觉），
+                      // 纯文字过程才退回条数
                       const steps = group.filter((x) => x.m.role === "tool").length;
                       out.push(
                         <div key={gkey} className={styles.toolGroup}>
@@ -397,9 +423,27 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                       );
                       group = [];
                     };
-                    visibleItems.forEach(({ m, k }) => {
-                      if (m.role === "tool" || m.role === "tool_result") {
-                        group.push({ m, k });
+
+                    // 回合已结束：结论已经有了，中间的摸索过程就不该再一条条占屏 ——
+                    // 把「最后一条产出」之前的**全部**内容（工具流水、中途的助手说明、
+                    // 已被后续结论取代的方案卡）并成一行折叠，只留结论展开。
+                    //
+                    // 例外：执行中不折 —— 那时最后一条不是结论、只是进行到哪了，
+                    // 一路折叠会让人以为什么都没发生。
+                    const lastOutIdx = inProgress
+                      ? -1
+                      : visibleItems.reduce(
+                          (acc, { m }, i) =>
+                            ["assistant", "plan"].includes(m.role) ? i : acc,
+                          -1,
+                        );
+
+                    visibleItems.forEach((it, i) => {
+                      const { m, k } = it;
+                      // 结论之前的一律进折叠组；结论及其之后的按原规则（工具仍折叠）
+                      const isTool = m.role === "tool" || m.role === "tool_result";
+                      if (isTool || (lastOutIdx >= 0 && i < lastOutIdx)) {
+                        group.push(it);
                       } else {
                         flush();
                         out.push(renderItem(m, k));

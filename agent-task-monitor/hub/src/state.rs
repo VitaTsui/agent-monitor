@@ -553,6 +553,11 @@ pub async fn tick_loop(state: SharedState) {
         if tick % 40 == 0 && state.bot_slots_dirty.swap(false, Ordering::Relaxed) {
             crate::slots::save(&state).await;
         }
+        // 交互历史同上。它是「人不在电脑前时唯一能回看的记录」，重启就丢等于没有，
+        // 所以这里跟号位同频落盘（~60s），丢的最多是最后一分钟的几条。
+        if tick % 40 == 0 && state.history_dirty.swap(false, Ordering::Relaxed) {
+            crate::history::save(&state).await;
+        }
         // 设备离线边沿检测（每 ~3s）：曾在线、现超阈值未上报 → 推「离线」
         if tick % 2 == 0 {
             let mut offline_events = Vec::new();

@@ -277,6 +277,22 @@ $active-bg: rgba(36, 61, 66, 0.09);
         }
       }
 
+      // 号位徽标：与钉钉「@N」是同一个编号。人在手机上看网页、用钉钉下发，
+      // 这个号是两端唯一的对照物，所以放在最显眼的行首（状态点之后）。
+      .sessSlot {
+        flex: none;
+        min-width: 18px;
+        height: 18px;
+        padding: 0 5px;
+        border-radius: 5px;
+        background: rgba(15, 155, 173, 0.12);
+        color: $accent;
+        font-family: "SF Mono", Menlo, Consolas, monospace;
+        font-size: 11.5px;
+        line-height: 18px;
+        text-align: center;
+      }
+
       .sessBody {
         flex: 1;
         min-width: 0;
@@ -441,16 +457,19 @@ $active-bg: rgba(36, 61, 66, 0.09);
     display: grid;
     gap: 1px;
     background: $border;
-    grid-template-columns: 1fr;
+    // 一律 minmax(0, 1fr)：grid 的 `1fr` 实为 `minmax(auto, 1fr)`，列的最小尺寸
+    // 会被内容的 min-content 顶开 —— 会话里一行长代码/宽表格就能把整个页面撑出
+    // 横向滚动条。行同理（长内容会顶开行高，把输入框挤出屏幕）。
+    grid-template-columns: minmax(0, 1fr);
 
     &[data-count="2"] {
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     }
 
     &[data-count="3"],
     &[data-count="4"] {
-      grid-template-columns: 1fr 1fr;
-      grid-template-rows: 1fr 1fr;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
     }
   }
 

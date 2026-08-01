@@ -136,6 +136,13 @@ const Portal: React.FC = observer(() => {
   };
 
 
+  // 本页完全响应式，豁免 index.scss 里给后管布局设的 min-width:960px
+  // （窗口拖窄到 960 以下时那条会造成整页横滚、右上角控制键被推出可视区）
+  useEffect(() => {
+    document.body.setAttribute("data-fluid", "");
+    return () => document.body.removeAttribute("data-fluid");
+  }, []);
+
   // 抽屉打开时：锁背景滚动 + Esc 关闭
   useEffect(() => {
     if (!mobileNav) return;
@@ -561,6 +568,12 @@ const Portal: React.FC = observer(() => {
                                   styles[t.status ?? ""] ?? ""
                                 }`}
                               />
+                              {/* 号位：与钉钉「@N」同一个编号，在手机上照着这个号下发 */}
+                              {t.slot != null && (
+                                <Tooltip title={`钉钉里发「@${t.slot} 内容」即下发到这个终端`}>
+                                  <span className={styles.sessSlot}>{t.slot}</span>
+                                </Tooltip>
+                              )}
                               <div className={styles.sessBody}>
                                 {/* 标题 + 右侧状态徽标同一行；来源等杂项不再展示 */}
                                 <div className={styles.sessRow}>

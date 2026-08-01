@@ -176,3 +176,36 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   color: $muted;
   font-family: $mono;
 }
+
+// 移动端（Capacitor 壳直接加载本页，所以这里就是手机上的样子）：
+// 720px 的弹窗在手机上会溢出，改为全屏 —— 且「人不在电脑前翻记录」正是这块的核心场景，
+// 值得占满整屏而不是挤在一个小卡片里。
+@media (max-width: 760px) {
+  :global(.ant-modal-content) {
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    border-radius: 0 !important;
+    padding-top: env(safe-area-inset-top) !important;
+  }
+
+  .hint {
+    // 窄屏放不下「一行说明 + 切换」，说明退居次行
+    flex-wrap: wrap;
+    gap: 8px;
+
+    > span {
+      flex: 1 1 100%;
+    }
+  }
+
+  .stream {
+    // 全屏后按视口算高度：减去标题、说明、切换与安全区
+    height: calc(100dvh - 200px);
+  }
+
+  // 手机屏窄，气泡放宽些才不至于一行没几个字
+  .bubbleUser {
+    max-width: 88%;
+    font-size: 14px; // 移动端正文小于 14px 会偏吃力
+  }
+}
