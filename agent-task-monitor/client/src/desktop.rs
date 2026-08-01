@@ -341,6 +341,20 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                 });
             }
 
+            // 同理自动写入 Claude Code 的配对 hook（~/.claude/settings.json）：让 agent 自己
+            // 报出会话身份，取代靠猜的配对。手工配这段 JSON 太容易出错，而且错了完全静默
+            // （尤其 Windows 路径的反斜杠会被 bash 吞掉），所以由客户端代劳。
+            // 每个配置版本只写一次；Claude Code 没装过（没有 settings.json）就静默跳过。
+            {
+                let dd = state_setup.config.data_dir.clone();
+                let exe = std::env::current_exe().unwrap_or_default();
+                std::thread::spawn(move || {
+                    if crate::hookrec::ensure_hook_config(&dd, &exe, false) {
+                        ulog("[hook] 已写入 Claude Code 配对 hook（新开的会话即生效）");
+                    }
+                });
+            }
+
             // 作为一般桌面应用运行：macOS 显示 Dock 图标（Regular）。
             // agent 模式启动即后台，初始就用 Accessory —— 若先 Regular 再切，
             // set_activation_policy 走事件循环代理，Dock 图标会闪现一下才消失。

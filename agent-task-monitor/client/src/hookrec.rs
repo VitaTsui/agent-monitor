@@ -27,14 +27,14 @@ pub fn hooks_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("hooks")
 }
 
-/// 一条 hook 上报：某个 claude 进程自报的会话身份
+/// 一条 hook 上报：某个 claude 进程自报的会话身份。
+///
+/// 只暴露配对真正要用的两个字段。cwd 与写入时刻也在落盘的 JSON 里（前者便于排查、后者用于
+/// TTL 判定），但都在 [`read_reports`] 内部消化，不必带出来让调用方多拿两个用不上的值。
 #[derive(Debug, Clone)]
 pub struct HookReport {
     pub claude_pid: u32,
     pub session_id: String,
-    pub cwd: String,
-    /// 写入时刻（epoch 秒），用于判新旧与清理
-    pub at: u64,
 }
 
 fn now_secs() -> u64 {
@@ -137,8 +137,6 @@ pub fn read_reports(data_dir: &Path, max_age_secs: u64) -> Vec<HookReport> {
         out.push(HookReport {
             claude_pid: pid as u32,
             session_id: sid.to_string(),
-            cwd: v.get("cwd").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            at,
         });
     }
     out
@@ -147,4 +145,218 @@ pub fn read_reports(data_dir: &Path, max_age_secs: u64) -> Vec<HookReport> {
 /// 删掉某个 pid 的 hook 记录（进程已确认退出时调用，避免 pid 重用后张冠李戴）
 pub fn drop_report(data_dir: &Path, claude_pid: u32) {
     let _ = std::fs::remove_file(hooks_dir(data_dir).join(format!("{claude_pid}.json")));
+}
+
+// ---------- 自动写入 Claude Code 的 hook 配置 ----------
+
+/// 配置版本：改了写入内容就加一，客户端会重写一次（同 BRIDGE_EXT_VERSION 的套路）
+const HOOK_CONFIG_VERSION: &str = "1";
+
+/// 标记本条目由 agent-monitor 写入 —— 用它识别自己的旧条目并替换，
+/// 绝不碰用户自己配的其它 hook。
+const MARK: &str = "agent-monitor:pairing";
+
+/// 确保 `~/.claude/settings.json` 里有本客户端的配对 hook。
+///
+/// 不这么做的话每个用户都得手工写一遍 JSON，而写错**完全静默**（尤其 Windows 路径的反斜杠会
+/// 被 bash 当转义符吞掉，hook 找不到命令既不报错也不阻断会话，只是配对一直没生效）。
+///
+/// 与桥接扩展同一套路：版本标记只写一次；出任何问题都静默跳过 —— 配置文件是用户的，
+/// 宁可这次没配上，也绝不能弄坏它或让客户端起不来。
+pub fn ensure_hook_config(data_dir: &Path, exe: &Path, force: bool) -> bool {
+    let marker = data_dir.join(format!("hook-config-{HOOK_CONFIG_VERSION}.done"));
+    if !force && marker.exists() {
+        return false;
+    }
+    let Some(home) = dirs::home_dir() else { return false };
+    let path = home.join(".claude").join("settings.json");
+    // Claude Code 没装/没跑过就没有这个文件，此时不该替它创建目录结构
+    let Ok(txt) = std::fs::read_to_string(&path) else { return false };
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&txt) else { return false };
+    if !root.is_object() {
+        return false;
+    }
+
+    // **正斜杠**：hook 命令交给 bash 执行，Windows 路径里的反斜杠会被当成转义符吃掉
+    // （D:\A\B.exe → D:AB.exe，找不到且静默失败）。正斜杠在 Windows 上照样能调起程序。
+    let cmd = format!("{} hook", exe.to_string_lossy().replace('\\', "/"));
+
+    let changed = apply_hook_config(&mut root, &cmd);
+
+    if !changed && !force {
+        let _ = std::fs::write(&marker, HOOK_CONFIG_VERSION);
+        return false;
+    }
+    // 备份 + 原子写：这是用户的配置文件，改坏了他会丢掉自己所有的 hook/权限设置
+    let bak = path.with_extension("json.am-bak");
+    let _ = std::fs::copy(&path, &bak);
+    let Ok(out) = serde_json::to_string_pretty(&root) else { return false };
+    let tmp = path.with_extension("json.am-tmp");
+    if std::fs::write(&tmp, &out).is_err() {
+        return false;
+    }
+    if std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    let _ = std::fs::write(&marker, HOOK_CONFIG_VERSION);
+    true
+}
+
+/// 把配对 hook 合并进 settings 的 JSON 树，返回是否有改动。
+///
+/// 纯函数（不碰文件），逻辑要点：
+/// - 只替换**自己**写过的条目（认 `_source` 标记），用户手写的 hook 一概不动；
+/// - 客户端换安装位置后命令会变，所以先摘旧条目再加新的，而不是简单去重；
+/// - 用户已手工配了等价命令时不重复添加。
+pub(crate) fn apply_hook_config(root: &mut serde_json::Value, cmd: &str) -> bool {
+    let Some(obj) = root.as_object_mut() else { return false };
+    let Some(hooks) =
+        obj.entry("hooks").or_insert_with(|| serde_json::json!({})).as_object_mut()
+    else {
+        return false;
+    };
+
+    let mut changed = false;
+    // SessionStart：会话一开就报身份，不必等它执行工具
+    // PreToolUse：兜底，万一 SessionStart 那次没写成，下次调工具补上
+    for (event, matcher) in [("SessionStart", None), ("PreToolUse", Some("*"))] {
+        let entry = match matcher {
+            Some(m) => serde_json::json!({
+                "matcher": m,
+                "hooks": [{ "type": "command", "command": cmd, "_source": MARK }],
+            }),
+            None => serde_json::json!({
+                "hooks": [{ "type": "command", "command": cmd, "_source": MARK }],
+            }),
+        };
+        let list = hooks.entry(event).or_insert_with(|| serde_json::json!([]));
+        let Some(arr) = list.as_array_mut() else { continue };
+        // 已经是我们写的、且命令一致 → 什么都不用做。
+        // **必须先判这个**：若先摘旧条目再判重，稳态下每次都会「摘掉又加回」，
+        // 于是每次客户端启动都改写一遍用户的配置文件（实测被幂等性测试抓到）。
+        if arr.iter().any(|e| is_ours(e) && has_cmd(e, cmd)) {
+            continue;
+        }
+        // 摘掉自己写的旧条目（命令变了，比如客户端换了安装位置），保留用户其它条目
+        let before = arr.len();
+        arr.retain(|e| !is_ours(e));
+        let removed = arr.len() != before;
+        // 用户已手工配了等价命令就不重复加
+        let dup = arr.iter().any(|e| has_cmd(e, cmd));
+        if !dup {
+            arr.push(entry);
+            changed = true;
+        } else if removed {
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// 这条 hook 条目里是否含指定命令
+fn has_cmd(entry: &serde_json::Value, cmd: &str) -> bool {
+    entry
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .map(|hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(cmd)))
+        .unwrap_or(false)
+}
+
+/// 这条 hook 条目是不是我们写的（认 `_source` 标记）
+fn is_ours(entry: &serde_json::Value) -> bool {
+    entry
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .map(|hs| {
+            hs.iter().any(|h| h.get("_source").and_then(|s| s.as_str()) == Some(MARK))
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_own_entries() {
+        let ours = serde_json::json!({
+            "hooks": [{ "type": "command", "command": "x hook", "_source": MARK }]
+        });
+        let theirs = serde_json::json!({
+            "hooks": [{ "type": "command", "command": "my-own-script.sh" }]
+        });
+        assert!(is_ours(&ours));
+        assert!(!is_ours(&theirs), "绝不能把用户自己配的 hook 认成我们的");
+    }
+
+    /// Windows 路径必须转成正斜杠 —— 反斜杠会被 bash 当转义符吃掉
+    #[test]
+    fn windows_path_uses_forward_slashes() {
+        let p = std::path::PathBuf::from(r"D:\AgentMonitor\AgentMonitor.exe");
+        let cmd = format!("{} hook", p.to_string_lossy().replace('\\', "/"));
+        assert_eq!(cmd, "D:/AgentMonitor/AgentMonitor.exe hook");
+        assert!(!cmd.contains('\\'));
+    }
+
+    /// **最关键的一条**：用户自己配的 hook 一根汗毛都不能动。
+    /// 这个文件是用户的，弄坏了他会丢掉全部 hook / 权限设置。
+    #[test]
+    fn never_touches_user_hooks() {
+        let mut root = serde_json::json!({
+            "model": "opus",
+            "hooks": {
+                "Stop": [{ "hooks": [{ "type": "command", "command": "my-stop-hook.sh" }] }],
+                "PreToolUse": [
+                    { "matcher": "Bash", "hooks": [{ "type": "command", "command": "audit.sh" }] }
+                ]
+            }
+        });
+        assert!(apply_hook_config(&mut root, "C:/am/am.exe hook"));
+
+        // 用户的 Stop 原样保留
+        assert_eq!(
+            root["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "my-stop-hook.sh"
+        );
+        // 用户的 PreToolUse 条目还在，我们的追加在后面
+        let pre = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 2);
+        assert_eq!(pre[0]["hooks"][0]["command"], "audit.sh");
+        assert_eq!(pre[1]["hooks"][0]["command"], "C:/am/am.exe hook");
+        // 其它设置不受影响
+        assert_eq!(root["model"], "opus");
+    }
+
+    /// 客户端换了安装位置：应替换掉自己的旧条目，而不是堆两条
+    #[test]
+    fn replaces_own_stale_entry() {
+        let mut root = serde_json::json!({ "hooks": {} });
+        apply_hook_config(&mut root, "D:/OLD/am.exe hook");
+        apply_hook_config(&mut root, "D:/NEW/am.exe hook");
+        let ss = root["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(ss.len(), 1, "旧条目该被替换而非累积：{ss:?}");
+        assert_eq!(ss[0]["hooks"][0]["command"], "D:/NEW/am.exe hook");
+    }
+
+    /// 重复调用不产生变化（幂等），避免每次启动都改写用户配置
+    #[test]
+    fn is_idempotent() {
+        let mut root = serde_json::json!({ "hooks": {} });
+        assert!(apply_hook_config(&mut root, "C:/am/am.exe hook"));
+        let after_first = root.clone();
+        let changed = apply_hook_config(&mut root, "C:/am/am.exe hook");
+        assert!(!changed, "第二次不该报告有改动");
+        assert_eq!(root, after_first, "内容也不该变");
+    }
+
+    /// settings.json 里原本没有 hooks 字段时也要能建起来
+    #[test]
+    fn creates_hooks_when_absent() {
+        let mut root = serde_json::json!({ "model": "opus" });
+        assert!(apply_hook_config(&mut root, "C:/am/am.exe hook"));
+        assert!(root["hooks"]["SessionStart"].is_array());
+        assert!(root["hooks"]["PreToolUse"].is_array());
+        assert_eq!(root["hooks"]["PreToolUse"][0]["matcher"], "*");
+    }
 }
