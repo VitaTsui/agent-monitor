@@ -186,7 +186,11 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     [task.pendingSelect],
   );
   const [answeredKey, setAnsweredKey] = useState("");
-  const showPending = !!task.pendingSelect && pendingKey !== answeredKey;
+  // 必须有题才弹。改结构化之后没有了 JSON.parse 那道天然闸门：万一
+  // AskUserQuestion 的 input 结构变了或给了个空壳，光判非空就会弹出一张
+  // 什么都没有、还挡着输入框的卡片。
+  const showPending =
+    !!task.pendingSelect?.questions?.length && pendingKey !== answeredKey;
 
   const interruptHint = !controllable
     ? "该会话没有存活进程"
