@@ -1,0 +1,115 @@
+// 配色与 Composer 保持一致（同一屏内的组件，色板不该各写各的）
+$text: #243d42;
+$muted: #7c9096;
+$accent: #0f9bad;
+$mono: "SF Mono", Menlo, Consolas, monospace;
+
+.hint {
+  font-size: 12px;
+  color: $muted;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(36, 61, 66, 0.08);
+}
+
+.list {
+  // 弹窗内滚动，避免记录多了把页面撑长
+  max-height: 60vh;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+
+.item {
+  padding: 10px 2px;
+  border-bottom: 1px solid rgba(36, 61, 66, 0.06);
+
+  &:last-child {
+    border-bottom: none;
+  }
+}
+
+.head {
+  cursor: pointer;
+  user-select: none;
+
+  &:hover .title {
+    color: $accent;
+  }
+}
+
+.titleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+// 号位徽标：与钉钉「@N」同一个编号，一眼对上是哪个终端
+.slot {
+  flex: none;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: rgba(15, 155, 173, 0.12);
+  color: $accent;
+  font-family: $mono;
+  font-size: 12px;
+  line-height: 20px;
+  text-align: center;
+}
+
+.title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  color: $text;
+  // 标题可能很长，单行截断而不是撑破布局
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.15s;
+}
+
+.time {
+  flex: none;
+  font-size: 12px;
+  color: $muted;
+  font-family: $mono;
+}
+
+.meta {
+  margin-top: 3px;
+  font-size: 12px;
+  color: $muted;
+
+  .dot {
+    margin: 0 6px;
+    opacity: 0.5;
+  }
+}
+
+// 收起态：只露三行，点击展开
+.result {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(36, 61, 66, 0.04);
+  color: rgba(36, 61, 66, 0.75);
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  // 保留换行的同时限制高度；长结果整段铺开会淹没列表
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  cursor: pointer;
+}
+
+.resultOpen {
+  @extend .result;
+  -webkit-line-clamp: unset;
+  max-height: 40vh;
+  overflow-y: auto;
+  // 展开后代码/输出居多，等宽更好读
+  font-family: $mono;
+}

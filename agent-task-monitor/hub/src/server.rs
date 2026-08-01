@@ -1861,7 +1861,8 @@ async fn report(
     let mut pending_sets: Vec<(String, String)> = Vec::new(); // (会话 id, 终端锚)
     let mut pending_removes: Vec<String> = Vec::new();
     // 会话结束时要落的历史记录（同样块内收集、块后写，避开借用冲突）
-    let mut history_records: Vec<crate::history::SessionRecord> = Vec::new();
+    // (记录, 终端锚) —— 号位要在锁外查，见下方 pending_history 处理
+    let mut history_records: Vec<(crate::history::SessionRecord, String)> = Vec::new();
     if let Some(owner) = &notify_owner {
         use crate::dingtalk::{EventKind, NotifyEvent};
         let old: std::collections::HashMap<&str, TaskStatus> =
@@ -1937,23 +1938,27 @@ async fn report(
                            owner: &str,
                            full: Option<&str>,
                            shown: &str|
-         -> crate::history::SessionRecord {
+         -> (crate::history::SessionRecord, String) {
             let result = match full {
                 Some(f) => f.to_string(),
                 None => shown.trim_start_matches("\n\n**最后结果**\n\n").to_string(),
             };
-            crate::history::SessionRecord {
-                id: t.id.clone(),
-                owner: owner.to_string(),
-                hostname: t.hostname.clone(),
-                project: t.project_name.clone(),
-                title: t.title.clone(),
-                prompt: t.prompt.clone(),
-                result,
-                provider: t.provider_dsr.clone(),
-                started_at: t.started_at.clone(),
-                ended_at: crate::state::now_secs(),
-            }
+            (
+                crate::history::SessionRecord {
+                    id: t.id.clone(),
+                    owner: owner.to_string(),
+                    hostname: t.hostname.clone(),
+                    project: t.project_name.clone(),
+                    title: t.title.clone(),
+                    prompt: t.prompt.clone(),
+                    result,
+                    provider: t.provider_dsr.clone(),
+                    started_at: t.started_at.clone(),
+                    ended_at: crate::state::now_secs(),
+                    slot: None, // 锁外补：查号位要 await
+                },
+                crate::slots::anchor_of(t),
+            )
         };
         // 「等待选择」判定：从末尾回看最近一条实质消息 —— 若先遇到 select（其后没有 user/
         // tool_result 应答），说明仍在等你选。比「末条恰好是 select」稳健：AskUserQuestion 记录
@@ -2196,7 +2201,10 @@ async fn report(
     drop(machines);
 
     // 会话历史：锁已释放，这里统一落（record 内部去重 + 截断 + 标脏，tick 循环负责写盘）
-    for rec in pending_history {
+    for (mut rec, anchor) in pending_history {
+        // 补号位，让网页历史与钉钉里的编号对得上。会话已结束、活跃列表里查不到，
+        // 所以按终端锚直接查表（锚要过保留期才回收，多数情况仍在）。
+        rec.slot = crate::slots::slot_of(&state, &rec.owner, &anchor).await;
         crate::history::record(&state, rec).await;
     }
 

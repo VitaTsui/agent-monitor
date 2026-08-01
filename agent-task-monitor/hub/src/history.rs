@@ -43,6 +43,11 @@ pub struct SessionRecord {
     pub started_at: Option<String>,
     /// 记录写入时刻（epoch 秒）= 判定结束的时刻
     pub ended_at: u64,
+    /// 结束时该会话在钉钉里的号位（`@9` 的 9）。留着是为了让网页历史和钉钉里看到的编号
+    /// 对得上 —— 「哦，这是我 9 号那个终端做的活」。号位绑终端锚，终端关掉超过保留期才回收，
+    /// 所以多数情况仍查得到；查不到就是 None。
+    #[serde(default)]
+    pub slot: Option<u32>,
 }
 
 /// 从数据目录加载（读不到/解析失败都当空：历史丢了不影响任何功能）
@@ -113,6 +118,7 @@ mod tests {
             provider: "Claude Code".into(),
             started_at: None,
             ended_at: ended,
+            slot: Some(9),
         }
     }
 

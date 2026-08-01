@@ -8,6 +8,7 @@ import {
   EditOutlined,
   FileSearchOutlined,
   FolderAddOutlined,
+  HistoryOutlined,
   PaperClipOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
@@ -22,6 +23,7 @@ import {
 } from "@/services/apis/portal";
 import { CONFIRM_WORD, DangerHit, checkDanger } from "../../_utils/dangerCheck";
 import PortalStore from "../../PortalStore";
+import HistoryModal from "../HistoryModal";
 import styles from "./index.module.scss";
 
 interface ComposerProps {
@@ -43,6 +45,8 @@ const Composer: React.FC<ComposerProps> = (props) => {
   const { taskId, disabled, onSend, machineId, cwd } = props;
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   const [uploading, setUploading] = useState(false);
+  // 会话历史弹窗（与当前会话状态无关，任何时候都能翻）
+  const [historyOpen, setHistoryOpen] = useState(false);
   // 斜杠命令：仅当输入以「/」开头且未含空格时弹出（Claude Code 终端式），
   // null=不在命令模式，字符串=「/」之后已输入的过滤词
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
@@ -572,8 +576,21 @@ const Composer: React.FC<ComposerProps> = (props) => {
         }
         onSend={guardedSend}
         uploadEnabled={false}
-        buttonGroup={
-          cwd && !disabled
+        buttonGroup={[
+          // 历史放最左：它跟当前会话状态无关（会话没进程、没 cwd 时照样要能翻记录），
+          // 所以不受下面那两个的 cwd && !disabled 条件限制
+          {
+            title: "查看会话历史（已结束会话的最终产出）",
+            icon: (
+              <HistoryOutlined
+                className={styles.uploadIcon}
+                style={{ fontSize: 17 }}
+              />
+            ),
+            type: "text" as const,
+            onClick: () => setHistoryOpen(true),
+          },
+          ...(cwd && !disabled
             ? [
                 {
                   title: "选择会话目录里的文件，插入相对路径",
@@ -584,7 +601,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
                       style={{ fontSize: 18 }}
                     />
                   ),
-                  type: "text",
+                  type: "text" as const,
                   onClick: openPicker,
                 },
                 ...(machineId
@@ -599,8 +616,8 @@ const Composer: React.FC<ComposerProps> = (props) => {
                     ]
                   : []),
               ]
-            : undefined
-        }
+            : []),
+        ]}
       />
       {/* 上传目录确认：默认会话所在目录，可改成设备上任意目录 */}
       <Modal
@@ -831,6 +848,9 @@ const Composer: React.FC<ComposerProps> = (props) => {
           )}
         </div>
       </Modal>
+
+      {/* 会话历史：已结束会话的最终产出 */}
+      <HistoryModal open={historyOpen} onClose={() => setHistoryOpen(false)} />
     </div>
   );
 };

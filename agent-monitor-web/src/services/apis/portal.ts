@@ -87,6 +87,31 @@ export const getPortalTaskList = async (params?: {
   return await get<ListRes<PortalTaskData>>("/monitor/tasks", { params });
 };
 
+/** 一条会话历史：会话结束时留下的最终产出 */
+export interface SessionHistoryItem {
+  id: string;
+  owner: string;
+  hostname: string;
+  project: string;
+  title: string;
+  prompt: string;
+  /** 最终产出（末条 assistant 消息，已按上限截断） */
+  result: string;
+  provider: string;
+  startedAt: string | null;
+  /** 判定结束的时刻（epoch 秒） */
+  endedAt: number;
+  /** 结束时该会话在钉钉里的号位（@N 的 N），终端关太久被回收则为 null */
+  slot: number | null;
+}
+
+/** 会话历史：每个会话结束时留一条最终产出，终端关了、机器关机后仍可回看 */
+export const getSessionHistory = async (limit?: number) => {
+  return await get<ListRes<SessionHistoryItem>>("/monitor/history", {
+    params: { limit },
+  });
+};
+
 // 会话消息
 export const getPortalTaskMessages = async (id: string, limit?: number) => {
   return await get<ListRes<PortalMessage>>(`/monitor/tasks/${id}/messages`, {

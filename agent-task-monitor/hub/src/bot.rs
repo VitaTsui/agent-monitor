@@ -1031,8 +1031,10 @@ async fn list_history(state: &SharedState, username: &str, arg: &str) -> String 
             })
             .unwrap_or_default();
         let title: String = if r.title.is_empty() { r.provider.clone() } else { r.title.clone() };
+        // 带上号位，和「@N」那套编号对得上 —— 「哦，这是我 9 号终端做的活」
+        let slot = r.slot.map(|n| format!("{n} 号 · ")).unwrap_or_default();
         lines.push(format!(
-            "\n【{when}】{} · {}\n{}\n{}",
+            "\n【{when}】{slot}{} · {}\n{}\n{}",
             r.hostname,
             r.project,
             title.chars().take(40).collect::<String>(),

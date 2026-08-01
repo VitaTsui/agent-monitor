@@ -153,6 +153,12 @@ pub async fn ensure(state: &SharedState, username: &str, tasks: &[Task]) -> Hash
 /// 打进了别的项目便宜得多。活跃对话期间完全无感（每条消息都会续期）。
 const STICKY_COOLDOWN_SECS: u64 = 2 * 3600;
 
+/// 按终端锚直接查号位（不分配）。用于给**已结束**的会话补号位 —— 那时会话已不在活跃列表里，
+/// `ensure` 走不通，但锚还在表里（终端关掉要过保留期才回收）。
+pub async fn slot_of(state: &SharedState, username: &str, anchor: &str) -> Option<u32> {
+    state.bot_slots.read().await.get(username)?.slots.get(anchor).copied()
+}
+
 /// 读「连续对话」当前锁定的号位
 pub async fn sticky_of(state: &SharedState, username: &str) -> Option<u32> {
     state.bot_slots.read().await.get(username)?.sticky
