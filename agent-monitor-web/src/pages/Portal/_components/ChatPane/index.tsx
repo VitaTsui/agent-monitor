@@ -14,7 +14,7 @@ import {
 } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
-import { PortalTaskData } from "@/services/apis/portal";
+import { PortalMessage, PortalTaskData } from "@/services/apis/portal";
 import PortalStore from "../../PortalStore";
 import Composer from "../Composer";
 import TerminalFeed, { SelectCard } from "../TerminalFeed";
@@ -55,10 +55,33 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   const id = task.id ?? "";
   const messages = messagesOf(id);
   const loading = isLoadingMessages(id);
-  // 清单与后台任务已抽到下方的状态面板；排队中的任务（本地回显 + 终端原生队列）
-  // 也不进对话流，改挂在对话框上方（见下方 queuedStrip）。
-  // 对话流 = 完整的对话记录，我发出去的每一条都留在这儿，不因为它还在排队就藏起来
-  //（藏起来的后果就是「我发的内容在正文里不见了」）。排队状态与撤回归下方排队条管。
+  // 一条任务的去处，取决于它有没有被终端拿去执行：
+  //
+  //   还没轮到 → 只在下方排队条，可撤回
+  //   已进执行 → 只在对话流，撤不回了（撤回按钮也就不该出现在正文里）
+  //
+  // 判据以终端上报的 queuedInputs 为准 —— 它随任务被会话接受而出列，是唯一
+  // 知道「跑了没有」的一方。本地回显的 delivered 只说明「送出去了」。
+  const normText = (s: string) => s.replace(/\s+/g, " ").trim();
+  const stillQueued = React.useMemo(() => {
+    const set = new Set((task.queuedInputs ?? []).map(normText));
+    return (m: PortalMessage) => {
+      if (!m.local) {
+        return false; // 终端同步回来的真实消息，早已在执行流里
+      }
+      if (m.queued) {
+        return true; // 还在 hub 队列，连终端都没送到
+      }
+      // 已送达终端：在队列里就是还没轮到。刚送达的几秒终端还没来得及上报，
+      // 先按「在队列」处理，免得它在对话流里闪一下又跳回排队条。
+      return (
+        Date.now() - new Date(m.timestamp).getTime() < 6000 ||
+        set.has(normText(m.content))
+      );
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task.queuedInputs]);
+
   const feedMessages = React.useMemo(
     () =>
       messages.filter(
@@ -69,9 +92,11 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
           // 是「此刻」的真问题、可点可答）。流里再放一张只会是重复的历史副本 ——
           // 长得一模一样却点不得，反而让人分不清哪张才是在等自己。
           // 选完之后答案本身会作为一条 user 消息进流，记录并不会丢。
-          m.role !== "select",
+          m.role !== "select" &&
+          // 还在排队的不进对话流 —— 它归排队条管，在那里才撤得回
+          !stillQueued(m),
       ),
-    [messages],
+    [messages, stillQueued],
   );
 
   // 底部「排队中」挂载项：本地回显（还在 hub 队列、可撤回）+ 终端里 claude 原生
@@ -85,9 +110,9 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
       recallable: boolean;
     }[] = [];
     const seen = new Set<string>();
-    // 不再和正文互相回避：正文是对话记录（我发了什么），这里是待执行队列
-    //（还有什么没跑），本来就是两件事，各显示各的。早先为了不重复而把正文里的
-    // 消息藏起来，反倒造成「我发的内容在对话流里不见了」。
+    // 与对话流是互补的两半（判据同 stillQueued）：还没轮到的在这里、可撤回；
+    // 一被终端拿去执行就从这里出列、转到对话流，那时也就撤不回了。
+    // 同一条任务任何时刻只出现在一处，不会两边都有。
     //
     // 顺序即终端队列的真实先后：先铺 queued_inputs（终端 queue-operation 的真实 FIFO，
     // 最旧在上、最新在下），再把「还在 hub 队列、尚未注入终端」的本地回显（可撤回）挂在
@@ -103,16 +128,20 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
       }
     }
     for (const m of messages) {
-      if (m.local && m.queued) {
+      // 用同一个判据取「还没轮到的本地回显」：除了还在 hub 队列的（queued，
+      // 可撤回），也含刚送达终端、尚未被拿去执行的那几秒 —— 否则这段时间里
+      // 它既被对话流挡在外面、又不在排队条上，人就看不到自己刚发的东西了。
+      if (m.local && stillQueued(m)) {
         const k = norm(m.content);
         if (!seen.has(k)) {
           seen.add(k);
-          items.push({ text: m.content, cmdId: m.cmdId, recallable: true });
+          // 只有还在 hub 队列（有 cmdId）的撤得回；已注入终端的只能整体按 ↑
+          items.push({ text: m.content, cmdId: m.cmdId, recallable: !!m.queued });
         }
       }
     }
     return items;
-  }, [messages, task.queuedInputs]);
+  }, [messages, task.queuedInputs, stillQueued]);
 
   useEffect(() => {
     const el = chatRef.current;
