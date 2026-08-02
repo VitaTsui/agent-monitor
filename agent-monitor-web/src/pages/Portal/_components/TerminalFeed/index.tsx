@@ -12,10 +12,8 @@ interface TerminalFeedProps {
   running?: boolean;
   /** 终端卡标题：来源代理名（Claude Code / Codex / Gemini CLI …） */
   providerDsr?: string;
-  /** 撤回仍在排队的输入（排队气泡上的撤回按钮） */
-  onRecall?: (cmdId: string) => void;
-  /** 撤回「已入终端队列」的输入（注入 ↑ 到终端） */
-  onRecallDelivered?: () => void;
+  // 撤回不在这里：排队状态与撤回统一由输入框上方的排队条负责，
+  // 对话流只呈现「我说了什么、它回了什么」。
 }
 
 /** 一轮对话：一条用户消息 + 其后的助手/工具活动 */
@@ -215,7 +213,7 @@ export const SelectCard: React.FC<{
 const RESULT_CLAMP_LINES = 4;
 
 const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
-  const { messages, running, providerDsr, onRecall, onRecallDelivered } = props;
+  const { messages, running, providerDsr } = props;
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   const turns = toTurns(messages);
@@ -310,16 +308,13 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
         // 用内容指纹做 key：执行中 → 完成态切换时 key 不变，避免整块重挂载闪烁；
         // 且不随消息裁剪而漂移（下标会）。
         const keyed = turn.items.map((m) => ({ m, k: msgKey(m) }));
-        // 执行中什么过程都不铺，只留底部那行「执行中…」——中途的说明、工具流水
-        // 都是转瞬即逝的噪音，一条条冒出来还会不停把视图往下推。等这一轮结束，
-        // 过程折成一行、结论展开，一次看个清楚。
+        // 执行中也铺，但**过程一律折叠着**（下面的分组逻辑会把它并成一行
+        // 「执行过程 · N 步」）—— 一条条冒出来是噪音、还不停把视图往下推，
+        // 但整段藏掉又会让人不知道它在干什么。折叠着实时长，想看点开即可。
         //
-        // 唯一例外是待批准的方案（plan）：它在等你点头，藏起来就等于把要办的事
-        // 藏了。（清单与后台任务是「当前状态」，已由 ChatPane 抽成单独面板；
+        // （清单与后台任务是「当前状态」，已由 ChatPane 抽成单独面板；
         // 选择卡同理挂在输入框上方，都不进内容流。）
-        const visibleItems = inProgress
-          ? keyed.filter(({ m }) => m.role === "plan")
-          : keyed;
+        const visibleItems = keyed;
         // 执行中时给一条「最近动作」预览（最后一条工具调用）
         const lastTool = inProgress
           ? [...turn.items].reverse().find((m) => m.role === "tool")
@@ -327,58 +322,14 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
 
         return (
           <div key={turn.key} className={styles.turn}>
+            {/* 对话流只管「我说了什么」。排队状态与撤回一律交给输入框上方的排队条 ——
+                两处都摆一份的话，同一条任务在正文和排队条各显示一遍，还得为了去重
+                把正文里的消息藏起来，于是「我发的内容在对话流里不见了」。
+                职责分开之后，正文永远是完整的对话记录。 */}
             {turn.user ? (
               <div className={styles.userRow}>
-                <div
-                  className={`${styles.userBubble} ${
-                    turn.user.local && (turn.user.queued || turn.user.delivered)
-                      ? styles.queued
-                      : ""
-                  }`}
-                >
-                  {turn.user.content}
-                </div>
-                {turn.user.local && (turn.user.queued || turn.user.delivered) ? (
-                  <div className={styles.queuedRow}>
-                    <span className={styles.queuedTag}>
-                      <span className={styles.queuedDot} />
-                      {turn.user.queued ? "排队中" : "已入终端队列 · 等待执行"}
-                    </span>
-                    {turn.user.queued && onRecall && turn.user.cmdId ? (
-                      <span
-                        className={styles.recallBtn}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => onRecall(turn.user!.cmdId!)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            onRecall(turn.user!.cmdId!);
-                          }
-                        }}
-                      >
-                        撤回
-                      </span>
-                    ) : turn.user.delivered && onRecallDelivered ? (
-                      <span
-                        className={styles.recallBtn}
-                        role="button"
-                        tabIndex={0}
-                        onClick={onRecallDelivered}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            onRecallDelivered();
-                          }
-                        }}
-                      >
-                        撤回
-                      </span>
-                    ) : null}
-                  </div>
-                ) : (
-                  <div className={styles.userTime}>{fmtTime(turn.user.timestamp)}</div>
-                )}
+                <div className={styles.userBubble}>{turn.user.content}</div>
+                <div className={styles.userTime}>{fmtTime(turn.user.timestamp)}</div>
               </div>
             ) : null}
 
@@ -445,10 +396,10 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                     // 把「最后一条产出」之前的**全部**内容（工具流水、中途的助手说明、
                     // 已被后续结论取代的方案卡）并成一行折叠，只留结论展开。
                     //
-                    // 例外：执行中不折 —— 那时最后一条不是结论、只是进行到哪了，
-                    // 一路折叠会让人以为什么都没发生。
+                    // 执行中：还没有结论可留，于是**全部**进折叠组 —— 折叠行会随着
+                    // 步数实时增长，既不刷屏也看得见在动，想看点开即可。
                     const lastOutIdx = inProgress
-                      ? -1
+                      ? visibleItems.length
                       : visibleItems.reduce(
                           (acc, { m }, i) =>
                             ["assistant", "plan"].includes(m.role) ? i : acc,
@@ -457,6 +408,13 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
 
                     visibleItems.forEach((it, i) => {
                       const { m, k } = it;
+                      // 待批准的方案在执行中永远展开：它在等你点头，折起来
+                      // 就等于把要办的事藏了。（回合结束后它已被结论取代，照折。）
+                      if (inProgress && m.role === "plan") {
+                        flush();
+                        out.push(renderItem(m, k));
+                        return;
+                      }
                       // 结论之前的一律进折叠组；结论及其之后的按原规则（工具仍折叠）
                       const isTool = m.role === "tool" || m.role === "tool_result";
                       if (isTool || (lastOutIdx >= 0 && i < lastOutIdx)) {

@@ -14,7 +14,7 @@ import {
 } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
-import { PortalMessage, PortalTaskData } from "@/services/apis/portal";
+import { PortalTaskData } from "@/services/apis/portal";
 import PortalStore from "../../PortalStore";
 import Composer from "../Composer";
 import TerminalFeed, { SelectCard } from "../TerminalFeed";
@@ -57,45 +57,21 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   const loading = isLoadingMessages(id);
   // 清单与后台任务已抽到下方的状态面板；排队中的任务（本地回显 + 终端原生队列）
   // 也不进对话流，改挂在对话框上方（见下方 queuedStrip）。
-  // 「还在终端队列里」的判据一律以终端上报的 queuedInputs 为准 —— 它随任务被
-  // 会话接受而出列，是唯一知道「执行了没有」的一方。本地回显的 delivered 只说明
-  // 「送出去了」，不代表还在等：终端早就跑起来了，正文却一直挂着「等待执行」。
-  const normText = (s: string) => s.replace(/\s+/g, " ").trim();
-  const stillInTerminalQueue = React.useMemo(() => {
-    const set = new Set((task.queuedInputs ?? []).map(normText));
-    // 刚送达的几秒里终端还没来得及上报，先按「在队列里」处理，免得标记闪一下
-    return (m: PortalMessage) =>
-      Date.now() - new Date(m.timestamp).getTime() < 6000 ||
-      set.has(normText(m.content));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [task.queuedInputs]);
-
+  // 对话流 = 完整的对话记录，我发出去的每一条都留在这儿，不因为它还在排队就藏起来
+  //（藏起来的后果就是「我发的内容在正文里不见了」）。排队状态与撤回归下方排队条管。
   const feedMessages = React.useMemo(
     () =>
-      messages
-        .filter(
-          (m) =>
-            m.role !== "todos" &&
-            m.role !== "bgtasks" &&
-            // 「排队中」的本地回显（还在 hub 队列、可撤回）不铺进内容流，改挂底部排队条；
-            // 但「已下发到终端」（delivered）的必须留在正文里当用户气泡 —— 否则任务被终端
-            // 接受后、真实同步消息还没回来（注入输入常常压根等不到那条 user 记录）这段时间
-            // 里，这条任务在正文中彻底消失。留着它，等真实消息回来时 store 会按内容接管去重。
-            !(m.local && m.queued) &&
-            // 选择卡一律不进内容流：要选的时候它会弹在输入框上方（那张来自 hook，
-            // 是「此刻」的真问题、可点可答）。流里再放一张只会是重复的历史副本 ——
-            // 长得一模一样却点不得，反而让人分不清哪张才是在等自己。
-            // 选完之后答案本身会作为一条 user 消息进流，记录并不会丢。
-            m.role !== "select",
-        )
-        // 终端已经把它拿去执行了（不在 queuedInputs 里）→ 摘掉「等待执行」标记，
-        // 就是条普通的用户气泡。留着标记会让人以为还能撤回，实则早已开跑。
-        .map((m) =>
-          m.local && m.delivered && !stillInTerminalQueue(m)
-            ? { ...m, delivered: false }
-            : m,
-        ),
-    [messages, stillInTerminalQueue],
+      messages.filter(
+        (m) =>
+          m.role !== "todos" &&
+          m.role !== "bgtasks" &&
+          // 选择卡一律不进内容流：要选的时候它会弹在输入框上方（那张来自 hook，
+          // 是「此刻」的真问题、可点可答）。流里再放一张只会是重复的历史副本 ——
+          // 长得一模一样却点不得，反而让人分不清哪张才是在等自己。
+          // 选完之后答案本身会作为一条 user 消息进流，记录并不会丢。
+          m.role !== "select",
+      ),
+    [messages],
   );
 
   // 底部「排队中」挂载项：本地回显（还在 hub 队列、可撤回）+ 终端里 claude 原生
@@ -109,18 +85,10 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
       recallable: boolean;
     }[] = [];
     const seen = new Set<string>();
-    // 已作为「已入终端队列」气泡显示在正文里的本地回显：不要在底部排队条再重复一遍
-    // （否则同一条任务正文 + 排队条各出现一次，见「出现了这种情况」）。
-    const deliveredInFeed = messages
-      .filter((m) => m.local && m.delivered)
-      .map((m) => norm(m.content));
-    // 全等匹配不够：终端把注入的文本记进队列时常带上前后文，内容比原始输入长，
-    // 于是同一条任务在正文（送达气泡）和底部排队条各显示一遍。判据与 store 里
-    // 的 echoTakenOver 保持一致 —— 队列项包含回显全文即认作同一条。
-    const shownInFeed = (queuedText: string) =>
-      deliveredInFeed.some(
-        (d) => d === queuedText || (d.length >= 4 && queuedText.includes(d)),
-      );
+    // 不再和正文互相回避：正文是对话记录（我发了什么），这里是待执行队列
+    //（还有什么没跑），本来就是两件事，各显示各的。早先为了不重复而把正文里的
+    // 消息藏起来，反倒造成「我发的内容在对话流里不见了」。
+    //
     // 顺序即终端队列的真实先后：先铺 queued_inputs（终端 queue-operation 的真实 FIFO，
     // 最旧在上、最新在下），再把「还在 hub 队列、尚未注入终端」的本地回显（可撤回）挂在
     // 最下（它们是刚发出、最新的）。这样一条任务从「本地回显（挂底）」过渡到「终端原生
@@ -129,9 +97,6 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     // 时随 remove 出列而清掉。
     for (const t of task.queuedInputs ?? []) {
       const k = norm(t);
-      if (shownInFeed(k)) {
-        continue; // 正文里已作为送达气泡显示，跳过
-      }
       if (!seen.has(k)) {
         seen.add(k);
         items.push({ text: t, recallable: false });
@@ -401,8 +366,6 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 messages={feedMessages}
                 running={task.status === "running"}
                 providerDsr={task.providerDsr}
-                onRecall={(cmdId) => recallInput(id, cmdId)}
-                onRecallDelivered={() => termKey(id, "up", 1)}
               />
             </div>
           )}
@@ -470,7 +433,25 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
               {queuedItems.map((q, i) => (
                 <div key={i} className={styles.queuedItem}>
                   <span className={styles.queuedItemText}>{q.text}</span>
-                  {!q.recallable && (
+                  {/* 单条撤回从对话流搬到这里 —— 撤回是「队列管理」，跟排队条同属一处；
+                      留在正文里既与这块重复，又要为去重把消息藏起来。
+                      已进终端原生队列的撤不回（只能整体注入 ↑），仍只给个标签。 */}
+                  {q.recallable && q.cmdId ? (
+                    <span
+                      className={styles.queuedItemRecall}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => recallInput(id, q.cmdId as string)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          recallInput(id, q.cmdId as string);
+                        }
+                      }}
+                    >
+                      撤回
+                    </span>
+                  ) : (
                     <span className={styles.queuedTag}>已入终端队列</span>
                   )}
                 </div>
