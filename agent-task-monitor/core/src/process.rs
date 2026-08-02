@@ -176,14 +176,7 @@ impl ProcessScanner {
                 break;
             }
             let Some(proc_) = self.sys.process(Pid::from_u32(cur)) else {
-                // 链在**半途**断了：父进程已经退出，再往上无从判断 —— 保守保留。
-                //
-                // 这在 Windows 上是常态：终端窗口一关，里面的 claude 就成了孤儿，
-                // 父链只剩它自己。而 IDE 插件进程由常驻的扩展宿主拉起，能一路走到
-                // 桌面层（见下面的 is_desktop_root）。把「半途断链」判成插件一律丢弃，
-                // 会把关掉终端后仍在跑的会话全抹掉 —— 实测同一台机器 6 个 claude
-                // 只剩 1 个能被看到，其余 5 个都是父 shell 已退出的孤儿。
-                return true;
+                break;
             };
             let name = proc_.name().to_lowercase();
             if matches!(
@@ -193,23 +186,11 @@ impl ProcessScanner {
             ) {
                 return true;
             }
-            // 一路走到桌面/系统层都没遇到 shell —— 链是完整的，确实不是终端里跑的。
-            //
-            // 这一条是「半途断链保守保留」的必要配对：任何进程的父链最终都会断在
-            // 系统层（explorer 的父 userinit 早已退出），只认「断」的话等于全部放行，
-            // Cursor / ChatGPT 拉起的 codex 插件进程就会混进来当成终端会话
-            // （实测它们的链是 codex → Cursor → Cursor → explorer）。
-            if is_desktop_root(&name) {
-                return false;
-            }
             match proc_.parent().map(|p| p.as_u32()) {
                 Some(pp) if pp != cur => cur = pp,
-                // 没有父进程记录：同样属于半途断链，保守保留
-                _ => return true,
+                _ => break,
             }
         }
-        // 完整走完 16 层都没遇到 shell：父链是活的且确实不含 shell，
-        // 这才是 IDE 插件/后台服务的样子，排除掉
         false
     }
 
@@ -380,26 +361,6 @@ fn name_via_ps(_pid: u32) -> Option<String> {
 }
 
 /// 判断进程属于哪种 AI 编码代理；未来在此扩展新代理（如 gemini 等）
-/// 是否已经走到「桌面/系统根」这一层。
-///
-/// 到了这里还没遇到 shell，就说明这条父链是完整走到顶的、确实不含终端 ——
-/// 用来把 IDE / 桌面应用拉起的插件进程（Cursor、ChatGPT 的 codex 常驻进程）
-/// 与「父 shell 已退出的孤儿终端会话」区分开：后者的链断在半途。
-fn is_desktop_root(name_lower: &str) -> bool {
-    matches!(
-        name_lower,
-        "explorer.exe"
-            | "winlogon.exe"
-            | "wininit.exe"
-            | "services.exe"
-            | "svchost.exe"
-            | "userinit.exe"
-            | "systemd"
-            | "launchd"
-            | "init"
-    )
-}
-
 fn agent_kind(name: &str, cmd: &[String]) -> Option<&'static str> {
     // 只认「精确命中」：进程名、可执行文件基名、node 包装脚本的路径分量/基名。
     // 绝不能在整串命令行里 contains 子串 —— MCP 配置路径、扩展目录等参数里
@@ -1233,36 +1194,6 @@ fn action_label(action: ControlAction) -> &'static str {
         ControlAction::Kill => "已强制终止",
         ControlAction::Input => "已发送",
         ControlAction::TermKey => "已注入按键",
-    }
-}
-
-#[cfg(test)]
-mod desktop_root_tests {
-    use super::is_desktop_root;
-
-    /// 这个判据是「半途断链保守保留」的必要配对，去掉任何一半都会出问题：
-    /// 只认断链 → 桌面应用拉起的插件进程混进来当终端会话；
-    /// 只认 shell → 父 shell 已退出的孤儿会话被全部抹掉（实测 6 个只剩 1 个）。
-    #[test]
-    fn desktop_and_system_roots_are_recognized() {
-        for n in [
-            "explorer.exe",
-            "winlogon.exe",
-            "wininit.exe",
-            "services.exe",
-            "svchost.exe",
-            "userinit.exe",
-        ] {
-            assert!(is_desktop_root(n), "{n} 应被认作桌面/系统根");
-        }
-    }
-
-    /// IDE 与终端宿主都**不是**根：链要继续往上走，才可能遇到 shell 或走到桌面层
-    #[test]
-    fn apps_and_shells_are_not_roots() {
-        for n in ["cursor.exe", "code.exe", "chatgpt.exe", "powershell.exe", "claude.exe"] {
-            assert!(!is_desktop_root(n), "{n} 不该被当成根");
-        }
     }
 }
 
