@@ -265,6 +265,10 @@ pub struct AppState {
     pub login_throttle: RwLock<LoginThrottle>,
     /// 快照变更信号（tick 循环自增，WS 据此推送）
     pub tx: broadcast::Sender<u64>,
+    /// 钉钉机器人配置有变，Stream 循环该立刻重扫了。
+    /// 没有它就要等下一轮 30s 轮询 —— 用户刚保存完就会去钉钉发消息试，
+    /// 半分钟没反应只会以为自己配错了。
+    pub dingtalk_reload: std::sync::Arc<tokio::sync::Notify>,
     pub started_at: chrono::DateTime<chrono::Local>,
     /// 会话表有未落盘变更（tick 循环定期 flush 到 sessions.json）
     pub sessions_dirty: std::sync::atomic::AtomicBool,
@@ -289,9 +293,6 @@ pub struct AppState {
     /// 用户先发文件（或图文一起发图片）→ 暂存于此 → 下一条发任务的指令把它落到会话 tmp 目录、
     /// 并把相对路径回填到任务文字开头。
     pub bot_pending_files: RwLock<HashMap<String, Vec<BotPendingFile>>>,
-    /// 钉钉「待绑定」一次性 token：未记录的 staffId 收到消息时生成，回登录链接。
-    /// 用户登录后带 token 调 bind 接口 → 把该 staffId 绑到登录进的账号。token → 绑定上下文。
-    pub dingtalk_binds: RwLock<HashMap<String, PendingDingtalkBind>>,
 }
 
 /// 钉钉挂起的待发文件（downloadCode 换取下载地址，随下一条任务发出时才真正下载+下发）
@@ -303,26 +304,6 @@ pub struct BotPendingFile {
     pub app_user: String,
     /// 收到时刻（秒），用于过期清理
     pub at: u64,
-}
-
-/// 钉钉待绑定上下文（一次性 token 指向它）
-#[derive(Clone)]
-pub struct PendingDingtalkBind {
-    /// 待绑定的钉钉 staffId
-    pub staff_id: String,
-    /// 钉钉用户昵称（供界面显示）
-    pub nick: String,
-    /// 消息经由的钉钉应用账号（推送凭据来源）
-    pub app_user: String,
-    /// 该应用的 robotCode（推送用）
-    pub robot_code: String,
-    /// 生成时刻（秒），用于过期清理（30 分钟）
-    pub at: u64,
-}
-
-/// 生成一次性绑定 token（不可猜）
-pub fn new_bind_token() -> String {
-    uuid::Uuid::new_v4().simple().to_string()
 }
 
 /// 机器人持续监控一个会话的状态（通过钉钉会话级 webhook 推送新内容）
@@ -357,6 +338,7 @@ impl AppState {
             oauth_states: RwLock::new(HashMap::new()),
             login_throttle: RwLock::new(LoginThrottle::default()),
             tx,
+            dingtalk_reload: std::sync::Arc::new(tokio::sync::Notify::new()),
             started_at: chrono::Local::now(),
             sessions_dirty: std::sync::atomic::AtomicBool::new(false),
             history: RwLock::new(history),
@@ -366,7 +348,6 @@ impl AppState {
             bot_monitors: RwLock::new(HashMap::new()),
             bot_sticky_pending: RwLock::new(HashMap::new()),
             bot_pending_files: RwLock::new(HashMap::new()),
-            dingtalk_binds: RwLock::new(HashMap::new()),
         })
     }
 
@@ -536,14 +517,6 @@ pub async fn tick_loop(state: SharedState) {
                 }
             }
             state.pair_codes.write().await.retain(|_, e| !e.expired());
-            // 待绑定的钉钉链接同样要清 —— 未绑定的人每发一条消息就留一条，不清就只增不减。
-            // 多用户接入时这条尤其要紧：陌生 staffId 给机器人发消息是常态。
-            let now = now_secs();
-            state
-                .dingtalk_binds
-                .write()
-                .await
-                .retain(|_, p| now.saturating_sub(p.at) < crate::bot::BIND_TOKEN_TTL_SECS);
         }
         // 会话变更定期落盘（~60s 一次）：登录/登出/活动续期都只标脏，这里统一写
         if tick % 40 == 0 && state.sessions_dirty.swap(false, Ordering::Relaxed) {

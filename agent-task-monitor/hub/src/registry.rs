@@ -143,34 +143,27 @@ struct Persisted {
     /// 超级管理员用户名（首次启动由 AM_USERNAME 种子决定）
     #[serde(default)]
     super_user: String,
-    /// 钉钉群机器人推送配置：用户名 → webhook + 事件开关
-    #[serde(default)]
-    dingtalk: HashMap<String, crate::dingtalk::DingtalkNotify>,
-    /// 企业微信自建应用（双向）：用户名 → 配置
-    #[serde(default)]
-    wecom_apps: HashMap<String, WecomApp>,
-    /// 钉钉企业应用（双向）：用户名 → 配置
+    /// 【已废弃】钉钉群机器人（webhook 单向推送）。群机器人与企业微信整体移除，
+    /// 保留字段仅为让旧文件仍能反序列化，读进来即丢弃（故不读、也不写回）。
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
+    dingtalk: HashMap<String, serde_json::Value>,
+    /// 【已废弃】企业微信自建应用，同上
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
+    wecom_apps: HashMap<String, serde_json::Value>,
+    /// 钉钉企业应用（双向）：用户名 → 配置。**一个应用只服务配置它的那个账号** ——
+    /// 谁配的机器人，收到的消息就归谁，不再有「一个机器人服务多个用户」那套。
     #[serde(default)]
     dingtalk_apps: HashMap<String, DingtalkApp>,
     /// 钉钉文件接收目录（按项目）：用户名 → (项目 cwd → 接收目录)。
     /// 未配置的项目默认落到 `<项目 cwd>/tmp`。
     #[serde(default)]
     dingtalk_recv_dirs: HashMap<String, HashMap<String, String>>,
-    /// 钉钉 id 绑定（多租户）：staffId → 绑定信息。收到消息按 staffId 找账号；
-    /// 未绑定的 staffId 走「登录链接」流程绑定到登录进的账号。
-    #[serde(default)]
-    dingtalk_ids: HashMap<String, DingtalkIdBinding>,
-}
-
-/// 企业微信自建应用（用户自助接入，双向遥控）
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct WecomApp {
-    /// 回调 URL 里的不透明路由 id（用户专属）
-    pub channel: String,
-    pub corp_id: String,
-    pub token: String,
-    /// EncodingAESKey 原文（43 位）
-    pub aes_key: String,
+    /// 【已废弃】钉钉 id 绑定（多租户）。现在机器人只服务配置它的那个账号，
+    /// 不必再把每个 staffId 单独绑到账号上；保留字段仅为兼容旧文件。
+    #[serde(default, skip_serializing)]
+    dingtalk_ids: HashMap<String, serde_json::Value>,
 }
 
 /// 钉钉企业应用（用户自助接入，双向遥控）
@@ -186,22 +179,12 @@ pub struct DingtalkApp {
     /// 但以消息里带的为准。
     #[serde(default)]
     pub robot_code: String,
-    /// 【已弃用】旧版单一 staffId；现由全局 `dingtalk_ids`（多绑定）承载，
-    /// 仅保留以兼容旧文件、启动时迁移进 `dingtalk_ids`。
+    /// 跟这个机器人说过话的钉钉用户 staffId（收到消息时捕获），主动推送发给他。
+    ///
+    /// 一个应用只服务配置它的那个账号，所以这里只需记住「机器人对面是谁」即可 ——
+    /// 不必再维护一张 staffId → 账号的绑定表，用户也不用去绑自己的钉钉 id。
     #[serde(default)]
     pub staff_id: String,
-}
-
-/// 钉钉 id 绑定（多租户）：一个 staffId 唯一归属一个账号；一个账号可绑多个 staffId。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DingtalkIdBinding {
-    /// 归属的 agent-monitor 账号
-    pub user: String,
-    /// 该 staffId 是经哪个账号的钉钉应用（Stream/回调）进来的 —— 主动 OTO 推送要用它的凭据/robotCode
-    pub app_user: String,
-    /// 钉钉用户昵称（绑定时从消息里捕获，供界面显示；旧绑定为空则回退显示 staffId）
-    #[serde(default)]
-    pub nick: String,
 }
 
 pub struct Registry {
@@ -209,11 +192,9 @@ pub struct Registry {
     users: Vec<User>,
     devices: HashMap<String, DeviceMeta>,
     super_user: String,
-    dingtalk: HashMap<String, crate::dingtalk::DingtalkNotify>,
-    wecom_apps: HashMap<String, WecomApp>,
+    /// 用户名 → 他自己的钉钉应用。一个账号一个机器人，收到的消息就归他。
     dingtalk_apps: HashMap<String, DingtalkApp>,
     dingtalk_recv_dirs: HashMap<String, HashMap<String, String>>,
-    dingtalk_ids: HashMap<String, DingtalkIdBinding>,
 }
 
 impl Registry {
@@ -243,29 +224,28 @@ impl Registry {
             } else {
                 p.super_user
             };
-            // 旧文件迁移：把各钉钉应用里遗留的单一 staff_id 收拢进全局 dingtalk_ids
-            let mut dingtalk_ids = p.dingtalk_ids;
-            for (owner, app) in &p.dingtalk_apps {
-                if !app.staff_id.is_empty() {
-                    dingtalk_ids.entry(app.staff_id.clone()).or_insert_with(|| DingtalkIdBinding {
-                        user: owner.clone(),
-                        app_user: owner.clone(),
-                        nick: String::new(),
-                    });
+            // 旧数据迁移（群机器人 / 企微 / 多租户绑定移除后的一次性收敛）：
+            // 把旧的「staffId → 账号」绑定表回填进各账号自己的应用 staff_id ——
+            // 那是主动推送的收件人。一个账号绑过多个钉钉号时只留第一个：新模型下
+            // 机器人一对一，谁配的机器人就推给谁。
+            let mut dingtalk_apps = p.dingtalk_apps;
+            for (staff_id, bind) in &p.dingtalk_ids {
+                let Some(user) = bind.get("user").and_then(|v| v.as_str()) else { continue };
+                if let Some(app) = dingtalk_apps.get_mut(user) {
+                    if app.staff_id.is_empty() {
+                        app.staff_id = staff_id.clone();
+                    }
                 }
             }
-            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk: p.dingtalk, wecom_apps: p.wecom_apps, dingtalk_apps: p.dingtalk_apps, dingtalk_recv_dirs: p.dingtalk_recv_dirs, dingtalk_ids }
+            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk_apps, dingtalk_recv_dirs: p.dingtalk_recv_dirs }
         } else {
             Registry {
                 dir,
                 users: Vec::new(),
                 devices: HashMap::new(),
                 super_user: seed_user.to_string(),
-                dingtalk: HashMap::new(),
-                wecom_apps: HashMap::new(),
                 dingtalk_apps: HashMap::new(),
                 dingtalk_recv_dirs: HashMap::new(),
-                dingtalk_ids: HashMap::new(),
             }
         };
         if reg.users.is_empty() {
@@ -289,8 +269,6 @@ impl Registry {
         if migrated {
             reg.save();
         }
-        // 归一钉钉企业应用 / 群机器人 / 企业微信到 super_user（后管统一管理）
-        reg.migrate_bots_to_super();
         reg
     }
 
@@ -298,11 +276,13 @@ impl Registry {
         let p = Persisted {
             users: self.users.clone(),
             devices: self.devices.clone(),
-            dingtalk: self.dingtalk.clone(),
-            wecom_apps: self.wecom_apps.clone(),
             dingtalk_apps: self.dingtalk_apps.clone(),
             dingtalk_recv_dirs: self.dingtalk_recv_dirs.clone(),
-            dingtalk_ids: self.dingtalk_ids.clone(),
+            // 已废弃字段：写出时一律为空（Persisted 上标了 skip_serializing，
+            // 这里给默认值只是为了满足结构体字面量）
+            dingtalk: HashMap::new(),
+            wecom_apps: HashMap::new(),
+            dingtalk_ids: HashMap::new(),
             quota_limit: 0,
             super_user: self.super_user.clone(),
         };
@@ -422,149 +402,8 @@ impl Registry {
         self.users.iter().find(|u| u.username == username)
     }
 
-    // ---------- 用户自助集成（企业微信 / 钉钉应用，双向） ----------
+    // ---------- 用户自助集成（钉钉企业应用，双向） ----------
 
-    /// 保存企业微信自建应用配置；corp_id 为空则删除。返回该用户的回调 channel。
-    pub fn set_wecom_app(&mut self, user: &str, corp_id: &str, token: &str, aes_key: &str) -> Option<String> {
-        if corp_id.trim().is_empty() {
-            self.wecom_apps.remove(user);
-            self.save();
-            return None;
-        }
-        let channel = self.wecom_apps.get(user).map(|a| a.channel.clone())
-            .filter(|c| !c.is_empty())
-            .unwrap_or_else(new_channel);
-        self.wecom_apps.insert(user.to_string(), WecomApp {
-            channel: channel.clone(),
-            corp_id: corp_id.trim().to_string(),
-            token: token.trim().to_string(),
-            aes_key: aes_key.trim().to_string(),
-        });
-        self.save();
-        Some(channel)
-    }
-
-    pub fn wecom_app_of(&self, user: &str) -> Option<WecomApp> {
-        self.wecom_apps.get(user).cloned()
-    }
-
-    /// 按回调 channel 反查 (用户名, 配置)
-    pub fn wecom_app_by_channel(&self, channel: &str) -> Option<(String, WecomApp)> {
-        self.wecom_apps.iter().find(|(_, a)| a.channel == channel).map(|(u, a)| (u.clone(), a.clone()))
-    }
-
-    /// 保存钉钉企业应用配置；app_secret 为空则删除。app_key 填了则走 Stream 长连接。
-    /// 返回回调 channel（HTTP 回调模式用；Stream 模式用不到但保留兼容）。
-    /// 全局（后管管理员配置的）钉钉企业应用 —— 存在 super_user 名下，全体用户共用这一个。
-    pub fn global_dingtalk_app(&self) -> Option<DingtalkApp> {
-        self.dingtalk_apps.get(&self.super_user).cloned()
-    }
-
-    /// 后管设置全局钉钉企业应用（存到 super_user 名下）。
-    pub fn set_global_dingtalk_app(&mut self, app_secret: &str, app_key: &str) -> Option<String> {
-        let su = self.super_user.clone();
-        self.set_dingtalk_app(&su, app_secret, app_key)
-    }
-
-    /// 全局钉钉群机器人 webhook 推送配置（后管配置，存 super_user 名下）。
-    pub fn global_dingtalk_notify(&self) -> Option<crate::dingtalk::DingtalkNotify> {
-        self.dingtalk.get(&self.super_user).cloned()
-    }
-
-    /// 后管设置全局钉钉群机器人 webhook（webhook 空 = 清除）。
-    pub fn set_global_dingtalk_notify(&mut self, cfg: crate::dingtalk::DingtalkNotify) {
-        let su = self.super_user.clone();
-        if cfg.webhook.trim().is_empty() {
-            self.dingtalk.remove(&su);
-        } else {
-            self.dingtalk.insert(su, cfg);
-        }
-        self.save();
-    }
-
-    /// 全局企业微信自建应用（后管配置，存 super_user 名下）。
-    pub fn global_wecom_app(&self) -> Option<WecomApp> {
-        self.wecom_apps.get(&self.super_user).cloned()
-    }
-
-    /// 后管设置全局企业微信自建应用。
-    pub fn set_global_wecom_app(&mut self, corp_id: &str, token: &str, aes_key: &str) -> Option<String> {
-        let su = self.super_user.clone();
-        self.set_wecom_app(&su, corp_id, token, aes_key)
-    }
-
-    /// 归一：把「当前配置的钉钉企业应用 / 钉钉群机器人 / 企业微信」都迁到 super_user 名下
-    /// （后管统一管理），并把所有钉钉 id 绑定的 app_user 指向 super_user（全体共用）。
-    /// 启动时跑一次，幂等。
-    fn migrate_bots_to_super(&mut self) {
-        let su = self.super_user.clone();
-        let mut dirty = false;
-        // 钉钉企业应用：super 名下没有但别人配过 → 迁过来
-        if !self.dingtalk_apps.contains_key(&su) {
-            if let Some(key) = self
-                .dingtalk_apps
-                .iter()
-                .find(|(_, a)| !a.app_key.is_empty() || !a.app_secret.is_empty())
-                .map(|(k, _)| k.clone())
-            {
-                if let Some(app) = self.dingtalk_apps.remove(&key) {
-                    self.dingtalk_apps.insert(su.clone(), app);
-                    dirty = true;
-                }
-            }
-        }
-        // 钉钉群机器人 webhook：迁一份到 super
-        if !self.dingtalk.contains_key(&su) {
-            if let Some(key) =
-                self.dingtalk.iter().find(|(_, c)| !c.webhook.is_empty()).map(|(k, _)| k.clone())
-            {
-                if let Some(c) = self.dingtalk.remove(&key) {
-                    self.dingtalk.insert(su.clone(), c);
-                    dirty = true;
-                }
-            }
-        }
-        // 企业微信：迁一份到 super
-        if !self.wecom_apps.contains_key(&su) {
-            if let Some(key) =
-                self.wecom_apps.iter().find(|(_, a)| !a.corp_id.is_empty()).map(|(k, _)| k.clone())
-            {
-                if let Some(a) = self.wecom_apps.remove(&key) {
-                    self.wecom_apps.insert(su.clone(), a);
-                    dirty = true;
-                }
-            }
-        }
-        // 三者都只保留 super 名下这一份（其余历史 per-user 配置归一后删掉）
-        for (before, retained) in [
-            (self.dingtalk_apps.len(), {
-                self.dingtalk_apps.retain(|k, _| k == &su);
-                self.dingtalk_apps.len()
-            }),
-            (self.dingtalk.len(), {
-                self.dingtalk.retain(|k, _| k == &su);
-                self.dingtalk.len()
-            }),
-            (self.wecom_apps.len(), {
-                self.wecom_apps.retain(|k, _| k == &su);
-                self.wecom_apps.len()
-            }),
-        ] {
-            if before != retained {
-                dirty = true;
-            }
-        }
-        // 所有绑定都指向 super 的应用（现在只有一个）
-        for b in self.dingtalk_ids.values_mut() {
-            if b.app_user != su {
-                b.app_user = su.clone();
-                dirty = true;
-            }
-        }
-        if dirty {
-            self.save();
-        }
-    }
 
     pub fn set_dingtalk_app(&mut self, user: &str, app_secret: &str, app_key: &str) -> Option<String> {
         if app_secret.trim().is_empty() {
@@ -588,79 +427,26 @@ impl Registry {
 
     /// 收到 Stream 机器人消息时，捕获发信人 staffId 与 robotCode（主动 OTO 推送要用）。
     /// staffId「首次捕获即绑定」，之后不因别的发信人自动改绑（防止他人私聊机器人把推送劫持走）；
-    /// 要改绑用 `bind_dingtalk_staff` 显式覆盖。robotCode 是机器人自身编码、与发信人无关，可随时更新。
-    /// 仅在有变化时落盘。返回是否发生了变更。
-    /// 捕获钉钉应用的 robotCode（收消息时；主动 OTO 推送要用）。first-capture 不够——
-    /// robotCode 可能变，按最新的存。
-    pub fn capture_dingtalk_robot_code(&mut self, app_user: &str, robot_code: &str) -> bool {
-        if robot_code.is_empty() {
-            return false;
-        }
+    /// 收到消息时记下「机器人自身编码」和「对面是谁」——主动推送两样都要用。
+    ///
+    /// 两者都按最新的存：robotCode 可能变；staffId 则跟着最后一个跟机器人说话的人走，
+    /// 换个钉钉号来聊，推送自然跟过去（一个账号一个机器人，不存在争抢）。
+    /// 仅在有变化时落盘，避免每条消息都写一次注册表。
+    pub fn capture_dingtalk_peer(&mut self, app_user: &str, robot_code: &str, staff_id: &str) -> bool {
         let Some(app) = self.dingtalk_apps.get_mut(app_user) else { return false };
-        if app.robot_code == robot_code {
-            return false;
+        let mut changed = false;
+        if !robot_code.is_empty() && app.robot_code != robot_code {
+            app.robot_code = robot_code.to_string();
+            changed = true;
         }
-        app.robot_code = robot_code.to_string();
-        self.save();
-        true
-    }
-
-    /// 按 staffId 找归属账号（收到消息时用；找不到 → 走登录绑定流程）。
-    pub fn dingtalk_user_of(&self, staff_id: &str) -> Option<String> {
-        self.dingtalk_ids.get(staff_id).map(|b| b.user.clone())
-    }
-
-    /// 某账号名下已绑定的全部钉钉 id：(staff_id, app_user)。主动推送按此逐个 OTO。
-    pub fn dingtalk_ids_of(&self, user: &str) -> Vec<(String, String)> {
-        self.dingtalk_ids
-            .iter()
-            .filter(|(_, b)| b.user == user)
-            .map(|(sid, b)| (sid.clone(), b.app_user.clone()))
-            .collect()
-    }
-
-    /// 某账号名下已绑定钉钉 id 的展示信息：(staff_id, nick)。nick 空则界面回退显示 staff_id。
-    pub fn dingtalk_ids_detail_of(&self, user: &str) -> Vec<(String, String)> {
-        self.dingtalk_ids
-            .iter()
-            .filter(|(_, b)| b.user == user)
-            .map(|(sid, b)| (sid.clone(), b.nick.clone()))
-            .collect()
-    }
-
-    /// 绑定一个钉钉 id 到账号（登录后由 bind 接口调用）。app_user = 消息经由的应用账号。
-    /// 同时把该应用的 robotCode 记下（推送用）。nick 供界面显示。
-    pub fn bind_dingtalk_id(
-        &mut self,
-        staff_id: &str,
-        user: &str,
-        app_user: &str,
-        robot_code: &str,
-        nick: &str,
-    ) {
-        if !robot_code.is_empty() {
-            if let Some(app) = self.dingtalk_apps.get_mut(app_user) {
-                app.robot_code = robot_code.to_string();
-            }
+        if !staff_id.is_empty() && app.staff_id != staff_id {
+            app.staff_id = staff_id.to_string();
+            changed = true;
         }
-        self.dingtalk_ids.insert(
-            staff_id.to_string(),
-            DingtalkIdBinding {
-                user: user.to_string(),
-                app_user: app_user.to_string(),
-                nick: nick.to_string(),
-            },
-        );
-        self.save();
-    }
-
-    /// 解绑某个钉钉 id。返回原本是否绑过。
-    pub fn unbind_dingtalk_id(&mut self, staff_id: &str) -> bool {
-        let existed = self.dingtalk_ids.remove(staff_id).is_some();
-        if existed {
+        if changed {
             self.save();
         }
-        existed
+        changed
     }
 
     /// 所有配了 Stream（app_key+app_secret 都非空）的钉钉应用：(user, app_key, app_secret)
@@ -678,21 +464,6 @@ impl Registry {
 
     pub fn dingtalk_app_by_channel(&self, channel: &str) -> Option<(String, DingtalkApp)> {
         self.dingtalk_apps.iter().find(|(_, a)| a.channel == channel).map(|(u, a)| (u.clone(), a.clone()))
-    }
-
-    // ---------- 钉钉推送配置 ----------
-
-    pub fn set_dingtalk(&mut self, username: &str, cfg: crate::dingtalk::DingtalkNotify) {
-        if cfg.webhook.trim().is_empty() {
-            self.dingtalk.remove(username);
-        } else {
-            self.dingtalk.insert(username.to_string(), cfg);
-        }
-        self.save();
-    }
-
-    pub fn dingtalk_of(&self, username: &str) -> Option<crate::dingtalk::DingtalkNotify> {
-        self.dingtalk.get(username).cloned()
     }
 
     /// 某项目配置的钉钉文件接收目录（未配置返回 None → 调用方回落 `<cwd>/tmp`）。

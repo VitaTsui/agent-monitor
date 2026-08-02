@@ -344,26 +344,13 @@ export const claimPairDevice = (code: string) => {
 // ---------- 用户自助机器人集成 ----------
 
 export interface IntegrationsInfo {
-  dingtalkRobot: {
-    webhook: string;
+  /** 自己的钉钉机器人（一个账号一个，谁配的就服务谁） */
+  dingtalk?: {
+    appKey: string;
     hasSecret: boolean;
-    waiting: boolean;
-    finished: boolean;
-    newSession: boolean;
-    device: boolean;
-  } | null;
-  wecomApp: {
-    corpId: string;
-    token: string;
-    hasAesKey: boolean;
-    callbackUrl: string;
-  } | null;
-  dingtalkApp: {
-    hasSecret: boolean;
-    appKey?: string;
-    stream?: boolean;
-    callbackUrl: string;
-  } | null;
+    /** 已经跟机器人说过话 = 它知道该把推送发给谁了 */
+    linked: boolean;
+  };
   /** 机器人文件接收目录（所有渠道通用）：按「设备 → 项目」层级列出 */
   recvDirDevices?: {
     machineId: string;
@@ -389,64 +376,9 @@ export const setDingtalkRecvDir = async (project: string, dir: string) => {
   );
 };
 
-/** 登录后凭一次性 token 把发起绑定的钉钉 id 绑到当前账号（钉钉机器人回的 ?dtbind= 链接用） */
-export const bindDingtalkId = async (token: string) => {
-  return await post<{ result: string; staffId: string }>(
-    "/monitor/integrations/dingtalk-bind",
-    { token }
-  );
-};
-
-/** 当前账号已绑定的钉钉 id 列表（nick = 钉钉昵称，空则回退显示 staffId） */
-export const getDingtalkIds = async () => {
-  return await get<ListRes<{ staffId: string; nick: string }>>(
-    "/monitor/integrations/dingtalk-ids"
-  );
-};
-
-/** 解绑当前账号的某个钉钉 id */
-export const unbindDingtalkId = async (staffId: string) => {
+/** 配置自己的钉钉机器人；appKey 传空 = 解绑。appSecret 留空表示沿用已存的 */
+export const setDingtalkApp = async (data: { appKey: string; appSecret?: string }) => {
   return await post<{ result: string }>(
-    "/monitor/integrations/dingtalk-unbind",
-    { staffId }
-  );
-};
-
-/** 钉钉群机器人（主动推送） */
-export const setDingtalkRobot = async (data: {
-  webhook: string;
-  secret?: string;
-  waiting: boolean;
-  finished: boolean;
-  newSession: boolean;
-  device: boolean;
-}) => {
-  return await post<boolean>("/monitor/integrations/dingtalk-robot", data);
-};
-
-export const testDingtalkRobot = async () => {
-  return await post<boolean>("/monitor/integrations/dingtalk-robot/test", {});
-};
-
-/** 企业微信自建应用（双向），返回专属回调地址 */
-export const setWecomApp = async (data: {
-  corpId: string;
-  token?: string;
-  aesKey?: string;
-}) => {
-  return await post<{ callbackUrl: string | null }>(
-    "/monitor/integrations/wecom-app",
-    data,
-  );
-};
-
-/** 钉钉企业应用（双向），返回专属回调地址 */
-export const setDingtalkApp = async (data: {
-  appSecret?: string;
-  /** 填了 AppKey 走 Stream 长连接（免公网回调）；传 "" 清空回 HTTP 回调模式 */
-  appKey?: string;
-}) => {
-  return await post<{ callbackUrl: string | null; stream?: boolean }>(
     "/monitor/integrations/dingtalk-app",
     data,
   );

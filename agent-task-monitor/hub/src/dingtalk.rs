@@ -1,53 +1,13 @@
-//! 钉钉主动推送：会话状态变化 → 推到用户配置的钉钉群自定义机器人。
-//! 群自定义机器人 Webhook 是单向（服务器→群），个人钉钉号建群即可用，
-//! 无需组织/认证 —— 正好补上微信公众号做不到的「主动推送」。
+//! 钉钉主动推送：会话状态变化 → 私聊推给账号本人。
+//! 走企业应用 OTO（Stream 长连接），机器人由用户在前台自助配置：
+//! 谁配的机器人就服务谁，收到的消息也归他。
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use hmac::{Hmac, Mac};
-use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
-
-/// 用户的钉钉推送配置（存注册表，随账号持久化）
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DingtalkNotify {
-    /// 群自定义机器人 Webhook 地址
-    pub webhook: String,
-    /// 加签密钥（机器人「安全设置 → 加签」的 SEC... 串；留空表示未用加签）
-    #[serde(default)]
-    pub secret: String,
-    /// 事件开关
-    #[serde(default)]
-    pub waiting: bool, // 会话等待输入
-    #[serde(default)]
-    pub finished: bool, // 会话结束/退出
-    #[serde(default)]
-    pub new_session: bool, // 新会话开始
-    #[serde(default)]
-    pub device: bool, // 设备上线/离线
-}
-
-impl DingtalkNotify {
-    pub fn enabled(&self) -> bool {
-        !self.webhook.is_empty()
-    }
-}
-
-/// 给 Webhook 追加加签参数（钉钉加签：sign=base64(HmacSHA256(secret, "{ts}\n{secret}"))）
-fn signed_url(webhook: &str, secret: &str, now_ms: u64) -> String {
-    if secret.is_empty() {
-        return webhook.to_string();
-    }
-    let string_to_sign = format!("{now_ms}\n{secret}");
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac key");
-    mac.update(string_to_sign.as_bytes());
-    let sig = B64.encode(mac.finalize().into_bytes());
-    let sig = urlencode(&sig);
-    let sep = if webhook.contains('?') { '&' } else { '?' };
-    format!("{webhook}{sep}timestamp={now_ms}&sign={sig}")
-}
 
 /// 校验钉钉企业应用「消息接收(HTTP)」回调签名。
 /// 钉钉：sign = base64(HmacSHA256(key=appSecret, msg="{timestamp}\n{appSecret}"))
@@ -82,46 +42,7 @@ fn md_title(text: &str) -> String {
     crate::mdfmt::derive_title(text, "终端通知", 24)
 }
 
-/// 推送一条 markdown 到钉钉群机器人 Webhook。now_ms 由调用方给（便于测试）。
-///
-/// 发送前统一降级（表格→列表、去围栏行）并按单条上限分片：agent 输出天然带表格和代码围栏，
-/// 而钉钉手机端基本不渲染这两样，直接推过去就是一堆 `|---|` 和孤立的 ```。
-pub async fn push_text(cfg: &DingtalkNotify, text: &str, now_ms: u64) -> Result<(), String> {
-    let md = crate::mdfmt::downgrade_for_dingtalk(text);
-    let chunks = crate::mdfmt::chunk_text(&md, crate::mdfmt::DINGTALK_MAX_LEN);
-    for chunk in chunks {
-        push_one(cfg, &chunk, now_ms).await?;
-    }
-    Ok(())
-}
-
-/// 发一条（已降级、已分片）markdown
-async fn push_one(cfg: &DingtalkNotify, text: &str, now_ms: u64) -> Result<(), String> {
-    let url = signed_url(&cfg.webhook, &cfg.secret, now_ms);
-    let body = serde_json::json!({
-        "msgtype": "markdown",
-        "markdown": { "title": md_title(text), "text": text }
-    });
-    let resp = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .map_err(|e| e.to_string())?
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {e}"))?;
-    let status = resp.status();
-    let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
-    // 钉钉成功返回 {"errcode":0,...}
-    if v.get("errcode").and_then(|c| c.as_i64()) == Some(0) {
-        Ok(())
-    } else {
-        Err(format!("钉钉拒绝（HTTP {status}）: {v}"))
-    }
-}
-
-// ---------- 企业应用 OTO 主动推送（Stream 用户，无需群机器人 webhook） ----------
+// ---------- 企业应用 OTO 主动推送 ----------
 
 /// access_token 缓存：app_key -> (token, 过期 epoch 秒)。钉钉 token 2h 有效，缓存复用。
 fn token_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, (String, u64)>> {
@@ -327,20 +248,7 @@ pub enum EventKind {
     Select,
 }
 
-impl DingtalkNotify {
-    fn wants(&self, k: EventKind) -> bool {
-        match k {
-            EventKind::Waiting => self.waiting,
-            EventKind::Finished => self.finished,
-            EventKind::NewSession => self.new_session,
-            EventKind::Device => self.device,
-            // 群 webhook 复用「等待输入」开关；企业应用 OTO 一律推（见 deliver）
-            EventKind::Select => self.waiting,
-        }
-    }
-}
-
-/// 后台推送：对开启了对应事件的用户，逐条发钉钉（失败只记日志，不阻塞）。
+/// 后台推送：把会话事件私聊推给账号本人（失败只记日志，不阻塞）。
 /// now_ms 由调用方给（tick/report 里取一次系统时间）。
 pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>, now_ms: u64) {
     for ev in events {
@@ -358,17 +266,12 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
                 .replace("{N}", &n.to_string()),
             None => ev.text.replace("{NO}", "").replace("{N}", "N"),
         };
-        // 1) 群自定义机器人 Webhook（后管统一配置的全局群，按事件开关推送）
-        let cfg = state.registry.read().await.global_dingtalk_notify();
-        if let Some(cfg) = cfg {
-            if cfg.enabled() && cfg.wants(ev.kind) {
-                if let Err(e) = push_text(&cfg, &text, now_ms).await {
-                    tracing::warn!("钉钉 Webhook 推送失败（{}）: {e}", ev.owner);
-                }
-            }
-        }
-        // 2) 企业应用 OTO 主动推：会话开始 / 任务完成 / 会话结束，直接私聊给用户本人。
-        //    设备上线不推（避免噪音）；需已配 Stream 应用且已捕获 staffId。
+        // 企业应用 OTO 主动推：会话开始 / 任务完成 / 会话结束，直接私聊给用户本人。
+        // 设备上线不推（避免噪音）；需该账号已配好自己的应用、且捕获过对面的 staffId
+        //（用户给机器人发过一句话就有了）。
+        //
+        // 只认「本人的应用 → 本人的钉钉号」这一条通路：机器人是谁配的就服务谁，
+        // 不再有全局群 webhook，也不再按 staffId 去查它归属哪个账号。
         if matches!(
             ev.kind,
             EventKind::NewSession
@@ -383,24 +286,24 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
                 EventKind::NewSession => "NewSession",
                 _ => "?",
             };
-            // 该账号名下已绑定的所有钉钉 id，各推一份 —— 每个 id 用其「来源应用」的凭据/robotCode。
-            let binds = state.registry.read().await.dingtalk_ids_of(&ev.owner);
-            if binds.is_empty() {
-                tracing::warn!("钉钉 OTO 跳过：账号未绑定任何钉钉 id（{}）", ev.owner);
+            let app = state.registry.read().await.dingtalk_app_of(&ev.owner);
+            let Some(app) = app else {
+                tracing::warn!("钉钉推送跳过：账号未配置钉钉机器人（{}）", ev.owner);
+                continue;
+            };
+            if app.app_key.is_empty() || app.app_secret.is_empty() {
+                continue;
             }
-            for (staff_id, app_user) in binds {
-                let Some(app) = state.registry.read().await.dingtalk_app_of(&app_user) else {
-                    continue;
-                };
-                if app.app_key.is_empty() || app.app_secret.is_empty() {
-                    continue;
-                }
-                match push_oto(&app, &staff_id, &text, ev.full_content.as_deref(), now_ms).await {
-                    Ok(_) => tracing::info!("钉钉 OTO 已推送 kind={kind}（{}→{staff_id}）", ev.owner),
-                    Err(e) => {
-                        tracing::warn!("钉钉 OTO 推送失败 kind={kind}（{}→{staff_id}）: {e}", ev.owner)
-                    }
-                }
+            if app.staff_id.is_empty() {
+                tracing::warn!(
+                    "钉钉推送跳过：还不知道该发给谁，请先在钉钉里给机器人发一句话（{}）",
+                    ev.owner
+                );
+                continue;
+            }
+            match push_oto(&app, &app.staff_id, &text, ev.full_content.as_deref(), now_ms).await {
+                Ok(_) => tracing::info!("钉钉已推送 kind={kind}（{}）", ev.owner),
+                Err(e) => tracing::warn!("钉钉推送失败 kind={kind}（{}）: {e}", ev.owner),
             }
         }
     }
@@ -410,26 +313,23 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
 mod tests {
     use super::*;
 
+    /// 回调验签是钉钉侧唯一的身份凭据：签错就该拒，不能放行。
     #[test]
-    fn sign_shape() {
-        let u = signed_url("https://oapi.dingtalk.com/robot/send?access_token=abc", "SECxyz", 1700000000000);
-        assert!(u.contains("&timestamp=1700000000000"));
-        assert!(u.contains("&sign="));
-        // 无 secret 时原样返回
-        assert_eq!(
-            signed_url("https://x/robot/send?access_token=abc", "", 1),
-            "https://x/robot/send?access_token=abc"
-        );
+    fn app_sign_verifies_and_rejects() {
+        // 用同一套算法算出期望签名，验证 verify_app_sign 认它
+        let secret = "mysecret";
+        let ts = "1700000000000";
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(format!("{ts}\n{secret}").as_bytes());
+        let good = B64.encode(mac.finalize().into_bytes());
+        assert!(verify_app_sign(secret, ts, &good), "正确签名应通过");
+        assert!(!verify_app_sign(secret, ts, "bogus"), "错误签名必须拒绝");
+        assert!(!verify_app_sign(secret, "1700000000001", &good), "时间戳变了签名就不该过");
     }
 
     #[test]
-    fn sign_is_stable_hmac() {
-        // 固定输入 → 固定签名（回归锁定 HmacSHA256 + base64 + urlencode 链路）
-        let u = signed_url("https://x", "mysecret", 1234567890000);
-        let sign = u.split("sign=").nth(1).unwrap();
-        // 解出来能 base64 解码（urldecode 后）
-        let decoded = urlencode("dummy");
-        assert!(!decoded.contains('+'));
-        assert!(!sign.is_empty());
+    fn urlencode_escapes_base64_chars() {
+        // base64 里的 + / = 必须转义，否则拼进 URL 会被解析成别的意思
+        assert_eq!(urlencode("a+b/c="), "a%2Bb%2Fc%3D");
     }
 }

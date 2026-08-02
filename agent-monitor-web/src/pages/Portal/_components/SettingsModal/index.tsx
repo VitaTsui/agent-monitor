@@ -316,7 +316,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
   }[] = [
     { key: "account", label: "账户", icon: <UserOutlined />, color: "#0f9bad" },
     { key: "devices", label: "设备管理", icon: <LaptopOutlined />, color: "#3a8cff", badge: pendingCount },
-    { key: "bots", label: "机器人接入", icon: <RobotOutlined />, color: "#21b34a" },
+    { key: "bots", label: "机器人管理", icon: <RobotOutlined />, color: "#21b34a" },
     { key: "security", label: "安全防护", icon: <SafetyOutlined />, color: "#f2933c" },
     { key: "about", label: "关于", icon: <InfoCircleOutlined />, color: "#8a94a6" },
   ];
@@ -757,10 +757,10 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
 
           {tab === "bots" && (
             <div className={styles.pane}>
-              <div className={styles.paneTitle}>机器人接入</div>
+              <div className={styles.paneTitle}>机器人管理</div>
               <div className={styles.hint}>
-                每种渠道都由你自己接入：钉钉群机器人做主动推送，企业微信自建应用 /
-                钉钉企业应用做双向遥控（把生成的回调地址填进各自后台）。
+                配置你自己的钉钉机器人：一个账号一个，它收到的消息就归你、推送也只发给你。
+                配好后在钉钉里发指令就能遥控会话，任务完成/需要你决定时也会私聊提醒。
               </div>
               <IntegrationsPanel />
             </div>

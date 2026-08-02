@@ -4,10 +4,8 @@ import { installFreshnessGuard } from "./utils/freshness";
 import { installKeyboardInset } from "./utils/keyboardInset";
 import { installSheetSwipe } from "./utils/sheetSwipe";
 import { hideSplashWhenReady } from "./utils/splash";
-import { stashDtbindToken } from "./utils/dtbind";
 
 // 一进站就把钉钉绑定 token 从 URL 摘出暂存（登录跳转会丢查询参数），登录后由 Portal 消费绑定
-stashDtbindToken();
 installFreshnessGuard();
 installKeyboardInset();
 installSheetSwipe();

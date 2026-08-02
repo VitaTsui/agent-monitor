@@ -53,7 +53,12 @@ pub async fn run(state: SharedState) {
             }
         }
 
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        // 平时 30s 扫一轮；用户刚改完机器人配置会立刻叫醒我们，免得他在钉钉那头
+        // 等半分钟没反应、以为配错了。
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+            _ = state.dingtalk_reload.notified() => {}
+        }
     }
 }
 

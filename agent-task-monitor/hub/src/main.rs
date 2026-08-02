@@ -15,7 +15,7 @@ mod server;
 mod slots;
 mod state;
 mod bot;
-mod wecom;
+
 
 use anyhow::{Context, Result};
 use rsa::pkcs8::DecodePrivateKey;

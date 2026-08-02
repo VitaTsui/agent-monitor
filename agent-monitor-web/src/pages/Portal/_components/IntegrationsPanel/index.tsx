@@ -7,30 +7,27 @@ import { Button, Input, Modal } from "@hsu-react/ui";
 
 import {
   IntegrationsInfo,
-  getDingtalkIds,
   getIntegrations,
+  setDingtalkApp,
   getTaskDirs,
   setDingtalkRecvDir,
-  unbindDingtalkId,
 } from "@/services/apis/portal";
 import styles from "./index.module.scss";
 
 /**
- * 机器人接入（用户端）：机器人（钉钉企业应用 / 群机器人 / 企业微信）由管理员在后管统一配置，
- * 用户这里只做两件事：① 配置「文件接收目录」；② 查看/解绑自己已绑定的钉钉号。
- * 绑定方式：给企业应用机器人发消息 → 按回复的登录链接登录即绑定本账号。
+ * 机器人管理（用户端）：在这里配置**自己的**钉钉机器人。
+ *
+ * 一个账号一个机器人：谁配的机器人，它收到的消息就归谁、推送也只发给他 ——
+ * 不需要再单独去绑定自己的钉钉 id，也没有一个机器人服务多人那套。
+ * 另外可配「文件接收目录」（机器人收到的文件落在项目里的哪儿）。
  */
 const IntegrationsPanel: React.FC = () => {
-  // 已绑定的钉钉（staffId + 昵称）
-  const [boundIds, setBoundIds] = useState<{ staffId: string; nick: string }[]>([]);
-
-  const loadBoundIds = useCallback(() => {
-    getDingtalkIds()
-      .then((res) => {
-        if (res.code === 0) setBoundIds(res.data?.list ?? []);
-      })
-      .catch(() => void 0);
-  }, []);
+  // 自己的钉钉机器人
+  const [appKey, setAppKey] = useState("");
+  const [appSecret, setAppSecret] = useState("");
+  const [hasSecret, setHasSecret] = useState(false);
+  const [linked, setLinked] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   // 机器人文件接收目录（通用）：按设备分组的项目
   type RecvProj = { cwd: string; name: string; dir: string; taskId?: string | null };
@@ -132,20 +129,31 @@ const IntegrationsPanel: React.FC = () => {
         const edits: Record<string, string> = {};
         devs.forEach((dev) => dev.projects.forEach((p) => (edits[p.cwd] = p.dir)));
         setRecvEdits(edits);
+        // 自己的机器人（密钥不回显，只知道配没配）
+        setAppKey(d.dingtalk?.appKey ?? "");
+        setHasSecret(!!d.dingtalk?.hasSecret);
+        setLinked(!!d.dingtalk?.linked);
       })
       .catch(() => void 0);
   }, []);
   useEffect(() => load(), [load]);
-  useEffect(() => loadBoundIds(), [loadBoundIds]);
 
-  const removeBound = (staffId: string) => {
-    unbindDingtalkId(staffId)
+  const saveApp = () => {
+    const key = appKey.trim();
+    if (key && !appSecret.trim() && !hasSecret) {
+      return message.error("请填写 AppSecret");
+    }
+    setSaving(true);
+    setDingtalkApp({ appKey: key, appSecret: appSecret.trim() })
       .then((res) => {
-        if (res.code !== 0) return message.error(res.msg ?? "解绑失败");
-        message.success("已解绑");
-        setBoundIds((ids) => ids.filter((x) => x.staffId !== staffId));
+        if (res.code !== 0) return message.error(res.msg ?? "保存失败");
+        message.success(res.data?.result ?? "已保存");
+        setAppSecret("");
+        setHasSecret(!!key);
+        if (!key) setLinked(false);
       })
-      .catch(() => message.error("解绑失败，请检查网络"));
+      .catch(() => message.error("保存失败，请检查网络"))
+      .finally(() => setSaving(false));
   };
 
   return (
@@ -179,31 +187,63 @@ const IntegrationsPanel: React.FC = () => {
         <RightOutlined className={styles.arrow} />
       </div>
 
-      {/* 已绑定的钉钉：机器人由管理员在后管统一配置，用户经机器人回的登录链接绑定自己的钉钉号 */}
+      {/* 自己的钉钉机器人：一个账号一个，配好即归自己 */}
       <div className={styles.groupTitle}>钉钉</div>
       <div className={styles.boundCard}>
         <div className={styles.boundTitle}>
           <DingtalkOutlined className={styles.boundTitleIcon} />
           钉钉机器人
+          {hasSecret ? (
+            <span
+              className={`${styles.botState} ${linked ? styles.botOk : ""}`}
+              // 配好了但还没人跟它说过话时，hub 不知道该把推送发给谁
+              title={linked ? "已连通，推送会私聊发给你" : "还没收到过你的消息"}
+            >
+              {linked ? "已连通" : "待发首条消息"}
+            </span>
+          ) : null}
         </div>
-        {boundIds.length === 0 ? (
-          <div className={styles.boundEmpty}>
-            未绑定。去钉钉里给机器人发条消息，按回复的链接登录即可绑定。
+        <div className={styles.botForm}>
+          <Input
+            placeholder="AppKey（钉钉应用的 ClientID）"
+            value={appKey}
+            onChange={(v: string) => setAppKey(v)}
+          />
+          <Input
+            type="password"
+            placeholder={hasSecret ? "AppSecret（已保存，留空则不改）" : "AppSecret"}
+            value={appSecret}
+            onChange={(v: string) => setAppSecret(v)}
+          />
+          <div className={styles.botActions}>
+            <Button type="primary" loading={saving} onClick={saveApp}>
+              保存
+            </Button>
+            {hasSecret ? (
+              <Button
+                loading={saving}
+                onClick={() => {
+                  setAppKey("");
+                  setAppSecret("");
+                  setDingtalkApp({ appKey: "" })
+                    .then(() => {
+                      message.success("已解绑");
+                      setHasSecret(false);
+                      setLinked(false);
+                    })
+                    .catch(() => message.error("解绑失败"));
+                }}
+              >
+                解绑
+              </Button>
+            ) : null}
           </div>
-        ) : (
-          <div className={styles.boundList}>
-            {boundIds.map((b) => (
-              <div key={b.staffId} className={styles.boundRow}>
-                <span className={styles.boundId} title={b.staffId}>
-                  已绑定 {b.nick || b.staffId}
-                </span>
-                <Button size="small" onClick={() => removeBound(b.staffId)}>
-                  解绑
-                </Button>
-              </div>
-            ))}
+          <div className={styles.botHint}>
+            在钉钉开放平台建一个「企业内部应用 · 机器人」，开启 Stream
+            模式，把 ClientID / ClientSecret 填到这里。保存后去钉钉给机器人发句话，
+            它就知道该把消息推给谁了。
           </div>
-        )}
+        </div>
       </div>
 
       {/* 接收目录配置弹窗：设备 → 项目 层级列全 */}

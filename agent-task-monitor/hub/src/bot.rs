@@ -1,87 +1,16 @@
-//! 机器人指令网关：每个用户自助接入自己的企业微信自建应用 / 钉钉企业应用，
+//! 机器人指令网关：每个用户在前台自助接入自己的钉钉企业应用，
 //! 用文字指令遥控自己的会话（查看/暂停/恢复/中断/终止/发布输入）。
 //!
-//! 路由靠回调 URL 里的 channel：`/monitor/int/{wecom|dingtalk}/<channel>`。
+//! 路由靠回调 URL 里的 channel：`/monitor/int/dingtalk/<channel>`。
 //! channel 反查到配置所属用户 → 指令即以该用户身份执行（URL 即绑定，无需绑定码）。
 
 use crate::state::SharedState;
-use crate::{dingtalk, wecom};
+use crate::dingtalk;
 use am_core::model::{ControlAction, ControlCmd, TaskStatus};
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use axum::Json;
-use serde::Deserialize;
 use serde_json::{json, Value};
-
-// ---------- 企业微信自建应用回调（每用户 channel） ----------
-
-#[derive(Deserialize)]
-pub struct WecomCbQuery {
-    msg_signature: String,
-    timestamp: String,
-    nonce: String,
-    #[serde(default)]
-    echostr: String,
-}
-
-/// GET /monitor/int/wecom/:channel —— 企业微信「接收消息」URL 验证
-pub async fn wecom_verify(
-    State(state): State<SharedState>,
-    Path(channel): Path<String>,
-    Query(q): Query<WecomCbQuery>,
-) -> impl IntoResponse {
-    let Some((_, app)) = state.registry.read().await.wecom_app_by_channel(&channel) else {
-        return (StatusCode::NOT_FOUND, "无效的回调地址".to_string());
-    };
-    let Some(cfg) = wecom::WecomConfig::from_parts(&app.token, &app.aes_key, &app.corp_id) else {
-        return (StatusCode::BAD_REQUEST, "配置的 EncodingAESKey 非法".to_string());
-    };
-    let sig = wecom::msg_signature(&cfg.token, &q.timestamp, &q.nonce, &q.echostr);
-    if sig != q.msg_signature {
-        return (StatusCode::FORBIDDEN, "签名校验失败".to_string());
-    }
-    match wecom::decrypt(&cfg, &q.echostr) {
-        Ok(plain) => (StatusCode::OK, plain),
-        Err(e) => (StatusCode::BAD_REQUEST, e),
-    }
-}
-
-/// POST /monitor/int/wecom/:channel —— 企业微信收消息 + 被动回复（加密）
-pub async fn wecom_message(
-    State(state): State<SharedState>,
-    Path(channel): Path<String>,
-    Query(q): Query<WecomCbQuery>,
-    body: String,
-) -> impl IntoResponse {
-    let Some((owner, app)) = state.registry.read().await.wecom_app_by_channel(&channel) else {
-        return (StatusCode::NOT_FOUND, String::new());
-    };
-    let Some(cfg) = wecom::WecomConfig::from_parts(&app.token, &app.aes_key, &app.corp_id) else {
-        return (StatusCode::BAD_REQUEST, String::new());
-    };
-    let Some(encrypt) = wecom::xml_field(&body, "Encrypt") else {
-        return (StatusCode::BAD_REQUEST, String::new());
-    };
-    if wecom::msg_signature(&cfg.token, &q.timestamp, &q.nonce, &encrypt) != q.msg_signature {
-        return (StatusCode::FORBIDDEN, String::new());
-    }
-    let inner = match wecom::decrypt(&cfg, &encrypt) {
-        Ok(x) => x,
-        Err(_) => return (StatusCode::BAD_REQUEST, String::new()),
-    };
-    let msg_type = wecom::xml_field(&inner, "MsgType").unwrap_or_default();
-    let content = wecom::xml_field(&inner, "Content").unwrap_or_default();
-    let reply = if msg_type == "text" {
-        // 企业微信走 XML 同步回复，无会话 webhook，「监控」在此渠道不可用
-        dispatch(&state, &owner, content.trim(), None).await
-    } else {
-        "只认文字指令，发「帮助」看用法。".to_string()
-    };
-    let rand16 = rand16();
-    let xml = wecom::build_reply(&cfg, &reply, &q.timestamp, &q.nonce, &rand16);
-    (StatusCode::OK, xml)
-}
 
 // ---------- 钉钉企业应用回调（每用户 channel，同步回复） ----------
 
@@ -129,13 +58,6 @@ pub async fn dingtalk_message(
     };
     // 同步回复：钉钉直接把响应体当作机器人回复消息
     Json(json!({ "msgtype": "text", "text": { "content": reply } }))
-}
-
-fn rand16() -> [u8; 16] {
-    let b = uuid::Uuid::new_v4().into_bytes();
-    let mut r = [0u8; 16];
-    r.copy_from_slice(&b[..16]);
-    r
 }
 
 // ---------- 指令调度（渠道无关，以账号身份执行） ----------
@@ -343,65 +265,30 @@ async fn run_command(
 }
 
 /// 待绑定链接的有效期。同一 staffId 在这段时间内重发消息复用同一个 token；
-/// 超期的条目由 tick 循环清掉（否则未绑定的人每发一条消息就留一条，只增不减）。
-pub const BIND_TOKEN_TTL_SECS: u64 = 30 * 60;
 
-/// 渠道收到消息后先按 staffId 找归属账号：
-/// - 找到 → Ok(账号)，按该账号身份执行指令 / 收推送；
-/// - 没找到（未绑定的钉钉 id）→ Err(登录链接回复)：生成一次性 token、回一段带登录链接的文案，
-///   用户登录后带 token 调 bind 接口，把这个 staffId 绑到登录进的账号。
-/// `app_owner` = 消息经由的钉钉应用配置账号（推送凭据/robotCode 来源）。
+/// 消息归属：**应用是谁配的，消息就归谁**。
+///
+/// 机器人由用户在前台「机器人管理」里自助配置，一个账号一个机器人，
+/// 所以拿到 `app_owner`（channel/Stream 连接对应的配置账号）就够了 ——
+/// 不需要再按 staffId 去查绑定表，用户也不必先点登录链接绑定自己的钉钉号。
+///
+/// 顺带把 robotCode 与「对面是谁」记下来，主动推送要用。
 pub(crate) async fn resolve_account(
     state: &SharedState,
     app_owner: &str,
     staff_id: &str,
     robot_code: &str,
-    nick: &str,
+    _nick: &str,
 ) -> Result<String, String> {
     if staff_id.is_empty() {
         return Err("拿不到你的钉钉身份（senderStaffId 为空），无法关联账号。".to_string());
     }
-    // 顺手把应用的 robotCode 记新（推送要用）
-    if !robot_code.is_empty() {
-        state.registry.write().await.capture_dingtalk_robot_code(app_owner, robot_code);
-    }
-    if let Some(account) = state.registry.read().await.dingtalk_user_of(staff_id) {
-        return Ok(account);
-    }
-    // 未绑定 → 回登录链接。**同一个人反复发消息要给同一个链接**：否则他每说一句就收到一个新
-    // 链接，不知道该点哪个；表里也会堆一串等价的待绑定项（多用户接入时尤其明显）。
-    let now = crate::state::now_secs();
-    let existing = state
-        .dingtalk_binds
-        .read()
+    state
+        .registry
+        .write()
         .await
-        .iter()
-        .find(|(_, p)| p.staff_id == staff_id && now.saturating_sub(p.at) < BIND_TOKEN_TTL_SECS)
-        .map(|(t, _)| t.clone());
-    let token = match existing {
-        Some(t) => t,
-        None => {
-            let t = crate::state::new_bind_token();
-            state.dingtalk_binds.write().await.insert(
-                t.clone(),
-                crate::state::PendingDingtalkBind {
-                    staff_id: staff_id.to_string(),
-                    nick: nick.to_string(),
-                    app_user: app_owner.to_string(),
-                    robot_code: robot_code.to_string(),
-                    at: now,
-                },
-            );
-            t
-        }
-    };
-    let link = format!("{}/?dtbind={token}", crate::server::public_base());
-    Err(format!(
-        "👋 你的钉钉还没关联 agent-monitor 账号。\n\
-         点下面链接登录，即可把当前钉钉号绑定到你的账号（绑定后：任务完成/需要操作会私聊推给你，\
-         也能在这直接发指令遥控会话）：\n{link}\n\
-         链接 30 分钟内有效。"
-    ))
+        .capture_dingtalk_peer(app_owner, robot_code, staff_id);
+    Ok(app_owner.to_string())
 }
 
 /// 「监控 N」：注册对第 N 个会话的持续监控，新内容由后台循环推到当前钉钉会话
@@ -1202,17 +1089,16 @@ async fn confirm_and_watch(
     }
 }
 
-/// OTO 主动私聊给某账号绑定的所有钉钉 id（网页/客户端下发的状态推送用；无 sessionWebhook 可回）。
+/// OTO 主动私聊给账号本人（网页/客户端下发的状态推送用；无 sessionWebhook 可回）。
+/// 机器人一对一：用他自己的应用，发给跟这个机器人说过话的那个钉钉号。
 async fn push_oto_owner(state: &SharedState, owner: &str, text: &str) {
     let now_ms = crate::state::now_secs() * 1000;
-    for (staff_id, app_user) in state.registry.read().await.dingtalk_ids_of(owner) {
-        let Some(app) = state.registry.read().await.dingtalk_app_of(&app_user) else {
-            continue;
-        };
-        if !app.app_key.is_empty() && !app.app_secret.is_empty() {
-            let _ = crate::dingtalk::push_oto(&app, &staff_id, text, None, now_ms).await;
-        }
+    let app = state.registry.read().await.dingtalk_app_of(owner);
+    let Some(app) = app else { return };
+    if app.app_key.is_empty() || app.app_secret.is_empty() || app.staff_id.is_empty() {
+        return;
     }
+    let _ = crate::dingtalk::push_oto(&app, &app.staff_id, text, None, now_ms).await;
 }
 
 /// 网页/客户端（非钉钉）下发任务后，把「排队中 / 执行中」状态主动推到钉钉（OTO 私聊）。
