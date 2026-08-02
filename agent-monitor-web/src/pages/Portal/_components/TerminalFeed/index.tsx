@@ -78,6 +78,10 @@ export const SelectCard: React.FC<{
   React.useEffect(() => {
     busy.current = false;
   }, [step]);
+  // 输入法是否正在组合。除了 nativeEvent.isComposing，这里再自己记一份：
+  // 有的输入法在窗口失焦时会先结束组合、再补发一个 Enter，那时 isComposing
+  // 已经是 false，只认它就会把没打完的半截内容当答案发出去。
+  const composing = React.useRef(false);
 
   const questions = data.questions ?? [];
   const total = questions.length;
@@ -149,8 +153,25 @@ export const SelectCard: React.FC<{
                 value={custom}
                 disabled={!onAnswer}
                 onChange={(e) => setCustom(e.target.value)}
+                onCompositionStart={() => {
+                  composing.current = true;
+                }}
+                onCompositionEnd={() => {
+                  // 延后一拍再解除：失焦收尾时「结束组合」与补发的 Enter 常常
+                  // 挨在同一轮里，立刻置回 false 就等于没挡
+                  setTimeout(() => {
+                    composing.current = false;
+                  }, 0);
+                }}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") {
+                  // 输入法组合中的 Enter 是「确认候选词」，不是「发送」。
+                  // 不挡的话，中文还没打完就被当成答案发进终端了 —— 而且这一发
+                  // 就推进到下一题，回不去。（Composer 早有这道防护，这里漏了。）
+                  if (
+                    e.key === "Enter" &&
+                    !e.nativeEvent.isComposing &&
+                    !composing.current
+                  ) {
                     e.preventDefault();
                     submitCustom();
                   }
