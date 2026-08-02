@@ -997,7 +997,15 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                 {
                     saw_clear = true;
                 }
-                if let Some(text) = user_text(content) {
+                if is_interrupt_marker(content) {
+                    // 在终端里按 Esc 中断 → 这一轮就此打住，回到等待输入。
+                    // 必须显式判定：中断记录被 user_text 当系统内容滤掉（对的，它不是
+                    // 用户发言），若不在这里收口，turn_ended 会保持中断前的值 —— 那时
+                    // 最后一条是 assistant 带 tool_use，即 false，于是会话永远停在
+                    // 「正在调用工具」，界面一直显示执行中，而终端早已在等你。
+                    turn_ended = true;
+                    last_action = "已中断".into();
+                } else if let Some(text) = user_text(content) {
                     prompt = text;
                     last_action = "等待助手响应".into();
                     turn_ended = false;
@@ -1185,6 +1193,26 @@ fn user_text(content: Option<&Value>) -> Option<String> {
         return None;
     }
     Some(truncate(trimmed, 500))
+}
+
+/// 这条 user 记录是不是「用户在终端按 Esc 中断」的标记。
+///
+/// Claude Code 把中断记成 `type=user`、正文 `[Request interrupted by user...]`
+/// （另有 `...for tool use` 变体）。它不是用户输入，而是「这一轮到此为止」的信号。
+fn is_interrupt_marker(content: Option<&Value>) -> bool {
+    let text = match content {
+        Some(Value::String(s)) => s.trim().to_string(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter(|i| i.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|i| i.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string(),
+        _ => return false,
+    };
+    text.starts_with("[Request interrupted")
 }
 
 /// queue-operation enqueue 的 content：用户排队输入（过滤系统通知包装）
@@ -2359,6 +2387,44 @@ mod pairing_tests {
         assert!(s.cleared, "只含 /clear 的新会话应标记 cleared");
         assert!(s.prompt.is_empty(), "cleared 会话不该有真实 prompt");
         assert!(s.turn_ended, "cleared 会话视为回合结束（Idle）");
+    }
+
+    /// 在终端按 Esc 中断后，会话应判为「回合已结束」（Idle），而不是卡在执行中。
+    ///
+    /// 中断记录被 user_text 当系统内容滤掉（对的，它不是用户发言），若不显式收口，
+    /// turn_ended 会保持中断前的值 —— 那时最后一条是 assistant 带 tool_use，即 false，
+    /// 于是界面一直显示「执行中」，而终端早已在等你输入。
+    #[test]
+    fn parse_tail_interrupt_ends_turn() {
+        let base = concat!(
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"跑一下测试"}}"#, "\n",
+            r#"{"type":"assistant","cwd":"/proj","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash"}]}}"#, "\n",
+        );
+        // 中断前：正在调用工具 → 未结束
+        let s = parse_tail("s1", std::path::Path::new("/x/-proj/s1.jsonl"), base).unwrap();
+        assert!(!s.turn_ended, "工具执行中，回合不该算结束");
+
+        // 两种中断文案都要认（纯字符串 / text 数组两种记法）
+        for marker in [
+            r#""[Request interrupted by user]""#,
+            r#"[{"type":"text","text":"[Request interrupted by user for tool use]"}]"#,
+        ] {
+            let tail = format!(
+                "{base}{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "cwd": "/proj",
+                    "message": {
+                        "role": "user",
+                        "content": serde_json::from_str::<Value>(marker).unwrap(),
+                    },
+                }),
+            );
+            let s = parse_tail("s1", std::path::Path::new("/x/-proj/s1.jsonl"), &tail).unwrap();
+            assert!(s.turn_ended, "中断后应判回合结束: {marker}");
+            // 中断标记不是用户输入，不能顶掉原来的 prompt
+            assert_eq!(s.prompt, "跑一下测试", "中断标记不该被当成新输入: {marker}");
+        }
     }
 
     /// 反例：清空后又输入了真实内容 → 不再是空会话，cleared=false。
