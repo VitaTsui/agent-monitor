@@ -734,7 +734,6 @@ class PortalStore {
                   (echoNorm.length >= 4 && u.text.includes(echoNorm))),
             );
           };
-          const now = Date.now();
           const withoutEcho = prev.filter((m) => {
             if (!m.local) {
               return true;
@@ -742,12 +741,16 @@ class PortalStore {
             if (echoTakenOver(norm(m.content), ts(m.timestamp))) {
               return false;
             }
-            // 自愈兜底：已送达终端超 5 分钟仍没等来同步替换（内容被终端改写等
-            // 罕见情况），回显转为普通消息幻影没意义，直接撤下防止重复观感
-            const age = now - new Date(m.timestamp).getTime();
-            if (m.delivered && age > 5 * 60_000) {
-              return false;
-            }
+            // 回显一旦送达终端就**永久保留**，直到被同步回来的真实消息接管。
+            //
+            // 这里原先有条「超 5 分钟就撤下」的自愈：那是为了避免它和真实消息
+            // 一起显示出重复观感。但注入终端的输入在 jsonl 里常常压根不写 user
+            // 记录（只留一条 queue-operation，而那类记录不进对话流），于是永远
+            // 等不到接管 —— 撤下就是永久消失。执行中下发的任务要在队列里排上
+            // 好几分钟，正好撞线，表现就是「下发的任务有概率被吞掉」。
+            //
+            // 现在对话流里的回显就是条普通用户气泡（排队状态与撤回已归排队条），
+            // 留着它不会造成任何重复观感；真来了同名消息也有 echoTakenOver 兜着。
             return true;
           });
           const echoReplaced = withoutEcho.length !== prev.length;
