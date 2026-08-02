@@ -32,6 +32,11 @@ export interface PortalMessage {
   queued?: boolean;
   /** 已送达终端（写入其输入队列），等待终端执行；真实消息同步回来后回显被替换 */
   delivered?: boolean;
+  /**
+   * 这条是在回答终端弹出的选择卡（选项序号或自定义答案）。
+   * 单看内容说明不了什么（孤零零一个「1」），问题本身又不在流里 —— 不进对话流。
+   */
+  fromSelect?: boolean;
 }
 
 /** AskUserQuestion 的一道题 */

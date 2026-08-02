@@ -93,6 +93,9 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
           // 长得一模一样却点不得，反而让人分不清哪张才是在等自己。
           // 选完之后答案本身会作为一条 user 消息进流，记录并不会丢。
           m.role !== "select" &&
+          // 选择卡的答案不进对话流：孤零零一个「1」「2」看不出在答什么，
+          // 而问题本身挂在输入框上方、根本不在流里
+          !m.fromSelect &&
           // 还在排队的不进对话流 —— 它归排队条管，在那里才撤得回
           !stillQueued(m),
       ),
@@ -131,7 +134,9 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
       // 用同一个判据取「还没轮到的本地回显」：除了还在 hub 队列的（queued，
       // 可撤回），也含刚送达终端、尚未被拿去执行的那几秒 —— 否则这段时间里
       // 它既被对话流挡在外面、又不在排队条上，人就看不到自己刚发的东西了。
-      if (m.local && stillQueued(m)) {
+      // 选择卡的答案也不进排队条：它是对终端提问的回答、不是待办任务，
+      // 而且终端正等着它，转眼就被吃掉，挂在「还没跑的」里只会让人困惑
+      if (m.local && !m.fromSelect && stillQueued(m)) {
         const k = norm(m.content);
         if (!seen.has(k)) {
           seen.add(k);
@@ -530,7 +535,11 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
               <SelectCard
                 key={pendingKey}
                 data={task.pendingSelect}
-                onAnswer={canSend ? (text) => sendInput(id, text) : undefined}
+                onAnswer={
+                  canSend
+                    ? (text) => sendInput(id, text, { fromSelect: true })
+                    : undefined
+                }
                 onDone={() => setAnsweredKey(pendingKey)}
               />
             </div>

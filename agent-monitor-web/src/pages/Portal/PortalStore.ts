@@ -805,7 +805,14 @@ class PortalStore {
   };
 
   /** 向会话发布任务（注入一行输入） */
-  public sendInput = (id: string, text: string) => {
+  /**
+   * 向会话发一行输入。
+   *
+   * `fromSelect` = 这是在回答终端弹出的选择卡（选项序号或自定义答案）。
+   * 那类内容对着对话流念出来毫无意义 —— 孤零零一个「1」「2」，看不出在答什么，
+   * 问题本身又不在流里（选择卡挂在输入框上方）。标记出来，让它不入流。
+   */
+  public sendInput = (id: string, text: string, opts?: { fromSelect?: boolean }) => {
     const task = this._tasks.find((t) => t.id === id);
     const content = text.trim();
     if (!task?.id || !content) {
@@ -824,6 +831,7 @@ class PortalStore {
           local: true,
           cmdId: res.data?.cmdId,
           queued: !!res.data?.cmdId,
+          fromSelect: opts?.fromSelect,
         };
         this._messagesById = {
           ...this._messagesById,
