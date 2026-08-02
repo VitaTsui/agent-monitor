@@ -1633,10 +1633,18 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     set_update_progress("restarting", 0, 0);
     let bundle_str = bundle.to_string_lossy().to_string();
     let old_str = old.to_string_lossy().to_string();
+    // 关键：必须**等旧进程完全退出**再拉起新实例，且用 `open -n` 强制开新实例。
+    // 否则旧进程还活着时 `open`（无 -n）只是把旧实例激活到前台、不启动新版本 —— 表现
+    // 就是「提示更新了、重启后还是旧版」。等自身 PID 消失（最多 ~15s）再 open -n。
+    let pid = std::process::id();
     std::process::Command::new("sh")
         .args([
             "-c",
-            &format!("sleep 1; AM_SELF_UPDATE=0 AM_TEST_UPDATE_CLICK=0 open \"{bundle_str}\"; sleep 3; rm -rf \"{old_str}\""),
+            &format!(
+                "for i in $(seq 1 60); do kill -0 {pid} 2>/dev/null || break; sleep 0.25; done; \
+                 AM_SELF_UPDATE=0 AM_TEST_UPDATE_CLICK=0 open -n \"{bundle_str}\"; \
+                 sleep 3; rm -rf \"{old_str}\""
+            ),
         ])
         .spawn()?;
     Ok(())
