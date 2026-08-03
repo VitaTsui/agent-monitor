@@ -72,6 +72,13 @@ class PortalStore {
   private _selectedMachineId = "";
   /** 拆分视图中打开的会话（有序，全局跨设备） */
   private _openIds: string[] = [];
+  /**
+   * 「放大」模式下占据主区的那个会话。为空＝普通网格模式。
+   *
+   * 会话多了以后网格里每格都不够看，尤其在看某一个的长输出时。放大模式把它撑满主区，
+   * 其余缩成右侧一列只读卡片 —— 仍能瞥见它们的动静，又不抢地方。
+   */
+  private _focusedId = "";
   private _messagesById: Record<string, PortalMessage[]> = {};
   /**
    * hub 队列里待下发的输入（会话 id → 条目）。
@@ -263,6 +270,23 @@ class PortalStore {
   get openIds() {
     return this._openIds;
   }
+
+  /**
+   * 当前放大的会话 id；为空表示普通网格。
+   *
+   * 取值时兜一道「它还开着吗」：会话被关掉或从列表消失时，若不校验就会卡在一个空的
+   * 放大态里 —— 主区什么都没有、右侧却列着其余几个，看着像坏了。
+   */
+  get focusedId() {
+    return this._focusedId && this._openIds.includes(this._focusedId)
+      ? this._focusedId
+      : "";
+  }
+
+  /** 放大某个会话；传空串或再点一次当前放大的那个＝还原成网格 */
+  public setFocused = (id: string) => {
+    this._focusedId = this._focusedId === id ? "" : id;
+  };
 
   get openTasks() {
     return this._openIds

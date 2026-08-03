@@ -4,6 +4,8 @@ import { Button } from "@hsu-react/ui";
 import { Dropdown, Modal, Popconfirm, Spin, Tooltip } from "antd";
 import {
   CloseOutlined,
+  CompressOutlined,
+  ExpandOutlined,
   MoreOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
@@ -24,6 +26,15 @@ interface ChatPaneProps {
   task: PortalTaskData;
   /** 是否显示关闭按钮（多格时） */
   closable?: boolean;
+  /**
+   * 紧凑只读模式：放大布局下右侧那一列卡片用。
+   *
+   * 藏掉输入框与排队条 —— 卡片只有固定的一点高度，塞下输入框就没剩多少地方看内容了；
+   * 真要发东西，点一下把它换到主区再说。头部的控制按钮仍保留（暂停/中断这类不需要打字）。
+   */
+  compact?: boolean;
+  /** 点卡片本体：放大布局里用来与主区对调 */
+  onActivate?: () => void;
 }
 
 /** token 数量缩写：1.2k / 3.4M */
@@ -34,7 +45,7 @@ const fmtTokens = (n: number) => {
 };
 
 const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
-  const { task, closable } = props;
+  const { task, closable, compact, onActivate } = props;
   const {
     messagesOf,
     isLoadingMessages,
@@ -46,6 +57,8 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     termKey,
     syncMessages,
     hubQueuedOf,
+    focusedId,
+    setFocused,
   } = PortalStore;
   const chatRef = useRef<HTMLDivElement>(null);
   const stickBottomRef = useRef(true);
@@ -235,7 +248,12 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
         : "当前没有正在执行的任务";
 
   return (
-    <div className={styles.ChatPane}>
+    <div
+      className={`${styles.ChatPane} ${compact ? styles.compact : ""}`}
+      // 紧凑卡片整体可点：右侧那一列的用途就是「点它换到主区」，
+      // 只让标题可点的话，卡片大半面积都是死的。头部按钮各自 stopPropagation。
+      onClick={compact ? onActivate : undefined}
+    >
       <header className={styles.paneHeader}>
         <div className={styles.headInfo}>
           {/* 状态放标题前；标题只显示会话标题（设备/IDE/PID 等杂项不再展示） */}
@@ -271,7 +289,12 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
             ) : null}
           </div>
         </div>
-        <div className={styles.headActions}>
+        <div
+          className={styles.headActions}
+          // 紧凑卡片整卡可点（换到主区），但头部这些是各自独立的动作 ——
+          // 不拦住冒泡的话，点「暂停」会连带把卡片换到主区。
+          onClick={compact ? (e) => e.stopPropagation() : undefined}
+        >
           {closable ? (
             // 拆分（多格）时空间窄：右上角功能收进下拉菜单（iOS 风格），只留一个 ⋯ 按钮
             <Dropdown
@@ -279,6 +302,15 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
               placement="bottomRight"
               menu={{
                 items: [
+                  // 放大/还原排在最前：它是布局操作，比暂停这些更常用，
+                  // 而多格时头部空间只够一个 ⋯，只能收进菜单（与其余按钮同一处境）。
+                  {
+                    key: "focus",
+                    icon:
+                      focusedId === id ? <CompressOutlined /> : <ExpandOutlined />,
+                    label: focusedId === id ? "还原为网格" : "放大这一格",
+                    onClick: () => setFocused(id),
+                  },
                   {
                     key: "sync",
                     icon: <SyncOutlined />,
@@ -404,7 +436,8 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
       {/* 清单与后台任务是「当前状态」而非时序事件：悬浮在本格右侧、可收起 */}
       <SessionPanels messages={messages} running={task.status === "running"} />
 
-      {queuedItems.length > 0 && (
+      {/* 排队条同样不进紧凑卡片：它整条都是操作（撤回、打断），而紧凑卡片是只读的 */}
+      {!compact && queuedItems.length > 0 && (
         <div className={styles.queuedStrip}>
           <div className={styles.chatColumn}>
             <div className={styles.queuedHead}>
@@ -496,6 +529,9 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
         </div>
       )}
 
+      {/* 紧凑卡片不给输入区：卡片只有固定的一点高度，塞下输入框就没剩多少地方看内容。
+          要发东西点一下把它换到主区 —— 那里才有完整的输入体验（附件、斜杠命令等）。 */}
+      {compact ? null : (
       <div className={styles.composerWrap}>
         <div className={styles.chatColumn}>
           {/* 暂停中必须说破。SIGSTOP 冻住的进程从外面看就是「什么都不回」——
@@ -559,6 +595,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
           />
         </div>
       </div>
+      )}
     </div>
   );
 });

@@ -87,6 +87,8 @@ const Portal: React.FC = observer(() => {
     control,
     syncMessages,
     splitOpen,
+    focusedId,
+    setFocused,
   } = PortalStore;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("account");
@@ -259,6 +261,14 @@ const Portal: React.FC = observer(() => {
   }
 
   const paneCount = openTasks.length;
+  // 放大的那一格。两道门槛：
+  //   多格 —— 单格本来就占满，再「放大」没意义，还会渲染出「主区 + 空右列」；
+  //   非移动端 —— 手机上主区要跟 320px 的右列分一块 390px 的屏，主区只剩个缝；
+  //     更要命的是移动端把 paneHeader 整个隐藏了（见样式），进去就没有还原按钮，出不来。
+  const focusedTask =
+    paneCount > 1 && !isMobile
+      ? openTasks.find((t) => t.id === focusedId)
+      : undefined;
   // 横向还是纵向拆分、一行摆几个，全按网格容器的实际宽高算（见 usePaneGrid）
   const {
     ref: paneGridRef,
@@ -708,6 +718,33 @@ const Portal: React.FC = observer(() => {
             </div>
             <div className={`${styles.hint} ${styles.descDesktop}`}>
               点击会话右侧的 <SplitCellsOutlined /> 可并排显示多个任务
+            </div>
+          </div>
+        ) : focusedTask ? (
+          /* 放大模式：主区一格撑满，其余缩成右侧一列只读卡片。
+             不走自适应网格 —— 那套是在「几格平分」的前提下算的，这里的诉求正相反：
+             一格独大、其余只求瞥得见。 */
+          <div className={styles.focusLayout}>
+            <div className={styles.focusMain}>
+              <ChatPane
+                key={focusedTask.id}
+                task={focusedTask}
+                closable={paneCount > 1}
+              />
+            </div>
+            <div className={styles.focusSide}>
+              {openTasks
+                .filter((t) => t.id !== focusedTask.id)
+                .map((t) => (
+                  <div key={t.id} className={styles.focusCard}>
+                    <ChatPane
+                      task={t}
+                      closable={paneCount > 1}
+                      compact
+                      onActivate={() => setFocused(t.id ?? "")}
+                    />
+                  </div>
+                ))}
             </div>
           </div>
         ) : (
