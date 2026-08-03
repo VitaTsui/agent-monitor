@@ -1303,6 +1303,15 @@ fn ulog(msg: &str) {
     crate::state::client_log(msg);
 }
 
+/// 「上次尝试更新时我是哪个版本」的落盘位置。
+/// 与 client_log 同一套目录定位：这段在后台线程里跑，拿不到 state。
+fn update_attempt_path() -> std::path::PathBuf {
+    std::env::var("AM_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| dirs::data_dir().unwrap_or_default().join("AgentMonitor"))
+        .join("update-attempt")
+}
+
 /// 托盘「点击更新」：后台线程执行自更新。
 /// - macOS：下载 zip → 原地替换 .app → 重启（全自动，无需用户操作）
 /// - Windows：下载安装器静默安装并自动重启
@@ -1659,14 +1668,24 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     download_to(&format!("{hub}/downloads/agent-monitor-setup.exe"), &installer, true, 1024 * 1024)?;
     ulog("[update] 安装器下载完成，静默安装");
     set_update_progress("installing", 0, 0);
-    // 全静默更新，不出安装向导：NSIS /S 静默安装（沿用上次安装目录与组件选择，
-    // 安装器内部会先结束本进程再覆盖），装完从注册表定位新程序并自动重启。
-    // 整个流程放在独立的 bat 里执行 —— 本进程会被安装器 taskkill，
-    // cmd 宿主不受影响，能等安装结束再拉起新版本。
+    // 全静默更新，不出安装向导：NSIS /S 静默安装（沿用上次安装目录与组件选择），
+    // 装完从注册表定位新程序并自动重启。整个流程放在独立的 bat 里执行 ——
+    // 本进程随后就会退出，cmd 宿主不受影响，能等安装结束再拉起新版本。
+    //
+    // **开头必须先等旧实例退出**：调用方是在本函数返回之后才 app.exit()，而 bat 一被
+    // spawn 就跑起来了。那一刻主 exe 还被自己占着，NSIS 覆盖不了 —— 偏偏静默模式
+    // 覆盖失败也不报错，它照样写完 Uninstall.exe 正常收工，bat 再把「新版」拉起来，
+    // 其实还是旧的：新实例又看到有新版，于是反复下载安装、版本永远不变。
+    // （实测现场：AgentMonitor.exe 停在上一次的时间，Uninstall.exe 却是刚写的。）
+    //
+    // 等待用 ping 而非 timeout：CREATE_NO_WINDOW 下没有控制台，timeout 会直接失败。
+    // 也不要用 `for /l` 轮询 tasklist —— 从循环体里 `goto` 跳出在 cmd 下不可靠，实测整个
+    // bat 就此卡住，装都装不上。固定等几秒再 taskkill 兜底，行为可预测得多。
     let bat = tmp.join("agent-monitor-update.bat");
     let script = format!(
-        "@echo off\r\nchcp 65001 >nul\r\n\"{}\" /S\r\nset \"DIR=\"\r\nfor /f \"skip=2 tokens=2,*\" %%a in ('reg query \"HKCU\\Software\\AgentMonitor\" /v \"InstallDir\" 2^>nul') do set \"DIR=%%b\"\r\nif not defined DIR set \"DIR=%LOCALAPPDATA%\\AgentMonitor\"\r\nif exist \"%DIR%\\AgentMonitor.exe\" (start \"\" \"%DIR%\\AgentMonitor.exe\") else (start \"\" \"%DIR%\\终端任务监控.exe\")\r\ndel \"%~f0\"\r\n",
-        installer.display()
+        "@echo off\r\nchcp 65001 >nul\r\nping -n 4 127.0.0.1 >nul\r\ntaskkill /f /pid {pid} >nul 2>&1\r\nping -n 3 127.0.0.1 >nul\r\n\"{installer}\" /S\r\nset \"DIR=\"\r\nfor /f \"skip=2 tokens=2,*\" %%a in ('reg query \"HKCU\\Software\\AgentMonitor\" /v \"InstallDir\" 2^>nul') do set \"DIR=%%b\"\r\nif not defined DIR set \"DIR=%LOCALAPPDATA%\\AgentMonitor\"\r\nif exist \"%DIR%\\AgentMonitor.exe\" (start \"\" \"%DIR%\\AgentMonitor.exe\") else (start \"\" \"%DIR%\\终端任务监控.exe\")\r\ndel \"%~f0\"\r\n",
+        pid = std::process::id(),
+        installer = installer.display(),
     );
     std::fs::write(&bat, script.as_bytes())?;
     std::process::Command::new("cmd")
@@ -1788,11 +1807,32 @@ pub(crate) fn spawn_update_watcher<R: tauri::Runtime>(
 /// 自更新执行（forced=true 时失败即退出：强制更新不允许带病运行）
 fn spawn_self_update_inner<R: tauri::Runtime>(app: tauri::AppHandle<R>, hub: String, forced: bool) {
     std::thread::spawn(move || {
+        // 把「装了没生效」截断成一次失败 + 一条提示，而不是无休止地下载安装。
+        // 判据用「上次尝试更新时我是哪个版本」：重启后版本变了 = 装上了；
+        // 没变 = 那次没生效，再自动试一次也是白搭。
+        let local = env!("CARGO_PKG_VERSION");
+        let last_try = update_attempt_path();
+        if let Some(prev) = std::fs::read_to_string(&last_try).ok().map(|s| s.trim().to_string()) {
+            if prev.is_empty() || prev != local {
+                let _ = std::fs::remove_file(&last_try); // 版本已变，上次装成功了
+            } else if !forced {
+                ulog(&format!(
+                    "[update] 上次更新后重启，版本仍是 v{local} —— 安装没生效，不再自动重试"
+                ));
+                clear_update_progress();
+                notify_progress(&format!(
+                    "自动更新未生效（仍是 v{local}），请下载安装包手动更新一次"
+                ));
+                return;
+            }
+        }
         ulog(&format!("[update] 开始自更新 forced={forced} hub={hub}"));
         set_update_progress("downloading", 0, 0);
         notify_progress("正在下载更新，完成后将自动重启…");
         match do_self_update(&hub) {
             Ok(()) => {
+                // 记下更新前的版本：新实例起来一比对就知道装没装上
+                let _ = std::fs::write(update_attempt_path(), local);
                 ulog("[update] 自更新就绪，退出旧实例");
                 app.exit(0);
                 // app.exit 走事件循环代理，个别路径（窗口全隐藏时）可能不生效；

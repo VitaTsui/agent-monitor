@@ -341,6 +341,16 @@ pub(crate) async fn resolve_account(
     if let Some(account) = state.registry.read().await.dingtalk_user_of(staff_id) {
         return Ok(account);
     }
+    // 全局机器人也是**它主人自己的**机器人：他没道理还要先给自己绑一次钉钉号。
+    // staff_id 对得上（或还没认过主人，即他刚配好第一次说话）就直接归他。
+    {
+        let mut reg = state.registry.write().await;
+        let owner_staff = reg.dingtalk_app_of(app_owner).map(|a| a.staff_id).unwrap_or_default();
+        if owner_staff.is_empty() || owner_staff == staff_id {
+            reg.capture_dingtalk_peer(app_owner, robot_code, staff_id);
+            return Ok(app_owner.to_string());
+        }
+    }
     // 未绑定 → 回引导。**同一个人反复发消息要给同一个链接**：否则他每说一句就收到
     // 一个新链接，不知道该点哪个；待绑定表里也会堆一串等价项。
     let now = crate::state::now_secs();

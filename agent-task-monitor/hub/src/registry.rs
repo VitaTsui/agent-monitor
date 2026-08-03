@@ -533,12 +533,14 @@ impl Registry {
     /// **自己的机器人优先**：配了就用自己的（收件人 = 跟它说过话的人）；没配才回退到
     /// 管理员的全局机器人（收件人 = 他绑定的钉钉号）。两者都没有就推不了。
     pub fn dingtalk_push_target(&self, owner: &str) -> Option<(DingtalkApp, String)> {
-        // 个人机器人（超管名下那个是全局的，走下面的分支统一处理）
-        if !self.is_global_dingtalk_app(owner) {
-            if let Some(app) = self.dingtalk_apps.get(owner) {
-                if !app.staff_id.is_empty() && !app.app_key.is_empty() {
-                    return Some((app.clone(), app.staff_id.clone()));
-                }
+        // 自己名下有应用、且已知道对面是谁 → 直接用。
+        //
+        // **超管也走这条**：他名下那个应用兼作全局机器人，但对他自己而言仍是私人机器人。
+        // 早先把超管排除在外，单用户部署（唯一的用户就是超管）就没人能收到推送了 ——
+        // 他的机器人被当成「服务所有人的公共机器人」，反倒要求他先去绑自己的钉钉号。
+        if let Some(app) = self.dingtalk_apps.get(owner) {
+            if !app.staff_id.is_empty() && !app.app_key.is_empty() {
+                return Some((app.clone(), app.staff_id.clone()));
             }
         }
         // 全局机器人 + 该账号绑定的钉钉号（绑了多个就取其一：同一个人的不同钉钉号，
@@ -1140,6 +1142,21 @@ mod dingtalk_routing_tests {
         // 全局机器人 = 超管名下那个
         assert!(r.is_global_dingtalk_app("admin"));
         assert!(!r.is_global_dingtalk_app("carol"), "普通用户的应用不是全局的");
+    }
+
+    /// 超管名下那个机器人**同时**是他自己的私人机器人。
+    /// 曾经把「全局」和「私人」互斥处理，单用户部署（唯一的用户就是超管）
+    /// 就整个收不到推送了：他的机器人被判为公共的，反过来要求他先绑自己的钉钉号。
+    #[test]
+    fn super_user_can_use_own_global_bot() {
+        let mut r = reg("超管自用");
+        r.set_global_dingtalk_app("gsecret", "gkey");
+        r.capture_dingtalk_peer("admin", "grobot", "admin_staff");
+        assert!(r.dingtalk_ids_of("admin").is_empty(), "前提：他没给自己绑过钉钉号");
+
+        let (app, staff) = r.dingtalk_push_target("admin").expect("超管自己也该收得到");
+        assert_eq!(app.app_key, "gkey");
+        assert_eq!(staff, "admin_staff");
     }
 
     /// 解绑只影响那一个钉钉号；一个账号可绑多个
