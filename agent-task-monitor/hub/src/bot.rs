@@ -49,12 +49,15 @@ pub async fn dingtalk_message(
             .unwrap_or("")
             .to_string(),
     };
-    // 按 staffId 找归属账号；未绑定 → 回登录链接（不按渠道 owner 兜底）
     let nick = payload.get("senderNick").and_then(Value::as_str).unwrap_or("");
-    let reply = match resolve_account(&state, &app_owner, &ctx.staff_id, &ctx.robot_code, nick).await
-    {
-        Ok(account) => dispatch(&state, &account, &content, Some(&ctx)).await,
-        Err(link_reply) => link_reply,
+    // 绑定指令要抢在认人之前：需要它的人正是还认不出来的那个
+    let reply = if let Some(r) = try_bind_command(&state, &ctx.staff_id, nick, &content).await {
+        r
+    } else {
+        match resolve_account(&state, &app_owner, &ctx.staff_id, &ctx.robot_code, nick).await {
+            Ok(account) => dispatch(&state, &account, &content, Some(&ctx)).await,
+            Err(guide) => guide,
+        }
     };
     // 同步回复：钉钉直接把响应体当作机器人回复消息
     Json(json!({ "msgtype": "text", "text": { "content": reply } }))
@@ -264,31 +267,116 @@ async fn run_command(
     })
 }
 
-/// 待绑定链接的有效期。同一 staffId 在这段时间内重发消息复用同一个 token；
+/// 待绑定链接 / 绑定码的有效期：30 分钟够走完「收到链接 → 登录 → 绑定」。
+pub const BIND_TOKEN_TTL_SECS: u64 = 30 * 60;
 
-/// 消息归属：**应用是谁配的，消息就归谁**。
+/// 「绑定 <码>」：把发消息的这个钉钉号，绑到取码的那个账号。
 ///
-/// 机器人由用户在前台「机器人管理」里自助配置，一个账号一个机器人，
-/// 所以拿到 `app_owner`（channel/Stream 连接对应的配置账号）就够了 ——
-/// 不需要再按 staffId 去查绑定表，用户也不必先点登录链接绑定自己的钉钉号。
+/// **必须在认人之前拦下**：需要它的人恰恰是还没绑定、认不出来的那个 ——
+/// 走到 resolve_account 只会拿回一句「你还没关联账号」，指令永远没机会执行。
 ///
-/// 顺带把 robotCode 与「对面是谁」记下来，主动推送要用。
+/// 返回 Some(回复) 表示这条消息是绑定指令、已处理完；None 表示不是，继续正常流程。
+pub(crate) async fn try_bind_command(
+    state: &SharedState,
+    staff_id: &str,
+    nick: &str,
+    text: &str,
+) -> Option<String> {
+    let t = text.trim();
+    let code = ["绑定", "bind", "綁定"]
+        .iter()
+        .find_map(|p| t.strip_prefix(*p))?
+        .trim()
+        .to_uppercase();
+    if code.is_empty() {
+        return Some(
+            "用法：绑定 <码>\n码在网页或客户端的「机器人管理」里取（也可扫码直接得到这条指令）。"
+                .to_string(),
+        );
+    }
+    if staff_id.is_empty() {
+        return Some("拿不到你的钉钉身份，无法绑定。".to_string());
+    }
+    let now = crate::state::now_secs();
+    // 取码即用掉：成功与否都移除，避免一个码被反复试
+    let entry = state.dingtalk_bind_codes.write().await.remove(&code);
+    let Some(pending) = entry else {
+        return Some("绑定码无效或已过期，请在「机器人管理」里重新取一个。".to_string());
+    };
+    if now.saturating_sub(pending.at) >= BIND_TOKEN_TTL_SECS {
+        return Some("绑定码已过期，请在「机器人管理」里重新取一个。".to_string());
+    }
+    state.registry.write().await.bind_dingtalk_id(staff_id, &pending.user, nick);
+    Some(format!(
+        "✅ 已绑定到账号「{}」。\n之后任务完成 / 需要你决定时会私聊推给你，也能在这直接发指令遥控会话。\n发「帮助」看用法。",
+        pending.user
+    ))
+}
+
+/// 消息归属：两种机器人，两套认人方式。
+///
+/// - **个人机器人**（用户自己在前台配的）：谁配的就归谁，不看发信人是谁。
+/// - **全局机器人**（管理员配的那一个，服务所有人）：只能靠发信人的 staffId
+///   认出他是谁；没绑过就回一段引导（登录链接 / 绑定码两条路都给）。
+///
+/// 顺带记下 robotCode 与「对面是谁」，主动推送要用。
 pub(crate) async fn resolve_account(
     state: &SharedState,
     app_owner: &str,
     staff_id: &str,
     robot_code: &str,
-    _nick: &str,
+    nick: &str,
 ) -> Result<String, String> {
     if staff_id.is_empty() {
         return Err("拿不到你的钉钉身份（senderStaffId 为空），无法关联账号。".to_string());
     }
-    state
-        .registry
-        .write()
+    let is_global = state.registry.read().await.is_global_dingtalk_app(app_owner);
+    if !is_global {
+        // 个人机器人：记下对面是谁（推送要用），消息直接归应用主人
+        state.registry.write().await.capture_dingtalk_peer(app_owner, robot_code, staff_id);
+        return Ok(app_owner.to_string());
+    }
+    // 全局机器人：robotCode 仍要记（推送用），但收件人由各自的绑定决定
+    state.registry.write().await.capture_dingtalk_peer(app_owner, robot_code, "");
+    if let Some(account) = state.registry.read().await.dingtalk_user_of(staff_id) {
+        return Ok(account);
+    }
+    // 未绑定 → 回引导。**同一个人反复发消息要给同一个链接**：否则他每说一句就收到
+    // 一个新链接，不知道该点哪个；待绑定表里也会堆一串等价项。
+    let now = crate::state::now_secs();
+    let existing = state
+        .dingtalk_binds
+        .read()
         .await
-        .capture_dingtalk_peer(app_owner, robot_code, staff_id);
-    Ok(app_owner.to_string())
+        .iter()
+        .find(|(_, p)| p.staff_id == staff_id && now.saturating_sub(p.at) < BIND_TOKEN_TTL_SECS)
+        .map(|(t, _)| t.clone());
+    let token = match existing {
+        Some(t) => t,
+        None => {
+            let t = crate::state::new_bind_token();
+            state.dingtalk_binds.write().await.insert(
+                t.clone(),
+                crate::state::PendingDingtalkBind {
+                    staff_id: staff_id.to_string(),
+                    nick: nick.to_string(),
+                    at: now,
+                },
+            );
+            t
+        }
+    };
+    let link = format!("{}/?dtbind={token}", crate::server::public_base());
+    Err(format!(
+        "👋 你的钉钉还没关联 agent-monitor 账号，两种方式任选：
+
+         ① 点链接登录即绑定（30 分钟内有效）：
+{link}
+
+         ② 在网页/客户端「机器人管理」里取一个绑定码，回来发「绑定 <码>」
+
+         绑定后：任务完成 / 需要你决定时会私聊推给你，也能在这直接发指令遥控会话。"
+    ))
 }
 
 /// 「监控 N」：注册对第 N 个会话的持续监控，新内容由后台循环推到当前钉钉会话
@@ -1093,12 +1181,12 @@ async fn confirm_and_watch(
 /// 机器人一对一：用他自己的应用，发给跟这个机器人说过话的那个钉钉号。
 async fn push_oto_owner(state: &SharedState, owner: &str, text: &str) {
     let now_ms = crate::state::now_secs() * 1000;
-    let app = state.registry.read().await.dingtalk_app_of(owner);
-    let Some(app) = app else { return };
-    if app.app_key.is_empty() || app.app_secret.is_empty() || app.staff_id.is_empty() {
+    let target = state.registry.read().await.dingtalk_push_target(owner);
+    let Some((app, staff_id)) = target else { return };
+    if app.app_secret.is_empty() {
         return;
     }
-    let _ = crate::dingtalk::push_oto(&app, &app.staff_id, text, None, now_ms).await;
+    let _ = crate::dingtalk::push_oto(&app, &staff_id, text, None, now_ms).await;
 }
 
 /// 网页/客户端（非钉钉）下发任务后，把「排队中 / 执行中」状态主动推到钉钉（OTO 私聊）。

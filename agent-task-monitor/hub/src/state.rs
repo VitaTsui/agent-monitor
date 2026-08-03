@@ -293,6 +293,49 @@ pub struct AppState {
     /// 用户先发文件（或图文一起发图片）→ 暂存于此 → 下一条发任务的指令把它落到会话 tmp 目录、
     /// 并把相对路径回填到任务文字开头。
     pub bot_pending_files: RwLock<HashMap<String, Vec<BotPendingFile>>>,
+    /// 钉钉绑定 —— 两个方向，都是一次性、都会过期：
+    ///
+    /// · `dingtalk_binds`：**钉钉那头先开口**。陌生 staffId 给全局机器人发消息，
+    ///   hub 回一条带 token 的登录链接；用户登录后带 token 来认领，token → 待绑的钉钉号。
+    /// · `dingtalk_bind_codes`：**网页这头先开口**。用户在「机器人管理」取一个绑定码
+    ///   （扫码或手输），到钉钉里发「绑定 <码>」；码 → 待绑的账号。
+    ///
+    /// 两条路解决的是同一件事在不同起点：人在电脑前就用码，人在手机上就用链接。
+    pub dingtalk_binds: RwLock<HashMap<String, PendingDingtalkBind>>,
+    pub dingtalk_bind_codes: RwLock<HashMap<String, PendingBindCode>>,
+}
+
+/// 钉钉待绑定上下文（一次性 token 指向它）
+#[derive(Clone)]
+pub struct PendingDingtalkBind {
+    /// 待绑定的钉钉 staffId
+    pub staff_id: String,
+    /// 钉钉昵称（供界面显示）
+    pub nick: String,
+    /// 生成时刻（秒），用于过期清理
+    pub at: u64,
+}
+
+/// 绑定码：网页/客户端先取码，再到钉钉里发「绑定 <码>」认领
+#[derive(Clone)]
+pub struct PendingBindCode {
+    /// 取码的账号 —— 谁取的码，钉钉号就绑给谁
+    pub user: String,
+    /// 生成时刻（秒）
+    pub at: u64,
+}
+
+/// 生成一次性绑定 token（不可猜）
+pub fn new_bind_token() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+/// 生成绑定码：6 位、避开易混淆字符（0/O、1/I/L），方便手输与扫码识别
+pub fn new_bind_code() -> String {
+    use rand::Rng;
+    const ALPHA: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::thread_rng();
+    (0..6).map(|_| ALPHA[rng.gen_range(0..ALPHA.len())] as char).collect()
 }
 
 /// 钉钉挂起的待发文件（downloadCode 换取下载地址，随下一条任务发出时才真正下载+下发）
@@ -339,6 +382,8 @@ impl AppState {
             login_throttle: RwLock::new(LoginThrottle::default()),
             tx,
             dingtalk_reload: std::sync::Arc::new(tokio::sync::Notify::new()),
+            dingtalk_binds: RwLock::new(HashMap::new()),
+            dingtalk_bind_codes: RwLock::new(HashMap::new()),
             started_at: chrono::Local::now(),
             sessions_dirty: std::sync::atomic::AtomicBool::new(false),
             history: RwLock::new(history),

@@ -160,10 +160,21 @@ struct Persisted {
     /// 未配置的项目默认落到 `<项目 cwd>/tmp`。
     #[serde(default)]
     dingtalk_recv_dirs: HashMap<String, HashMap<String, String>>,
-    /// 【已废弃】钉钉 id 绑定（多租户）。现在机器人只服务配置它的那个账号，
-    /// 不必再把每个 staffId 单独绑到账号上；保留字段仅为兼容旧文件。
-    #[serde(default, skip_serializing)]
-    dingtalk_ids: HashMap<String, serde_json::Value>,
+    /// 钉钉 id 绑定：staffId → 账号。**只有走「管理员的全局机器人」时才需要** ——
+    /// 那一个机器人服务所有人，只能靠发信人的 staffId 认出他是谁。
+    /// 自己配了机器人的用户不必绑：谁配的机器人，消息就归谁。
+    #[serde(default)]
+    dingtalk_ids: HashMap<String, DingtalkIdBinding>,
+}
+
+/// 钉钉 id 绑定：一个 staffId 唯一归属一个账号；一个账号可绑多个钉钉号。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DingtalkIdBinding {
+    /// 归属的 agent-monitor 账号
+    pub user: String,
+    /// 钉钉昵称（绑定时捕获，供界面显示；为空则回退显示 staffId）
+    #[serde(default)]
+    pub nick: String,
 }
 
 /// 钉钉企业应用（用户自助接入，双向遥控）
@@ -192,9 +203,12 @@ pub struct Registry {
     users: Vec<User>,
     devices: HashMap<String, DeviceMeta>,
     super_user: String,
-    /// 用户名 → 他自己的钉钉应用。一个账号一个机器人，收到的消息就归他。
+    /// 用户名 → 他自己的钉钉应用。谁配的机器人，它收到的消息就归谁。
+    /// super_user 名下那条同时充当「管理员的全局机器人」，供没配机器人的用户共用。
     dingtalk_apps: HashMap<String, DingtalkApp>,
     dingtalk_recv_dirs: HashMap<String, HashMap<String, String>>,
+    /// staffId → 账号。只有走全局机器人时才需要（那一个机器人服务所有人）。
+    dingtalk_ids: HashMap<String, DingtalkIdBinding>,
 }
 
 impl Registry {
@@ -224,20 +238,8 @@ impl Registry {
             } else {
                 p.super_user
             };
-            // 旧数据迁移（群机器人 / 企微 / 多租户绑定移除后的一次性收敛）：
-            // 把旧的「staffId → 账号」绑定表回填进各账号自己的应用 staff_id ——
-            // 那是主动推送的收件人。一个账号绑过多个钉钉号时只留第一个：新模型下
-            // 机器人一对一，谁配的机器人就推给谁。
-            let mut dingtalk_apps = p.dingtalk_apps;
-            for (staff_id, bind) in &p.dingtalk_ids {
-                let Some(user) = bind.get("user").and_then(|v| v.as_str()) else { continue };
-                if let Some(app) = dingtalk_apps.get_mut(user) {
-                    if app.staff_id.is_empty() {
-                        app.staff_id = staff_id.clone();
-                    }
-                }
-            }
-            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk_apps, dingtalk_recv_dirs: p.dingtalk_recv_dirs }
+            let dingtalk_apps = p.dingtalk_apps;
+            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk_apps, dingtalk_recv_dirs: p.dingtalk_recv_dirs, dingtalk_ids: p.dingtalk_ids }
         } else {
             Registry {
                 dir,
@@ -246,6 +248,7 @@ impl Registry {
                 super_user: seed_user.to_string(),
                 dingtalk_apps: HashMap::new(),
                 dingtalk_recv_dirs: HashMap::new(),
+                dingtalk_ids: HashMap::new(),
             }
         };
         if reg.users.is_empty() {
@@ -278,11 +281,11 @@ impl Registry {
             devices: self.devices.clone(),
             dingtalk_apps: self.dingtalk_apps.clone(),
             dingtalk_recv_dirs: self.dingtalk_recv_dirs.clone(),
-            // 已废弃字段：写出时一律为空（Persisted 上标了 skip_serializing，
-            // 这里给默认值只是为了满足结构体字面量）
+            dingtalk_ids: self.dingtalk_ids.clone(),
+            // 已废弃字段（群机器人 / 企业微信）：写出时一律为空，
+            // Persisted 上标了 skip_serializing，这里给默认值只为满足结构体字面量
             dingtalk: HashMap::new(),
             wecom_apps: HashMap::new(),
-            dingtalk_ids: HashMap::new(),
             quota_limit: 0,
             super_user: self.super_user.clone(),
         };
@@ -464,6 +467,88 @@ impl Registry {
 
     pub fn dingtalk_app_by_channel(&self, channel: &str) -> Option<(String, DingtalkApp)> {
         self.dingtalk_apps.iter().find(|(_, a)| a.channel == channel).map(|(u, a)| (u.clone(), a.clone()))
+    }
+
+    // ---------- 全局机器人（管理员配置，供没配机器人的用户共用） ----------
+
+    /// 管理员的全局钉钉机器人 —— 就是 super_user 名下那个应用。
+    /// 不额外开一份配置：超管本来就用它，再复制一份只会两处不同步。
+    pub fn global_dingtalk_app(&self) -> Option<DingtalkApp> {
+        self.dingtalk_apps.get(&self.super_user).cloned()
+    }
+
+    /// 后管保存全局机器人（存到 super_user 名下）
+    pub fn set_global_dingtalk_app(&mut self, app_secret: &str, app_key: &str) -> Option<String> {
+        let su = self.super_user.clone();
+        self.set_dingtalk_app(&su, app_secret, app_key)
+    }
+
+    /// 这个应用是不是「全局机器人」（即超管配的那个）。
+    /// 全局机器人服务所有人，必须靠 staffId 认人；个人机器人则谁配的归谁。
+    pub fn is_global_dingtalk_app(&self, app_user: &str) -> bool {
+        app_user == self.super_user
+    }
+
+    // ---------- 钉钉 id 绑定（仅全局机器人需要） ----------
+
+    /// 按 staffId 找归属账号（全局机器人收到消息时用；找不到 → 引导绑定）
+    pub fn dingtalk_user_of(&self, staff_id: &str) -> Option<String> {
+        self.dingtalk_ids.get(staff_id).map(|b| b.user.clone())
+    }
+
+    /// 某账号绑定的钉钉号（staff_id, nick）；nick 空则界面回退显示 staff_id
+    pub fn dingtalk_ids_of(&self, user: &str) -> Vec<(String, String)> {
+        self.dingtalk_ids
+            .iter()
+            .filter(|(_, b)| b.user == user)
+            .map(|(sid, b)| (sid.clone(), b.nick.clone()))
+            .collect()
+    }
+
+    /// 绑定一个钉钉号到账号。一个 staffId 只能归一个账号，重复绑定即改绑。
+    pub fn bind_dingtalk_id(&mut self, staff_id: &str, user: &str, nick: &str) {
+        self.dingtalk_ids.insert(
+            staff_id.to_string(),
+            DingtalkIdBinding { user: user.to_string(), nick: nick.to_string() },
+        );
+        self.save();
+    }
+
+    /// 已绑定的钉钉号总数（后管用：看全局机器人到底有没有人在用）
+    pub fn dingtalk_bound_count(&self) -> usize {
+        self.dingtalk_ids.len()
+    }
+
+    /// 解绑（返回原本是否绑过）
+    pub fn unbind_dingtalk_id(&mut self, staff_id: &str) -> bool {
+        let existed = self.dingtalk_ids.remove(staff_id).is_some();
+        if existed {
+            self.save();
+        }
+        existed
+    }
+
+    /// 给某账号推送时该用哪个机器人、发给哪个钉钉号。
+    ///
+    /// **自己的机器人优先**：配了就用自己的（收件人 = 跟它说过话的人）；没配才回退到
+    /// 管理员的全局机器人（收件人 = 他绑定的钉钉号）。两者都没有就推不了。
+    pub fn dingtalk_push_target(&self, owner: &str) -> Option<(DingtalkApp, String)> {
+        // 个人机器人（超管名下那个是全局的，走下面的分支统一处理）
+        if !self.is_global_dingtalk_app(owner) {
+            if let Some(app) = self.dingtalk_apps.get(owner) {
+                if !app.staff_id.is_empty() && !app.app_key.is_empty() {
+                    return Some((app.clone(), app.staff_id.clone()));
+                }
+            }
+        }
+        // 全局机器人 + 该账号绑定的钉钉号（绑了多个就取其一：同一个人的不同钉钉号，
+        // 推给哪个都算送到；全推反而会在多设备上重复响）
+        let global = self.global_dingtalk_app()?;
+        if global.app_key.is_empty() {
+            return None;
+        }
+        let staff = self.dingtalk_ids.iter().find(|(_, b)| b.user == owner).map(|(s, _)| s.clone())?;
+        Some((global, staff))
     }
 
     /// 某项目配置的钉钉文件接收目录（未配置返回 None → 调用方回落 `<cwd>/tmp`）。
@@ -1000,5 +1085,76 @@ mod share_tests {
         r.connect_share(&code, &pw, "frank").unwrap();
         r.kick_share_user("pc-e", "frank");
         assert!(!r.can_view("pc-e", "frank"), "被踢后失效");
+    }
+}
+
+#[cfg(test)]
+mod dingtalk_routing_tests {
+    use super::*;
+
+    fn reg(tag: &str) -> Registry {
+        let dir = std::env::temp_dir().join(format!("am-ding-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Registry::load(dir, "admin", "admin123")
+    }
+
+    /// 自己的机器人优先：配了就用自己的，不看有没有绑钉钉号、也不管全局机器人在不在
+    #[test]
+    fn personal_bot_wins_over_global() {
+        let mut r = reg("personal");
+        r.register("alice", "pw123456", "alice").unwrap();
+        // 管理员的全局机器人
+        r.set_global_dingtalk_app("gsecret", "gkey");
+        // alice 自己的机器人，并已跟她聊过（捕获到收件人）
+        r.set_dingtalk_app("alice", "asecret", "akey");
+        r.capture_dingtalk_peer("alice", "arobot", "alice_staff");
+
+        let (app, staff) = r.dingtalk_push_target("alice").expect("该有推送目标");
+        assert_eq!(app.app_key, "akey", "配了自己的机器人就该用自己的");
+        assert_eq!(staff, "alice_staff");
+    }
+
+    /// 没配自己的机器人 → 回退全局机器人，收件人取他绑定的钉钉号
+    #[test]
+    fn falls_back_to_global_with_bound_id() {
+        let mut r = reg("global");
+        r.register("bob", "pw123456", "bob").unwrap();
+        r.set_global_dingtalk_app("gsecret", "gkey");
+        assert!(r.dingtalk_push_target("bob").is_none(), "没绑钉钉号时认不出该发给谁");
+
+        r.bind_dingtalk_id("bob_staff", "bob", "Bob");
+        let (app, staff) = r.dingtalk_push_target("bob").expect("绑了就该能推");
+        assert_eq!(app.app_key, "gkey", "没配个人机器人时走全局");
+        assert_eq!(staff, "bob_staff");
+    }
+
+    /// 全局机器人靠 staffId 认人；个人机器人不需要绑定
+    #[test]
+    fn staff_id_only_matters_for_global_bot() {
+        let mut r = reg("认人");
+        r.register("carol", "pw123456", "carol").unwrap();
+        r.bind_dingtalk_id("carol_staff", "carol", "Carol");
+
+        assert_eq!(r.dingtalk_user_of("carol_staff").as_deref(), Some("carol"));
+        assert_eq!(r.dingtalk_user_of("陌生人").as_deref(), None, "没绑过的认不出来");
+        // 全局机器人 = 超管名下那个
+        assert!(r.is_global_dingtalk_app("admin"));
+        assert!(!r.is_global_dingtalk_app("carol"), "普通用户的应用不是全局的");
+    }
+
+    /// 解绑只影响那一个钉钉号；一个账号可绑多个
+    #[test]
+    fn unbind_removes_only_that_id() {
+        let mut r = reg("解绑");
+        r.register("dave", "pw123456", "dave").unwrap();
+        r.bind_dingtalk_id("s1", "dave", "手机");
+        r.bind_dingtalk_id("s2", "dave", "电脑");
+        assert_eq!(r.dingtalk_ids_of("dave").len(), 2);
+
+        assert!(r.unbind_dingtalk_id("s1"));
+        assert!(!r.unbind_dingtalk_id("s1"), "重复解绑应返回 false");
+        let left = r.dingtalk_ids_of("dave");
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].0, "s2");
     }
 }

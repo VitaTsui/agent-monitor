@@ -527,6 +527,69 @@ pub async fn version_admin_info(
 }
 
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DingtalkAppAdminReq {
+    #[serde(default)]
+    pub app_key: String,
+    #[serde(default)]
+    pub app_secret: String,
+}
+
+/// GET /sys/dingtalk/app —— 后管查看全局钉钉机器人（密钥不回显）。
+///
+/// 全局机器人服务所有没自己配机器人的用户，他们各自绑一个钉钉号即可使用。
+pub async fn dingtalk_app_admin_get(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+) -> Json<Value> {
+    if let Err(e) = admin_gate(&state, &headers).await {
+        return e;
+    }
+    let app = state.registry.read().await.global_dingtalk_app();
+    ok(json!({
+        "appKey": app.as_ref().map(|a| a.app_key.clone()).unwrap_or_default(),
+        "hasSecret": app.as_ref().is_some_and(|a| !a.app_secret.is_empty()),
+        // 已跟机器人说过话的人数（即已绑定的钉钉号数），给管理员一个「用起来没有」的感知
+        "boundCount": state.registry.read().await.dingtalk_bound_count(),
+    }))
+}
+
+/// POST /sys/dingtalk/app —— 后管保存全局钉钉机器人；appKey 传空 = 停用。
+pub async fn dingtalk_app_admin_set(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<DingtalkAppAdminReq>,
+) -> Json<Value> {
+    if let Err(e) = admin_gate(&state, &headers).await {
+        return e;
+    }
+    let app_key = req.app_key.trim().to_string();
+    if app_key.is_empty() {
+        state.registry.write().await.set_global_dingtalk_app("", "");
+        state.dingtalk_reload.notify_one();
+        return ok(json!({ "result": "已停用" }));
+    }
+    // 密钥留空 = 沿用已存的（界面不回显密钥，只改 appKey 时不该被清掉）
+    let mut secret = req.app_secret.trim().to_string();
+    if secret.is_empty() {
+        secret = state
+            .registry
+            .read()
+            .await
+            .global_dingtalk_app()
+            .map(|a| a.app_secret)
+            .unwrap_or_default();
+    }
+    if secret.is_empty() {
+        return err(400, "请填写 AppSecret");
+    }
+    state.registry.write().await.set_global_dingtalk_app(&secret, &app_key);
+    // 立刻重连 Stream，免得管理员配完等半分钟没反应
+    state.dingtalk_reload.notify_one();
+    ok(json!({ "result": "已保存" }))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetMinReq {

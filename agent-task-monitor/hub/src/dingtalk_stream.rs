@@ -199,10 +199,19 @@ async fn connect_once(
                 // 先 ACK 该帧（钉钉据此认为已消费）
                 ack(&mut ws, &message_id).await?;
 
-                // 按 staffId 找归属账号；未绑定 → 回登录链接（不落文件、不 dispatch）
-                let account =
-                    crate::bot::resolve_account(&state, user, &staff_id, &robot_code, &sender_nick)
-                        .await;
+                // 「绑定 <码>」抢在认人之前：需要它的人正是还认不出来的那个。
+                // 处理完直接回执，不进后面的文件暂存/dispatch。
+                let bind_reply =
+                    crate::bot::try_bind_command(&state, &staff_id, &sender_nick, &content).await;
+
+                // 认归属账号；未绑定 → 回引导（不落文件、不 dispatch）
+                let account = match &bind_reply {
+                    Some(_) => Err(String::new()), // 绑定指令：账号无关，下面按 bind_reply 回
+                    None => {
+                        crate::bot::resolve_account(&state, user, &staff_id, &robot_code, &sender_nick)
+                            .await
+                    }
+                };
 
                 // 带文件/图片：仅对已绑定账号暂存（按账号存，send_input 也按账号取）。
                 // 多张图片/文件全部累积，落盘名去重避免互相覆盖（原来只取一张就是同名覆盖导致）。
@@ -244,8 +253,10 @@ async fn connect_once(
                             robot_code,
                         };
                         let reply = match account {
-                            // 未绑定：回登录链接
-                            Err(link) => link,
+                            // 绑定指令：直接回它的结果（此时 account 是占位的 Err）
+                            _ if bind_reply.is_some() => bind_reply.unwrap_or_default(),
+                            // 未绑定：回引导（登录链接 + 绑定码两条路）
+                            Err(guide) => guide,
                             Ok(acct) if file_only => {
                                 let _ = &acct;
                                 "📎 已收到文件，随下一条任务一起发出（如「@2 处理这个文件」），\

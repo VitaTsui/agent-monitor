@@ -286,22 +286,20 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
                 EventKind::NewSession => "NewSession",
                 _ => "?",
             };
-            let app = state.registry.read().await.dingtalk_app_of(&ev.owner);
-            let Some(app) = app else {
-                tracing::warn!("钉钉推送跳过：账号未配置钉钉机器人（{}）", ev.owner);
-                continue;
-            };
-            if app.app_key.is_empty() || app.app_secret.is_empty() {
-                continue;
-            }
-            if app.staff_id.is_empty() {
+            // 用哪个机器人、发给谁：自己的优先，没配才回退到管理员的全局机器人
+            //（后者需要该账号绑过钉钉号，否则认不出该发给谁）
+            let target = state.registry.read().await.dingtalk_push_target(&ev.owner);
+            let Some((app, staff_id)) = target else {
                 tracing::warn!(
-                    "钉钉推送跳过：还不知道该发给谁，请先在钉钉里给机器人发一句话（{}）",
+                    "钉钉推送跳过：账号既没配自己的机器人，也没绑钉钉号（{}）",
                     ev.owner
                 );
                 continue;
+            };
+            if app.app_secret.is_empty() {
+                continue;
             }
-            match push_oto(&app, &app.staff_id, &text, ev.full_content.as_deref(), now_ms).await {
+            match push_oto(&app, &staff_id, &text, ev.full_content.as_deref(), now_ms).await {
                 Ok(_) => tracing::info!("钉钉已推送 kind={kind}（{}）", ev.owner),
                 Err(e) => tracing::warn!("钉钉推送失败 kind={kind}（{}）: {e}", ev.owner),
             }
