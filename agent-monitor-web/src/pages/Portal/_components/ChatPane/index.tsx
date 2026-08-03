@@ -44,6 +44,15 @@ const fmtTokens = (n: number) => {
   return String(n);
 };
 
+/**
+ * 头部按钮平铺所需的最小格宽。低于它就收回 `⋯` 菜单 —— 按钮会把标题挤成几个字，
+ * 而「这一格是哪个会话」比「少点一下」重要得多。
+ *
+ * 两档：多格时头部有 6 个按钮（含放大、关闭），单格只有 4 个，需要的地方自然不同。
+ * 数值按「按钮 ~32px + 标题至少留 180px」估，再取整。
+ */
+const FLAT_MIN_W = { multi: 400, single: 320 };
+
 const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   const { task, closable, compact, onActivate } = props;
   const {
@@ -62,6 +71,9 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   } = PortalStore;
   const chatRef = useRef<HTMLDivElement>(null);
   const stickBottomRef = useRef(true);
+  const rootRef = useRef<HTMLDivElement>(null);
+  /** 本格是否窄到摆不下一排按钮（按实测宽度判定，不看视口 —— 决定拥挤的是格宽） */
+  const [narrow, setNarrow] = useState(false);
 
   const id = task.id ?? "";
   const messages = messagesOf(id);
@@ -170,6 +182,24 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     return items;
   }, [messages, task.queuedInputs, hubQueued, stillQueued]);
 
+  // 按实际格宽决定头部平铺还是收进菜单。用 ResizeObserver 而非视口断点：同一个视口下
+  // 格子可能是 1/2/3/4 等分，还能被侧栏折叠改变，只有量自己才准。
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) {
+      return;
+    }
+    const limit = closable ? FLAT_MIN_W.multi : FLAT_MIN_W.single;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width;
+      if (w) {
+        setNarrow(w < limit);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [closable]);
+
   useEffect(() => {
     const el = chatRef.current;
     if (el && stickBottomRef.current) {
@@ -249,6 +279,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
 
   return (
     <div
+      ref={rootRef}
       className={`${styles.ChatPane} ${compact ? styles.compact : ""}`}
       // 紧凑卡片整体可点：右侧那一列的用途就是「点它换到主区」，
       // 只让标题可点的话，卡片大半面积都是死的。头部按钮各自 stopPropagation。
@@ -295,8 +326,11 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
           // 不拦住冒泡的话，点「暂停」会连带把卡片换到主区。
           onClick={compact ? (e) => e.stopPropagation() : undefined}
         >
-          {closable ? (
-            // 拆分（多格）时空间窄：右上角功能收进下拉菜单（iOS 风格），只留一个 ⋯ 按钮
+          {compact || narrow ? (
+            // 收进下拉菜单的两种情形：放大布局右侧那一列的窄卡片，以及格子被切得太窄
+            //（见 FLAT_MIN_W）。其余情况一律平铺 —— 功能藏在 ⋯ 里每次都要多点一下，
+            // 而这些恰恰是高频操作。移动端不受这里影响：整个 paneHeader 被样式隐藏，
+            // 操作走全局顶栏的「⋯」菜单。
             <Dropdown
               trigger={["click"]}
               placement="bottomRight"
@@ -362,6 +396,19 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
             </Dropdown>
           ) : (
             <>
+              {/* 放大/还原：单格没有意义（本来就占满），故与关闭按钮一样只在多格时出现 */}
+              {closable ? (
+                <Tooltip title={focusedId === id ? "还原为网格" : "放大这一格"}>
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={
+                      focusedId === id ? <CompressOutlined /> : <ExpandOutlined />
+                    }
+                    onClick={() => setFocused(id)}
+                  />
+                </Tooltip>
+              ) : null}
               <Tooltip title="重新同步该终端的对话内容">
                 <Button
                   size="small"
@@ -409,6 +456,17 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                   />
                 </Tooltip>
               </Popconfirm>
+              {/* 关闭此格：只在多格时给 —— 单格关掉就空了，没有「回到网格」可言 */}
+              {closable ? (
+                <Tooltip title="关闭此格">
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<CloseOutlined />}
+                    onClick={() => closePane(id)}
+                  />
+                </Tooltip>
+              ) : null}
             </>
           )}
         </div>
