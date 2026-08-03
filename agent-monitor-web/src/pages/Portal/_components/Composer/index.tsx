@@ -211,7 +211,10 @@ const Composer: React.FC<ComposerProps> = (props) => {
   };
 
   // 选中的待上传文件 + 目录树浏览（根 = 会话所在目录，只能往下走）
-  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  /** 待上传的文件（可多选）。空数组＝没有待传，用它控制上传弹窗开合 */
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  /** 批量上传进度：已完成数 / 总数，仅上传中有值 */
+  const [uploadDone, setUploadDone] = useState(0);
   const [dirRel, setDirRel] = useState("");
   const [dirList, setDirList] = useState<string[]>([]);
   const [dirFiles, setDirFiles] = useState<string[]>([]);
@@ -219,6 +222,8 @@ const Composer: React.FC<ComposerProps> = (props) => {
   const dirPollRef = useRef(0);
   // 「选择文件回填相对路径」模态（与上传共用目录浏览，但只读、点文件即插入路径）
   const [pickerOpen, setPickerOpen] = useState(false);
+  /** 文件选择器里已勾选的相对路径（可跨子目录累积） */
+  const [pickedRefs, setPickedRefs] = useState<string[]>([]);
 
   // 拉取 rel 下的子目录；agent 异步回带，pending 时 1.2s 后重试（最多 8 次）
   const loadDirs = (rel: string, attempt = 0) => {
@@ -347,16 +352,32 @@ const Composer: React.FC<ComposerProps> = (props) => {
     setDeleteTarget(null);
   };
 
-  const onPickFile = (file: File) => {
+  /**
+   * 收下一批待上传文件。
+   *
+   * 弹窗已开时**追加**而不是替换：选完一批又想起还有几个，不该把前面选的顶掉。
+   * 按「名字 + 大小」去重，挡住手滑重复选同一个文件。
+   */
+  const onPickFiles = (files: File[]) => {
+    if (!files.length) {
+      return;
+    }
     if (!machineId || !cwd) {
       message.warning("该会话缺少设备或目录信息，无法传文件");
       return;
     }
-    setPendingFile(file);
-    setDirRel("");
-    setDirList([]);
-    setDirFiles([]);
-    loadDirs("");
+    const first = pendingFiles.length === 0;
+    setPendingFiles((prev) => {
+      const seen = new Set(prev.map((f) => `${f.name}\u0000${f.size}`));
+      return [...prev, ...files.filter((f) => !seen.has(`${f.name}\u0000${f.size}`))];
+    });
+    // 目录浏览状态只在「首次打开弹窗」时重置：追加文件不该把已经选好的目标目录清掉
+    if (first) {
+      setDirRel("");
+      setDirList([]);
+      setDirFiles([]);
+      loadDirs("");
+    }
   };
 
   // 打开「选择文件」浏览器：根 = 会话所在目录
@@ -369,8 +390,24 @@ const Composer: React.FC<ComposerProps> = (props) => {
   };
 
   // 选中某个文件 → 把相对会话目录的路径（正斜杠通用）插入输入框
-  const pickFileRef = (name: string) => {
-    appendToInput(`./${dirRel ? `${dirRel}/` : ""}${name}`);
+  /**
+   * 勾选/取消一个文件。存的是**完整相对路径**而不是文件名 ——
+   * 选文件时可以来回进出子目录，只存名字的话跨目录同名文件会互相顶掉，
+   * 而且插入时也无从知道它当初在哪一层。
+   */
+  const toggleFileRef = (name: string) => {
+    const rel = `./${dirRel ? `${dirRel}/` : ""}${name}`;
+    setPickedRefs((prev) =>
+      prev.includes(rel) ? prev.filter((x) => x !== rel) : [...prev, rel],
+    );
+  };
+
+  /** 把勾选的路径一次性插入输入框 */
+  const insertPickedRefs = () => {
+    if (pickedRefs.length) {
+      appendToInput(pickedRefs.join(" "));
+    }
+    setPickedRefs([]);
     setPickerOpen(false);
   };
 
@@ -381,43 +418,79 @@ const Composer: React.FC<ComposerProps> = (props) => {
   const onPaste = (e: React.ClipboardEvent) => {
     if (disabled) return;
     const items = Array.from(e.clipboardData?.items ?? []);
-    const fileItem = items.find((it) => it.kind === "file");
-    if (!fileItem) return;
-    const f = fileItem.getAsFile();
-    if (!f) return;
+    // 剪贴板里可能一次带多个文件（比如在文件管理器里复制了几张图）
+    const files = items
+      .filter((it) => it.kind === "file")
+      .map((it) => it.getAsFile())
+      .filter((f): f is File => !!f);
+    if (!files.length) return;
     e.preventDefault();
-    const named =
+    // 截图粘贴出来的往往都叫 image.png，多个一起粘会重名互相覆盖 —— 加索引区分
+    const named = files.map((f, i) =>
       f.name && f.name !== "image.png"
         ? f
-        : new File([f], `粘贴-${Date.now()}.${(f.type.split("/")[1] || "png")}`, {
-            type: f.type,
-          });
-    onPickFile(named);
+        : new File(
+            [f],
+            `粘贴-${Date.now()}${files.length > 1 ? `-${i + 1}` : ""}.${
+              f.type.split("/")[1] || "png"
+            }`,
+            { type: f.type },
+          ),
+    );
+    onPickFiles(named);
   };
 
-  /** 确认上传到当前浏览目录，成功后把相对路径填入输入框 */
-  const doUpload = () => {
-    const file = pendingFile;
-    if (!file || !machineId || !cwd) {
+  /**
+   * 依次上传选中的文件，成功的把相对路径一并填进输入框。
+   *
+   * 串行而非并发：一次可能选十几个文件，并发全推出去既容易把设备侧的写入撑爆，
+   * 出错时也分不清是哪个失败的。串行慢一点，但每一步的成败都对得上号。
+   * 单个失败不中断整批 —— 已经传上去的那些不该因为最后一个出错就白费。
+   */
+  const doUpload = async () => {
+    const files = pendingFiles;
+    if (!files.length || !machineId || !cwd) {
       return;
     }
     // 设备侧绝对目录 = 会话目录 + 相对子路径（按设备的分隔符拼）
     const sep = cwd.includes("\\") ? "\\" : "/";
     const dir = dirRel ? `${cwd}${sep}${dirRel.split("/").join(sep)}` : cwd;
     setUploading(true);
-    setPendingFile(null);
-    uploadPortalFile(machineId, dir, file)
-      .then((res) => {
+    setUploadDone(0);
+    setPendingFiles([]);
+
+    const ok: string[] = [];
+    const failed: string[] = [];
+    for (const file of files) {
+      try {
+        const res = await uploadPortalFile(machineId, dir, file);
         if (res.code === 0) {
-          message.success(res.data?.result ?? "已上传");
           // 回填相对路径（相对会话目录，正斜杠通用）
-          appendToInput(dirRel ? `./${dirRel}/${file.name}` : `./${file.name}`);
+          ok.push(dirRel ? `./${dirRel}/${file.name}` : `./${file.name}`);
         } else {
-          message.error(res.msg ?? "上传失败");
+          failed.push(file.name);
         }
-      })
-      .catch(() => message.error("上传失败，请检查网络"))
-      .finally(() => setUploading(false));
+      } catch {
+        failed.push(file.name);
+      }
+      setUploadDone((n) => n + 1);
+    }
+
+    setUploading(false);
+    setUploadDone(0);
+    // 一次性回填：逐个 append 会在输入框里触发多次光标跳动
+    if (ok.length) {
+      appendToInput(ok.join(" "));
+    }
+    if (failed.length) {
+      message.error(
+        `${failed.length} 个失败：${failed.slice(0, 3).join("、")}${
+          failed.length > 3 ? " 等" : ""
+        }`,
+      );
+    } else {
+      message.success(ok.length > 1 ? `已上传 ${ok.length} 个文件` : "已上传");
+    }
   };
 
   // 会话切换时拉取该模型的可用命令（只读、不影响任务）
@@ -551,8 +624,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
         e.preventDefault();
         setDragOver(false);
         if (disabled) return;
-        const f = e.dataTransfer?.files?.[0];
-        if (f) onPickFile(f);
+        onPickFiles(Array.from(e.dataTransfer?.files ?? []));
       }}
     >
       {dragOver ? (
@@ -644,7 +716,11 @@ const Composer: React.FC<ComposerProps> = (props) => {
                 ...(machineId
                   ? [
                       {
-                        title: "传文件到会话目录（完成后自动填入路径）",
+                        // 批量上传是串行的，会持续一段时间 —— 标题里带上进度，
+                        // 否则用户只看到一个转圈的回形针，不知道传到第几个了
+                        title: uploading
+                          ? `正在上传… ${uploadDone} 个已完成`
+                          : "传文件到会话目录（可多选，完成后自动填入路径）",
                         icon: <PaperClipOutlined className={styles.uploadIcon} />,
                         type: "text" as const,
                         loading: uploading,
@@ -659,9 +735,13 @@ const Composer: React.FC<ComposerProps> = (props) => {
       {/* 上传目录确认：默认会话所在目录，可改成设备上任意目录 */}
       <Modal
         className={styles.dirModal}
-        title="传文件到设备"
-        open={!!pendingFile}
-        onCancel={() => setPendingFile(null)}
+        title={
+          pendingFiles.length > 1
+            ? `传 ${pendingFiles.length} 个文件到设备`
+            : "传文件到设备"
+        }
+        open={pendingFiles.length > 0}
+        onCancel={() => setPendingFiles([])}
         onOk={doUpload}
         okText="上传"
         cancelText="取消"
@@ -670,7 +750,31 @@ const Composer: React.FC<ComposerProps> = (props) => {
       >
         <div className={styles.uploadForm}>
           <div className={styles.uploadFile}>
-            文件：<b>{pendingFile?.name}</b>
+            {pendingFiles.length > 1 ? (
+              // 多个时列出来并允许逐个剔除：多选常常手滑带上不想传的
+              <div className={styles.uploadList}>
+                {pendingFiles.map((f) => (
+                  <div key={`${f.name} ${f.size}`} className={styles.uploadItem}>
+                    <span className={styles.uploadItemName}>{f.name}</span>
+                    <span
+                      className={styles.uploadItemDel}
+                      role="button"
+                      tabIndex={0}
+                      title="不传这个"
+                      onClick={() =>
+                        setPendingFiles((prev) => prev.filter((x) => x !== f))
+                      }
+                    >
+                      ×
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <>
+                文件：<b>{pendingFiles[0]?.name}</b>
+              </>
+            )}
           </div>
           <div className={styles.uploadLabel}>
             <span>目标目录（会话目录内选择）</span>
@@ -728,7 +832,16 @@ const Composer: React.FC<ComposerProps> = (props) => {
             )}
           </div>
           <div className={styles.uploadHint}>
-            将上传到：<b>./{dirRel ? `${dirRel}/` : ""}{pendingFile?.name}</b>
+            {pendingFiles.length > 1 ? (
+              <>
+                将上传到：<b>./{dirRel ? `${dirRel}/` : ""}</b>（{pendingFiles.length}{" "}
+                个文件），路径会一并填进输入框
+              </>
+            ) : (
+              <>
+                将上传到：<b>./{dirRel ? `${dirRel}/` : ""}{pendingFiles[0]?.name}</b>
+              </>
+            )}
           </div>
         </div>
       </Modal>
@@ -736,10 +849,21 @@ const Composer: React.FC<ComposerProps> = (props) => {
       {/* 选择文件：浏览会话目录，点文件即把相对路径插入输入框（不上传） */}
       <Modal
         className={styles.dirModal}
-        title="选择文件（插入相对路径）"
+        title={
+          pickedRefs.length
+            ? `选择文件（已选 ${pickedRefs.length} 个）`
+            : "选择文件（插入相对路径）"
+        }
         open={pickerOpen}
-        onCancel={() => setPickerOpen(false)}
-        footer={null}
+        onCancel={() => {
+          setPickedRefs([]);
+          setPickerOpen(false);
+        }}
+        // 多选要攒完再插，所以得有个确认出口 —— 原先点一下即插入并关闭，选不了第二个
+        onOk={insertPickedRefs}
+        okText={pickedRefs.length > 1 ? `插入 ${pickedRefs.length} 个路径` : "插入"}
+        cancelText="取消"
+        okButtonProps={{ disabled: pickedRefs.length === 0 }}
         width={460}
         centered
       >
@@ -770,22 +894,32 @@ const Composer: React.FC<ComposerProps> = (props) => {
                     <span className={styles.dirIcon}>📁</span> {d}
                   </div>
                 ))}
-                {dirFiles.map((f) => (
-                  <div
-                    key={`f-${f}`}
-                    className={styles.dirItem}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => pickFileRef(f)}
-                  >
-                    <span className={styles.dirIcon}>📄</span> {f}
-                  </div>
-                ))}
+                {dirFiles.map((f) => {
+                  const rel = `./${dirRel ? `${dirRel}/` : ""}${f}`;
+                  const picked = pickedRefs.includes(rel);
+                  return (
+                    <div
+                      key={`f-${f}`}
+                      className={`${styles.dirItem} ${picked ? styles.dirItemPicked : ""}`}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={picked}
+                      onClick={() => toggleFileRef(f)}
+                    >
+                      <span className={styles.dirIcon}>{picked ? "✅" : "📄"}</span> {f}
+                    </div>
+                  );
+                })}
               </>
             )}
           </div>
           <div className={styles.uploadHint}>
-            点击文件即插入：<b>./{dirRel ? `${dirRel}/` : ""}文件名</b>
+            {pickedRefs.length ? (
+              // 已选的列出来：可以进出多个子目录累积勾选，不显示的话就记不住选过哪些了
+              <>已选：<b>{pickedRefs.join(" ")}</b></>
+            ) : (
+              <>点文件勾选，可跨目录多选，选完点「插入」</>
+            )}
           </div>
         </div>
       </Modal>
@@ -794,10 +928,10 @@ const Composer: React.FC<ComposerProps> = (props) => {
       <input
         ref={fileRef}
         type="file"
+        multiple
         hidden
         onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) onPickFile(f);
+          onPickFiles(Array.from(e.target.files ?? []));
           // 允许连续选同一个文件
           e.target.value = "";
         }}

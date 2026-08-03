@@ -209,6 +209,45 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     word-break: break-all;
   }
 
+  // 多选时的文件清单：给个上限高度自己滚，几十个文件不至于把弹窗顶穿
+  .uploadList {
+    max-height: 168px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .uploadItem {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 6px;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.03);
+
+    .uploadItemName {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .uploadItemDel {
+      flex: none;
+      cursor: pointer;
+      color: #98a2b3;
+      font-size: 15px;
+      line-height: 1;
+      padding: 0 2px;
+
+      &:hover {
+        color: #d92d20;
+      }
+    }
+  }
+
   .uploadLabel {
     font-size: 12.5px;
     color: #7c9096;
@@ -269,6 +308,12 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
         .dirItemOps {
           opacity: 1;
         }
+      }
+
+      // 已勾选的文件：多选是「攒完再插入」，没有选中态就记不住自己点过哪些
+      &.dirItemPicked {
+        background: rgba(15, 155, 173, 0.14);
+        font-weight: 500;
       }
 
       .dirIcon {
