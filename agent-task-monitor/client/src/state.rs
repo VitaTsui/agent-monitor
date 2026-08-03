@@ -622,17 +622,18 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
     // 没对上（会话已被 /clear 换掉等）就丢弃 —— 一张挂错会话的选项卡比没有更糟。
     if !pending_selects.is_empty() {
         for t in &mut tasks {
-            if let Some((sel, at)) = pending_selects.remove(&t.id) {
-                // 时序校验：hook 报的是「上次工具调用那一刻」的快照。若会话在那之后又写过盘
-                //（人已在终端里作答、claude 接着往下跑），这份待选就是陈的，不能再挂出去 ——
-                // 否则一张早就答完的选项卡会在网页/其他端一直显示，怎么点都不消失。
+            if let Some((sel, _at)) = pending_selects.remove(&t.id) {
+                // 这里**不要**再拿「jsonl 的 mtime 比 hook 晚多少」判过期。
                 //
-                // 留 2 秒宽限：hook 与 jsonl 落盘几乎同时发生，先后顺序不保证，卡太死会让
-                // 刚弹出的选项卡一次都显示不出来（那比多显示一会儿糟得多）。
-                let stale = t.mtime_ms > 0 && t.mtime_ms.saturating_sub(at * 1000) > 2_000;
-                if !stale {
-                    t.pending_select = Some(sel);
-                }
+                // 曾经加过那道校验（想兜住「答完的卡不消失」），判据是「会话在 hook 之后
+                // 又写过盘 ⇒ 人已作答」—— 而这个前提是错的：等你选择的那段时间里 claude
+                // 仍在往 jsonl 写工具调用与消息，mtime 一直在推进。结果几秒之后，一张
+                // **正等着你回答**的卡片就被判成陈旧、直接不回填，远端什么都看不到。
+                // 从「答完不消失」变成了「压根不出现」，得不偿失。
+                //
+                // 清除本就有正道：PostToolUse hook 会在作答后整份重写记录、把
+                // pending_select 写成 null（见 hookrec 的说明），靠覆盖自然失效。
+                t.pending_select = Some(sel);
             }
         }
     }
