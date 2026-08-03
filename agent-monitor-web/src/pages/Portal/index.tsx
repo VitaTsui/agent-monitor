@@ -5,6 +5,7 @@ import { Badge, ConfigProvider, Modal, Popover, Tooltip } from "antd";
 import { useNativeBack } from "./_hooks/useNativeBack";
 import { useApkUpdateCheck } from "./_hooks/useApkUpdateCheck";
 import { useClientUpdateToast } from "./_hooks/useClientUpdateToast";
+import { usePaneGrid } from "./_hooks/usePaneGrid";
 import { claimPairDevice, getMe } from "@/services/apis/portal";
 import { message as antdMessage } from "antd";
 import {
@@ -261,6 +262,13 @@ const Portal: React.FC = observer(() => {
   }
 
   const paneCount = openTasks.length;
+  // 横向还是纵向拆分、一行摆几个，全按网格容器的实际宽高算（见 usePaneGrid）
+  const {
+    ref: paneGridRef,
+    cols: paneCols,
+    rows: paneRows,
+    lastSpan: paneLastSpan,
+  } = usePaneGrid(paneCount);
   // 用 state 承载用户信息：每次加载调 /monitor/me 刷新（含实时 isSuper），
   // 这样管理员改了别人的权限，对方不必重新登录、下次加载即生效。
   const [user, setUser] = useState<{
@@ -709,7 +717,17 @@ const Portal: React.FC = observer(() => {
             </div>
           </div>
         ) : (
-          <div className={styles.paneGrid} data-count={Math.min(paneCount, 4)}>
+          <div
+            ref={paneGridRef}
+            className={styles.paneGrid}
+            data-last-span={paneLastSpan}
+            style={
+              {
+                "--pane-cols": paneCols,
+                "--pane-rows": paneRows,
+              } as React.CSSProperties
+            }
+          >
             {openTasks.map((t) => (
               <ChatPane key={t.id} task={t} closable={paneCount > 1} />
             ))}
