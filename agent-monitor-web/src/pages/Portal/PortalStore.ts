@@ -414,10 +414,10 @@ class PortalStore {
    * 落地一份会话列表快照。WS 推送与兜底轮询共用，保证两条通路行为一致。
    */
   private applyTasks = (list: PortalTaskData[]) => {
-    // /clear、compact 等会让同一终端进程换新会话（新 id/jsonl）：pid 会从旧会话挪到
-    // 新会话。先记下旧表里各会话的 pid，换表后把「丢了 pid 的打开会话」跟随到「现在
-    // 持有该 pid 的会话」——这样 /clear 后仍能对着同一终端发任务、看内容，而不是卡在
-    // 已失联（无 pid）的旧会话上，导致「下发失败、终端没这个任务」。
+    // 同一个终端进程换新会话（新 id/jsonl）时，pid 会从旧会话挪到新会话 —— /clear、
+    // compact 如此，占位任务头一回落盘配上会话文件也如此。先记下旧表里各会话的 pid，
+    // 换表后据此把打开的格子跟过去：否则要么卡在已失联（无 pid）的旧会话上「下发失败、
+    // 终端没这个任务」，要么整个格子被清掉退回空态。
     const prevPidById = new Map<string, number | null | undefined>();
     for (const t of this._tasks) prevPidById.set(t.id ?? "", t.pid);
 
@@ -426,16 +426,43 @@ class PortalStore {
       this._tasks = list;
     }
 
-    // pid 跟随：打开的会话若丢了 pid，切到现在持有其原 pid 的会话（同一终端的新会话）
+    // pid 跟随：打开的格子原地跟到继任会话，靠 pid 认人（前后是同一个 agent 进程）。
+    // 两种换 id 的场景：
+    //   ① /clear、compact —— 旧会话还留在列表里，只是把 pid 让给了新会话；
+    //   ② 进程占位任务（只扫到进程、还没配上 jsonl，id 形如 `<machine>-pid-<pid>`）收到
+    //      第一条输入后落了盘、配上真会话 —— 旧任务整条从列表消失，换成真会话 id。
+    // ② 不跟随的话，刚给空终端下发完任务，格子就被下面的存活清理踢掉、退回空态，
+    // 用户还得再点一次新冒出来的会话才能接着看。
+    const carried: Array<[string, string]> = [];
     const followed = this._openIds.map((id) => {
-      const cur = this._tasks.find((t) => t.id === id);
       const prevPid = prevPidById.get(id);
-      if (cur && !cur.pid && prevPid) {
-        const succ = this._tasks.find((t) => t.pid === prevPid && t.id !== id);
-        if (succ?.id) return succ.id;
+      if (!prevPid) {
+        return id;
       }
-      return id;
+      // 还持有原 pid 就没换人（会话仍在，绝大多数刷新走这条）
+      if (this._tasks.find((t) => t.id === id)?.pid) {
+        return id;
+      }
+      const succ = this._tasks.find((t) => t.pid === prevPid && t.id !== id);
+      if (!succ?.id) {
+        return id;
+      }
+      carried.push([id, succ.id]);
+      return succ.id;
     });
+    // 本地回显（刚发出、终端还没同步回来的那条）跟着搬家，否则存活清理连它一起丢，
+    // 看着就像「刚发的消息凭空没了」。继任者已有内容时不覆盖，只清掉旧账。
+    if (carried.length) {
+      const next = { ...this._messagesById };
+      carried.forEach(([from, to]) => {
+        const old = next[from];
+        if (old?.length && !next[to]?.length) {
+          next[to] = old;
+        }
+        delete next[from];
+      });
+      this._messagesById = next;
+    }
     // 跟随后可能与已打开的会话撞车，去重保序
     const deduped = Array.from(new Set(followed));
     if (deduped.join(" ") !== this._openIds.join(" ")) {

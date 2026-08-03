@@ -39,6 +39,26 @@ fn worth_finish_notice(mtime_ms: u64, now_secs: u64) -> bool {
     idle_secs <= STALE_FINISH_SECS
 }
 
+/// 「进程占位任务」：只扫到 agent 进程、还没配上会话文件时，客户端先造一条空壳任务占位
+///（见 core `scanner::build_tasks` 尾部：id 为 `pid-<pid>`，再由 `attach_machine` 加机器前缀）。
+///
+/// 它消失几乎总是好事而非坏事：一给它下发任务，claude 就落了 jsonl，下一轮扫描把进程配到
+/// 真会话上，占位任务功成身退、换成真会话 id 继续。此刻推「会话已结束」纯属噪音 —— 卡片上
+/// 只有一个「Claude Code」，既认不出是哪个，也没有任何结果可看（消息都记在新 id 名下）。
+///
+/// 光靠文本口径挡不住它：占位任务的标题恒为终端名「Claude Code」、提示词恒为
+///「（会话尚未产生记录）」，两者都非空。只能认 id。
+fn is_proc_placeholder(t: &am_core::model::Task) -> bool {
+    is_proc_placeholder_id(&t.id, &t.machine_id)
+}
+
+/// [`is_proc_placeholder`] 的纯字符串内核（Task 字段太多，测试直接打这一层）
+fn is_proc_placeholder_id(id: &str, machine_id: &str) -> bool {
+    // 机器前缀剥不掉时（machine_id 为空 / 老客户端没加前缀）原样回退，兜底认裸形态
+    let rest = id.strip_prefix(machine_id).unwrap_or(id);
+    rest.starts_with("-pid-") || rest.starts_with("pid-")
+}
+
 pub fn router(state: SharedState) -> Router {
     // downloads 目录解析要用 data_dir，router 组装尾部 state 已被 with_state 消费
     let state_dl = state.clone();
@@ -2194,11 +2214,15 @@ async fn report(
                 })
                 .unwrap_or((String::new(), None))
         };
-        // 「占位会话」：从没出现过真实内容（标题与提示词都空，列表里只显示成终端名
-        // 「Claude Code」）。多是刚开终端还没输入、或没配对上 jsonl 的空壳 —— 它结束时推一条
-        // 「会话已结束」纯属噪音（认不出是哪个、也没有任何结果可看），所以不推。
+        // 「占位会话」：没有真实内容可看的空壳，结束时推一条「会话已结束」纯属噪音
+        //（认不出是哪个、也没有任何结果可看），所以不推。两种形态：
+        //   ① 进程占位任务（`is_proc_placeholder`）—— 只有进程还没配上 jsonl；下发任务后
+        //      它换成真会话 id 就地消失，这条「消失」本不该报丧。
+        //   ② 有会话文件但标题与提示词都空 —— 刚开终端还没输入过。
         // 只挡推送，基线仍要照常清理，否则会被后面的「消失」判定再推一次。
-        let is_placeholder = |t: &am_core::model::Task| t.title.is_empty() && t.prompt.is_empty();
+        let is_placeholder = |t: &am_core::model::Task| {
+            is_proc_placeholder(t) || (t.title.is_empty() && t.prompt.is_empty())
+        };
         // 造一条 assistant 侧的交互记录（任务完成 / 会话结束时的结果）。
         // 正文优先用完整原文（推送里被截断时 full 有值），否则退回展示版并去掉「最后结果」抬头。
         // 号位要 await 才能查，所以这里带回终端锚，等锁释放后再补。
@@ -2659,6 +2683,38 @@ async fn ws_loop(socket: WebSocket, state: SharedState, user: Option<String>, to
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod proc_placeholder_tests {
+    use super::is_proc_placeholder_id;
+
+    /// 正常形态：客户端 attach_machine 给 `pid-<pid>` 加了机器前缀
+    #[test]
+    fn prefixed_placeholder_is_detected() {
+        assert!(is_proc_placeholder_id("mach01-pid-1234", "mach01"));
+    }
+
+    /// machine_id 为空（老客户端 / 还没归属）时的裸形态也要认出来
+    #[test]
+    fn bare_placeholder_is_detected() {
+        assert!(is_proc_placeholder_id("pid-1234", ""));
+        assert!(is_proc_placeholder_id("pid-1234", "mach01"), "前缀剥不掉时按裸形态兜底");
+    }
+
+    /// 真会话（jsonl 的 uuid 文件名）绝不能被误判成占位 —— 误判就是漏推「会话已结束」
+    #[test]
+    fn real_session_is_not_placeholder() {
+        assert!(!is_proc_placeholder_id("mach01-9f3c-4a1e-bb02-77d1", "mach01"));
+        assert!(!is_proc_placeholder_id("9f3c4a1e-bb02-77d1", ""));
+    }
+
+    /// 会话 uuid 里恰好出现 `pid-` 字样不算数：只认剥掉机器前缀后的开头
+    #[test]
+    fn pid_substring_elsewhere_is_not_placeholder() {
+        assert!(!is_proc_placeholder_id("mach01-abc-pid-1234", "mach01"));
+        assert!(!is_proc_placeholder_id("rapid-7788", ""));
     }
 }
 
