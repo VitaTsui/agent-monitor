@@ -1,25 +1,35 @@
 import React, { useCallback, useEffect, useState } from "react";
 
-import { message } from "antd";
+// Modal.confirm 这类命令式弹窗 hsu-ui 未提供，按约定用 antd 兜底（组件式仍用 hsu-ui 的 Modal）
+import { message, Modal as AntdModal, QRCode, Spin } from "antd";
 import { DingtalkOutlined, FolderOutlined, RightOutlined } from "@ant-design/icons";
 
-import { Button, Input, Modal } from "@hsu-react/ui";
+import { Button, Copy, Input, Modal } from "@hsu-react/ui";
 
 import {
+  DingtalkBoundId,
   IntegrationsInfo,
   getIntegrations,
   setDingtalkApp,
   getTaskDirs,
   setDingtalkRecvDir,
+  getDingtalkQr,
+  getDingtalkIds,
+  unbindDingtalkId,
+  claimDingtalkBind,
 } from "@/services/apis/portal";
 import styles from "./index.module.scss";
 
 /**
- * 机器人管理（用户端）：在这里配置**自己的**钉钉机器人。
+ * 机器人管理（用户端）：两条接入方式并存，各取所需。
  *
- * 一个账号一个机器人：谁配的机器人，它收到的消息就归谁、推送也只发给他 ——
- * 不需要再单独去绑定自己的钉钉 id，也没有一个机器人服务多人那套。
- * 另外可配「文件接收目录」（机器人收到的文件落在项目里的哪儿）。
+ * 1. **自己的机器人** —— 填 AppKey/AppSecret。谁配的机器人，它收到的消息就归谁、
+ *    推送也只发给他，不用再绑钉钉号。
+ * 2. **公共机器人** —— 用管理员配的那一个，绑定自己的钉钉号来认人：拿钉钉扫下面
+ *    那个二维码，授权后即绑好。一个账号可以绑多个钉钉号（手机/电脑各一个）。
+ *
+ * 两者同时具备时以自己的机器人优先。另外可配「文件接收目录」（机器人收到的文件
+ * 落在项目里的哪儿）。
  */
 const IntegrationsPanel: React.FC = () => {
   // 自己的钉钉机器人
@@ -28,6 +38,13 @@ const IntegrationsPanel: React.FC = () => {
   const [hasSecret, setHasSecret] = useState(false);
   const [linked, setLinked] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // 公共机器人 + 钉钉号绑定
+  const [globalAvailable, setGlobalAvailable] = useState(false);
+  const [boundIds, setBoundIds] = useState<DingtalkBoundId[]>([]);
+  const [qr, setQr] = useState<{ url: string; command: string } | null>(null);
+  const [qrLoading, setQrLoading] = useState(false);
+  const [qrErr, setQrErr] = useState("");
 
   // 机器人文件接收目录（通用）：按设备分组的项目
   type RecvProj = { cwd: string; name: string; dir: string; taskId?: string | null };
@@ -133,10 +150,84 @@ const IntegrationsPanel: React.FC = () => {
         setAppKey(d.dingtalk?.appKey ?? "");
         setHasSecret(!!d.dingtalk?.hasSecret);
         setLinked(!!d.dingtalk?.linked);
+        setGlobalAvailable(!!d.globalBot?.available);
+        setBoundIds(d.globalBot?.boundIds ?? []);
       })
       .catch(() => void 0);
   }, []);
   useEffect(() => load(), [load]);
+
+  // 二维码按需取：进面板就取会白白占掉一个绑定码，展开绑定区时才要
+  const loadQr = useCallback(() => {
+    setQrLoading(true);
+    setQrErr("");
+    getDingtalkQr()
+      .then((res) => {
+        if (res.code !== 0 || !res.data) {
+          setQrErr(res.msg ?? "取二维码失败");
+          return;
+        }
+        setQr({ url: res.data.url, command: res.data.command });
+      })
+      .catch(() => setQrErr("取二维码失败，请检查网络"))
+      .finally(() => setQrLoading(false));
+  }, []);
+  useEffect(() => {
+    // 没配自己的机器人、且管理员开了公共机器人时，绑定才有意义
+    if (globalAvailable && !hasSecret && !qr && !qrLoading) loadQr();
+  }, [globalAvailable, hasSecret, qr, qrLoading, loadQr]);
+
+  // 扫码是在**手机上**完成的，这一端只能靠轮询知道绑上了没有。
+  // 只在二维码挂着、且还没绑过时轮询，绑上即停。
+  useEffect(() => {
+    if (!qr || boundIds.length > 0) return;
+    const timer = window.setInterval(() => {
+      getDingtalkIds()
+        .then((res) => {
+          const list = res.data?.list ?? [];
+          if (list.length > 0) {
+            setBoundIds(list);
+            message.success("钉钉号绑定成功");
+          }
+        })
+        .catch(() => void 0);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [qr, boundIds.length]);
+
+  // 机器人回发的登录链接（?dtbind=<token>）：登录进来后自动认领，省得再去扫码
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const token = url.searchParams.get("dtbind");
+    if (!token) return;
+    // 无论成败都把参数摘掉：刷新页面不该重复认领（token 本身也是一次性的）
+    url.searchParams.delete("dtbind");
+    window.history.replaceState(null, "", url.toString());
+    claimDingtalkBind(token)
+      .then((res) => {
+        if (res.code !== 0) return message.error(res.msg ?? "绑定失败");
+        message.success(`已绑定钉钉号${res.data?.nick ? ` · ${res.data.nick}` : ""}`);
+        getDingtalkIds().then((r) => setBoundIds(r.data?.list ?? []));
+      })
+      .catch(() => message.error("绑定失败，请检查网络"));
+  }, []);
+
+  const doUnbind = (staffId: string, nick: string) => {
+    AntdModal.confirm({
+      title: "解绑钉钉号",
+      content: `解绑后「${nick || staffId}」将不再收到推送，也不能再通过钉钉控制会话。`,
+      okText: "解绑",
+      cancelText: "取消",
+      onOk: () =>
+        unbindDingtalkId(staffId)
+          .then((res) => {
+            if (res.code !== 0) return message.error(res.msg ?? "解绑失败");
+            message.success("已解绑");
+            setBoundIds((l) => l.filter((x) => x.staffId !== staffId));
+          })
+          .catch(() => message.error("解绑失败，请检查网络")),
+    });
+  };
 
   const saveApp = () => {
     const key = appKey.trim();
@@ -245,6 +336,73 @@ const IntegrationsPanel: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* 公共机器人：不想自己建应用就绑个钉钉号，扫码即可 */}
+      {globalAvailable ? (
+        <div className={styles.boundCard}>
+          <div className={styles.boundTitle}>
+            <DingtalkOutlined className={styles.boundTitleIcon} />
+            绑定钉钉号
+            <span className={`${styles.botState} ${boundIds.length ? styles.botOk : ""}`}>
+              {boundIds.length ? `已绑 ${boundIds.length}` : "未绑定"}
+            </span>
+          </div>
+
+          {hasSecret ? (
+            <div className={styles.botHint}>
+              你已配了自己的机器人，推送走它就够了，无需再绑钉钉号。
+            </div>
+          ) : (
+            <div className={styles.qrRow}>
+              <div className={styles.qrBox}>
+                {qrLoading ? (
+                  <Spin />
+                ) : qr ? (
+                  <QRCode value={qr.url} size={148} bordered={false} />
+                ) : (
+                  <div className={styles.qrErr}>
+                    {qrErr || "二维码未就绪"}
+                    <Button size="small" onClick={loadQr}>
+                      重试
+                    </Button>
+                  </div>
+                )}
+              </div>
+              <div className={styles.qrSide}>
+                <div className={styles.qrTitle}>用钉钉扫一扫</div>
+                <div className={styles.qrSub}>
+                  扫码授权后，这个钉钉号就绑到当前账号：会话提醒私聊推给你，
+                  也能直接在钉钉里控制会话。手机、电脑可各绑一个。
+                </div>
+                {qr ? (
+                  <div className={styles.qrAlt}>
+                    扫不了？在钉钉里把这句话发给机器人也一样：
+                    <code className={styles.qrCmd}>{qr.command}</code>
+                    <Copy id="dt-bind-cmd" text={qr.command} />
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          )}
+
+          {boundIds.length ? (
+            <div className={styles.idList}>
+              {boundIds.map((b) => (
+                <div key={b.staffId} className={styles.idRow}>
+                  <DingtalkOutlined className={styles.idIcon} />
+                  <div className={styles.idName}>
+                    <div className={styles.idNick}>{b.nick || "（未取到昵称）"}</div>
+                    <div className={styles.idStaff}>{b.staffId}</div>
+                  </div>
+                  <Button size="small" onClick={() => doUnbind(b.staffId, b.nick)}>
+                    解绑
+                  </Button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* 接收目录配置弹窗：设备 → 项目 层级列全 */}
       <Modal

@@ -356,6 +356,11 @@ export interface IntegrationsInfo {
     /** 已经跟机器人说过话 = 它知道该把推送发给谁了 */
     linked: boolean;
   };
+  /** 管理员配的公共机器人：没配自己机器人的账号，绑个钉钉号就能用 */
+  globalBot?: {
+    available: boolean;
+    boundIds: DingtalkBoundId[];
+  };
   /** 机器人文件接收目录（所有渠道通用）：按「设备 → 项目」层级列出 */
   recvDirDevices?: {
     machineId: string;
@@ -367,6 +372,12 @@ export interface IntegrationsInfo {
       taskId?: string | null;
     }[];
   }[];
+}
+
+/** 已绑到本账号的钉钉号 */
+export interface DingtalkBoundId {
+  staffId: string;
+  nick: string;
 }
 
 export const getIntegrations = async () => {
@@ -386,6 +397,39 @@ export const setDingtalkApp = async (data: { appKey: string; appSecret?: string 
   return await post<{ result: string }>(
     "/monitor/integrations/dingtalk-app",
     data,
+  );
+};
+
+/**
+ * 取扫码绑定的授权地址：把 url 画成二维码，用钉钉扫一下即可把该钉钉号绑到本账号。
+ * command 是同一个码的另一种用法（扫不了时手动发给机器人）。
+ */
+export const getDingtalkQr = async () => {
+  return await get<{
+    url: string;
+    code: string;
+    expiresIn: number;
+    command: string;
+  }>("/monitor/integrations/dingtalk-qr");
+};
+
+/** 本账号已绑定的钉钉号 */
+export const getDingtalkIds = async () => {
+  return await get<ListRes<DingtalkBoundId>>("/monitor/integrations/dingtalk-ids");
+};
+
+/** 解绑自己的某个钉钉号 */
+export const unbindDingtalkId = async (staffId: string) => {
+  return await post<{ result: string }>("/monitor/integrations/dingtalk-unbind", {
+    staffId,
+  });
+};
+
+/** 认领机器人回发的绑定链接（URL 上的 ?dtbind= token） */
+export const claimDingtalkBind = async (token: string) => {
+  return await post<{ result: string; staffId: string; nick: string }>(
+    "/monitor/integrations/dingtalk-bind",
+    { token },
   );
 };
 

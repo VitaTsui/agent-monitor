@@ -63,6 +63,10 @@ const Composer: React.FC<ComposerProps> = (props) => {
   // 供原生 keydown 捕获处理器读取当前菜单项/高亮（避免闭包拿到旧值）
   const slashItemsRef = useRef<Array<{ key: string; run: () => void }>>([]);
   const slashActiveRef = useRef(0);
+  // 输入法是否正在组字。事件自带的 isComposing 不够：不少输入法（尤其 macOS）
+  // 在候选词上屏时是「先 compositionend、再补一个 Enter」的顺序，那个 Enter 上
+  // isComposing 已经是 false，看起来就是一次正常的回车。
+  const composingRef = useRef(false);
 
   /**
    * 把文本追加进 Chat.Input 的输入框。
@@ -129,13 +133,34 @@ const Composer: React.FC<ComposerProps> = (props) => {
   // 移动端：回车换行、不发送（发送用右下角发送按钮）。hsu-ui Chat.Input 默认回车即提交，
   // 这里在捕获阶段拦住移动端的 Enter、stopPropagation 阻止它到达 Chat.Input 的提交处理，
   // 不 preventDefault 让 textarea 自然插入换行。
+  //
+  // 同一处还要拦住**输入法上屏用的那个 Enter**：桌面端的提交在 Chat.Input 内部，
+  // 组字中的回车一旦漏过去就会把「刚上屏的半句话」当成一条消息发出去。发完输入框
+  // 被清空、输入法紧接着又把候选词补回来，于是越打越长、每次上屏都发一条 ——
+  // 表现就是同一句话被拆成「卷管理弹窗」「卷管理弹窗表格」这样的递增前缀连发。
   useEffect(() => {
     const ta = rootRef.current?.querySelector("textarea");
     if (!ta) return;
+    const onCompStart = () => {
+      composingRef.current = true;
+    };
+    // 延后一个宏任务再解除：紧跟在 compositionend 之后补发的那个 Enter 仍要算组字期内
+    const onCompEnd = () => {
+      setTimeout(() => {
+        composingRef.current = false;
+      }, 0);
+    };
     const onKeyDownCapture = (e: KeyboardEvent) => {
+      // keyCode 229 = 按键被输入法吃掉了，同样不能当回车用
+      const composing = composingRef.current || e.isComposing || e.keyCode === 229;
+      if (e.key === "Enter" && !e.shiftKey && composing) {
+        // 只拦提交，不 preventDefault —— 上屏动作要照常完成
+        e.stopPropagation();
+        return;
+      }
       // 命令菜单开着时：↑↓ 移高亮、回车选中当前项（选中后自动聚焦回输入框）
       const items = slashItemsRef.current;
-      if (items.length > 0 && !e.isComposing) {
+      if (items.length > 0 && !composing) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
           e.stopPropagation();
@@ -157,12 +182,18 @@ const Composer: React.FC<ComposerProps> = (props) => {
         }
       }
       const isMobile = window.matchMedia("(max-width: 760px)").matches;
-      if (isMobile && e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      if (isMobile && e.key === "Enter" && !e.shiftKey && !composing) {
         e.stopPropagation();
       }
     };
+    ta.addEventListener("compositionstart", onCompStart);
+    ta.addEventListener("compositionend", onCompEnd);
     ta.addEventListener("keydown", onKeyDownCapture, true);
-    return () => ta.removeEventListener("keydown", onKeyDownCapture, true);
+    return () => {
+      ta.removeEventListener("compositionstart", onCompStart);
+      ta.removeEventListener("compositionend", onCompEnd);
+      ta.removeEventListener("keydown", onKeyDownCapture, true);
+    };
   }, [taskId]);
 
   // 把某条命令填进输入框（保留在输入框，用户可继续补参数或直接回车发布）

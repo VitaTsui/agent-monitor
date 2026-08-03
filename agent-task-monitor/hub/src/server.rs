@@ -117,6 +117,9 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/integrations/dingtalk-app", post(set_dingtalk_app))
         // 钉钉号绑定（走管理员的全局机器人时才需要）：取码 / 认领链接 / 查看 / 解绑
         .route("/monitor/integrations/dingtalk-bindcode", post(dingtalk_bind_code))
+        .route("/monitor/integrations/dingtalk-qr", get(dingtalk_qr))
+        // 扫码回调：人在手机钉钉里打开，没有登录态，故不鉴权（凭一次性 state 认人）
+        .route("/monitor/integrations/dingtalk-scan", get(dingtalk_scan_cb))
         .route("/monitor/integrations/dingtalk-bind", post(dingtalk_bind))
         .route("/monitor/integrations/dingtalk-ids", get(dingtalk_ids_get))
         .route("/monitor/integrations/dingtalk-unbind", post(dingtalk_unbind))
@@ -1522,6 +1525,112 @@ async fn dingtalk_bind_code(State(state): State<SharedState>, headers: HeaderMap
         // 前端直接把它做成二维码：扫出来就是能发给机器人的那句话
         "command": format!("绑定 {code}"),
     }))
+}
+
+/// GET /monitor/integrations/dingtalk-qr —— 扫码绑定用的授权地址。
+///
+/// 前端把返回的 url 画成二维码，用钉钉扫一下、确认授权，回调就把扫码那个人的
+/// 钉钉号绑到本账号 —— 全程不用手输任何东西。
+///
+/// **只对全局机器人有意义**：自己配了机器人的账号，谁配的归谁，本就不需要绑
+/// 钉钉号。而且 OAuth 的 redirect_uri 要在应用后台登记白名单，个人应用没登记
+/// 过我们的回调地址，给了也走不通。
+///
+/// state 直接复用绑定码：一码两用 —— 扫码走它认人，手动发「绑定 <码>」也认它。
+async fn dingtalk_qr(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let Some(app) = state.registry.read().await.global_dingtalk_app() else {
+        return err(400, "管理员还没配公共机器人，暂不能扫码绑定");
+    };
+    if app.app_key.is_empty() {
+        return err(400, "管理员还没配公共机器人，暂不能扫码绑定");
+    }
+    let now = crate::state::now_secs();
+    let mut map = state.dingtalk_bind_codes.write().await;
+    map.retain(|_, e| now.saturating_sub(e.at) < crate::bot::BIND_TOKEN_TTL_SECS);
+    // 与取码走同一张表：手上那个码没过期就接着用，别每次刷新都换二维码
+    let (code, left) = match map.iter().find(|(_, e)| e.user == user) {
+        Some((c, e)) => {
+            (c.clone(), crate::bot::BIND_TOKEN_TTL_SECS.saturating_sub(now.saturating_sub(e.at)))
+        }
+        None => {
+            if map.len() >= 5000 {
+                return err(429, "绑定请求过多，请稍后再试");
+            }
+            let c = crate::state::new_bind_code();
+            map.insert(c.clone(), crate::state::PendingBindCode { user, at: now });
+            (c, crate::bot::BIND_TOKEN_TTL_SECS)
+        }
+    };
+    drop(map);
+    let redirect = format!("{}/monitor/integrations/dingtalk-scan", public_base());
+    ok(json!({
+        "url": crate::dingtalk::qr_auth_url(&app.app_key, &redirect, &code),
+        "code": code,
+        "expiresIn": left,
+        // 扫码不通时的退路：到钉钉里把这句话发给机器人，一样能绑
+        "command": format!("绑定 {code}"),
+    }))
+}
+
+#[derive(Deserialize)]
+struct ScanCb {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    state: String,
+}
+
+/// GET /monitor/integrations/dingtalk-scan —— 扫码授权后的回调（钉钉打开，无登录态）。
+///
+/// 回的是给人看的 HTML：扫码人此刻在手机钉钉的内置浏览器里，看不懂 JSON。
+async fn dingtalk_scan_cb(
+    State(state): State<SharedState>,
+    Query(q): Query<ScanCb>,
+) -> axum::response::Html<String> {
+    let page = |ok: bool, msg: &str| {
+        axum::response::Html(format!(
+            "<!doctype html><meta charset=utf-8>\
+             <meta name=viewport content=\"width=device-width,initial-scale=1\">\
+             <div style=\"font:16px/1.7 -apple-system,system-ui,sans-serif;\
+             padding:56px 24px;text-align:center;color:#1f2329\">\
+             <div style=\"font-size:44px\">{}</div>\
+             <div style=\"margin-top:16px;font-size:18px;font-weight:600\">{}</div>\
+             <div style=\"margin-top:10px;color:#8a8f8d;font-size:14px\">{}</div></div>",
+            if ok { "✅" } else { "⚠️" },
+            msg,
+            if ok { "可以关掉这个页面了" } else { "请回到网页重新扫码" },
+        ))
+    };
+    if q.code.is_empty() || q.state.is_empty() {
+        return page(false, "授权信息不完整");
+    }
+    // state = 绑定码 → 认出「是谁在网页上发起的这次绑定」。一次性，用掉即销。
+    let now = crate::state::now_secs();
+    let pending = state.dingtalk_bind_codes.write().await.remove(q.state.trim());
+    let Some(p) = pending else {
+        return page(false, "二维码已失效");
+    };
+    if now.saturating_sub(p.at) >= crate::bot::BIND_TOKEN_TTL_SECS {
+        return page(false, "二维码已过期");
+    }
+    let Some(app) = state.registry.read().await.global_dingtalk_app() else {
+        return page(false, "公共机器人未配置");
+    };
+    let now_ms = now * 1000;
+    match crate::dingtalk::resolve_scan_user(&app.app_key, &app.app_secret, &q.code, now_ms).await {
+        Ok((staff_id, nick)) => {
+            state.registry.write().await.bind_dingtalk_id(&staff_id, &p.user, &nick);
+            tracing::info!("钉钉扫码绑定成功 user={} nick={nick}", p.user);
+            page(true, &format!("已绑定到 {}", p.user))
+        }
+        Err(e) => {
+            tracing::warn!("钉钉扫码绑定失败: {e}");
+            page(false, "绑定失败，请重试")
+        }
+    }
 }
 
 #[derive(Deserialize)]
