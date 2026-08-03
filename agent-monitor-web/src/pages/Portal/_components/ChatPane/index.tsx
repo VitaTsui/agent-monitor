@@ -491,8 +491,12 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
         </Spin>
       </div>
 
-      {/* 清单与后台任务是「当前状态」而非时序事件：悬浮在本格右侧、可收起 */}
-      <SessionPanels messages={messages} running={task.status === "running"} />
+      {/* 清单与后台任务是「当前状态」而非时序事件：悬浮在本格右侧、可收起。
+          紧凑卡片不给 —— 它只有 320×260，这组悬浮面板会盖掉大半内容，而卡片的用途
+          就是「瞥一眼这个会话在干什么」。要看清单点一下把它换到主区即可。 */}
+      {!compact && (
+        <SessionPanels messages={messages} running={task.status === "running"} />
+      )}
 
       {/* 排队条同样不进紧凑卡片：它整条都是操作（撤回、打断），而紧凑卡片是只读的 */}
       {!compact && queuedItems.length > 0 && (
