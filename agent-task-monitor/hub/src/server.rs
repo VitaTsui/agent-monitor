@@ -335,6 +335,39 @@ async fn pair_status(
     ok(json!({ "claimed": false, "expired": false }))
 }
 
+/// 把固定名安装包对齐到最新版本。
+///
+/// 客户端自更新固定去下 `agent-monitor-setup.exe`（见 client 的 `do_self_update`），而每次
+/// 发版上传的是带版本号的 `AgentMonitor-<v>-setup.exe` —— 两者此前靠发布流程手工保持一致。
+///
+/// 漏更新一次的后果特别隐蔽：客户端把「旧包」完整下载、静默安装，两步都成功，只是版本号
+/// 没变，于是自己判定「安装没生效」并停止重试，提示用户手动下载。排查时看到的是安装环节
+/// 报错，真正的病灶却在服务端少复制了一个文件。线上就这么发生过（0.10.0 发布后固定名仍
+/// 停在 0.9.8，客户端反复把 0.9.8 装了一遍又一遍）。
+///
+/// 交给 hub 定期核对：发版只要放好版本化的包，固定名自动跟上。
+pub(crate) fn sync_fixed_installer(downloads_dir: &std::path::Path) {
+    let ver = ready_desktop_version(downloads_dir);
+    let src = downloads_dir.join(format!("AgentMonitor-{ver}-setup.exe"));
+    let dst = downloads_dir.join("agent-monitor-setup.exe");
+    let Ok(meta) = std::fs::metadata(&src) else {
+        return; // 版本化的包还没传上来，等下一轮
+    };
+    // 只比大小：每次发版内容必变，大小相同即认为已是同一个包。比 mtime 稳 ——
+    // 复制出来的副本 mtime 天然与源不同，拿它比会每轮都重复复制。
+    if std::fs::metadata(&dst).map(|d| d.len()).ok() == Some(meta.len()) {
+        return;
+    }
+    // 先写临时再 rename：直接覆盖的话，正在下载的客户端会拿到写了一半的文件
+    let tmp = downloads_dir.join("agent-monitor-setup.exe.part");
+    if std::fs::copy(&src, &tmp).is_ok() && std::fs::rename(&tmp, &dst).is_ok() {
+        tracing::info!("固定名安装包已对齐到 v{ver}");
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+        tracing::warn!("固定名安装包对齐失败（v{ver}），客户端自更新会下到旧包");
+    }
+}
+
 /// 已就绪、可对外推送的桌面版本：downloads 里已存在 `AgentMonitor-<v>-setup.exe`
 /// 的最高版本（不超过 hub 自身版本）。
 ///

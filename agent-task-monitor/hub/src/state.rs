@@ -563,6 +563,20 @@ pub async fn tick_loop(state: SharedState) {
         if tick % 40 == 0 && state.sessions_dirty.swap(false, Ordering::Relaxed) {
             save_sessions(&state).await;
         }
+        // 固定名安装包对齐（~60s 一次）：发版只上传版本化的包，客户端自更新却固定去下
+        // agent-monitor-setup.exe。不对齐的话客户端会把旧包装了又装（见 sync_fixed_installer）。
+        // 放 spawn_blocking：拷 11MB 是同步文件 IO，别占着 tick 所在的 worker。
+        if tick % 40 == 0 {
+            let dir = std::env::var("AM_DOWNLOADS_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| state.config.data_dir.join("downloads"));
+            if dir.is_dir() {
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::server::sync_fixed_installer(&dir)
+                })
+                .await;
+            }
+        }
         // 机器人号位同上：分配/回收只标脏，这里统一写（丢一轮也只是号位重排一次）
         if tick % 40 == 0 && state.bot_slots_dirty.swap(false, Ordering::Relaxed) {
             crate::slots::save(&state).await;
