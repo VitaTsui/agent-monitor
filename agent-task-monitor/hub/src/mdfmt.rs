@@ -1,12 +1,15 @@
 //! 出站 Markdown 适配：把 agent 输出降级成钉钉真能渲染的样子。
 //!
 //! 病灶：Claude Code / Codex 的输出天然带表格与代码围栏，而**钉钉 markdown 官方只保证**
-//! 标题、加粗、斜体、链接、图片、有序/无序列表、引用；**表格与代码围栏不在保证范围内**
-//! —— 部分 PC 版本能渲染，手机端基本不渲染，推过去就是一堆 `|---|---|` 和孤零零的 ```。
-//! 而「人在手机上看结果」正是本项目的核心场景，所以出站前统一降级：
+//! 标题、加粗、斜体、链接、图片、有序/无序列表、引用；代码围栏不在保证范围内 ——
+//! 推过去就是孤零零的 ```。而「人在手机上看结果」正是本项目的核心场景，所以出站前降级：
 //!
-//! - 表格 → 每行一条 `- 表头: 值｜表头: 值`（只在识别出**规范表格**时转换，否则原样保留）；
 //! - 围栏行删掉、围栏内的代码原样保留（代码本身要看，围栏符号是噪音）。
+//!
+//! **表格不再降级**：早先按官方文档把表格转成 `- 表头: 值｜…` 的列表，但实测钉钉已能
+//! 渲染 markdown 表格，转成列表反而丢了行列对照、比原表难读。现在原样透传。
+//! （判定与转换那几个辅助函数一并删了，留着只会一直报 dead_code；真要按客户端版本
+//! 重新降级，从 git 历史取回即可。）
 //!
 //! 另外提供按长度切分：钉钉单条 markdown 上限约 4000 字符，此前各处是硬截断到 1500/1800，
 //! 既浪费额度又会把话切断在半句。切分优先落在换行、其次空格，避免拦腰截断。
@@ -16,53 +19,6 @@
 
 /// 钉钉单条 markdown 的字符上限（留出余量，官方约 5000 字节）
 pub const DINGTALK_MAX_LEN: usize = 4000;
-
-/// 是否像表格行：`| a | b |`
-fn is_table_line(line: &str) -> bool {
-    let s = line.trim();
-    s.starts_with('|') && s.matches('|').count() >= 2
-}
-
-/// 拆一行表格为单元格（去掉首尾竖线后按竖线切）
-fn split_row(line: &str) -> Vec<String> {
-    line.trim().trim_matches('|').split('|').map(|c| c.trim().to_string()).collect()
-}
-
-/// 是否分隔行：单元格只由 `-` 和可选的首尾 `:` 组成（`---` / `:---` / `---:` / `:---:`）
-fn is_separator_row(cells: &[String]) -> bool {
-    let non_empty: Vec<&String> = cells.iter().filter(|c| !c.is_empty()).collect();
-    !non_empty.is_empty()
-        && non_empty.iter().all(|c| {
-            let core = c.trim_start_matches(':').trim_end_matches(':');
-            !core.is_empty() && core.chars().all(|ch| ch == '-')
-        })
-}
-
-/// 规范表格（首行表头 + 次行分隔）→ 每数据行一条 `- 表头: 值｜…`；不规范就原样返回。
-fn convert_table(block: &[&str]) -> Vec<String> {
-    let rows: Vec<Vec<String>> = block.iter().map(|l| split_row(l)).collect();
-    if rows.len() < 2 || !is_separator_row(&rows[1]) {
-        return block.iter().map(|s| s.to_string()).collect();
-    }
-    let headers = &rows[0];
-    let mut out = Vec::new();
-    for cells in rows.iter().skip(2) {
-        let pairs: Vec<String> = headers
-            .iter()
-            .zip(cells.iter())
-            .filter(|(_, c)| !c.is_empty())
-            .map(|(h, c)| if h.is_empty() { c.clone() } else { format!("{h}: {c}") })
-            .collect();
-        if !pairs.is_empty() {
-            out.push(format!("- {}", pairs.join("｜")));
-        }
-    }
-    if out.is_empty() {
-        block.iter().map(|s| s.to_string()).collect()
-    } else {
-        out
-    }
-}
 
 /// 把钉钉渲染不了的语法降级成可读纯文本。幂等。
 pub fn downgrade_for_dingtalk(text: &str) -> String {
@@ -76,15 +32,6 @@ pub fn downgrade_for_dingtalk(text: &str) -> String {
         if t.starts_with("```") || t.starts_with("~~~") {
             in_fence = !in_fence;
             i += 1; // 丢掉围栏行本身，围栏内内容原样保留
-            continue;
-        }
-        if !in_fence && is_table_line(line) {
-            let mut j = i;
-            while j < lines.len() && is_table_line(lines[j]) {
-                j += 1;
-            }
-            out.extend(convert_table(&lines[i..j]));
-            i = j;
             continue;
         }
         out.push(line.to_string());
@@ -220,21 +167,28 @@ pub fn chunk_text(text: &str, max_len: usize) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// 表格原样保留：钉钉能渲染，转成列表反而丢了行列对照（这条曾断言相反，见模块注释）
     #[test]
-    fn table_becomes_line_list() {
+    fn table_kept_as_is() {
         let src = "结果如下：\n| 文件 | 状态 |\n| --- | --- |\n| a.rs | 已改 |\n| b.rs | 跳过 |\n完毕";
-        let out = downgrade_for_dingtalk(src);
-        assert!(out.contains("- 文件: a.rs｜状态: 已改"), "得到：{out}");
-        assert!(out.contains("- 文件: b.rs｜状态: 跳过"));
-        assert!(!out.contains('|'), "降级后不该再有竖线表格：{out}");
-        assert!(out.starts_with("结果如下：") && out.ends_with("完毕"));
+        assert_eq!(downgrade_for_dingtalk(src), src);
     }
 
-    /// 不规范的表格（缺分隔行）原样保留 —— 宁可不动，也别乱猜
+    /// 不规范的表格（缺分隔行）同样原样保留
     #[test]
     fn malformed_table_kept_as_is() {
         let src = "| 只有表头 | 没有分隔 |\n| a | b |";
         assert_eq!(downgrade_for_dingtalk(src), src);
+    }
+
+    /// 表格与围栏混排：围栏照常剥掉，表格分毫不动
+    #[test]
+    fn table_survives_alongside_fence() {
+        let src = "| a | b |\n| --- | --- |\n| 1 | 2 |\n```\nlet x = 1;\n```";
+        let out = downgrade_for_dingtalk(src);
+        assert!(out.contains("| 1 | 2 |"), "表格行要原样留着：{out}");
+        assert!(out.contains("let x = 1;"), "代码内容要保留：{out}");
+        assert!(!out.contains("```"), "围栏行要去掉：{out}");
     }
 
     #[test]

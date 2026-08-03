@@ -861,6 +861,13 @@ struct InputReq {
     #[serde(default)]
     #[allow(dead_code)]
     source: Option<String>,
+    /// 这条是在回答终端弹出的选择卡（选项序号或自定义答案），不是主动发的任务。
+    ///
+    /// 单看内容说明不了什么 —— 孤零零一个「1」，问题本身又不在流里。所以既不推钉钉
+    /// 也不进交互历史，与前端把 fromSelect 排除出对话流的处理保持一致。
+    /// 用显式 rename 而非给整个结构挂 rename_all：现有字段都是单词，不必为这一个改口径。
+    #[serde(default, rename = "fromSelect")]
+    from_select: bool,
 }
 
 /// 把 select 消息（AskUserQuestion 的整份 input JSON）里的问题+选项转成一段可读文本，
@@ -965,7 +972,8 @@ async fn input_task(
     drop(machines); // 释放锁：下面后台任务会再读 machines
     // 记进「远程交互历史」的 user 侧。网页这条路径没走 bot::queue_command（它自己压队列），
     // 所以要单独记一次，否则网页发的任务不会出现在聊天记录里。
-    {
+    // 选择卡的作答除外（见 InputReq::from_select）。
+    if !req.from_select {
         let slot =
             crate::slots::slot_of(&state, &user, &crate::slots::anchor_of(&task)).await;
         crate::history::append(
@@ -989,7 +997,9 @@ async fn input_task(
     }
     // 网页/客户端（非钉钉）下发的任务，主动把「排队中 / 执行中」状态推到钉钉私聊；
     // 排队的还会盯到执行后再推一条。钉钉自己「发 N」走 queue_command 不经这里，不重复。
-    {
+    // 选择卡的作答不推：钉钉那边本来就收到过「⌨️ 需要你选择」，再补一条「已下发 1」
+    // 只是噪音 —— 真正该看的是它选完之后做了什么。
+    if !req.from_select {
         let st = state.clone();
         let (owner, tid) = (user.clone(), id.clone());
         tokio::spawn(async move {

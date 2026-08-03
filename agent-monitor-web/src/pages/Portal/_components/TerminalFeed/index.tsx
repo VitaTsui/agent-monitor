@@ -70,11 +70,22 @@ export const SelectCard: React.FC<{
 }> = ({ data, onAnswer, onDone }) => {
   const [custom, setCustom] = useState("");
   const [step, setStep] = useState(0);
+  /** 多选题当前已勾选的选项序号（1 起，升序） */
+  const [picked, setPicked] = useState<number[]>([]);
   // 刚提交的那一下：防手机上连点两次。不能只靠 step 变化后的重渲染 ——
   // 两次点击可能落在同一帧里，那时第二下打的已经是**下一题**的同位置选项了。
   const busy = React.useRef(false);
   React.useEffect(() => {
-    busy.current = false;
+    // 换题时清空勾选，否则上一题的选择会带进下一题
+    setPicked([]);
+    // 解锁必须**延后**：原先在 step 变化的这一帧立刻置回 false，而一次点击常常产生
+    // 两个事件（触屏的 touch + click、误触的双击）。第二个事件赶在解锁之后落下，
+    // 打中的已经是下一题同位置的选项 —— 表现就是「还没看清第二题就被替我答了」。
+    // 隔一拍再解锁，把这类连发挡在门外；真人看清题目再点，远不止 400ms。
+    const t = setTimeout(() => {
+      busy.current = false;
+    }, 400);
+    return () => clearTimeout(t);
   }, [step]);
   // 输入法是否正在组合。除了 nativeEvent.isComposing，这里再自己记一份：
   // 有的输入法在窗口失焦时会先结束组合、再补发一个 Enter，那时 isComposing
@@ -99,6 +110,29 @@ export const SelectCard: React.FC<{
 
   const submitCustom = () => submit(custom.trim());
 
+  const multi = !!q?.multiSelect;
+
+  const toggle = (n: number) =>
+    setPicked((p) =>
+      p.includes(n) ? p.filter((x) => x !== n) : [...p, n].sort((a, b) => a - b)
+    );
+
+  /**
+   * 多选提交：勾选序号 + 末尾补一个 Submit 的序号，连成一串发出去。
+   *
+   * 终端多选卡里 **Submit 自己也占一个编号**：N 个选项占 1..N，其后是「其它/自定义」
+   * 占 N+1，Submit 就是 N+2。按下它即提交，不必用 ↓ 导航过去（实测确认）。
+   * 于是 4 选项里勾 1、3 就发 "136" —— 逐个数字键勾选，最后一下落在 Submit 上。
+   *
+   * 此前一律按单选只发单个序号，终端勾上一项后仍停在卡上等 Submit，表现为「提交卡住」：
+   * pendingSelect 不被清除，其他端的卡也跟着一直挂着不消失。
+   *
+   * 序号连写不加分隔符，因为终端认的是按键而不是文本。AskUserQuestion 每题至多 4 个
+   * 选项，Submit 编号最大到 6，不会出现两位数带来的歧义。
+   */
+  const submitPicked = () =>
+    submit(picked.join("") + String((q?.options?.length ?? 0) + 2));
+
   if (!q) return null;
 
   return (
@@ -120,18 +154,28 @@ export const SelectCard: React.FC<{
           {(q.options ?? []).map((o, oi) => (
             <div
               key={oi}
-              className={`${styles.selectOpt} ${onAnswer ? styles.clickable : ""}`}
+              className={`${styles.selectOpt} ${onAnswer ? styles.clickable : ""} ${
+                picked.includes(oi + 1) ? styles.selectOptPicked : ""
+              }`}
               role={onAnswer ? "button" : undefined}
               tabIndex={onAnswer ? 0 : undefined}
-              onClick={() => submit(String(oi + 1))}
+              aria-pressed={multi ? picked.includes(oi + 1) : undefined}
+              // 单选点一下即落定；多选只切换勾选，攒齐了再由下方按钮一次性提交
+              onClick={() => (multi ? toggle(oi + 1) : submit(String(oi + 1)))}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
-                  submit(String(oi + 1));
+                  if (multi) {
+                    toggle(oi + 1);
+                  } else {
+                    submit(String(oi + 1));
+                  }
                 }
               }}
             >
-              <span className={styles.selectOptIdx}>{oi + 1}</span>
+              <span className={styles.selectOptIdx}>
+                {multi ? (picked.includes(oi + 1) ? "✓" : oi + 1) : oi + 1}
+              </span>
               <span className={styles.selectOptBody}>
                 <span className={styles.selectOptLabel}>{o.label}</span>
                 {o.description ? (
@@ -193,6 +237,26 @@ export const SelectCard: React.FC<{
               </span>
             </span>
           </div>
+          {/* 多选专用的提交行：对应终端选择卡底部那个 Submit。单选没有这一步（点一下即落定），
+              所以只在 multiSelect 时出现，免得单选也要多点一次。 */}
+          {multi ? (
+            <div
+              className={`${styles.selectSubmit} ${
+                onAnswer && picked.length ? styles.clickable : styles.disabled
+              }`}
+              role="button"
+              tabIndex={0}
+              onClick={submitPicked}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  submitPicked();
+                }
+              }}
+            >
+              {picked.length ? `提交所选（${picked.length} 项）` : "请先勾选选项"}
+            </div>
+          ) : null}
         </div>
       </div>
       {/* 「回车」在手机虚拟键盘上不成立（那是「换行/完成」），所以窄屏改说「点发送」。

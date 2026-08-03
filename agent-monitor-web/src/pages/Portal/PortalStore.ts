@@ -62,6 +62,9 @@ const MAX_MESSAGES_PER_TASK = 500;
  */
 const EMPTY_MESSAGES: PortalMessage[] = [];
 
+/** 同 EMPTY_MESSAGES：无队列时统一返回这一个空数组，别每次新建 */
+const EMPTY_HUB_QUEUED: { cmdId: string; text: string }[] = [];
+
 class PortalStore {
   private _tasks: PortalTaskData[] = [];
   private _devices: PortalDevice[] = [];
@@ -70,6 +73,14 @@ class PortalStore {
   /** 拆分视图中打开的会话（有序，全局跨设备） */
   private _openIds: string[] = [];
   private _messagesById: Record<string, PortalMessage[]> = {};
+  /**
+   * hub 队列里待下发的输入（会话 id → 条目）。
+   *
+   * 这是**跨端可见**的那一份：本地回显只活在发起方自己的浏览器里，别的端无从知道。
+   * 手机上发一条任务，桌面客户端得靠这份数据才看得见「有条任务正排着队」，
+   * 而不是干等到终端执行完、真实消息回来才突然冒出来。
+   */
+  private _hubQueuedById: Record<string, { cmdId: string; text: string }[]> = {};
   private _loadingIds: string[] = [];
   private _keyword = "";
   /**
@@ -602,18 +613,32 @@ class PortalStore {
     this.fetchMessages(id, true);
   };
 
-  /** 刷新「仍在排队」状态：排队中的回显被客户端取走后去掉排队标记 */
+  /** 会话在 hub 队列里待下发的输入（任何端发的都在这，供跨端显示） */
+  public hubQueuedOf = (id: string) => this._hubQueuedById[id] ?? EMPTY_HUB_QUEUED;
+
+  /**
+   * 拉取 hub 队列：既用来去掉本地回显的排队标记，也用来同步**别的端**发的任务。
+   *
+   * 这里原先有个短路 —— 本端没有 `local && queued` 的回显就直接返回、连请求都不发。
+   * 那样一来「手机发、电脑看」永远看不到：别的端发的任务在本端没有任何本地回显，
+   * 短路条件恒不成立。接口本来就把 text 一起返回了，白白丢掉。
+   */
   private refreshQueued = (id: string) => {
-    const msgs = this._messagesById[id] ?? [];
-    if (!msgs.some((m) => m.local && m.queued)) {
-      return;
-    }
     getQueuedInputs(id)
       .then((res) => {
         if (res.code !== 0) {
           return;
         }
-        const still = new Set((res.data?.list ?? []).map((x) => x.cmdId));
+        const list = (res.data?.list ?? []).map((x) => ({
+          cmdId: x.cmdId ?? "",
+          text: x.text ?? "",
+        }));
+        // 内容没变就不换引用，避免每轮轮询都触发重渲染
+        const prev = this._hubQueuedById[id] ?? EMPTY_HUB_QUEUED;
+        if (JSON.stringify(list) !== JSON.stringify(prev)) {
+          this._hubQueuedById = { ...this._hubQueuedById, [id]: list };
+        }
+        const still = new Set(list.map((x) => x.cmdId));
         const cur = this._messagesById[id] ?? [];
         if (cur.some((m) => m.local && m.queued && !still.has(m.cmdId ?? ""))) {
           this._messagesById = {
@@ -643,6 +668,22 @@ class PortalStore {
       .then((res) => {
         if (res.code === 0) {
           antdMessage.success(key === "up" ? "已撤回终端排队" : "已插入排队到会话");
+          // 撤回后把「已送达终端、尚未执行」的本地回显一并清掉。
+          //
+          // 不清的话排队条看着像「撤回了却还在」：那一条其实由两份数据接力显示 ——
+          // 排队条优先铺 queuedInputs，同内容的本地回显被去重挡在后面；撤回让
+          // queuedInputs 随下一轮扫描清空，而本地回显此刻多半还在 stillQueued 的
+          // 6 秒宽限里，于是立刻顶替上来占住同一个位置。
+          //
+          // 判据 `local && !queued`：queued 为真的还在 hub 队列、压根没到终端，
+          // 归 recallAllQueued 按 cmdId 精确撤，不能在这里一并抹掉。
+          if (key === "up") {
+            const cur = this._messagesById[id] ?? [];
+            const kept = cur.filter((m) => !(m.local && !m.queued));
+            if (kept.length !== cur.length) {
+              this._messagesById = { ...this._messagesById, [id]: kept };
+            }
+          }
         } else {
           antdMessage.warning(res.msg ?? "按键注入失败");
         }
@@ -846,7 +887,7 @@ class PortalStore {
       return Promise.resolve(false);
     }
 
-    return sendPortalInput(task.id, content, task.pid).then((res) => {
+    return sendPortalInput(task.id, content, task.pid, opts?.fromSelect).then((res) => {
       if (res.code === 0) {
         antdMessage.success(res.data?.result ?? "已发送");
         // 乐观回显：发出的内容立即上屏为 user 气泡，

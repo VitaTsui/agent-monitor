@@ -47,6 +47,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     recallAllQueued,
     termKey,
     syncMessages,
+    hubQueuedOf,
   } = PortalStore;
   const chatRef = useRef<HTMLDivElement>(null);
   const stickBottomRef = useRef(true);
@@ -54,6 +55,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
 
   const id = task.id ?? "";
   const messages = messagesOf(id);
+  const hubQueued = hubQueuedOf(id);
   const loading = isLoadingMessages(id);
   // 一条任务的去处，取决于它有没有被终端拿去执行：
   //
@@ -130,6 +132,16 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
         items.push({ text: t, recallable: false });
       }
     }
+    // hub 队列（还没下发到终端）：这一份是**跨端可见**的，手机上发的任务靠它才能
+    // 出现在电脑端。本地回显只活在发起方自己的浏览器里，别的端看不到。
+    // 排在终端队列之后、本地回显之前 —— 它比终端里那些新，又比刚发出的旧。
+    for (const q of hubQueued) {
+      const k = norm(q.text);
+      if (!seen.has(k)) {
+        seen.add(k);
+        items.push({ text: q.text, cmdId: q.cmdId, recallable: true });
+      }
+    }
     for (const m of messages) {
       // 用同一个判据取「还没轮到的本地回显」：除了还在 hub 队列的（queued，
       // 可撤回），也含刚送达终端、尚未被拿去执行的那几秒 —— 否则这段时间里
@@ -146,7 +158,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
       }
     }
     return items;
-  }, [messages, task.queuedInputs, stillQueued]);
+  }, [messages, task.queuedInputs, hubQueued, stillQueued]);
 
   useEffect(() => {
     const el = chatRef.current;

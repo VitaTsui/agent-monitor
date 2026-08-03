@@ -43,6 +43,15 @@ export interface PortalMessage {
 export interface SelectQuestion {
   question?: string;
   header?: string;
+  /**
+   * 这道题可多选。终端里的交互也随之不同：单选按一下数字键即落定，多选要逐个
+   * 数字键勾选、最后回车提交底部的 Submit —— 远端注入必须照着这个节奏来，
+   * 否则终端停在选择卡上不动（选项卡不消失、其他端也跟着不消失）。
+   *
+   * 数据一直都在：pendingSelect 存的是 AskUserQuestion 的整份 tool_input，
+   * 只是此前这里没声明、UI 便一律当单选处理。
+   */
+  multiSelect?: boolean;
   options?: { label?: string; description?: string }[];
 }
 
@@ -206,12 +215,14 @@ export const controlPortalTask = async (
 export const sendPortalInput = async (
   id: string,
   text: string,
-  pid?: number | null
+  pid?: number | null,
+  /** 这条是在回答选择卡（选项序号/自定义答案）：hub 据此不推钉钉、不进交互历史 */
+  fromSelect?: boolean
 ) => {
   return await post<{ pid: number; result: string; cmdId?: string }>(
     `/monitor/tasks/${id}/input`,
     // source 让 hub 区分「客户端 / 网页」下发来源，用于钉钉推送正文标注
-    { text, pid, source: inDesktopClient() ? "client" : "web" }
+    { text, pid, source: inDesktopClient() ? "client" : "web", fromSelect }
   );
 };
 

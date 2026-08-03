@@ -427,7 +427,8 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
     // 「终端此刻正等你选」：由 PreToolUse hook 在 AskUserQuestion 执行前落下，
     // 下面读 hook 记录时顺带收上来（session_id → AskUserQuestion 的 input JSON），
     // 扫描完再回填到对应会话上报出去。
-    let mut pending_selects: std::collections::HashMap<String, serde_json::Value> =
+    // 值 = (AskUserQuestion 的 input, hook 落盘时刻)：后者用来判断这份待选是否已经过期
+    let mut pending_selects: std::collections::HashMap<String, (serde_json::Value, u64)> =
         std::collections::HashMap::new();
     let pinned = {
         use std::sync::atomic::Ordering;
@@ -504,7 +505,7 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                 continue;
             };
             if let Some(sel) = r.pending_select {
-                pending_selects.insert(r.session_id.clone(), sel);
+                pending_selects.insert(r.session_id.clone(), (sel, r.at));
             }
             if acc.insert(r.claude_pid, (r.session_id, start)).is_none() {
                 added += 1;
@@ -621,8 +622,17 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
     // 没对上（会话已被 /clear 换掉等）就丢弃 —— 一张挂错会话的选项卡比没有更糟。
     if !pending_selects.is_empty() {
         for t in &mut tasks {
-            if let Some(sel) = pending_selects.remove(&t.id) {
-                t.pending_select = Some(sel);
+            if let Some((sel, at)) = pending_selects.remove(&t.id) {
+                // 时序校验：hook 报的是「上次工具调用那一刻」的快照。若会话在那之后又写过盘
+                //（人已在终端里作答、claude 接着往下跑），这份待选就是陈的，不能再挂出去 ——
+                // 否则一张早就答完的选项卡会在网页/其他端一直显示，怎么点都不消失。
+                //
+                // 留 2 秒宽限：hook 与 jsonl 落盘几乎同时发生，先后顺序不保证，卡太死会让
+                // 刚弹出的选项卡一次都显示不出来（那比多显示一会儿糟得多）。
+                let stale = t.mtime_ms > 0 && t.mtime_ms.saturating_sub(at * 1000) > 2_000;
+                if !stale {
+                    t.pending_select = Some(sel);
+                }
             }
         }
     }

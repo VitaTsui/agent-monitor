@@ -656,6 +656,17 @@ fn windows_send_key(pid: u32, key: &str, count: usize) -> Result<&'static str> {
         "esc" => (0x1B, 27), // VK_ESCAPE，UnicodeChar = ESC
         _ => return Err(anyhow!("未知按键: {key}")),
     };
+
+    // 与 `windows_send_input` 同一道判定：Windows Terminal 的 ConPTY 下 WriteConsoleInput
+    // 「可能报错、也可能成功却没送达」，必须改走聚焦发键。
+    //
+    // 这里长期漏了这一分支，后果是「打断并执行」在 WT 里静默失效：Esc 没送达 → claude
+    // 不产生 queue-operation:popAll → 排队列表一直挂着不消失，看着像会话卡死。发任务
+    // 那条路径早就有这道判定，只有按键这条没有 —— 两者必须同进同退，日后放宽宿主判定
+    // 也要一起改。
+    if let Some(wt_pid) = windows_wt_pid(pid) {
+        return windows_focus_send_key(wt_pid, vk, count);
+    }
     let dir = std::env::temp_dir();
     let ps_path = dir.join(format!("am-key-{pid}-{}.ps1", std::process::id()));
     let script = format!(
@@ -767,6 +778,9 @@ public class AmConIn {
   [StructLayout(LayoutKind.Explicit)] public struct INPUT_RECORD { [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public KEY_EVENT_RECORD Key; }
   [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode,EntryPoint="WriteConsoleInputW")] public static extern bool WriteConsoleInput(IntPtr h, INPUT_RECORD[] buf, uint len, out uint written);
   static INPUT_RECORD Mk(char c, ushort vk, bool down){ var r=new INPUT_RECORD(); r.EventType=1; var k=new KEY_EVENT_RECORD(); k.bKeyDown=down?1:0; k.wRepeatCount=1; k.wVirtualKeyCode=vk; k.wVirtualScanCode=0; k.UnicodeChar=c; k.dwControlKeyState=0; r.Key=k; return r; }
+  // Ctrl+U：0x15 是它的控制字符，0x55 是 VK_U，0x0008 是 LEFT_CTRL_PRESSED。
+  // 三者都给全 —— 有的 TUI 读控制字符、有的看虚拟键码 + 修饰位。
+  static INPUT_RECORD MkCtrlU(bool down){ var r=new INPUT_RECORD(); r.EventType=1; var k=new KEY_EVENT_RECORD(); k.bKeyDown=down?1:0; k.wRepeatCount=1; k.wVirtualKeyCode=0x55; k.wVirtualScanCode=0; k.UnicodeChar=(char)0x15; k.dwControlKeyState=0x0008; r.Key=k; return r; }
   // 一次写太多记录会撑爆控制台输入缓冲、报 ERROR_INSUFFICIENT_BUFFER(0x8007007A) —— 长
   // 输入注入失败正因如此。改成每 8 条一批分次写，每批失败即回退。
   static bool WriteAll(IntPtr h, System.Collections.Generic.List<INPUT_RECORD> recs){
@@ -788,7 +802,23 @@ public class AmConIn {
       IntPtr h=CreateFileW("CONIN$",0xC0000000u,3u,IntPtr.Zero,3u,0u,IntPtr.Zero);
       if(h==(IntPtr)(-1)) return false;
       var recs=new System.Collections.Generic.List<INPUT_RECORD>();
-      foreach(char c in text){ recs.Add(Mk(c,0,true)); recs.Add(Mk(c,0,false)); }
+      // 先清空输入框：Ctrl+U（UnicodeChar=0x15 + VK_U + 左 Ctrl 按下位）。「全部撤回」
+      // 会把原文调回终端输入框，不清的话这次注入会直接接在残留后面黏成一句。
+      // 输入框本来就空时这一下无副作用。
+      recs.Add(MkCtrlU(true)); recs.Add(MkCtrlU(false));
+      // 换行必须带 VK_RETURN 才进得去：只给 UnicodeChar 不带虚拟键码时，控制台输入
+      // 缓冲会把它丢掉 —— 多行内容于是被连成一行（末尾那个提交用的回车一直是带
+      // 0x0D 的，正文里的换行漏了）。CR/LF 都归一成一次回车键事件，\r\n 不重复触发。
+      char prev='\0';
+      foreach(char c in text){
+        if(c=='\r' || c=='\n'){
+          if(c=='\n' && prev=='\r'){ prev=c; continue; }  // \r\n 只算一次
+          recs.Add(Mk('\r',0x0D,true)); recs.Add(Mk('\r',0x0D,false));
+        } else {
+          recs.Add(Mk(c,0,true)); recs.Add(Mk(c,0,false));
+        }
+        prev=c;
+      }
       recs.Add(Mk('\r',0x0D,true)); recs.Add(Mk('\r',0x0D,false));
       return WriteAll(h, recs);
     } finally { FreeConsole(); }
@@ -906,6 +936,77 @@ fn windows_wt_pid(claude_pid: u32) -> Option<u32> {
     None
 }
 
+/// Windows Terminal 回退（按键版）：聚焦 wt_pid 的可见窗口 → keybd_event 连发 count 次该键。
+///
+/// 与 [`windows_paste_send`] 同源、同局限（抢前台焦点；多标签页只送到当前活动标签）。
+/// 按键不经剪贴板，所以比粘贴那条路径更简单。每次按键之间留一点间隔——Esc/↑ 都是给
+/// TUI 用的，连发过快时终端可能合并或丢事件。
+#[cfg(windows)]
+fn windows_focus_send_key(wt_pid: u32, vk: u16, count: usize) -> Result<&'static str> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let dir = std::env::temp_dir();
+    let ps_path = dir.join(format!("am-fkey-{wt_pid}-{}.ps1", std::process::id()));
+    let script = r#"param([int]$WtPid,[int]$Vk,[int]$Count)
+$ErrorActionPreference='Stop'
+$code=@'
+using System;
+using System.Runtime.InteropServices;
+public class AmFKey {
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  public delegate bool EnumProc(IntPtr h, IntPtr p);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
+  const uint KEYUP=2;
+  static IntPtr FindWin(uint target){
+    IntPtr found=IntPtr.Zero;
+    EnumWindows((h,p)=>{ uint wp; GetWindowThreadProcessId(h,out wp); if(wp==target && IsWindowVisible(h)){ found=h; return false; } return true; }, IntPtr.Zero);
+    return found;
+  }
+  public static bool Run(uint pid, byte vk, int count){
+    IntPtr h=FindWin(pid);
+    if(h==IntPtr.Zero) return false;
+    ShowWindow(h,9); SetForegroundWindow(h);
+    System.Threading.Thread.Sleep(180);
+    for(int i=0;i<count;i++){
+      keybd_event(vk,0,0,IntPtr.Zero); keybd_event(vk,0,KEYUP,IntPtr.Zero);
+      System.Threading.Thread.Sleep(45);
+    }
+    return true;
+  }
+}
+'@
+Add-Type -TypeDefinition $code -Language CSharp
+if([AmFKey]::Run([uint32]$WtPid,[byte]$Vk,$Count)){ exit 0 } else { exit 4 }
+"#;
+    std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
+
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
+        .arg(&ps_path)
+        .arg("-WtPid")
+        .arg(wt_pid.to_string())
+        .arg("-Vk")
+        .arg(vk.to_string())
+        .arg("-Count")
+        .arg(count.to_string())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let _ = std::fs::remove_file(&ps_path);
+    match out {
+        Ok(o) if o.status.success() => Ok("已注入按键"),
+        Ok(o) => Err(anyhow!(
+            "按键注入失败（未找到可见的终端窗口）。{}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Err(anyhow!("powershell 执行失败: {e}")),
+    }
+}
+
 /// Windows Terminal 回退：把文本放剪贴板 → 聚焦 wt_pid 的可见窗口 → 发 Ctrl+V + 回车。
 /// 局限：会抢前台焦点；多标签页时粘到「当前活动标签」，claude 不在活动标签则会送错——
 /// 这是已有 WT 标签页对外注入的固有限制（见 CreatePseudoConsole 文档）。
@@ -936,7 +1037,7 @@ public class AmPaste {
   public delegate bool EnumProc(IntPtr h, IntPtr p);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
-  const uint KEYUP=2; const byte VK_CTRL=0x11, VK_V=0x56, VK_RET=0x0D;
+  const uint KEYUP=2; const byte VK_CTRL=0x11, VK_V=0x56, VK_RET=0x0D, VK_U=0x55;
   static IntPtr FindWin(uint target){
     IntPtr found=IntPtr.Zero;
     EnumWindows((h,p)=>{ uint wp; GetWindowThreadProcessId(h,out wp); if(wp==target && IsWindowVisible(h)){ found=h; return false; } return true; }, IntPtr.Zero);
@@ -947,6 +1048,10 @@ public class AmPaste {
     if(h==IntPtr.Zero) return false;
     ShowWindow(h,9); SetForegroundWindow(h);
     System.Threading.Thread.Sleep(180);
+    // 先 Ctrl+U 清空输入框：撤回会把原文调回那里，不清就与这次粘贴的内容黏成一句
+    keybd_event(VK_CTRL,0,0,IntPtr.Zero); keybd_event(VK_U,0,0,IntPtr.Zero);
+    keybd_event(VK_U,0,KEYUP,IntPtr.Zero); keybd_event(VK_CTRL,0,KEYUP,IntPtr.Zero);
+    System.Threading.Thread.Sleep(90);
     keybd_event(VK_CTRL,0,0,IntPtr.Zero); keybd_event(VK_V,0,0,IntPtr.Zero);
     keybd_event(VK_V,0,KEYUP,IntPtr.Zero); keybd_event(VK_CTRL,0,KEYUP,IntPtr.Zero);
     System.Threading.Thread.Sleep(140);
@@ -1012,6 +1117,10 @@ fn inject_tiocsti(tty: &str, text: &str) -> Result<&'static str> {
     // 多行内容用 bracketed paste 包裹：TUI（Claude Code 等）会把块内换行当
     // 文本而非提交键，否则第一个 \n 就提交了前半句、剩余卡在输入框里出不去
     let mut bytes = Vec::with_capacity(text.len() + 16);
+    // 先清空输入框：Ctrl+U(0x15) 删到行首。「全部撤回」会把原文调回终端输入框，
+    // 不清的话下一条注入就直接接在残留后面，两段文字黏成一句。顺带也挡住了
+    // 「人在终端里打了一半」的半截输入。输入框本来就空时这一下无副作用。
+    bytes.push(0x15);
     if text.contains('\n') {
         bytes.extend_from_slice(b"\x1b[200~");
         bytes.extend_from_slice(text.as_bytes());

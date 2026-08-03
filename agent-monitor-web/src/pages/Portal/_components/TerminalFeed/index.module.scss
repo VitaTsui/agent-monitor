@@ -552,6 +552,12 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           }
         }
 
+        // 多选已勾选：边框与底色都点亮，序号位换成 ✓（见 SelectCard）。
+        // 多选是「攒够了再提交」，没有选中态就完全不知道自己勾了什么。
+        &.selectOptPicked {
+          background: rgba(217, 164, 65, 0.2);
+          border-color: rgba(217, 164, 65, 0.62);
+        }
 
         .selectOptIdx {
           flex: none;
@@ -638,6 +644,38 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
               opacity: 0.4;
               pointer-events: none;
             }
+          }
+        }
+
+        // 多选的提交行，对应终端选择卡底部的 Submit。做成整行按钮而不是小标签：
+        // 它是多选的唯一出口，漏看了就会以为卡片没反应。
+        .selectSubmit {
+          margin-top: 2px;
+          padding: 7px 8px;
+          border-radius: 6px;
+          text-align: center;
+          font-size: 12px;
+          background: rgba(217, 164, 65, 0.22);
+          color: #f0c674;
+          border: 1px solid rgba(217, 164, 65, 0.42);
+
+          &.clickable {
+            cursor: pointer;
+
+            @media (hover: hover) {
+              &:hover {
+                background: rgba(217, 164, 65, 0.36);
+              }
+            }
+
+            &:active {
+              background: rgba(217, 164, 65, 0.44);
+            }
+          }
+
+          &.disabled {
+            opacity: 0.45;
+            pointer-events: none;
           }
         }
       }
