@@ -21,6 +21,24 @@ use tower_http::services::ServeDir;
 /// 但不设限等于给任何持令牌方一个无界内存分配入口。
 const REPORT_BODY_LIMIT: usize = 32 * 1024 * 1024;
 
+/// 「会话已结束」推送的新鲜度门槛：会话最后一次有动静距今超过这么久，
+/// 它从上报里消失时就静默清理、不再打扰。
+///
+/// 关掉终端窗口后 claude 进程常会残留，这类僵尸会话可能挂上几小时；
+/// 客户端换版本导致扫描口径变化、历史会话滑出窗口，也会让一批陈年会话
+/// 同时消失。真正在用的会话刚结束时 mtime 就在几分钟内，1 小时足够宽松。
+const STALE_FINISH_SECS: u64 = 3600;
+
+/// 一个从上报里消失的会话，值不值得推「会话已结束」。
+///
+/// 只看它最后一次有动静距今多久：刚还在用的值得说一声，几小时没动静的
+/// 说了也只是打扰。`mtime_ms` 为 0（拿不到时间）时按「很旧」处理 ——
+/// 信息不足就别打扰，漏推一条远好过半夜莫名其妙响一下。
+fn worth_finish_notice(mtime_ms: u64, now_secs: u64) -> bool {
+    let idle_secs = now_secs.saturating_mul(1000).saturating_sub(mtime_ms) / 1000;
+    idle_secs <= STALE_FINISH_SECS
+}
+
 pub fn router(state: SharedState) -> Router {
     // downloads 目录解析要用 data_dir，router 组装尾部 state 已被 with_state 消费
     let state_dl = state.clone();
@@ -2102,8 +2120,17 @@ async fn report(
                 .map(|t| t.elapsed().as_secs())
                 .unwrap_or(u64::MAX);
             if gone >= crate::state::FINISH_GRACE_SECS {
+                // 早就没动静的会话消失了，不值得打扰：终端可能几小时前就关了
+                //（关掉窗口后 claude 进程常残留），此刻收到一条「会话已结束」
+                // 只会莫名其妙 —— 用户早不记得有这么个会话。
+                //
+                // 这类「消失」也不止于此：客户端换版本导致扫描口径变化、历史会话
+                // 滑出窗口，都会让一批陈年会话同时消失。
+                //
                 // 同上：空壳占位会话消失不推，只清基线
-                if !is_placeholder(task) {
+                if !is_placeholder(task)
+                    && worth_finish_notice(task.mtime_ms, crate::state::now_secs())
+                {
                     let (res, full) = result(id);
                     history_records.push(make_reply(task, owner, full.as_deref(), &res));
                     events.push(NotifyEvent {
@@ -2392,5 +2419,47 @@ async fn ws_loop(socket: WebSocket, state: SharedState, user: Option<String>, to
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod finish_notice_tests {
+    use super::{worth_finish_notice, STALE_FINISH_SECS};
+
+    const NOW: u64 = 1_800_000_000;
+
+    /// 刚还在用的会话结束了，该说一声
+    #[test]
+    fn fresh_session_is_worth_notifying() {
+        let two_min_ago = (NOW - 120) * 1000;
+        assert!(worth_finish_notice(two_min_ago, NOW));
+    }
+
+    /// 几小时没动静的会话消失，说了只是打扰 ——
+    /// 关掉终端后 claude 进程常残留，这类僵尸会话可能挂很久才被清理掉，
+    /// 用户早不记得有这么个会话（线上就因此在凌晨收到过莫名其妙的结束提醒）。
+    #[test]
+    fn stale_session_is_silently_dropped() {
+        let three_hours_ago = (NOW - 3 * 3600) * 1000;
+        assert!(!worth_finish_notice(three_hours_ago, NOW));
+    }
+
+    /// 边界两侧各验一次，防阈值写反
+    #[test]
+    fn boundary_is_inclusive() {
+        assert!(worth_finish_notice((NOW - STALE_FINISH_SECS) * 1000, NOW), "刚好卡线仍推");
+        assert!(!worth_finish_notice((NOW - STALE_FINISH_SECS - 1) * 1000, NOW), "过线即不推");
+    }
+
+    /// 拿不到 mtime（0）时按「很旧」处理：信息不足就别打扰
+    #[test]
+    fn unknown_mtime_is_treated_as_stale() {
+        assert!(!worth_finish_notice(0, NOW));
+    }
+
+    /// mtime 比当前时间还新（客户端时钟快）不能算成「极旧」而漏推
+    #[test]
+    fn future_mtime_does_not_underflow() {
+        assert!(worth_finish_notice((NOW + 60) * 1000, NOW), "时钟偏差不该吞掉通知");
     }
 }
