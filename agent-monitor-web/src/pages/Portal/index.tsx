@@ -736,7 +736,14 @@ const Portal: React.FC = observer(() => {
               {openTasks
                 .filter((t) => t.id !== focusedTask.id)
                 .map((t) => (
-                  <div key={t.id} className={styles.focusCard}>
+                  <div
+                    key={t.id}
+                    className={`${styles.focusCard} ${
+                      t.pendingSelect?.questions?.length
+                        ? styles.focusCardAlert
+                        : ""
+                    }`}
+                  >
                     <ChatPane
                       task={t}
                       closable={paneCount > 1}

@@ -280,7 +280,9 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   return (
     <div
       ref={rootRef}
-      className={`${styles.ChatPane} ${compact ? styles.compact : ""}`}
+      className={`${styles.ChatPane} ${compact ? styles.compact : ""} ${
+        compact && showPending ? styles.awaitingSelect : ""
+      }`}
       // 紧凑卡片整体可点：右侧那一列的用途就是「点它换到主区」，
       // 只让标题可点的话，卡片大半面积都是死的。头部按钮各自 stopPropagation。
       onClick={compact ? onActivate : undefined}
@@ -289,11 +291,19 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
         <div className={styles.headInfo}>
           {/* 状态放标题前；标题只显示会话标题（设备/IDE/PID 等杂项不再展示） */}
           <div className={styles.headTitle}>
-            <span
-              className={`${styles.statusChip} ${styles[task.status ?? ""] ?? ""}`}
-            >
-              {task.statusDsr}
-            </span>
+            {/* 紧凑卡片里，「终端正等你选」必须显式标出来：卡片是只读的，
+                选择卡本身不在这儿渲染，不给提示的话这个会话会一直干等着没人知道。
+                点卡片换到主区即可作答。放在状态胶囊的位置 —— 此刻「在等你」
+                比「执行中/等待输入」更该被先看到。 */}
+            {compact && showPending ? (
+              <span className={styles.pendingChip}>⌨ 待你选择</span>
+            ) : (
+              <span
+                className={`${styles.statusChip} ${styles[task.status ?? ""] ?? ""}`}
+              >
+                {task.statusDsr}
+              </span>
+            )}
             {/* 号位：手机上看着这个号去钉钉发「@N …」。移动端头部是唯一能看到它的
                 地方（侧栏是抽屉、看完就收起了），所以这里必须有。 */}
             {task.slot != null && (
@@ -326,7 +336,20 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
           // 不拦住冒泡的话，点「暂停」会连带把卡片换到主区。
           onClick={compact ? (e) => e.stopPropagation() : undefined}
         >
-          {compact || narrow ? (
+          {compact ? (
+            /* 紧凑卡片只留「关闭」：卡片是拿来瞥一眼的，点它本体就换到主区，
+               暂停/中断/终止这些都该在主区从容地做，摆在这儿既挤又容易误触。 */
+            closable ? (
+              <Tooltip title="关闭此格">
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<CloseOutlined />}
+                  onClick={() => closePane(id)}
+                />
+              </Tooltip>
+            ) : null
+          ) : narrow ? (
             // 收进下拉菜单的两种情形：放大布局右侧那一列的窄卡片，以及格子被切得太窄
             //（见 FLAT_MIN_W）。其余情况一律平铺 —— 功能藏在 ⋯ 里每次都要多点一下，
             // 而这些恰恰是高频操作。移动端不受这里影响：整个 paneHeader 被样式隐藏，

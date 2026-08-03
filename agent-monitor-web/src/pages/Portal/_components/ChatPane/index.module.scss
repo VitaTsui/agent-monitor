@@ -48,6 +48,21 @@ $accent: #0f9bad;
     .headInfo {
       min-width: 0;
 
+      // 「终端正等你选」：紧凑卡片里顶替状态胶囊出现（见 ChatPane）。
+      // 用实心主色而非淡底 —— 它要在一列卡片里第一眼被抓住，
+      // 和其余那些灰扑扑的状态胶囊拉开量级。
+      .pendingChip {
+        flex: none;
+        padding: 0 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 18px;
+        white-space: nowrap;
+        background: $accent;
+        color: #fff;
+      }
+
       .statusChip {
         flex: none;
         padding: 0 8px;

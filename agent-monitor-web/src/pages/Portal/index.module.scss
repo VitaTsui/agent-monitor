@@ -214,31 +214,18 @@ $active-bg: rgba(36, 61, 66, 0.09);
 
     .sessionList {
       padding-bottom: 8px;
-      // 分组之间比组内更松，让「项目」这一层自己形成段落
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
     }
 
     // 终端类型分组
     .termGroup {
-      // 组内卡片间距：卡片化之后必须留缝，否则白块连成一片反而看不出是几条
-      display: flex;
-      flex-direction: column;
-      gap: 5px;
-
       // 纯分组标签：会话直接铺开，这里不再可点，故无 cursor / hover / 焦点态
-      // 项目名：与上方「会话」那级区分开 —— 两者原本同为 11px + $muted，
-      // 叠在一起分不出谁统辖谁。这里加重字色与字重，「会话」保持弱化，
-      // 层级就从「两条灰线」变成「小标题 + 分组名」。
       .termTitle {
         display: flex;
         align-items: center;
         gap: 6px;
         padding: 6px 8px;
-        font-size: 11.5px;
-        font-weight: 600;
-        color: rgba(36, 61, 66, 0.62);
+        font-size: 11px;
+        color: $muted;
         user-select: none;
 
         .termCount {
@@ -248,60 +235,24 @@ $active-bg: rgba(36, 61, 66, 0.09);
     }
 
     // 会话项（Claude 最近对话式）
-    // 会话做成白底卡片：侧栏底色是 $oat（淡青灰），白卡浮在上面天然有一层高度差，
-    // 比「透明条 + hover 才有底色」更有实体感，也让每条的边界一目了然。
     .session {
       position: relative;
       display: flex;
       align-items: center;
-      gap: 9px;
-      padding: 10px 12px;
-      border-radius: 10px;
+      gap: 8px;
+      padding: 7px 10px;
+      border-radius: 8px;
       cursor: pointer;
-      background: #fff;
-      // 描边比投影克制：侧栏本就窄，一堆卡片各带阴影会显得脏。
-      // 只在悬停/选中时才升起阴影，静止状态保持平整。
-      border: 1px solid rgba(36, 61, 66, 0.06);
-      overflow: hidden;
-      transition: background 0.15s ease, transform 0.15s ease,
-        box-shadow 0.15s ease, border-color 0.15s ease;
       // 触摸屏不套 :hover —— 否则移动端首触只落 hover 态、需再点一次才触发 onClick
       // （经典 sticky-hover），表现为「点两次才打开会话」。仅指针设备保留悬停反馈。
       @media (hover: hover) {
         &:hover {
-          transform: translateX(2px);
-          border-color: rgba(15, 155, 173, 0.28);
-          box-shadow: 0 2px 8px rgba(36, 61, 66, 0.08);
+          background: $hover;
         }
       }
 
-      // 选中态：白底不动，靠主色描边 + 左侧竖条 + 阴影把它抬起来。
-      // 不改底色是有意的 —— 卡片化之后「一片白里有一块青」反而割裂，
-      // 而边框与投影能表达「这张浮在最上层」，语义更贴切。
       &.active {
-        border-color: rgba(15, 155, 173, 0.55);
-        box-shadow: 0 2px 10px rgba(15, 155, 173, 0.14);
-
-        &::before {
-          content: "";
-          position: absolute;
-          left: 0;
-          top: 0;
-          bottom: 0;
-          width: 3px;
-          background: $accent;
-        }
-
-        .sessName {
-          color: $text;
-          font-weight: 600;
-        }
-
-        // 选中项的号位徽标跟着实心化，与左侧竖条呼应
-        .sessSlot {
-          background: $accent;
-          color: #fff;
-        }
+        background: $active-bg;
       }
 
       .dot {
@@ -311,13 +262,9 @@ $active-bg: rgba(36, 61, 66, 0.09);
         border-radius: 50%;
         background: #bbb;
 
-        // 执行中：光晕做呼吸。整个列表里只有这一处动效 —— 「哪个终端正在干活」
-        // 是扫一眼侧栏最想知道的事，让它自己会动，比多加一个标签有效。
-        // 周期放到 2.4s、幅度压得很小，余光里是脉动感而不是闪烁。
         &.running {
           background: #38b26a;
           box-shadow: 0 0 0 3px rgba(56, 178, 106, 0.16);
-          animation: dotPulse 2.4s ease-in-out infinite;
         }
         &.idle {
           background: #f2b234;
@@ -528,8 +475,9 @@ $active-bg: rgba(36, 61, 66, 0.09);
     }
   }
 
-  // 右侧卡片列：整列滚动，卡片各自固定高度（需求如此 —— 等高才好扫视，
-  // 内容多的那个自己在卡片内滚，不去挤别人的地方）
+  // 右侧卡片列：整列滚动，卡片各自固定高度（等高才好扫视，内容多的那个
+  // 自己在卡片内滚，不去挤别人的地方）。列本身给内边距，卡片才有地方"浮"起来 ——
+  // 贴着边的话投影会被裁掉，圆角也显不出来。
   .focusSide {
     min-width: 0;
     min-height: 0;
@@ -537,21 +485,48 @@ $active-bg: rgba(36, 61, 66, 0.09);
     overflow-x: hidden;
     display: flex;
     flex-direction: column;
-    gap: 1px;
-    background: $border;
+    gap: 10px;
+    padding: 10px;
+    box-sizing: border-box;
+    background: $oat;
   }
 
   .focusCard {
     flex: none;
-    height: 260px;
+    height: 248px;
     overflow: hidden;
-    background: $cream;
-    transition: box-shadow 0.12s;
+    border-radius: 12px;
+    background: #fff;
+    border: 1px solid rgba(36, 61, 66, 0.07);
+    // 静止只给一层极淡的投影：一列卡片各自重投影会显脏，浮起来的事交给 hover
+    box-shadow: 0 1px 2px rgba(36, 61, 66, 0.04);
+    transition: box-shadow 0.15s ease, transform 0.15s ease,
+      border-color 0.15s ease;
 
     @media (hover: hover) {
       &:hover {
-        // 悬停提示「点我换到主区」——卡片整体可点，没有反馈就看不出来
-        box-shadow: inset 0 0 0 2px rgba(217, 164, 65, 0.55);
+        // 上浮 + 加深投影：卡片整体可点，位移比换色更能说明「点我换到主区」
+        transform: translateY(-2px);
+        border-color: rgba(15, 155, 173, 0.3);
+        box-shadow: 0 6px 16px rgba(36, 61, 66, 0.1);
+      }
+    }
+
+  }
+
+  // 有选择卡等着作答：整张卡描主色边并微微发光，让它在一列里跳出来。
+  // 这是「非看不可」的状态 —— 不作答那个终端就一直干等着。
+  //
+  // 类名由 Portal 自己挂（见 index.tsx），不能写成 `.focusCard:has(待选类)` ——
+  // 那个类属于 ChatPane 模块，CSS Modules 会把两边 hash 成不同名字，
+  // 选择器永远匹配不上，且编译不报错、静默失效。
+  .focusCardAlert {
+    border-color: rgba(15, 155, 173, 0.6);
+    box-shadow: 0 0 0 3px rgba(15, 155, 173, 0.12);
+
+    @media (hover: hover) {
+      &:hover {
+        border-color: rgba(15, 155, 173, 0.75);
       }
     }
   }
@@ -743,25 +718,6 @@ $active-bg: rgba(36, 61, 66, 0.09);
   }
   50% {
     opacity: 0.35;
-  }
-}
-
-// 「执行中」状态点的呼吸：只放大光晕、不动圆点本身，避免行内文字被带得视觉抖动
-@keyframes dotPulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 3px rgba(56, 178, 106, 0.16);
-  }
-  50% {
-    box-shadow: 0 0 0 5px rgba(56, 178, 106, 0.06);
-  }
-}
-
-// 系统开了「减弱动效」就别动：前庭敏感的人会被持续脉动的元素干扰，
-// 而这个动画只是锦上添花，静态光晕本身已经能表达「执行中」。
-@media (prefers-reduced-motion: reduce) {
-  .Portal .session .dot.running {
-    animation: none;
   }
 }
 
