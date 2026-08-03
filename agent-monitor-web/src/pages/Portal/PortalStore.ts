@@ -465,7 +465,7 @@ class PortalStore {
     }
     // 跟随后可能与已打开的会话撞车，去重保序
     const deduped = Array.from(new Set(followed));
-    if (deduped.join(" ") !== this._openIds.join(" ")) {
+    if (deduped.join("\u0000") !== this._openIds.join("\u0000")) {
       this._openIds = deduped;
     }
 
