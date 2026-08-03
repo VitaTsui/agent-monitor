@@ -1899,10 +1899,10 @@
   dependencies:
     hsu-utils "^0.0.55"
 
-"@hsu-react/ui@0.0.15":
-  version "0.0.15"
-  resolved "https://registry.npmjs.org/@hsu-react/ui/-/ui-0.0.15.tgz#e3ef3d2657a3f1e1eef08293ffdfa666d646740f"
-  integrity sha512-l/bC6fxeZq2hp3XCC6D+RVX/kuBSN0S2soOpRqY2XNU+hAN1Ndy8qY/qgNIkVRfix2KbOHvDBKVUnMPpvY1R7w==
+"@hsu-react/ui@0.0.17":
+  version "0.0.17"
+  resolved "https://registry.npmjs.org/@hsu-react/ui/-/ui-0.0.17.tgz#25af1688854fcdc15f6ea341ca5d06e7708a501b"
+  integrity sha512-Vgu3zLUA0LShssNoZzkcHIwbiPfDiXTHOi2STa9HPEWxhR9Q+WHTcpAsmUq6zw54bu/PFcm3G/+Iy4YuxzHeZQ==
   dependencies:
     "@ant-design/x" "^2.0.1"
     "@antv/g" "^6.1.21"
