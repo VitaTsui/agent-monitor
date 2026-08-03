@@ -178,6 +178,94 @@ async fn upload_media(token: &str, filename: &str, content: &[u8]) -> Result<Str
     }
 }
 
+// ---------- 扫码绑定：钉钉扫码授权 → 认出扫码的是谁 ----------
+
+/// 扫码授权页地址。二维码里放的就是它 —— 用钉钉扫一下，授权后回调到 hub。
+///
+/// 走钉钉标准 OAuth：扫码人在钉钉里确认授权，我们才拿得到「他是谁」。
+/// 这是扫码绑定与「扫出一段文字再手动发」的根本差别。
+pub fn qr_auth_url(app_key: &str, redirect_uri: &str, state: &str) -> String {
+    format!(
+        "https://login.dingtalk.com/oauth2/auth?redirect_uri={}&response_type=code\
+         &client_id={}&scope=openid&state={}&prompt=consent",
+        urlencode(redirect_uri),
+        urlencode(app_key),
+        urlencode(state),
+    )
+}
+
+/// 用授权码换出「扫码人是谁」——返回其企业内 userId（即消息里的 senderStaffId）与昵称。
+///
+/// 分三步，缺一不可：
+/// 1. code → 用户级 access_token
+/// 2. 该 token → 用户的 unionId（此接口只给 unionId/openId，拿不到企业 userId）
+/// 3. unionId + **企业级** token → userId
+///
+/// 第 3 步常被忽略：机器人消息里的 senderStaffId 是企业 userId，与 unionId 不是一回事，
+/// 不换这一步就会绑上一个永远匹配不到来信的 id。
+pub async fn resolve_scan_user(
+    app_key: &str,
+    app_secret: &str,
+    code: &str,
+    now_ms: u64,
+) -> Result<(String, String), String> {
+    let cli = http_client()?;
+    // 1) 授权码 → 用户 token
+    let v: serde_json::Value = cli
+        .post("https://api.dingtalk.com/v1.0/oauth2/userAccessToken")
+        .json(&serde_json::json!({
+            "clientId": app_key,
+            "clientSecret": app_secret,
+            "code": code,
+            "grantType": "authorization_code",
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("换取用户令牌失败: {e}"))?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+    let user_token = v
+        .get("accessToken")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| format!("换取用户令牌失败: {v}"))?;
+
+    // 2) 用户 token → unionId / 昵称
+    let me: serde_json::Value = cli
+        .get("https://api.dingtalk.com/v1.0/contact/users/me")
+        .header("x-acs-dingtalk-access-token", user_token)
+        .send()
+        .await
+        .map_err(|e| format!("获取用户信息失败: {e}"))?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+    let union_id = me
+        .get("unionId")
+        .and_then(|u| u.as_str())
+        .ok_or_else(|| format!("获取用户信息失败: {me}"))?;
+    let nick = me.get("nick").and_then(|n| n.as_str()).unwrap_or("").to_string();
+
+    // 3) unionId → 企业 userId（= senderStaffId）
+    let corp_token = access_token(app_key, app_secret, now_ms).await?;
+    let uv: serde_json::Value = cli
+        .post(format!(
+            "https://oapi.dingtalk.com/topapi/user/getbyunionid?access_token={corp_token}"
+        ))
+        .json(&serde_json::json!({ "unionid": union_id }))
+        .send()
+        .await
+        .map_err(|e| format!("换取企业 userId 失败: {e}"))?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+    let user_id = uv
+        .pointer("/result/userid")
+        .and_then(|u| u.as_str())
+        .ok_or_else(|| format!("换取企业 userId 失败（扫码人可能不在该企业内）: {uv}"))?;
+    Ok((user_id.to_string(), nick))
+}
+
 /// 通过企业应用机器人 OTO 接口，主动把一条文本发给某个用户（staffId）。
 /// full 非空且比正文长时，额外把完整内容作为 .txt 文件发在下面（正文被截断的兜底）。
 pub async fn push_oto(

@@ -1189,6 +1189,10 @@ fn user_text(content: Option<&Value>) -> Option<String> {
         || trimmed.starts_with("<task-notification>")
         || trimmed.starts_with("Caveat:")
         || trimmed.starts_with("[Request interrupted")
+        // 上下文压缩后注入的续接摘要（compact）：整段几百行的 "Summary: 1. Primary
+        // Request and Intent..."，也是记成 type=user。不滤掉的话，对话流里会突然
+        // 冒出一大段英文，看着像自己发的。
+        || trimmed.starts_with("This session is being continued from a previous conversation")
     {
         return None;
     }
@@ -2387,6 +2391,33 @@ mod pairing_tests {
         assert!(s.cleared, "只含 /clear 的新会话应标记 cleared");
         assert!(s.prompt.is_empty(), "cleared 会话不该有真实 prompt");
         assert!(s.turn_ended, "cleared 会话视为回合结束（Idle）");
+    }
+
+    /// Claude Code 注入的系统内容一律不得冒充「用户发的话」。
+    ///
+    /// 这些都被记成 type=user，只能靠正文特征认出来。名单漏一种，对话流里就会
+    /// 突然冒出一大段不是自己写的东西 —— compact 的续接摘要（几百行英文）尤其扎眼。
+    #[test]
+    fn user_text_rejects_all_injected_kinds() {
+        for injected in [
+            "<local-command-caveat>x</local-command-caveat>",
+            "<command-name>/clear</command-name>",
+            "<system-reminder>别忘了</system-reminder>",
+            "<task-notification>后台任务完成</task-notification>",
+            "Caveat: local command",
+            "[Request interrupted by user]",
+            "This session is being continued from a previous conversation that ran out of context.\n\nSummary:\n1. Primary Request...",
+        ] {
+            let v = serde_json::json!(injected);
+            assert!(
+                user_text(Some(&v)).is_none(),
+                "注入内容不该被当成用户输入: {}",
+                &injected[..injected.len().min(40)]
+            );
+        }
+        // 反例：真实输入照常通过，别把人家正常打的字也滤掉
+        let real = serde_json::json!("帮我看看这个 session 的问题");
+        assert_eq!(user_text(Some(&real)).as_deref(), Some("帮我看看这个 session 的问题"));
     }
 
     /// 在终端按 Esc 中断后，会话应判为「回合已结束」（Idle），而不是卡在执行中。
