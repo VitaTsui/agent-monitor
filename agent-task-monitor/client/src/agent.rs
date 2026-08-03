@@ -74,8 +74,6 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     let mut net_fail_streak: u32 = 0;
     // 未被 hub 信任前，只发送心跳（设备登记），绝不上报任何会话/终端数据
     let mut trusted = false;
-    // 待随下一轮上报回传的 git 对比结果
-    let mut pending_git_results: Vec<am_core::model::GitResult> = Vec::new();
     let mut pending_dir_results: Vec<am_core::model::DirResult> = Vec::new();
     let mut pending_fs_op_results: Vec<am_core::model::FsOpResult> = Vec::new();
 
@@ -225,7 +223,6 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             version: env!("CARGO_PKG_VERSION").into(),
             owner: owner.clone(),
             tasks,
-            git_results: std::mem::take(&mut pending_git_results),
             dir_results: std::mem::take(&mut pending_dir_results),
             fs_op_results: std::mem::take(&mut pending_fs_op_results),
         };
@@ -319,25 +316,6 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         .unwrap_or_default();
                     for f in files {
                         write_transfer(&f, &session_dirs);
-                    }
-                    // git 对比请求：本机跑 git，结果随下一轮上报回传
-                    let git_queries: Vec<am_core::model::GitQuery> = body
-                        .pointer("/data/gitQueries")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    for q in git_queries {
-                        // git_overview 会起 4 个 git 子进程（含全仓 diff HEAD），是同步阻塞调用。
-                        // hub 侧同样的活儿走的是 spawn_blocking，agent 侧不能例外，
-                        // 否则大仓库的一次 diff 就把上报循环所在的 worker 线程占住。
-                        let cwd = q.cwd.clone();
-                        let overview =
-                            tokio::task::spawn_blocking(move || am_core::gitdiff::git_overview(&cwd))
-                                .await
-                                .unwrap_or_default();
-                        pending_git_results.push(am_core::model::GitResult {
-                            task_id: q.task_id,
-                            overview,
-                        });
                     }
                     // 目录列举请求（上传选目录）：列出 cwd/rel 下的子目录
                     let dir_queries: Vec<am_core::model::DirQuery> = body

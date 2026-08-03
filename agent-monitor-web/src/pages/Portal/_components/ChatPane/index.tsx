@@ -3,7 +3,6 @@ import React, { useEffect, useRef, useState } from "react";
 import { Button } from "@hsu-react/ui";
 import { Dropdown, Modal, Popconfirm, Spin, Tooltip } from "antd";
 import {
-  BranchesOutlined,
   CloseOutlined,
   MoreOutlined,
   PauseCircleOutlined,
@@ -19,7 +18,6 @@ import PortalStore from "../../PortalStore";
 import Composer from "../Composer";
 import TerminalFeed, { SelectCard } from "../TerminalFeed";
 import SessionPanels from "../SessionPanels";
-import GitDiffModal from "../GitDiffModal";
 import styles from "./index.module.scss";
 
 interface ChatPaneProps {
@@ -51,7 +49,6 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   } = PortalStore;
   const chatRef = useRef<HTMLDivElement>(null);
   const stickBottomRef = useRef(true);
-  const [gitOpen, setGitOpen] = useState(false);
 
   const id = task.id ?? "";
   const messages = messagesOf(id);
@@ -289,12 +286,6 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                     onClick: () => syncMessages(id),
                   },
                   {
-                    key: "git",
-                    icon: <BranchesOutlined />,
-                    label: "代码改动（git diff）",
-                    onClick: () => setGitOpen(true),
-                  },
-                  {
                     key: "pause",
                     icon: paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />,
                     label: paused ? "恢复" : "暂停",
@@ -345,14 +336,6 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                   type="text"
                   icon={<SyncOutlined spin={loading} />}
                   onClick={() => syncMessages(id)}
-                />
-              </Tooltip>
-              <Tooltip title="查看代码改动（git diff）">
-                <Button
-                  size="small"
-                  type="text"
-                  icon={<BranchesOutlined />}
-                  onClick={() => setGitOpen(true)}
                 />
               </Tooltip>
               <Tooltip title={paused ? "恢复" : "暂停"}>
@@ -576,13 +559,6 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
           />
         </div>
       </div>
-
-      <GitDiffModal
-        open={gitOpen}
-        taskId={id}
-        title={task.projectName}
-        onClose={() => setGitOpen(false)}
-      />
     </div>
   );
 });

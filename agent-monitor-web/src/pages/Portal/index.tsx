@@ -10,7 +10,6 @@ import { claimPairDevice, getMe } from "@/services/apis/portal";
 import { message as antdMessage } from "antd";
 import {
   CodeOutlined,
-  BranchesOutlined,
   ControlOutlined,
   DownOutlined,
   EllipsisOutlined,
@@ -37,7 +36,6 @@ import {
 } from "@/utils/clientAuth";
 import PortalStore from "./PortalStore";
 import { ShareReceiveModal } from "./_hooks/useShareReceive";
-import GitDiffModal from "./_components/GitDiffModal";
 import ChatPane from "./_components/ChatPane";
 import ScrollText from "./_components/ScrollText";
 import SettingsModal from "./_components/SettingsModal";
@@ -109,7 +107,6 @@ const Portal: React.FC = observer(() => {
   const [mobileNav, setMobileNav] = useState(false);
   // 移动端：顶栏「⋯」操作菜单与代码改动弹窗
   const [mobileActs, setMobileActs] = useState(false);
-  const [mobileGit, setMobileGit] = useState(false);
   const [isMobile, setIsMobile] = useState(
     () => window.matchMedia("(max-width: 760px)").matches,
   );
@@ -405,9 +402,6 @@ const Portal: React.FC = observer(() => {
                     <>
                       <div className={styles.mobileActItem} onClick={act(() => syncMessages(id0))}>
                         <SyncOutlined /> 重新同步
-                      </div>
-                      <div className={styles.mobileActItem} onClick={act(() => setMobileGit(true))}>
-                        <BranchesOutlined /> 代码改动
                       </div>
                       <div
                         className={styles.mobileActItem}
@@ -741,12 +735,6 @@ const Portal: React.FC = observer(() => {
         onClose={() => setSettingsOpen(false)}
       />
       <ShareReceiveModal />
-      <GitDiffModal
-        open={mobileGit}
-        taskId={openTasks[0]?.id ?? ""}
-        title={openTasks[0]?.projectName}
-        onClose={() => setMobileGit(false)}
-      />
     </div>
     </ConfigProvider>
   );

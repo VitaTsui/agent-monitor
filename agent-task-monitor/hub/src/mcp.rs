@@ -193,6 +193,50 @@ fn tool_defs() -> Vec<Value> {
                 "additionalProperties": false,
             },
         }),
+        json!({
+            "name": "list_queued",
+            "description": "看某个会话排了哪些活、分别排在哪一层：hub 队列（还没送到终端，可精确撤回）\
+                与终端原生队列（已在终端里等着，只能整体撤）。派活前先看一眼，免得把同一件事排两遍。",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "session": session_arg() },
+                "required": ["session"],
+                "additionalProperties": false,
+            },
+        }),
+        json!({
+            "name": "answer_select",
+            "description": "回答终端弹出的选择卡（AskUserQuestion）。会话在等你选时 session_detail 会列出\
+                问题和选项 —— 单选传选项序号（如 \"2\"）；多选把勾选的序号连写、末尾再加 Submit 的序号\
+                （选项 N 个时 Submit 是 N+2，因为选项之后还有一个「其它」占 N+1），例如 4 个选项里选 1 和 3 就传 \"136\"；\
+                想自己答就直接传文本。作答不会推送到钉钉、也不进交互历史 —— 孤零零一个「1」没有留存价值。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": session_arg(),
+                    "answer": { "type": "string", "description": "选项序号、多选序号串，或自定义答案文本" },
+                },
+                "required": ["session", "answer"],
+                "additionalProperties": false,
+            },
+        }),
+        json!({
+            "name": "terminal_key",
+            "description": "向终端注入按键：recall 撤回终端里排队的输入（按 count 次 ↑，内容会回到输入框）/\
+                flush 打断当前任务并让排队内容立刻开始（按一次 Esc）。\
+                与 control_session 的 interrupt 不同 —— 那个只是打断，这个打断后排队的会接着跑。\
+                仅 Windows 与 iTerm2 可注入；macOS 的 Terminal.app 不支持，会返回失败提示。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session": session_arg(),
+                    "action": { "type": "string", "enum": ["recall", "flush"] },
+                    "count": { "type": "integer", "description": "recall 时撤回几条（默认 1，上限 50）" },
+                },
+                "required": ["session", "action"],
+                "additionalProperties": false,
+            },
+        }),
     ]
 }
 
@@ -235,6 +279,20 @@ async fn call_tool(
             control_session(state, user, &sess()?, action).await
         }
         "recall_last" => recall_last(state, user, &sess()?).await,
+        "list_queued" => list_queued(state, user, &sess()?).await,
+        "answer_select" => {
+            let answer = args
+                .get("answer")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or("缺少参数 answer（选项序号或自定义答案）")?;
+            answer_select(state, user, &sess()?, answer).await
+        }
+        "terminal_key" => {
+            let action = args.get("action").and_then(Value::as_str).unwrap_or("");
+            let count = args.get("count").and_then(Value::as_u64).unwrap_or(1).clamp(1, 50);
+            terminal_key(state, user, &sess()?, action, count as u32).await
+        }
         _ => Err(format!("未知工具「{name}」")),
     }
 }
@@ -306,6 +364,15 @@ async fn session_detail(
         status_zh(task.status),
         if task.prompt.is_empty() { "（无）" } else { task.prompt.as_str() },
     )];
+    // 「正等你选」要排在最前：它是**阻塞**的 —— 不作答，这个会话什么都推进不了。
+    // 没有这一段的话，MCP 客户端只看到一个「等待输入」的会话，根本不知道该调 answer_select，
+    // 只会傻等或者去 send_to_session，而那会把答案当成新任务。
+    if let Some(sel) = &task.pending_select {
+        out.push(format!(
+            "⌨ 终端正等你选（用 answer_select 作答）：\n{}",
+            crate::server::select_summary(sel)
+        ));
+    }
     if let Some((hub_pending, term_q)) = crate::bot::read_queue(state, user, &id).await {
         let all: Vec<String> = term_q.into_iter().chain(hub_pending).collect();
         if !all.is_empty() {
@@ -424,5 +491,93 @@ async fn recall_last(state: &SharedState, user: &str, sess: &str) -> Result<Stri
         crate::bot::Recalled::InjectedUpKey => Ok(format!(
             "会话「{sess}」那条输入已进终端队列，已注入 ↑ 撤回（macOS Terminal.app 需手动按 ↑）。"
         )),
+    }
+}
+
+/// 排队清单：分两层列出，因为它们的可撤回性不同（hub 侧能精确撤、终端侧只能整体按 ↑）
+async fn list_queued(state: &SharedState, user: &str, sess: &str) -> Result<String, String> {
+    let id = resolve(state, user, sess).await?;
+    let (hub_pending, term_q) =
+        crate::bot::read_queue(state, user, &id).await.ok_or("会话不存在")?;
+    if hub_pending.is_empty() && term_q.is_empty() {
+        return Ok(format!("会话「{sess}」当前没有排队中的输入。"));
+    }
+    let mut out = Vec::new();
+    if !term_q.is_empty() {
+        out.push(format!("终端原生队列（{} 条，已在终端里等着）：", term_q.len()));
+        for (i, t) in term_q.iter().enumerate() {
+            out.push(format!("  {}. {}", i + 1, one_line(t, 120)));
+        }
+    }
+    if !hub_pending.is_empty() {
+        out.push(format!("hub 队列（{} 条，还没送到终端，可精确撤回）：", hub_pending.len()));
+        for (i, t) in hub_pending.iter().enumerate() {
+            out.push(format!("  {}. {}", i + 1, one_line(t, 120)));
+        }
+    }
+    Ok(out.join("\n"))
+}
+
+/// 回答选择卡：走与下发同一条队列，只是不留痕（不推钉钉、不进交互历史）。
+///
+/// 复用 `send_to_session` 的通路而不是另开一条 —— 答案对终端而言就是一行普通输入，
+/// 区别只在「值不值得留存」：孤零零一个「1」脱离了问题本身毫无意义。
+async fn answer_select(
+    state: &SharedState,
+    user: &str,
+    sess: &str,
+    answer: &str,
+) -> Result<String, String> {
+    let id = resolve(state, user, sess).await?;
+    let waiting = state
+        .tasks_for(user)
+        .await
+        .into_iter()
+        .find(|t| t.id == id)
+        .and_then(|t| t.pending_select)
+        .is_some();
+    if !waiting {
+        return Err(format!(
+            "会话「{sess}」当前没有在等选择。用 session_detail 确认它是否真的弹了选择卡 —— \
+             盲发答案会被当成普通任务执行。"
+        ));
+    }
+    crate::bot::queue_command(
+        state,
+        user,
+        &id,
+        ControlAction::Input,
+        Some(answer.to_string()),
+        "mcp-select",
+    )
+    .await?;
+    Ok(format!("已回答会话「{sess}」的选择卡：{}", one_line(answer, 80)))
+}
+
+/// 终端按键：撤回排队（↑）/ 打断并让排队接上（Esc）
+async fn terminal_key(
+    state: &SharedState,
+    user: &str,
+    sess: &str,
+    action: &str,
+    count: u32,
+) -> Result<String, String> {
+    let id = resolve(state, user, sess).await?;
+    let (spec, done) = match action {
+        "recall" => (format!("up:{count}"), format!("已注入 {count} 次 ↑ 撤回终端排队")),
+        "flush" => ("esc".to_string(), "已注入 Esc：当前任务被打断，排队内容随即开始".to_string()),
+        _ => return Err("action 只能是 recall 或 flush".into()),
+    };
+    crate::bot::queue_command(state, user, &id, ControlAction::TermKey, Some(spec), "mcp").await?;
+    Ok(format!("{done}（会话「{sess}」）。仅 Windows 与 iTerm2 可注入。"))
+}
+
+/// 队列条目压成单行摘要：排队内容常是多行任务描述，原样铺开会把清单冲垮
+fn one_line(s: &str, limit: usize) -> String {
+    let flat: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > limit {
+        format!("{}…", flat.chars().take(limit).collect::<String>())
+    } else {
+        flat
     }
 }

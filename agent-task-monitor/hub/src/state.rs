@@ -35,8 +35,6 @@ pub struct MachineEntry {
     pub pending_files: VecDeque<am_core::model::FileTransfer>,
     /// 会话 ID → 最近消息（agent 上报时缓存，供前端查看远程会话）
     pub messages: HashMap<String, Vec<MessageBrief>>,
-    /// 待下发给该 agent 的 git 对比请求
-    pub pending_git: VecDeque<am_core::model::GitQuery>,
     /// 待下发的目录列举请求（上传选目录）
     pub pending_dir: VecDeque<am_core::model::DirQuery>,
     /// 待下发的文件夹操作（新建/删除/重命名）
@@ -46,8 +44,6 @@ pub struct MachineEntry {
     /// 目录列举结果缓存：(task_id, rel) → 子目录名
     /// (task_id, rel) → (子目录, 文件)。文件用于「选择文件回填相对路径」。
     pub dir_cache: HashMap<(String, String), (Vec<String>, Vec<String>)>,
-    /// 会话 ID → 最近一次 git 对比结果（agent 回传后缓存）
-    pub git_cache: HashMap<String, am_core::model::GitOverview>,
     /// 上次通知过的在线状态（钉钉推送用，边沿触发上线/离线，避免重复）
     pub notified_online: bool,
     /// 已推过「等待选择」提醒的会话 ID（边沿触发：进入 select 推一次，离开清除）

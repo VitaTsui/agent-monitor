@@ -178,27 +178,6 @@ export const getPortalSlashCommands = async (id: string) => {
   return await get<ListRes<SlashCommand>>(`/monitor/tasks/${id}/slash-commands`);
 };
 
-// ---------- git 改动对比（原文件 vs 修改后） ----------
-
-export interface GitFile {
-  status: string;
-  path: string;
-}
-export interface GitOverview {
-  isRepo: boolean;
-  branch: string;
-  files: GitFile[];
-  diff: string;
-  untracked: string[];
-  error: string;
-}
-// 远程会话首次可能 pending（agent 正在跑），前端轮询直到 pending=false
-export const getPortalGitDiff = async (id: string) => {
-  return await get<{ overview: GitOverview | null; pending: boolean }>(
-    `/monitor/tasks/${id}/git-diff`,
-  );
-};
-
 // 任务控制
 export const controlPortalTask = async (
   id: string,

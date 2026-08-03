@@ -105,7 +105,6 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/tasks/page", get(page_tasks))
         .route("/monitor/tasks/detail/:id", get(task_detail))
         .route("/monitor/tasks/:id/messages", get(task_messages))
-        .route("/monitor/tasks/:id/git-diff", get(task_git_diff))
         .route("/monitor/tasks/:id/slash-commands", get(task_slash_commands))
         .route("/monitor/tasks/:id/control", post(control_task))
         .route("/monitor/tasks/:id/input", post(input_task))
@@ -743,46 +742,6 @@ async fn task_messages(
     ok(json!({ "list": list }))
 }
 
-/// GET /monitor/tasks/:id/git-diff —— 会话项目目录的 git 改动概览（原文件 vs 修改后）。
-/// 本机会话直接计算；远程会话下发请求给 agent，返回缓存结果（首次可能 pending，前端轮询）。
-async fn task_git_diff(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Json<Value> {
-    let Some(user) = auth_user(&state, &headers).await else {
-        return err(401, "未登录");
-    };
-    let task = {
-        let tasks = state.tasks_for(&user).await;
-        tasks.into_iter().find(|t| t.id == id)
-    };
-    let Some(task) = task else {
-        return err(404, "任务不存在");
-    };
-    let cwd = task.process.as_ref().map(|p| p.cwd.clone()).unwrap_or_default();
-
-    // 读缓存；同时下发一个请求让 agent 刷新（去重：同 task 已在队列则不重复入队）
-    let mut machines = state.machines.write().await;
-    let Some(entry) = machines.get_mut(&task.machine_id) else {
-        return err(404, "任务所属机器已离线");
-    };
-    if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
-        return err(500, "任务所属机器已离线");
-    }
-    let cached = entry.git_cache.get(&id).cloned();
-    if !entry.pending_git.iter().any(|q| q.task_id == id) {
-        entry.pending_git.push_back(am_core::model::GitQuery {
-            task_id: id.clone(),
-            cwd,
-        });
-    }
-    match cached {
-        Some(overview) => ok(json!({ "overview": overview, "pending": false })),
-        None => ok(json!({ "overview": null, "pending": true })),
-    }
-}
-
 /// GET /monitor/tasks/:id/slash-commands —— 该会话模型的可用斜杠命令（只读扫描）
 async fn task_slash_commands(
     State(state): State<SharedState>,
@@ -870,23 +829,44 @@ struct InputReq {
     from_select: bool,
 }
 
-/// 把 select 消息（AskUserQuestion 的整份 input JSON）里的问题+选项转成一段可读文本，
-/// 供钉钉「等待选择」提醒展示。解析失败返回空串。
+/// 把 select 消息（AskUserQuestion 的整份 input JSON 文本）转成可读文本。解析失败返回空串。
 fn select_options_text(content: &str) -> String {
-    let Ok(v) = serde_json::from_str::<Value>(content) else {
-        return String::new();
-    };
+    match serde_json::from_str::<Value>(content) {
+        Ok(v) => select_summary(&v),
+        Err(_) => String::new(),
+    }
+}
+
+/// 把 AskUserQuestion 的 input 渲染成「问题 + 编号选项」。
+///
+/// 钉钉的「⌨️ 需要你选择」与 MCP 的 session_detail 共用这一份 —— 两处各写一套的话，
+/// 哪天选项结构变了（比如加多选标记）只改一边，另一边就悄悄错了。
+pub(crate) fn select_summary(v: &Value) -> String {
     let mut out = String::new();
     if let Some(qs) = v.get("questions").and_then(|q| q.as_array()) {
         for q in qs {
+            // 多选与单选的作答方式完全不同（单选发一个序号即落定，多选要连写序号再补
+            // Submit 的编号），不标出来的话，远端只能靠猜 —— 猜错就卡在选择卡上不动。
+            let multi = q.get("multiSelect").and_then(|x| x.as_bool()).unwrap_or(false);
             if let Some(question) = q.get("question").and_then(|x| x.as_str()) {
                 out.push_str(question);
+                if multi {
+                    out.push_str("（多选）");
+                }
                 out.push('\n');
             }
             if let Some(opts) = q.get("options").and_then(|o| o.as_array()) {
                 for (i, o) in opts.iter().enumerate() {
                     let label = o.get("label").and_then(|x| x.as_str()).unwrap_or("");
                     out.push_str(&format!("{}. {}\n", i + 1, label));
+                }
+                if multi {
+                    // Submit 在终端选择卡里也占编号：N 个选项 + 「其它」占 N+1，Submit 是 N+2
+                    out.push_str(&format!(
+                        "（多选：勾选的序号连写，末尾补 {}＝Submit，如 \"1{}\"）\n",
+                        opts.len() + 2,
+                        opts.len() + 2
+                    ));
                 }
             }
         }
@@ -2111,12 +2091,10 @@ async fn report(
                 pending: VecDeque::new(),
                 pending_files: VecDeque::new(),
                 messages: HashMap::new(),
-                pending_git: VecDeque::new(),
                 pending_dir: VecDeque::new(),
                 pending_fsop: VecDeque::new(),
                 fsop_results: HashMap::new(),
                 dir_cache: HashMap::new(),
-                git_cache: HashMap::new(),
                 notified_online: false,
                 select_notified: std::collections::HashSet::new(),
                 online_since: Instant::now(),
@@ -2496,21 +2474,16 @@ async fn report(
     if entry.fsop_results.len() > 256 {
         entry.fsop_results.clear();
     }
-    for r in payload.git_results {
-        entry.git_cache.insert(r.task_id, r.overview);
-    }
     // 清掉已消失会话的缓存：这两张表按会话 ID 累积，不清理的话
     // hub 长期运行会随「历史会话总数」无限增长（而非「当前会话数」）。
     let alive: std::collections::HashSet<&str> =
         entry.tasks.iter().map(|t| t.id.as_str()).collect();
     entry.messages.retain(|k, _| alive.contains(k.as_str()));
-    entry.git_cache.retain(|k, _| alive.contains(k.as_str()));
     // 输入指令一律即时下发到终端：点了发送就直接键入终端会话，是否「排队」由终端里
     // claude 自己的原生队列决定（会话跑着时新输入排在其后、被接收后才执行），hub 不再
     // 代为扣留。（撤回按「终端队列是否已接收」判定，见前端。）
     let commands: Vec<ControlCmd> = entry.pending.drain(..).collect();
     let files: Vec<am_core::model::FileTransfer> = entry.pending_files.drain(..).collect();
-    let git_queries: Vec<am_core::model::GitQuery> = entry.pending_git.drain(..).collect();
     let dir_queries: Vec<am_core::model::DirQuery> = entry.pending_dir.drain(..).collect();
     let fs_ops: Vec<am_core::model::FsOp> = entry.pending_fsop.drain(..).collect();
     drop(machines);
@@ -2539,7 +2512,6 @@ async fn report(
     ok(json!({
         "commands": commands,
         "files": files,
-        "gitQueries": git_queries,
         "dirQueries": dir_queries,
         "fsOps": fs_ops,
         "trusted": trusted,
