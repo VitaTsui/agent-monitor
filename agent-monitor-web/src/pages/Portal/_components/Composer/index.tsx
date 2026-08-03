@@ -658,6 +658,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
       />
       {/* 上传目录确认：默认会话所在目录，可改成设备上任意目录 */}
       <Modal
+        className={styles.dirModal}
         title="传文件到设备"
         open={!!pendingFile}
         onCancel={() => setPendingFile(null)}
@@ -734,6 +735,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
 
       {/* 选择文件：浏览会话目录，点文件即把相对路径插入输入框（不上传） */}
       <Modal
+        className={styles.dirModal}
         title="选择文件（插入相对路径）"
         open={pickerOpen}
         onCancel={() => setPickerOpen(false)}
