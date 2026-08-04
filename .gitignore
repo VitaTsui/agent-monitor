@@ -19,3 +19,18 @@ agent-task-monitor/keys/
 .DS_Store
 *.log
 *.tar.gz
+
+# --- 对齐 vita-admin-starter 模板 ---
+.cursor
+.codex
+
+# 忽略 .claude 本地配置，但保留项目级 skills
+.claude/*
+!.claude/skills/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.local
+*.zip
