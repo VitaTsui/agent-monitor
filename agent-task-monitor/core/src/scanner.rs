@@ -1196,7 +1196,7 @@ fn user_text(content: Option<&Value>) -> Option<String> {
     {
         return None;
     }
-    Some(truncate(trimmed, 500))
+    Some(truncate(trimmed, FLOW_TEXT_MAX))
 }
 
 /// 这条 user 记录是不是「用户在终端按 Esc 中断」的标记。
@@ -1225,7 +1225,9 @@ fn queued_user_text(v: &Value) -> Option<String> {
     if text.is_empty() || text.starts_with('<') || text.starts_with("[Request interrupted") {
         return None;
     }
-    Some(truncate(&text, 500))
+    // 与对话流里的 user 正文同上限：否则同一条下发在「排队条」被截到 500、进流后是全文，
+    // 两边按内容去重就对不上。
+    Some(truncate(&text, FLOW_TEXT_MAX))
 }
 
 fn content_has_tool_result(content: Option<&Value>) -> bool {
@@ -1258,7 +1260,7 @@ fn codex_user_text(v: &Value) -> Option<String> {
     if t.is_empty() || t.starts_with('<') {
         return None;
     }
-    Some(truncate(t, 500))
+    Some(truncate(t, FLOW_TEXT_MAX))
 }
 
 /// 把一行 Codex 会话记录转为简要消息（与 Claude 的 entry_to_brief 对应）。
@@ -1288,7 +1290,7 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 let t = buf.trim();
                 (!t.is_empty()).then(|| MessageBrief {
                     role: "assistant".into(),
-                    content: truncate(t, 2000),
+                    content: truncate(t, FLOW_TEXT_MAX),
                     timestamp: ts,
                 })
             }
@@ -1320,6 +1322,12 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
         _ => None,
     }
 }
+
+/// 对话流里「一段话」的存储上限（用户下发内容 / 助手回复 / 方案正文）。定得足够大，
+/// 让整段内容都进对话流——前端再按需折叠（展开全部/收起）。此前 500/2000 太小，长下发
+/// 与长结果在流里被 `…` 砍掉，连「展开」也放不出来。仍留个上限挡住病态超长（如误粘整个
+/// 文件），避免每次轮询都把 MB 级文本反复搬运。
+const FLOW_TEXT_MAX: usize = 16_000;
 
 fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
     let ts = v.get("timestamp").and_then(Value::as_str).unwrap_or("").to_string();
@@ -1400,7 +1408,7 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
             if let Some(p) = plan.filter(|p| !p.trim().is_empty()) {
                 return Some(MessageBrief {
                     role: "plan".into(),
-                    content: truncate(p.trim(), 4000),
+                    content: truncate(p.trim(), FLOW_TEXT_MAX),
                     timestamp: ts,
                 });
             }
@@ -1415,7 +1423,7 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
             if !text_buf.trim().is_empty() {
                 Some(MessageBrief {
                     role: "assistant".into(),
-                    content: truncate(text_buf.trim(), 2000),
+                    content: truncate(text_buf.trim(), FLOW_TEXT_MAX),
                     timestamp: ts,
                 })
             } else if !tools.is_empty() {

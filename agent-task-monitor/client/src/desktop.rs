@@ -678,6 +678,9 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                     });
                 }
             }
+            // 先结算上次自更新装没装上（一次性提示 + 清标记），避免陈标记把后续「点击更新」
+            // 永久卡成「请手动下载」。必须在 watcher/点击之前做。
+            settle_update_marker();
             // 更新监视：常规新版本只发系统通知气泡 + 托盘置顶「点击更新」项，不弹模态；
             // 仅当本机低于强制下限（desktopMin）时才弹必须更新的模态，否则退出。
             spawn_update_watcher(handle.clone(), state_setup.clone(), web_base.clone());
@@ -1312,6 +1315,34 @@ fn update_attempt_path() -> std::path::PathBuf {
         .join("update-attempt")
 }
 
+/// 启动即结算「上次自更新到底装没装上」，然后**清掉标记**。
+/// 标记文件存着上次更新前的版本：
+/// - 版本已变（marker ≠ 当前）：装成功了，静默清掉即可；顺带清掉旧机器人手动换包留下的陈标记。
+/// - 版本没变（marker == 当前）：那次没生效，提示一次「请手动下载」，然后一样清掉。
+///
+/// 关键是**无论哪种都清标记**：老逻辑把结算拖到「下次点击更新」时才做、且同版本时不清标记，
+/// 于是每次点更新都被这道闸直接回绝成「请手动下载」，永远不再尝试。改到启动做一次性结算后，
+/// 点更新时标记已不在，必定真去下载重装。
+fn settle_update_marker() {
+    let local = env!("CARGO_PKG_VERSION");
+    let marker = update_attempt_path();
+    let Ok(raw) = std::fs::read_to_string(&marker) else {
+        return; // 没有标记 = 上次不是更新重启，无需结算
+    };
+    let prev = raw.trim();
+    // 无论成败，先把上次遗留的「正在下载/重启」进度清掉：新实例已经起来了。
+    clear_update_progress();
+    if !prev.is_empty() && prev == local {
+        ulog(&format!("[update] 上次更新后仍是 v{local} —— 未生效，提示手动更新一次"));
+        notify_progress(&format!(
+            "自动更新未生效（仍是 v{local}），请下载安装包手动更新一次"
+        ));
+    } else {
+        ulog(&format!("[update] 上次更新已生效（v{prev} → v{local}），清理标记"));
+    }
+    let _ = std::fs::remove_file(&marker);
+}
+
 /// 托盘「点击更新」：后台线程执行自更新。
 /// - macOS：下载 zip → 原地替换 .app → 重启（全自动，无需用户操作）
 /// - Windows：下载安装器静默安装并自动重启
@@ -1864,32 +1895,17 @@ pub(crate) fn spawn_update_watcher<R: tauri::Runtime>(
 /// 自更新执行（forced=true 时失败即退出：强制更新不允许带病运行）
 fn spawn_self_update_inner<R: tauri::Runtime>(app: tauri::AppHandle<R>, hub: String, forced: bool) {
     std::thread::spawn(move || {
-        // 把「装了没生效」截断成一次失败 + 一条提示，而不是无休止地下载安装。
-        // 判据用「上次尝试更新时我是哪个版本」：重启后版本变了 = 装上了；
-        // 没变 = 那次没生效，再自动试一次也是白搭。
-        let local = env!("CARGO_PKG_VERSION");
-        let last_try = update_attempt_path();
-        if let Some(prev) = std::fs::read_to_string(&last_try).ok().map(|s| s.trim().to_string()) {
-            if prev.is_empty() || prev != local {
-                let _ = std::fs::remove_file(&last_try); // 版本已变，上次装成功了
-            } else if !forced {
-                ulog(&format!(
-                    "[update] 上次更新后重启，版本仍是 v{local} —— 安装没生效，不再自动重试"
-                ));
-                clear_update_progress();
-                notify_progress(&format!(
-                    "自动更新未生效（仍是 v{local}），请下载安装包手动更新一次"
-                ));
-                return;
-            }
-        }
+        // 「装了没生效」的判定挪到了启动时的 settle_update_marker()：那里一次性告知并清标记。
+        // 这里**不再预先回绝**——用户明确点了「更新」，就该真的去下载重装一次（哪怕上次没生效，
+        // 服务器包也可能已修好）。老逻辑把标记一直留着、每次点更新都直接弹「请手动下载」、
+        // 根本不再尝试，才是「点更新只提示手动下载」的根因。
         ulog(&format!("[update] 开始自更新 forced={forced} hub={hub}"));
         set_update_progress("downloading", 0, 0);
         notify_progress("正在下载更新，完成后将自动重启…");
         match do_self_update(&hub) {
             Ok(()) => {
-                // 记下更新前的版本：新实例起来一比对就知道装没装上
-                let _ = std::fs::write(update_attempt_path(), local);
+                // 记下更新前的版本：新实例启动时 settle_update_marker() 一比对就知道装没装上
+                let _ = std::fs::write(update_attempt_path(), env!("CARGO_PKG_VERSION"));
                 ulog("[update] 自更新就绪，退出旧实例");
                 app.exit(0);
                 // app.exit 走事件循环代理，个别路径（窗口全隐藏时）可能不生效；
