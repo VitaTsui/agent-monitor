@@ -88,18 +88,22 @@ pub fn run_hook_cli(data_dir: &Path) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    // 待选项：只有「AskUserQuestion 即将执行」这一刻才记。
+    // 待选项：AskUserQuestion 即将执行时记下，作答后清掉，**其余事件一律原样继承**。
     //
-    // 清除是靠覆盖完成的：这个文件每次 hook 触发都整份重写，而 PreToolUse 挂的是
-    // `*`，所以用户选完、claude 接着调下一个工具时，新记录里没有 pending_select，
-    // 待选状态自然就没了 —— 不必额外维护过期逻辑。
-    // 「选完就收尾、不再调工具」这一种覆盖不到，由 PostToolUse 那条补上。
+    // 早先是「除了 AskUserQuestion 的 PreToolUse，一律写 None」，靠覆盖来清除。那个设想
+    // 漏了一件事：claude 可以**并行**发起多个工具调用。AskUserQuestion 正阻塞等着作答时，
+    // 同一批次里另一个工具的 PreToolUse 一触发，待选状态就被冲掉了 —— 卡片还挂在终端上
+    // 等你，远端却再也看不到它。线上抓到过：15:26:45 调用 AskUserQuestion（jsonl 里没有
+    // tool_result，即从未作答），15:32:53 记录已被改写成 null。
+    //
+    // 所以清除只认一个明确信号：PostToolUse(AskUserQuestion) —— 那才是「答完了」。
     let event = v.get("hook_event_name").and_then(|x| x.as_str()).unwrap_or("");
     let tool = v.get("tool_name").and_then(|x| x.as_str()).unwrap_or("");
-    let pending_select = if event == "PreToolUse" && tool == "AskUserQuestion" {
-        v.get("tool_input").cloned()
-    } else {
-        None
+    let pending_select = match (event, tool) {
+        ("PreToolUse", "AskUserQuestion") => v.get("tool_input").cloned(),
+        ("PostToolUse", "AskUserQuestion") => None,
+        // 与选择卡无关的事件：把上一条记录里的待选原样带过来，别动它
+        _ => prev_pending_select(&dir, claude_pid),
     };
     let rec = serde_json::json!({
         "claude_pid": claude_pid,
@@ -114,6 +118,16 @@ pub fn run_hook_cli(data_dir: &Path) {
     if std::fs::write(&tmp, txt).is_ok() {
         let _ = std::fs::rename(&tmp, dir.join(format!("{claude_pid}.json")));
     }
+}
+
+/// 读上一条记录里的待选状态，供与选择卡无关的 hook 事件原样继承。
+///
+/// hook 必须极快，这里只读一个几百字节的小文件、任何异常都当「没有」——
+/// 丢一次待选顶多是远端少显示一张卡，而拖慢 hook 会直接卡住用户的会话。
+fn prev_pending_select(dir: &Path, claude_pid: u32) -> Option<serde_json::Value> {
+    let txt = std::fs::read_to_string(dir.join(format!("{claude_pid}.json"))).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+    v.get("pending_select").filter(|x| !x.is_null()).cloned()
 }
 
 /// 取当前进程的父进程 pid（CLAUDE_PID 缺失时的兜底）
