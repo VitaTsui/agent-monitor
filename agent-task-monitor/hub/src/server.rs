@@ -912,33 +912,55 @@ fn select_options_text(content: &str) -> String {
 /// 哪天选项结构变了（比如加多选标记）只改一边，另一边就悄悄错了。
 pub(crate) fn select_summary(v: &Value) -> String {
     let mut out = String::new();
-    if let Some(qs) = v.get("questions").and_then(|q| q.as_array()) {
-        for q in qs {
-            // 多选与单选的作答方式完全不同（单选发一个序号即落定，多选要连写序号再补
-            // Submit 的编号），不标出来的话，远端只能靠猜 —— 猜错就卡在选择卡上不动。
-            let multi = q.get("multiSelect").and_then(|x| x.as_bool()).unwrap_or(false);
-            if let Some(question) = q.get("question").and_then(|x| x.as_str()) {
-                out.push_str(question);
-                if multi {
-                    out.push_str("（多选）");
-                }
-                out.push('\n');
+    let Some(qs) = v.get("questions").and_then(|q| q.as_array()) else {
+        return out;
+    };
+    let many = qs.len() > 1;
+    for (qi, q) in qs.iter().enumerate() {
+        // 多选与单选的作答方式完全不同（单选发一个序号即落定，多选要连写序号再补
+        // Submit 的编号），不标出来的话，远端只能靠猜 —— 猜错就卡在选择卡上不动。
+        let multi = q.get("multiSelect").and_then(|x| x.as_bool()).unwrap_or(false);
+        // 题与题之间空一行。**这一行不能省**：markdown 的 lazy continuation 会把紧跟在
+        // 列表项后面的文字当成该项的续行，于是下一题的题干被吞进上一题的最后一个选项，
+        // 后面的有序列表还会被视为同一个列表的延续、自动接着编号。
+        // 线上就这么翻过车：两道题在钉钉里被渲染成一道、选项连号成 1~6。
+        if qi > 0 {
+            out.push('\n');
+        }
+        if many {
+            out.push_str(&format!("**第 {} 题**", qi + 1));
+            if multi {
+                out.push_str("（多选）");
             }
-            if let Some(opts) = q.get("options").and_then(|o| o.as_array()) {
-                for (i, o) in opts.iter().enumerate() {
-                    let label = o.get("label").and_then(|x| x.as_str()).unwrap_or("");
-                    out.push_str(&format!("{}. {}\n", i + 1, label));
-                }
-                if multi {
-                    // Submit 在终端选择卡里也占编号：N 个选项 + 「其它」占 N+1，Submit 是 N+2
-                    out.push_str(&format!(
-                        "（多选：勾选的序号连写，末尾补 {}＝Submit，如 \"1{}\"）\n",
-                        opts.len() + 2,
-                        opts.len() + 2
-                    ));
-                }
+            out.push_str("  \n");
+        }
+        if let Some(question) = q.get("question").and_then(|x| x.as_str()) {
+            out.push_str(question);
+            if multi && !many {
+                out.push_str("（多选）");
+            }
+            // 题干与选项列表之间同样要空行，列表才会被当作新列表起头
+            out.push_str("\n\n");
+        }
+        if let Some(opts) = q.get("options").and_then(|o| o.as_array()) {
+            for (i, o) in opts.iter().enumerate() {
+                let label = o.get("label").and_then(|x| x.as_str()).unwrap_or("");
+                out.push_str(&format!("{}. {}\n", i + 1, label));
+            }
+            if multi {
+                // Submit 在终端选择卡里也占编号：N 个选项 + 「其它」占 N+1，Submit 是 N+2
+                out.push_str(&format!(
+                    "\n（多选：勾选的序号连写，末尾补 {}＝Submit，如 \"1{}\"）\n",
+                    opts.len() + 2,
+                    opts.len() + 2
+                ));
             }
         }
+    }
+    if many {
+        // 每题的选项都从 1 编号，而作答是一次一题 —— 不说明的话，看到两组「1.」很容易
+        // 以为可以直接回第二题的序号。
+        out.push_str("\n（多题：逐题作答，先回第 1 题的序号）");
     }
     out.trim_end().to_string()
 }
@@ -2760,6 +2782,74 @@ async fn ws_loop(socket: WebSocket, state: SharedState, user: Option<String>, to
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod select_summary_tests {
+    use super::select_summary;
+    use serde_json::json;
+
+    fn two_questions() -> serde_json::Value {
+        json!({"questions": [
+            {"question": "这两个值从哪来？", "options": [
+                {"label": "前端自算"}, {"label": "等后端补字段"}, {"label": "复用总体增长率"}
+            ]},
+            {"question": "允许选几个？", "options": [
+                {"label": "单选，可取消"}, {"label": "多选（最多 2 个）"}
+            ]}
+        ]})
+    }
+
+    /// 多题之间必须有空行分隔。
+    ///
+    /// 线上翻过车：没有空行时 markdown 的 lazy continuation 把下一题的题干当成上一题
+    /// 最后一个选项的续行，两道题被渲染成一道，选项还连号成了 1~6。
+    #[test]
+    fn questions_separated_by_blank_line() {
+        let s = select_summary(&two_questions());
+        // 第二题的题干必须自成一段，前面隔着空行 —— 不能紧贴在上一个选项行后面
+        assert!(
+            s.contains("\n\n") && !s.contains("复用总体增长率\n允许选几个？"),
+            "第二题题干被粘到了上一题的选项后面：\n{s}"
+        );
+        assert!(s.contains("**第 1 题**") && s.contains("**第 2 题**"), "多题要标题号：\n{s}");
+    }
+
+    /// 题干与其选项之间也要空行，否则列表不会被当成新列表起头
+    #[test]
+    fn question_and_options_separated() {
+        let s = select_summary(&two_questions());
+        assert!(s.contains("这两个值从哪来？\n\n1. 前端自算"), "得到：\n{s}");
+    }
+
+    /// 每题各自从 1 开始编号，且要提示逐题作答 —— 看到两组「1.」容易以为能直接回第二题
+    #[test]
+    fn each_question_numbers_from_one() {
+        let s = select_summary(&two_questions());
+        assert!(s.contains("1. 前端自算") && s.contains("1. 单选，可取消"), "得到：\n{s}");
+        assert!(s.contains("逐题作答"), "多题要提示作答顺序：\n{s}");
+    }
+
+    /// 单题不加题号前缀，免得平白多一行
+    #[test]
+    fn single_question_has_no_index_prefix() {
+        let s = select_summary(&json!({"questions": [
+            {"question": "继续吗？", "options": [{"label": "继续"}, {"label": "停"}]}
+        ]}));
+        assert!(!s.contains("第 1 题"), "单题不该有题号：\n{s}");
+        assert!(s.starts_with("继续吗？"), "得到：\n{s}");
+    }
+
+    /// 多选要标出来并给出作答格式（Submit 占 N+2 号）
+    #[test]
+    fn multi_select_marked_with_submit_hint() {
+        let s = select_summary(&json!({"questions": [
+            {"question": "选哪些？", "multiSelect": true,
+             "options": [{"label": "A"}, {"label": "B"}]}
+        ]}));
+        assert!(s.contains("（多选）"), "得到：\n{s}");
+        assert!(s.contains("补 4＝Submit"), "2 个选项时 Submit 应是 4 号：\n{s}");
     }
 }
 
