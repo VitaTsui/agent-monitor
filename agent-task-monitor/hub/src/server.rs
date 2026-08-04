@@ -2259,6 +2259,21 @@ async fn report(
         use crate::dingtalk::{EventKind, NotifyEvent};
         let old: std::collections::HashMap<&str, TaskStatus> =
             entry.tasks.iter().map(|t| (t.id.as_str(), t.status)).collect();
+        // 上一轮还是「进程占位任务」的那些终端锚。
+        //
+        // 占位任务一收到输入就落盘 jsonl、配上真会话，id 从 `<machine>-pid-<pid>` 换成
+        // 会话 uuid —— 对用户而言是同一个终端接着往下用，不是新开了一个会话。此时若照常
+        // 推「🆕 会话开始」，配上另一头的「✅ 会话已结束」（占位任务消失），一次下发就
+        // 收到两条通知，而实际什么都没开始也没结束。
+        //
+        // 认锚不认 id：占位任务与转正后的会话共享同一个终端锚（machine|sh:pid@start），
+        // 这是唯一能把两者串起来的线索。
+        let placeholder_anchors: std::collections::HashSet<String> = entry
+            .tasks
+            .iter()
+            .filter(|t| is_proc_placeholder(t))
+            .map(crate::slots::anchor_of)
+            .collect();
         // 会话基线是否已建立：空表示刚（重）上线还没建基线，此时出现的会话不算「新」。
         let baseline = !entry.known_sessions.is_empty();
         let current_ids: std::collections::HashSet<&str> =
@@ -2434,6 +2449,12 @@ async fn report(
                 // 沉降期内**不进基线**（下面 continue 跳过 known_updates），否则下一轮
                 // `!known_sessions.contains_key` 不成立，这条会话就永远不会再被判为「新」。
                 let anchor = crate::slots::anchor_of(t);
+                // 占位任务转正：同一个终端接着用，不是新会话（见 placeholder_anchors）。
+                // 仍要落进基线（不 continue），否则下一轮它又会被当成没见过的新会话。
+                if placeholder_anchors.contains(&anchor) {
+                    known_updates.push(t.clone());
+                    continue;
+                }
                 match entry.new_session_pending.get(&t.id) {
                     Some((since, a))
                         if a == &anchor
