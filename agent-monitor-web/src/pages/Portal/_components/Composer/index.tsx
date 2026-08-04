@@ -391,9 +391,10 @@ const Composer: React.FC<ComposerProps> = (props) => {
 
   // 选中某个文件 → 把相对会话目录的路径（正斜杠通用）插入输入框
   /**
-   * 勾选/取消一个文件。存的是**完整相对路径**而不是文件名 ——
-   * 选文件时可以来回进出子目录，只存名字的话跨目录同名文件会互相顶掉，
-   * 而且插入时也无从知道它当初在哪一层。
+   * 勾选/取消一个条目（文件或文件夹都走这里 —— 对使用者而言都是「一个路径」）。
+   *
+   * 存的是**完整相对路径**而不是名字：选的时候可以来回进出子目录，只存名字的话
+   * 跨目录的同名条目会互相顶掉，插入时也无从知道它当初在哪一层。
    */
   const toggleFileRef = (name: string) => {
     const rel = `./${dirRel ? `${dirRel}/` : ""}${name}`;
@@ -883,17 +884,58 @@ const Composer: React.FC<ComposerProps> = (props) => {
               <div className={styles.dirEmpty}>该目录为空</div>
             ) : (
               <>
-                {dirList.map((d) => (
-                  <div
-                    key={`d-${d}`}
-                    className={styles.dirItem}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => enterDir(d)}
-                  >
-                    <span className={styles.dirIcon}>📁</span> {d}
-                  </div>
-                ))}
+                {dirList.map((d) => {
+                  const rel = `./${dirRel ? `${dirRel}/` : ""}${d}`;
+                  const picked = pickedRefs.includes(rel);
+                  return (
+                    <div
+                      key={`d-${d}`}
+                      className={`${styles.dirItem} ${
+                        picked ? styles.dirItemPicked : ""
+                      }`}
+                    >
+                      {/* 目录名点进去（继续往下浏览），右侧按钮才是「选中这个目录本身」。
+                          两个动作必须分开 —— 只给一个的话，想选中当前这层就得先进去、
+                          再回头找「选当前目录」，绕一大圈。 */}
+                      <span
+                        className={styles.dirItemName}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => enterDir(d)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            enterDir(d);
+                          }
+                        }}
+                      >
+                        <span className={styles.dirIcon}>
+                          {picked ? "✅" : "📁"}
+                        </span>{" "}
+                        {d}
+                      </span>
+                      <span
+                        className={styles.dirPickBtn}
+                        role="button"
+                        tabIndex={0}
+                        title={picked ? "取消选择该文件夹" : "选中该文件夹（回填其路径）"}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleFileRef(d);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            toggleFileRef(d);
+                          }
+                        }}
+                      >
+                        {picked ? "取消" : "选它"}
+                      </span>
+                    </div>
+                  );
+                })}
                 {dirFiles.map((f) => {
                   const rel = `./${dirRel ? `${dirRel}/` : ""}${f}`;
                   const picked = pickedRefs.includes(rel);
@@ -918,7 +960,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
               // 已选的列出来：可以进出多个子目录累积勾选，不显示的话就记不住选过哪些了
               <>已选：<b>{pickedRefs.join(" ")}</b></>
             ) : (
-              <>点文件勾选，可跨目录多选，选完点「插入」</>
+              <>点文件勾选，文件夹点「选它」，可跨目录多选，选完点「插入」</>
             )}
           </div>
         </div>

@@ -330,6 +330,23 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
         word-break: break-all;
       }
 
+      // 「选它」：把这个文件夹本身作为路径选中（区别于点名字进入下一层）。
+      // 常驻显示而不是 hover 才现 —— 它是这一行的主要动作之一，藏起来就没人知道
+      // 文件夹也能选；而且触屏根本没有 hover。
+      .dirPickBtn {
+        flex: none;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 11.5px;
+        color: #0f9bad;
+        background: rgba(15, 155, 173, 0.1);
+        white-space: nowrap;
+
+        &:hover {
+          background: rgba(15, 155, 173, 0.2);
+        }
+      }
+
       .dirItemOps {
         display: inline-flex;
         align-items: center;
