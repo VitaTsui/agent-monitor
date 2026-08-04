@@ -2309,27 +2309,25 @@ async fn report(
         // (推送里展示的截断版, 若被截断则给出完整原文供 OTO 作为文件补发)。
         let msgs_map = &entry.messages;
         let result = |id: &str| -> (String, Option<String>) {
-            // 这里只做"要不要附完整原文"的判定，正文的降级与分片交给 dingtalk::push_*。
-            // 留出余量给外层的设备/项目/会话等抬头（正文 + 抬头要一起塞进单条上限）。
-            const LIMIT: usize = crate::mdfmt::DINGTALK_MAX_LEN - 600;
+            // 正文不再硬截断：完整结果整段交给 dingtalk::push_*，那边按钉钉 4000 上限**分片**
+            // 逐条发进聊天里（chunk_text 尽量断在换行/空格）。此前这里 take(LIMIT) 把话砍掉、
+            // 只在下面附个 .txt——长结果在聊天里看不全，正是要修的「最后结果太长被砍掉」。
+            //
+            // 只有极长（会被分成很多条、刷屏）才额外附一份完整 .txt 兜底，既不刷屏也留个整档。
+            const HUGE: usize = crate::mdfmt::DINGTALK_MAX_LEN * 3;
             msgs_map
                 .get(id)
                 .and_then(|ms| ms.iter().rev().find(|m| m.role.as_str() == "assistant"))
                 .map(|m| {
                     let full = m.content.trim();
-                    let cut = full.chars().count() > LIMIT;
-                    let s: String = full.chars().take(LIMIT).collect();
                     // 结果正文里的 markdown 标题转成加粗，避免推送里出现大字号 heading
-                    let s = md_headings_to_bold(s.trim());
+                    let s = md_headings_to_bold(full);
                     if s.is_empty() {
                         (String::new(), None)
-                    } else if cut {
-                        (
-                            format!("\n\n**最后结果**\n\n{s}\n\n…（内容较长，完整内容见下方文件）"),
-                            Some(full.to_string()),
-                        )
                     } else {
-                        (format!("\n\n**最后结果**\n\n{s}"), None)
+                        let file =
+                            (full.chars().count() > HUGE).then(|| full.to_string());
+                        (format!("\n\n**最后结果**\n\n{s}"), file)
                     }
                 })
                 .unwrap_or((String::new(), None))

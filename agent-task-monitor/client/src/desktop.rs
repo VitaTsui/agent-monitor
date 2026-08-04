@@ -1511,10 +1511,16 @@ fn ensure_bridge_extension(hub: &str, data_dir: &std::path::Path, force: bool) -
         return 0;
     }
     let mut installed = 0u32;
-    for cli in ["cursor", "code"] {
-        if install_vsix(cli, &vsix) {
-            installed += 1;
-            ulog(&format!("[bridge] 已安装桥接扩展到 {cli}"));
+    for name in ["cursor", "code"] {
+        // 每个编辑器按候选顺序试：PATH 短名优先，装不上再退回应用内置 CLI 的绝对路径。
+        // 用户没执行「Shell Command: Install 'cursor' command in PATH」时短名找不到，
+        // 但 app 包里一直有这个 CLI —— 不兜底就会：扩展装不上→内嵌终端下发悄悄失败。
+        for cli in editor_clis(name) {
+            if install_vsix(&cli, &vsix) {
+                installed += 1;
+                ulog(&format!("[bridge] 已安装桥接扩展到 {name}（{cli}）"));
+                break; // 该编辑器装成功一个候选即够
+            }
         }
     }
     // 校验实际已装版本 == 期望版本，才打标记。否则——hub 上的 vsix 可能还是旧版（发版时漏了
@@ -1535,9 +1541,60 @@ fn ensure_bridge_extension(hub: &str, data_dir: &std::path::Path, force: bool) -
     installed
 }
 
-/// 查已装的桥接扩展版本：`<cli> --list-extensions --show-versions` 里找
-/// `vitahsu.agent-monitor-bridge@x.y.z`。取不到（CLI 不在/未装）返回 None。
-fn installed_ext_version(cli: &str) -> Option<String> {
+/// 某编辑器（"cursor" / "code"）的候选 CLI 列表：PATH 短名优先，再兜底到应用内置 CLI 的
+/// 绝对路径。绝对路径仅在文件真实存在时加入，避免给未安装的编辑器留下无效候选。
+fn editor_clis(name: &str) -> Vec<String> {
+    #[allow(unused_mut)]
+    let mut v = vec![name.to_string()]; // PATH 短名
+    #[cfg(target_os = "macos")]
+    {
+        let app = match name {
+            "cursor" => "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
+            "code" => "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+            _ => "",
+        };
+        if !app.is_empty() && std::path::Path::new(app).exists() {
+            v.push(app.to_string());
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let p = match name {
+                "cursor" => format!("{local}\\Programs\\cursor\\resources\\app\\bin\\cursor.cmd"),
+                "code" => {
+                    format!("{local}\\Programs\\Microsoft VS Code\\bin\\code.cmd")
+                }
+                _ => String::new(),
+            };
+            if !p.is_empty() && std::path::Path::new(&p).exists() {
+                v.push(p);
+            }
+        }
+        // VS Code 还可能是系统级安装
+        if name == "code" {
+            for pf in ["ProgramFiles", "ProgramFiles(x86)"] {
+                if let Ok(dir) = std::env::var(pf) {
+                    let p = format!("{dir}\\Microsoft VS Code\\bin\\code.cmd");
+                    if std::path::Path::new(&p).exists() {
+                        v.push(p);
+                    }
+                }
+            }
+        }
+    }
+    v
+}
+
+/// 查已装的桥接扩展版本：对该编辑器的候选 CLI 逐个试，任一给出版本即返回。
+/// 取不到（编辑器未装 / CLI 都不可用）返回 None。
+fn installed_ext_version(name: &str) -> Option<String> {
+    editor_clis(name).iter().find_map(|cli| installed_ext_version_via(cli))
+}
+
+/// 单个 CLI 路径：`<cli> --list-extensions --show-versions` 里找
+/// `vitahsu.agent-monitor-bridge@x.y.z`。
+fn installed_ext_version_via(cli: &str) -> Option<String> {
     #[cfg(windows)]
     let out = {
         use std::os::windows::process::CommandExt;
