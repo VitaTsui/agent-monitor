@@ -215,6 +215,8 @@ const Composer: React.FC<ComposerProps> = (props) => {
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   /** 批量上传进度：已完成数 / 总数，仅上传中有值 */
   const [uploadDone, setUploadDone] = useState(0);
+  /** 当前这个文件的分片进度百分比（大文件切片上传时才有意义） */
+  const [uploadPct, setUploadPct] = useState(0);
   const [dirRel, setDirRel] = useState("");
   const [dirList, setDirList] = useState<string[]>([]);
   const [dirFiles, setDirFiles] = useState<string[]>([]);
@@ -464,7 +466,10 @@ const Composer: React.FC<ComposerProps> = (props) => {
     const failed: string[] = [];
     for (const file of files) {
       try {
-        const res = await uploadPortalFile(machineId, dir, file);
+        const res = await uploadPortalFile(machineId, dir, file, (sent, total) => {
+          // 大文件单个就要传一会儿，只报「第几个文件」看着像卡住了，带上本文件的百分比
+          setUploadPct(total > 0 ? Math.round((sent / total) * 100) : 0);
+        });
         if (res.code === 0) {
           // 回填相对路径（相对会话目录，正斜杠通用）
           ok.push(dirRel ? `./${dirRel}/${file.name}` : `./${file.name}`);
@@ -475,6 +480,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
         failed.push(file.name);
       }
       setUploadDone((n) => n + 1);
+      setUploadPct(0);
     }
 
     setUploading(false);
@@ -720,8 +726,12 @@ const Composer: React.FC<ComposerProps> = (props) => {
                         // 批量上传是串行的，会持续一段时间 —— 标题里带上进度，
                         // 否则用户只看到一个转圈的回形针，不知道传到第几个了
                         title: uploading
-                          ? `正在上传… ${uploadDone} 个已完成`
-                          : "传文件到会话目录（可多选，完成后自动填入路径）",
+                          ? `正在上传… ${uploadDone} 个已完成${
+                              uploadPct > 0 && uploadPct < 100
+                                ? `，当前 ${uploadPct}%`
+                                : ""
+                            }`
+                          : "传文件到会话目录（可多选，大文件自动分片）",
                         icon: <PaperClipOutlined className={styles.uploadIcon} />,
                         type: "text" as const,
                         loading: uploading,

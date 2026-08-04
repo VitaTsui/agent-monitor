@@ -21,6 +21,17 @@ use tower_http::services::ServeDir;
 /// 但不设限等于给任何持令牌方一个无界内存分配入口。
 const REPORT_BODY_LIMIT: usize = 32 * 1024 * 1024;
 
+/// 上传接口的请求体上限（12MB）。
+///
+/// 此前这个路由没设过 limit，吃的是 axum 默认的 **2MB** —— 传张大点的截图都会被拒，
+/// 而错误只是一个干巴巴的 413，前端看着像"上传失败"，根本猜不到是体积卡的。
+///
+/// 定 12MB 是配合前端 5MB 的分片粒度（见 web 的 UPLOAD_CHUNK_SIZE）：单片 5MB 加上
+/// multipart 边界与其它字段绰绰有余，也给非分片路径的中等文件留了空间。
+/// 不往更大放是因为 hub 会把整片读进内存再 base64（膨胀 1/3），上限就是并发上传时的
+/// 内存底数。
+const UPLOAD_BODY_LIMIT: usize = 12 * 1024 * 1024;
+
 /// 「会话已结束」推送的新鲜度门槛：会话最后一次有动静距今超过这么久，
 /// 它从上报里消失时就静默清理、不再打扰。
 ///
@@ -122,7 +133,10 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/devices/:id/trust", post(trust_device))
         .route("/monitor/devices/:id/untrust", post(untrust_device))
         .route("/monitor/devices/:id", axum::routing::delete(delete_device))
-        .route("/monitor/devices/:id/upload", post(upload_file))
+        .route(
+            "/monitor/devices/:id/upload",
+            post(upload_file).layer(axum::extract::DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
+        )
         // ---- 协助共享（跨用户设备接入，类似远程控制）----
         .route("/monitor/share/:id", get(share_info).post(share_create).delete(share_revoke))
         .route("/monitor/share/:id/guests", get(share_guests))
@@ -333,6 +347,28 @@ async fn pair_status(
         return ok(json!({ "claimed": true, "deviceToken": token }));
     }
     ok(json!({ "claimed": false, "expired": false }))
+}
+
+/// 支持分片写入的最低 agent 版本。低于它的客户端不认识 FileTransfer 的 chunk_* 字段，
+/// 会把每一片都当整份覆盖写。
+const CHUNKED_UPLOAD_MIN_VER: (u32, u32, u32) = (0, 10, 5);
+
+/// 该 agent 版本是否支持分片写入。
+///
+/// 版本号解析不出来时按「不支持」处理：宁可让大文件走不通、给出明确提示，也不能赌 ——
+/// 赌错的代价是文件被静默写坏，而用户还以为传成功了。
+fn agent_supports_chunked(ver: &str) -> bool {
+    let mut it = ver.trim().trim_start_matches('v').split('.');
+    let parse = |x: Option<&str>| -> Option<u32> {
+        // 容忍 "0.10.5-beta1" 这类后缀：只取前导数字
+        let s = x?.trim();
+        let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    };
+    match (parse(it.next()), parse(it.next()), parse(it.next())) {
+        (Some(a), Some(b), Some(c)) => (a, b, c) >= CHUNKED_UPLOAD_MIN_VER,
+        _ => false,
+    }
 }
 
 /// 把固定名安装包对齐到最新版本。
@@ -1980,11 +2016,20 @@ async fn upload_file(
     let mut filename = String::new();
     let mut name_field = String::new();
     let mut bytes: Vec<u8> = Vec::new();
+    // 分片信息：前端切大文件时带上，缺省即「整份就这一个」
+    let mut chunk_index: u32 = 0;
+    let mut chunk_total: u32 = 0;
     while let Ok(Some(field)) = multipart.next_field().await {
         match field.name().unwrap_or("") {
             "dir" => dir = field.text().await.unwrap_or_default(),
             // 显式文件名（UTF-8 文本字段）：优先用它，避免 multipart filename 对非 ASCII 解歪
             "name" => name_field = field.text().await.unwrap_or_default(),
+            "chunkIndex" => {
+                chunk_index = field.text().await.ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+            }
+            "chunkTotal" => {
+                chunk_total = field.text().await.ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+            }
             "file" => {
                 filename = field.file_name().unwrap_or("file.bin").to_string();
                 bytes = field.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
@@ -2017,12 +2062,29 @@ async fn upload_file(
         if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
             return err(500, "设备已离线，无法传输");
         }
+        // 分片必须先确认对端认得这套协议。旧版 agent 反序列化时 chunk_total 取默认值 0，
+        // 会把**每一片**都当成完整文件覆盖写 —— 传完只剩最后一片，文件却看着"成功"了。
+        // 与其静默写坏，不如明确拒绝并告诉用户去更新客户端。
+        if chunk_total > 1 && !agent_supports_chunked(&entry.version) {
+            return err(
+                400,
+                "该设备的客户端版本过旧，不支持分片传输大文件，请先更新客户端",
+            );
+        }
         entry.pending_files.push_back(am_core::model::FileTransfer {
             dir,
             filename: safe_name,
             content_b64: B64.encode(&bytes),
+            chunk_index,
+            chunk_total,
         });
-        ok(json!({ "result": "已下发到目标设备，等待写入", "size": bytes.len() }))
+        let done = chunk_total <= 1 || chunk_index + 1 >= chunk_total;
+        ok(json!({
+            "result": if done { "已下发到目标设备，等待写入" } else { "分片已接收" },
+            "size": bytes.len(),
+            "chunkIndex": chunk_index,
+            "chunkTotal": chunk_total,
+        }))
     }
 }
 
@@ -2698,6 +2760,46 @@ async fn ws_loop(socket: WebSocket, state: SharedState, user: Option<String>, to
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod chunked_support_tests {
+    use super::agent_supports_chunked;
+
+    /// 达标与超出都放行
+    #[test]
+    fn new_enough_versions_pass() {
+        assert!(agent_supports_chunked("0.10.5"));
+        assert!(agent_supports_chunked("0.10.6"));
+        assert!(agent_supports_chunked("0.11.0"));
+        assert!(agent_supports_chunked("1.0.0"));
+        assert!(agent_supports_chunked("v0.10.5"), "带 v 前缀也要认");
+    }
+
+    /// 差一个补丁号都不行 —— 旧 agent 会把每片当整份写坏
+    #[test]
+    fn older_versions_rejected() {
+        assert!(!agent_supports_chunked("0.10.4"));
+        assert!(!agent_supports_chunked("0.9.9"));
+        assert!(!agent_supports_chunked("0.1.0"));
+    }
+
+    /// 解析不出来一律按「不支持」：宁可大文件走不通并给出提示，
+    /// 也不能赌 —— 赌错就是文件被静默写坏，而用户以为传成功了
+    #[test]
+    fn unparsable_is_treated_as_unsupported() {
+        assert!(!agent_supports_chunked(""));
+        assert!(!agent_supports_chunked("unknown"));
+        assert!(!agent_supports_chunked("0.10"), "位数不足不能当成 0.10.0 放行");
+        assert!(!agent_supports_chunked("a.b.c"));
+    }
+
+    /// 预发布后缀要能容忍：0.10.5-beta 的能力与 0.10.5 相同
+    #[test]
+    fn prerelease_suffix_tolerated() {
+        assert!(agent_supports_chunked("0.10.5-beta1"));
+        assert!(!agent_supports_chunked("0.10.4-rc1"));
     }
 }
 

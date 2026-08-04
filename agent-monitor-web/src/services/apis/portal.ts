@@ -191,6 +191,15 @@ export const controlPortalTask = async (
 };
 
 // 向会话发布任务（注入一行输入）
+/**
+ * 分片粒度（5MB）。与 hub 的 UPLOAD_BODY_LIMIT（12MB）配套 —— 单片加上 multipart
+ * 边界与其它字段留足富余。
+ *
+ * 不切得更小是因为每片都是一次完整往返（鉴权、multipart 解析、base64、入队），
+ * 片太多时这些固定开销会盖过传输本身。
+ */
+export const UPLOAD_CHUNK_SIZE = 5 * 1024 * 1024;
+
 export const sendPortalInput = async (
   id: string,
   text: string,
@@ -301,17 +310,57 @@ export const disconnectShare = async (machineId: string) => {
 
 // ---------- 文件传输到指定设备目录 ----------
 
-export const uploadPortalFile = async (id: string, dir: string, file: File) => {
-  const form = new FormData();
-  form.append("dir", dir);
-  // 显式传文件名（UTF-8 文本字段）：multipart 的 Content-Disposition filename 对非 ASCII
-  // （如粘贴图片的「粘贴-xxx.png」）编码在服务端会被解歪，导致落盘名与回填名对不上。
-  form.append("name", file.name);
-  form.append("file", file);
-  return await post<{ path?: string; result?: string; size: number }>(
-    `/monitor/devices/${id}/upload`,
-    form
-  );
+/**
+ * 上传一个文件（超过分片粒度的自动切片顺序上传）。
+ *
+ * 切片是必需的而非优化：hub 会把收到的这一片整个读进内存再 base64（膨胀 1/3），
+ * 还要在下发队列里驻留到 agent 来取。不切的话，一个上百 MB 的文件能直接把 hub 顶爆，
+ * 而且请求体也会撞上服务端的体积上限。
+ *
+ * 顺序而非并发：agent 侧按 FIFO 收到分片后依次追加写入，乱序会写出错乱的文件。
+ *
+ * @param onProgress 已发送字节数 / 总字节数，用于展示进度
+ */
+export const uploadPortalFile = async (
+  id: string,
+  dir: string,
+  file: File,
+  onProgress?: (sent: number, total: number) => void
+) => {
+  const url = `/monitor/devices/${id}/upload`;
+  const total = file.size;
+  // 小文件不切：多带两个字段没意义，也省得旧版 hub/agent 走到分片分支上
+  if (total <= UPLOAD_CHUNK_SIZE) {
+    const form = new FormData();
+    form.append("dir", dir);
+    // 显式传文件名（UTF-8 文本字段）：multipart 的 Content-Disposition filename 对非 ASCII
+    // （如粘贴图片的「粘贴-xxx.png」）编码在服务端会被解歪，导致落盘名与回填名对不上。
+    form.append("name", file.name);
+    form.append("file", file);
+    const res = await post<{ path?: string; result?: string; size: number }>(url, form);
+    onProgress?.(total, total);
+    return res;
+  }
+
+  const chunkTotal = Math.ceil(total / UPLOAD_CHUNK_SIZE);
+  let last!: Awaited<ReturnType<typeof post<{ path?: string; result?: string; size: number }>>>;
+  for (let i = 0; i < chunkTotal; i += 1) {
+    const start = i * UPLOAD_CHUNK_SIZE;
+    const blob = file.slice(start, Math.min(start + UPLOAD_CHUNK_SIZE, total));
+    const form = new FormData();
+    form.append("dir", dir);
+    form.append("name", file.name);
+    form.append("chunkIndex", String(i));
+    form.append("chunkTotal", String(chunkTotal));
+    form.append("file", blob, file.name);
+    last = await post<{ path?: string; result?: string; size: number }>(url, form);
+    // 任一片失败即中止：继续传后面的只会在 agent 那边拼出一个残缺却"看着成功"的文件
+    if (last.code !== 0) {
+      return last;
+    }
+    onProgress?.(Math.min(start + UPLOAD_CHUNK_SIZE, total), total);
+  }
+  return last;
 };
 
 /** 最新版本信息（更新推送用；desktop = hub 版本，android 来自打包 manifest） */

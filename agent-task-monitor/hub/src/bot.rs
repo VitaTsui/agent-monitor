@@ -946,6 +946,10 @@ async fn attach_pending_file(
         dir,
         filename: safe.clone(),
         content_b64: B64.encode(&bytes),
+        // 钉钉转发的附件一律整份下发：走的是钉钉自己的下载接口，文件已完整落在 hub 内存里，
+        // 再切片没有意义（切片是为了让**上行**的大文件不必一次性穿过 hub）。
+        chunk_index: 0,
+        chunk_total: 0,
     });
     // 回填路径：目标在项目目录内 → 用相对 `./子路径`，否则用绝对路径（Claude 才找得到）。
     let rel = target

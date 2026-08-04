@@ -301,8 +301,21 @@ pub struct FileTransfer {
     /// 目标目录（agent 本机）
     pub dir: String,
     pub filename: String,
-    /// base64 编码的文件内容
+    /// base64 编码的文件内容（分片传输时是这一片的内容）
     pub content_b64: String,
+    /// 分片序号（0 起）。非分片传输恒为 0。
+    ///
+    /// 大文件必须切片：整份读进内存再 base64 会膨胀 1/3，还要在 hub 的下发队列里
+    /// 驻留到 agent 来取 —— 一个 100MB 的文件就能让 hub 吃掉 130MB+。
+    #[serde(default)]
+    pub chunk_index: u32,
+    /// 分片总数。0 或 1 都表示「不是分片，就这一份」。
+    ///
+    /// 旧版 agent 不认识这两个字段，反序列化时按 default 取 0，于是走原来的整份覆盖
+    /// 写入路径 —— 语义正好落在「非分片」上，不会把某一片当成完整文件写坏。
+    /// 但也因此，hub 必须确认对端版本够新才允许分片（见 server 的上传处理）。
+    #[serde(default)]
+    pub chunk_total: u32,
 }
 
 pub fn platform_dsr(platform: &str) -> String {

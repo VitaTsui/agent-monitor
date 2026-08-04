@@ -548,9 +548,34 @@ fn write_transfer(f: &am_core::model::FileTransfer, session_dirs: &[std::path::P
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "file.bin".into());
     let target = dir.join(&safe);
-    match std::fs::write(&target, &bytes) {
-        Ok(_) => tracing::info!("已写入下发文件: {}", target.display()),
-        Err(e) => tracing::warn!("写入下发文件失败: {e}"),
+
+    // 分片：第 0 片建/截断，其余追加。hub 的下发队列是 FIFO、agent 也按序处理，
+    // 所以顺序有保证，不必在文件里按 offset 定位。
+    //
+    // chunk_total 为 0 或 1 都当整份处理 —— 0 是旧版 hub（没有这个字段）落到的默认值。
+    let chunked = f.chunk_total > 1;
+    let res = if !chunked || f.chunk_index == 0 {
+        std::fs::write(&target, &bytes)
+    } else {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&target)
+            .and_then(|mut fh| fh.write_all(&bytes))
+    };
+    match res {
+        Ok(_) if !chunked => tracing::info!("已写入下发文件: {}", target.display()),
+        Ok(_) if f.chunk_index + 1 >= f.chunk_total => {
+            tracing::info!("已写入下发文件（{} 片）: {}", f.chunk_total, target.display());
+        }
+        Ok(_) => {}
+        // 中途某片失败就别再追加了：后续分片会接在残缺内容后面，拼出一个看着"成功"
+        // 却是坏的文件。这里只能记日志——协议是单向下发，没有回执通道能叫停后续分片。
+        Err(e) => tracing::warn!(
+            "写入下发文件失败（第 {}/{} 片）: {e}",
+            f.chunk_index + 1,
+            f.chunk_total.max(1)
+        ),
     }
 }
 
