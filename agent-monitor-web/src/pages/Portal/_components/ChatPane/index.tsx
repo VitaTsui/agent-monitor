@@ -137,6 +137,18 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
       recallable: boolean;
     }[] = [];
     const seen = new Set<string>();
+    // 过长内容的收尾兜底：一旦它作为**真实消息**（非本地回显，m.local 为假）进了对话流，
+    // 就说明终端已经把它拿去执行了；此时哪怕终端的 queued_inputs 因超长匹配失败还挂着这
+    // 一条，也不该在排队条里重复显示。预先把这些内容塞进 seen，下面三处 push 自然跳过。
+    //
+    // 只对长内容（>200 字）这么做：短命令（「继续」「y」）完全可能被合法地再次排队，
+    // 按内容去重会把这次真正在排队的那条误当成历史消息藏掉。长内容几乎不会一字不差重复，
+    // 没有这个误伤风险。
+    for (const m of messages) {
+      if (!m.local && m.content && m.content.length > 200) {
+        seen.add(norm(m.content));
+      }
+    }
     // 与对话流是互补的两半（判据同 stillQueued）：还没轮到的在这里、可撤回；
     // 一被终端拿去执行就从这里出列、转到对话流，那时也就撤不回了。
     // 同一条任务任何时刻只出现在一处，不会两边都有。

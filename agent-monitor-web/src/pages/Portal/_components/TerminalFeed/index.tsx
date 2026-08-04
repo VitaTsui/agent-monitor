@@ -275,6 +275,10 @@ export const SelectCard: React.FC<{
 
 /** 工具结果超过该行数时折叠 */
 const RESULT_CLAMP_LINES = 4;
+// 下发的用户内容过长时，正文里先折起来：超过这些行数、或字数（应对单行超长
+// 粘贴）就夹断，给个「展开全部 / 收起」。阈值取「一屏能顺手扫完」的量。
+const USER_CLAMP_LINES = 12;
+const USER_CLAMP_CHARS = 600;
 
 const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
   const { messages, running, providerDsr } = props;
@@ -391,10 +395,47 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                 把正文里的消息藏起来，于是「我发的内容在对话流里不见了」。
                 职责分开之后，正文永远是完整的对话记录。 */}
             {turn.user ? (
-              <div className={styles.userRow}>
-                <div className={styles.userBubble}>{turn.user.content}</div>
-                <div className={styles.userTime}>{fmtTime(turn.user.timestamp)}</div>
-              </div>
+              (() => {
+                const uKey = `u|${turn.key}`;
+                const uContent = turn.user.content;
+                const uLines = uContent.split("\n");
+                const uLong =
+                  uLines.length > USER_CLAMP_LINES ||
+                  uContent.length > USER_CLAMP_CHARS;
+                const uClamped = uLong && !expanded[uKey];
+                let uShown = uContent;
+                if (uClamped) {
+                  uShown = uLines.slice(0, USER_CLAMP_LINES).join("\n");
+                  if (uShown.length > USER_CLAMP_CHARS) {
+                    uShown = uShown.slice(0, USER_CLAMP_CHARS);
+                  }
+                }
+                return (
+                  <div className={styles.userRow}>
+                    <div className={styles.userBubble}>
+                      {uClamped ? `${uShown}…` : uShown}
+                      {uLong && (
+                        <span
+                          className={styles.userExpandBtn}
+                          role="button"
+                          tabIndex={0}
+                          aria-expanded={!uClamped}
+                          onClick={() => toggleExpand(uKey)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              toggleExpand(uKey);
+                            }
+                          }}
+                        >
+                          {uClamped ? "展开全部" : "收起"}
+                        </span>
+                      )}
+                    </div>
+                    <div className={styles.userTime}>{fmtTime(turn.user.timestamp)}</div>
+                  </div>
+                );
+              })()
             ) : null}
 
             {(visibleItems.length > 0 || inProgress) && (

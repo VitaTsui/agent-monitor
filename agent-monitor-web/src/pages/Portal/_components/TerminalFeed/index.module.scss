@@ -37,6 +37,21 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       white-space: pre-wrap;
       word-break: break-word;
       overflow-wrap: anywhere;
+
+      // 过长内容折叠：正文夹断后另起一行给「展开全部 / 收起」
+      .userExpandBtn {
+        display: block;
+        margin-top: 4px;
+        font-size: 12px;
+        font-weight: 500;
+        color: #0a6b79;
+        cursor: pointer;
+        user-select: none;
+
+        &:hover {
+          text-decoration: underline;
+        }
+      }
     }
 
     .userTime {
