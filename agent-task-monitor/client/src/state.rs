@@ -520,7 +520,15 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                 tokio::task::block_in_place(|| procs.session_pins())
             };
             env_n = env_pins.len();
-            merge(acc, env_pins, &mut added);
+            // **只补充、不覆盖**：hook 自报才是最权威的那一路（claude 主动报，且 /clear 后
+            // 立刻报新会话），而 env pin 读的是 claude **派生子进程**的环境变量 —— 像
+            // `npm start` 这种能跑几小时的子进程，env 里带的是它被拉起那一刻的 session_id。
+            // 用户在那个终端 /clear 之后，hook 已经报了新会话，若这里再无条件覆盖，
+            // 就会被子进程里的陈旧 id 顶回旧会话：表现为「/clear 之后这个终端再也不同步」，
+            // 而同项目开着多个终端时尤其明显（实测 66378 就是这么被顶回去的）。
+            let only_new: std::collections::HashMap<u32, String> =
+                env_pins.into_iter().filter(|(pid, _)| !acc.contains_key(pid)).collect();
+            merge(acc, only_new, &mut added);
         }
         // 句柄扫描留作补充（env 优先级更高，上面先并入、这里不覆盖已有条目）
         if maintain {
