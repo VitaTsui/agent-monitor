@@ -12,20 +12,12 @@
 //! <data_dir>/configs/<safe_user>/files/<rel>     文件内容，<rel> 同 ConfigFileMeta::path
 //! ```
 
-use am_core::configpath::{
-    is_allowed, is_syncable_field, looks_machine_specific, portable_hooks, portable_mcp,
-    MAX_FILE_BYTES,
-};
-use am_core::model::{
-    ConfigChange, ConfigFileBody, ConfigManifest, ConfigPatch, ConfigProbe, ConfigPush,
-};
+use am_core::configpath::{is_allowed, MAX_FILE_BYTES};
+use am_core::model::{ConfigFileBody, ConfigManifest, ConfigPush};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-
-/// 配置项改动记录的保留条数（给人看近期动态，不是审计日志）
-const MAX_CHANGES: usize = 50;
 
 /// 单轮向源机索要的文件数上限
 pub const MAX_PULLS_PER_ROUND: usize = 3;
@@ -194,174 +186,6 @@ impl ConfigStore {
         })
     }
 
-    /// 把配置源的字段值写进基线（字段级同步）。
-    ///
-    /// 入库前**再过一遍白名单**：上报来自客户端，不能因为「它说这是可同步字段」就照收——
-    /// 一台被控设备否则就能把 `hooks` 塞进基线，再由 hub 分发到该账号的所有机器上。
-    pub fn put_patches(&mut self, user: &str, patches: &[ConfigPatch]) -> bool {
-        let mut clean = Vec::new();
-        for p in patches {
-            let mut fields = std::collections::BTreeMap::new();
-            for (k, v) in &p.fields {
-                if !is_syncable_field(&p.file, k) {
-                    tracing::warn!("拒绝把字段 {}:{k} 收进基线", p.file);
-                    continue;
-                }
-                // hooks 只收「通用」条目：客户端可能被控，不能让它把带 _source 标记的
-                // 条目或指向本机路径的 hook 塞进基线，再由 hub 分发到该账号的所有机器
-                if k == "hooks" {
-                    match portable_hooks(v) {
-                        Some(p) => {
-                            fields.insert(k.clone(), p);
-                        }
-                        None => tracing::warn!("hooks 无可同步条目，不入基线"),
-                    }
-                    continue;
-                }
-                // mcpServers 同样走专门通道：兜底剥一次 env（客户端可能被控，
-                // 不能让密钥落进基线再分发）。路径归一化只有客户端做得了——
-                // hub 不知道对端 home，传空串即跳过归一化。
-                // 也因此不能对它跑 looks_machine_specific：MCP 命令合法地含
-                // /opt/homebrew 这类安装路径，一刀切会把整份配置滤没。
-                if k == "mcpServers" {
-                    match portable_mcp(v, "") {
-                        Some(p) => {
-                            fields.insert(k.clone(), p);
-                        }
-                        None => tracing::warn!("mcpServers 为空，不入基线"),
-                    }
-                    continue;
-                }
-                if looks_machine_specific(v) {
-                    tracing::warn!("拒绝把字段 {}:{k} 收进基线", p.file);
-                    continue;
-                }
-                fields.insert(k.clone(), v.clone());
-            }
-            if !fields.is_empty() {
-                clean.push(ConfigPatch { file: p.file.clone(), fields });
-            }
-        }
-        if clean == self.patches_of(user) {
-            return false;
-        }
-        let dir = self.user_dir(user);
-        if std::fs::create_dir_all(&dir).is_err() {
-            return false;
-        }
-        let Ok(txt) = serde_json::to_string_pretty(&clean) else { return false };
-        let path = dir.join("patches.json");
-        let tmp = dir.join("patches.json.tmp");
-        if std::fs::write(&tmp, &txt).is_err() {
-            return false;
-        }
-        if std::fs::rename(&tmp, &path).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-            return false;
-        }
-        true
-    }
-
-    /// 基线里的字段值（没有则空）
-    pub fn patches_of(&self, user: &str) -> Vec<ConfigPatch> {
-        let path = self.user_dir(user).join("patches.json");
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
-    }
-
-    /// 记一条配置项改动。**同一台设备的同一字段、目标值没变时不重复记** ——
-    /// 下发后客户端要到下一次扫描（30s）才报回新值，中间每一轮都会重新算出同样的差异，
-    /// 不去重的话历史里会瞬间堆满几十条一模一样的记录。
-    pub fn append_change(&mut self, user: &str, change: ConfigChange) {
-        let mut list = self.changes_of(user);
-        if let Some(last) = list
-            .iter()
-            .rev()
-            .find(|c| c.machine_id == change.machine_id && c.file == change.file && c.field == change.field)
-        {
-            if last.to == change.to {
-                return;
-            }
-        }
-        list.push(change);
-        // 只留最近这些条：这是给人看的近期动态，不是审计日志
-        let len = list.len();
-        if len > MAX_CHANGES {
-            list.drain(..len - MAX_CHANGES);
-        }
-        let dir = self.user_dir(user);
-        if std::fs::create_dir_all(&dir).is_err() {
-            return;
-        }
-        let Ok(txt) = serde_json::to_string_pretty(&list) else { return };
-        let path = dir.join("changes.json");
-        let tmp = dir.join("changes.json.tmp");
-        if std::fs::write(&tmp, &txt).is_err() {
-            return;
-        }
-        if std::fs::rename(&tmp, &path).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
-
-    /// 该账号的配置项改动记录（旧→新）
-    pub fn changes_of(&self, user: &str) -> Vec<ConfigChange> {
-        std::fs::read_to_string(self.user_dir(user).join("changes.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
-    }
-
-    /// 存下某设备的结构化配置字段普查（二期定白名单用）。
-    ///
-    /// 按设备分开存而不是合并：不同机器上同一个字段可能一台是机器相关、另一台不是
-    /// （例如 `statusLine` 在 A 上填的是绝对路径、在 B 上是命令名），合并会把这个信息抹平，
-    /// 而它恰恰是「该字段能不能跨机同步」的判据。
-    pub fn put_probe(&self, user: &str, machine_id: &str, probes: &[ConfigProbe]) {
-        if probes.is_empty() {
-            return;
-        }
-        let dir = self.user_dir(user).join("probes");
-        if std::fs::create_dir_all(&dir).is_err() {
-            return;
-        }
-        // machine_id 来自客户端上报，同样不能直接当文件名
-        let name: String = machine_id
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-            .take(64)
-            .collect();
-        let Ok(txt) = serde_json::to_string_pretty(probes) else { return };
-        let path = dir.join(format!("{name}.json"));
-        let tmp = dir.join(format!("{name}.json.tmp"));
-        if std::fs::write(&tmp, &txt).is_err() {
-            return;
-        }
-        if std::fs::rename(&tmp, &path).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
-
-    /// 读回某账号全部设备的普查结果：(machine_id 安全名, 普查)
-    pub fn probes_of(&self, user: &str) -> Vec<(String, Vec<ConfigProbe>)> {
-        let dir = self.user_dir(user).join("probes");
-        let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
-        let mut out = Vec::new();
-        for e in rd.flatten() {
-            let path = e.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                continue;
-            }
-            let Ok(txt) = std::fs::read_to_string(&path) else { continue };
-            let Ok(probes) = serde_json::from_str::<Vec<ConfigProbe>>(&txt) else { continue };
-            let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-            out.push((name, probes));
-        }
-        out
-    }
-
     /// 只保留 `keep` 里的路径，其余从基线清单与磁盘上移除，返回移除份数。
     ///
     /// 用于「源机删掉了某份配置」：基线跟着删，镜像机就不会再被推这份文件。
@@ -502,35 +326,6 @@ mod tests {
         assert!(!store.put("u", &body("claude/CLAUDE.md", &big)));
 
         assert_eq!(store.file_count("u"), 0);
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn put_patches_filters_blacklisted_fields() {
-        let d = tmp_dir("patch");
-        let mut store = ConfigStore::load(&d);
-        let patch = ConfigPatch {
-            file: "claude/settings.json".into(),
-            fields: [
-                ("model".to_string(), serde_json::json!("opus")),
-                // 客户端可能被控 —— hub 必须自己再过一遍白名单
-                ("hooks".to_string(), serde_json::json!({"evil": "x"})),
-                ("apiKeyHelper".to_string(), serde_json::json!("/Users/a/k.sh")),
-                // 白名单字段但值是本机路径
-                ("model2".to_string(), serde_json::json!("/abs/path")),
-            ]
-            .into_iter()
-            .collect(),
-        };
-        assert!(store.put_patches("u", &[patch]));
-
-        let saved = store.patches_of("u");
-        assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0].fields.keys().collect::<Vec<_>>(), vec!["model"]);
-        assert_eq!(saved[0].fields["model"], serde_json::json!("opus"));
-
-        // 重启后还在
-        assert_eq!(ConfigStore::load(&d).patches_of("u"), saved);
         let _ = std::fs::remove_dir_all(&d);
     }
 

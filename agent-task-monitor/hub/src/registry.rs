@@ -169,13 +169,6 @@ struct Persisted {
     /// hub 既不收清单也不下发（默认关闭，用户必须显式指定以谁为准）。
     #[serde(default)]
     config_source: HashMap<String, String>,
-    /// 额外开启了「字段级同步」（settings.json）的账号。
-    ///
-    /// 与配置源分开是有意的：搬 md 文件和改 settings.json 的风险不在一个量级 ——
-    /// 用户完全可能想共用一套 CLAUDE.md，却不希望另一台机器来动自己的 settings。
-    /// 默认关闭。
-    #[serde(default)]
-    config_field_sync: std::collections::HashSet<String>,
 }
 
 /// 钉钉 id 绑定：一个 staffId 唯一归属一个账号；一个账号可绑多个钉钉号。
@@ -222,8 +215,6 @@ pub struct Registry {
     dingtalk_ids: HashMap<String, DingtalkIdBinding>,
     /// 配置同步的源设备：账号 → machine_id。空 = 该账号未开启配置同步。
     config_source: HashMap<String, String>,
-    /// 额外开启了「字段级同步」（settings.json）的账号
-    config_field_sync: std::collections::HashSet<String>,
 }
 
 impl Registry {
@@ -254,7 +245,7 @@ impl Registry {
                 p.super_user
             };
             let dingtalk_apps = p.dingtalk_apps;
-            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk_apps, dingtalk_recv_dirs: p.dingtalk_recv_dirs, dingtalk_ids: p.dingtalk_ids, config_source: p.config_source, config_field_sync: p.config_field_sync }
+            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk_apps, dingtalk_recv_dirs: p.dingtalk_recv_dirs, dingtalk_ids: p.dingtalk_ids, config_source: p.config_source }
         } else {
             Registry {
                 dir,
@@ -265,7 +256,6 @@ impl Registry {
                 dingtalk_recv_dirs: HashMap::new(),
                 dingtalk_ids: HashMap::new(),
                 config_source: HashMap::new(),
-                config_field_sync: std::collections::HashSet::new(),
             }
         };
         if reg.users.is_empty() {
@@ -300,7 +290,6 @@ impl Registry {
             dingtalk_recv_dirs: self.dingtalk_recv_dirs.clone(),
             dingtalk_ids: self.dingtalk_ids.clone(),
             config_source: self.config_source.clone(),
-            config_field_sync: self.config_field_sync.clone(),
             // 已废弃字段（群机器人 / 企业微信）：写出时一律为空，
             // Persisted 上标了 skip_serializing，这里给默认值只为满足结构体字面量
             dingtalk: HashMap::new(),
@@ -633,22 +622,6 @@ impl Registry {
     /// 设备被删除/换绑时清掉指向它的配置源，免得留下一个永远同步不动的悬空来源
     pub fn clear_config_source_of_device(&mut self, machine_id: &str) {
         self.config_source.retain(|_, v| v != machine_id);
-    }
-
-    /// 该账号是否开启了字段级同步（settings.json）
-    pub fn config_field_sync_enabled(&self, username: &str) -> bool {
-        self.config_field_sync.contains(username)
-    }
-
-    /// 开关字段级同步。**独立于配置源**：改 settings.json 的风险比搬 md 高得多，
-    /// 用户完全可能只想要后者。
-    pub fn set_config_field_sync(&mut self, username: &str, enabled: bool) {
-        if enabled {
-            self.config_field_sync.insert(username.to_string());
-        } else {
-            self.config_field_sync.remove(username);
-        }
-        self.save();
     }
 
     /// 该用户名下全部设备（含离线；设备管理列表用）

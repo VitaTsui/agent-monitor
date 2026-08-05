@@ -31,11 +31,6 @@ reqwest.workspace = true
 base64 = "0.22"
 # 配置同步：算文件指纹（与 hub 同一版本，差异判定只认哈希不认 mtime）
 sha2 = "0.10"
-# 读 Codex 的 config.toml（转成 JSON 形态便于统一处理字段）
-toml = "0.8"
-# 回写 config.toml 必须用它：`toml` crate 序列化会吞掉用户的注释与字段顺序，
-# 而配置文件是用户的，改完一看注释全没了比不同步还糟。
-toml_edit = "0.22"
 # 监听会话目录：文件一变（用户发了任务）立即扫描上报，不必等被系统节流的轮询定时器
 notify = "6"
 tauri = { version = "2", features = ["tray-icon"] }

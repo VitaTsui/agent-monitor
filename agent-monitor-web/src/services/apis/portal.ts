@@ -537,28 +537,6 @@ export interface ConfigSyncDevice {
   behind: number;
   /** 最近一次扫描时刻（unix 秒，0 = 没扫过） */
   scannedAt: number;
-  /** 因本机缺少依赖而被跳过的同步项（MCP 二进制 / hook 脚本不在这台机器上） */
-  skips: { file: string; item: string; reason: string }[];
-  /** 与基线不一致的配置项（源机恒为空） */
-  fieldDiff: {
-    file: string;
-    field: string;
-    /** 本机当前值；本机没有该字段时为 null */
-    current: unknown;
-    /** 配置源上的值 */
-    target: unknown;
-  }[];
-}
-
-/** 一条「某台设备的某个配置项被改动」的记录 */
-export interface ConfigChange {
-  at: number;
-  machineId: string;
-  hostname: string;
-  file: string;
-  field: string;
-  from?: unknown;
-  to: unknown;
 }
 
 /** 配置同步总览 */
@@ -569,12 +547,6 @@ export interface ConfigSyncInfo {
   /** 服务端基线里的份数 */
   baselineCount: number;
   devices: ConfigSyncDevice[];
-  /** 是否开启了 settings.json 的字段级同步（独立于配置源） */
-  fieldSyncEnabled: boolean;
-  /** 基线里实际在同步的配置项（按文件分组） */
-  syncedFields: { file: string; fields: string[] }[];
-  /** 近期配置项改动（新→旧，最多 10 条） */
-  recentChanges: ConfigChange[];
 }
 
 /** 配置同步状态：谁是配置源、各设备还差多少份 */
@@ -585,9 +557,4 @@ export const getConfigSync = async () => {
 /** 指定配置源设备；machineId 传空 = 关闭配置同步 */
 export const setConfigSource = async (machineId: string) => {
   return await post<{ result: string }>("/monitor/config/source", { machineId });
-};
-
-/** 开关 settings.json 的字段级同步（独立于配置源） */
-export const setConfigFieldSync = async (enabled: boolean) => {
-  return await post<{ result: string }>("/monitor/config/fields", { enabled });
 };

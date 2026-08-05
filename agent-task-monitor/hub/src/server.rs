@@ -146,7 +146,6 @@ pub fn router(state: SharedState) -> Router {
         // ---- 配置同步（Claude Code / Codex 的 md 类配置跨设备镜像）----
         .route("/monitor/config/sync", get(config_sync_status))
         .route("/monitor/config/source", post(set_config_source))
-        .route("/monitor/config/fields", post(set_config_field_sync))
         // ---- 用户自助机器人集成 ----
         // 配置读写（登录用户，返回各渠道配置 + 专属回调地址）
         .route("/monitor/integrations", get(integrations_get))
@@ -1396,17 +1395,12 @@ async fn config_sync_status(State(state): State<SharedState>, headers: HeaderMap
     let Some(user) = auth_user(&state, &headers).await else {
         return err(401, "未登录");
     };
-    let (source, devices, field_sync) = {
+    let (source, devices) = {
         let reg = state.registry.read().await;
-        (
-            reg.config_source_of(&user),
-            reg.devices_of(&user),
-            reg.config_field_sync_enabled(&user),
-        )
+        (reg.config_source_of(&user), reg.devices_of(&user))
     };
     let store = state.configs.read().await;
     let baseline = store.manifest_of(&user);
-    let baseline_patches = store.patches_of(&user);
     let machines = state.machines.read().await;
 
     let list: Vec<Value> = devices
@@ -1431,24 +1425,6 @@ async fn config_sync_status(State(state): State<SharedState>, headers: HeaderMap
                 }
                 None => (false, 0usize, 0usize, 0u64),
             };
-            // 字段级差异：这台机器上哪些配置项与基线不一致（源机恒为 0，它就是基线）
-            let field_diff: Vec<Value> = if is_source || !field_sync {
-                Vec::new()
-            } else {
-                let mine = entry.and_then(|e| e.config_patches.as_ref());
-                baseline_patches
-                    .iter()
-                    .flat_map(|b| {
-                        let mine_file = mine.and_then(|ps| ps.iter().find(|p| p.file == b.file));
-                        b.fields.iter().filter_map(move |(k, v)| {
-                            let cur = mine_file.and_then(|m| m.fields.get(k));
-                            (cur != Some(v)).then(|| {
-                                json!({ "file": b.file, "field": k, "current": cur, "target": v })
-                            })
-                        })
-                    })
-                    .collect()
-            };
             json!({
                 "machineId": id,
                 "hostname": meta.hostname,
@@ -1460,47 +1436,8 @@ async fn config_sync_status(State(state): State<SharedState>, headers: HeaderMap
                 "fileCount": file_count,
                 "behind": behind,
                 "scannedAt": scanned_at,
-                "fieldDiff": field_diff,
-                // 因这台机器缺依赖而没同步过来的项（MCP 二进制 / hook 脚本不在）
-                "skips": entry.map(|e| e.config_skips.clone()).unwrap_or_default(),
             })
         })
-        .collect();
-
-    // 字段普查汇总（二期定白名单用）：按 文件+字段路径 归并所有设备的结果。
-    // `machineSpecific` 取**或**：只要在任何一台机器上是本机路径，这个字段就不能跨机同步。
-    let mut agg: std::collections::BTreeMap<(String, String), (String, bool, usize)> =
-        std::collections::BTreeMap::new();
-    for (_machine, probes) in store.probes_of(&user) {
-        for p in probes {
-            for k in p.keys {
-                let e = agg
-                    .entry((p.file.clone(), k.path.clone()))
-                    .or_insert((k.ty.clone(), false, 0));
-                e.1 |= k.machine_specific;
-                e.2 += 1;
-            }
-        }
-    }
-    let probe: Vec<Value> = agg
-        .into_iter()
-        .map(|((file, path), (ty, machine_specific, seen))| {
-            json!({
-                "file": file,
-                "path": path,
-                "type": ty,
-                "machineSpecific": machine_specific,
-                // 出现在几台设备上：只在一台上出现的字段多半是那台机器的特例
-                "seenOn": seen,
-            })
-        })
-        .collect();
-
-    // 字段级同步：开关状态 + 基线里实际有哪几个字段（供界面如实说明「会动你什么」）
-    let synced_fields: Vec<Value> = store
-        .patches_of(&user)
-        .into_iter()
-        .map(|p| json!({ "file": p.file, "fields": p.fields.keys().collect::<Vec<_>>() }))
         .collect();
 
     ok(json!({
@@ -1508,11 +1445,6 @@ async fn config_sync_status(State(state): State<SharedState>, headers: HeaderMap
         "source": source,
         "baselineCount": store.file_count(&user),
         "devices": list,
-        "probe": probe,
-        "fieldSyncEnabled": field_sync,
-        "syncedFields": synced_fields,
-        // 近期改动（新→旧）：字段级同步是静默的，这里让用户看得见「已经动了什么」
-        "recentChanges": store.changes_of(&user).into_iter().rev().take(10).collect::<Vec<_>>(),
     }))
 }
 
@@ -1539,29 +1471,6 @@ async fn set_config_source(
         Ok(()) => ok(json!({ "result": "已设为配置源" })),
         Err(e) => err(400, &e),
     }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ConfigFieldSyncReq {
-    enabled: bool,
-}
-
-/// POST /monitor/config/fields —— 开关字段级同步（settings.json）
-///
-/// 独立于配置源：搬 md 文件和改 settings.json 的风险不在一个量级。
-async fn set_config_field_sync(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-    Json(req): Json<ConfigFieldSyncReq>,
-) -> Json<Value> {
-    let Some(user) = auth_user(&state, &headers).await else {
-        return err(401, "未登录");
-    };
-    state.registry.write().await.set_config_field_sync(&user, req.enabled);
-    ok(json!({
-        "result": if req.enabled { "已开启配置项同步" } else { "已关闭配置项同步" }
-    }))
 }
 
 /// 校验当前用户对设备的管理权限（超级管理员或归属本人）
@@ -2323,18 +2232,13 @@ async fn sync_configs(
     state: &SharedState,
     machine_id: &str,
     bodies: &[am_core::model::ConfigFileBody],
-    probes: &[am_core::model::ConfigProbe],
-    // device_patches：该设备**最近一次**报告的字段值（缓存值，不是本轮 payload）。
-    // 用本轮 payload 是错的：字段值和清单一样每 30s 才带一次，其余轮次为空，
-    // 会让镜像机被判成「基线字段全缺」而每轮重复下发，改动记录里的旧值也全成了「无」。
-    device_patches: Option<Vec<am_core::model::ConfigPatch>>,
     device_manifest: Option<am_core::model::ConfigManifest>,
-) -> (Vec<String>, Vec<am_core::model::ConfigPush>, Vec<am_core::model::ConfigPatch>) {
-    let empty = || (Vec::new(), Vec::new(), Vec::new());
+) -> (Vec<String>, Vec<am_core::model::ConfigPush>) {
+    let empty = || (Vec::new(), Vec::new());
 
     // 归属账号 + 该账号选定的配置源。未信任的设备一概不参与：
     // 它连会话都不许上报，更不该往别人的机器上写文件。
-    let (owner, source, field_sync) = {
+    let (owner, source) = {
         let reg = state.registry.read().await;
         let meta = reg.device_meta(machine_id);
         if !meta.trusted {
@@ -2342,90 +2246,12 @@ async fn sync_configs(
         }
         let Some(owner) = meta.owner else { return empty() };
         let source = reg.config_source_of(&owner);
-        let field_sync = reg.config_field_sync_enabled(&owner);
-        (owner, source, field_sync)
+        (owner, source)
     };
     // 没指定配置源 = 该账号没开配置同步。默认关闭：往用户机器上写文件这件事，
     // 必须是他自己点开的。
     let Some(source) = source else { return empty() };
     let is_source = source == machine_id;
-
-    // 字段普查（只有键与类型，没有值）：源机与镜像机都收 —— 同一字段在不同机器上
-    // 是否机器相关可能不同，而那正是「它能不能跨机同步」的判据。
-    if !probes.is_empty() {
-        state.configs.read().await.put_probe(&owner, machine_id, probes);
-    }
-
-    // 字段级同步：源机的字段值进基线；镜像机缺什么就下发什么。
-    // 与 md 类走两条独立路径 —— 那边整份覆盖，这边只带白名单字段、由客户端合并。
-    // 算出来先存着，最后与 md 的结果一起返回：两条路径互不阻塞，同一轮里都能推进。
-    // 独立开关：没开就完全不碰 settings.json —— 连基线都不收，避免留下一份
-    // 用户从没同意上传的字段值。md 类同步不受影响，照常进行。
-    let mut patch_todo: Vec<am_core::model::ConfigPatch> = Vec::new();
-    if !field_sync {
-        // 什么都不做
-    } else if is_source {
-        if let Some(p) = device_patches.as_ref().filter(|p| !p.is_empty()) {
-            state.configs.write().await.put_patches(&owner, p);
-        }
-    } else if let Some(mine_all) = device_patches.as_ref() {
-        let baseline = state.configs.read().await.patches_of(&owner);
-        // 镜像机已有的字段值，用于逐字段比对（只发真正不一致的，避免每轮重复下发）
-        let have: std::collections::HashMap<&str, &am_core::model::ConfigPatch> =
-            mine_all.iter().map(|p| (p.file.as_str(), p)).collect();
-        patch_todo = baseline
-            .into_iter()
-            .filter_map(|b| {
-                let mine = have.get(b.file.as_str());
-                let fields: std::collections::BTreeMap<_, _> = b
-                    .fields
-                    .into_iter()
-                    .filter(|(k, v)| mine.map(|m| m.fields.get(k) != Some(v)).unwrap_or(true))
-                    .collect();
-                (!fields.is_empty()).then_some(am_core::model::ConfigPatch { file: b.file, fields })
-            })
-            .collect();
-
-        // 跨系统的 MCP **照常下发**，由客户端自己解析路径：它会先试源机那个路径，
-        // 不成再按可执行文件名在本机的 PATH 与常见安装目录里找，找到就换成本地实际路径，
-        // 真找不到才跳过并报「缺依赖」（见 client 的 resolve_by_name）。
-        //
-        // 这里一度按平台把含路径的 MCP 整个挡掉 —— 太保守了：对端明明装了同一个工具、
-        // 只是位置不同，也一并不给用。挡的应该是「写出一个无效路径」，而那件事客户端
-        // 已经能自己避免。
-
-        // 记下「把这台机器的哪个字段从什么改成了什么」。字段级同步是静默生效的，
-        // 用户不会察觉自己的 model 被另一台机器改了 —— 开关说明「会动什么」，
-        // 这里回答「已经动了什么」。（append_change 内部按目标值去重，不会每轮重复记。）
-        if !patch_todo.is_empty() {
-            let hostname = state
-                .machines
-                .read()
-                .await
-                .get(machine_id)
-                .map(|e| e.hostname.clone())
-                .unwrap_or_default();
-            let now = crate::state::now_secs();
-            let mut store = state.configs.write().await;
-            for p in &patch_todo {
-                let mine = have.get(p.file.as_str());
-                for (field, to) in &p.fields {
-                    store.append_change(
-                        &owner,
-                        am_core::model::ConfigChange {
-                            at: now,
-                            machine_id: machine_id.to_string(),
-                            hostname: hostname.clone(),
-                            file: p.file.clone(),
-                            field: field.clone(),
-                            from: mine.and_then(|m| m.fields.get(field).cloned()),
-                            to: to.clone(),
-                        },
-                    );
-                }
-            }
-        }
-    }
 
     // 源机回传的内容入基线。只认源机的上传——否则任何一台被控设备都能往基线里塞东西，
     // 而基线随后会被分发到该账号的全部设备上。
@@ -2436,9 +2262,8 @@ async fn sync_configs(
         }
     }
 
-    // 还没收到过这台机器的清单（旧客户端，或刚上线还没扫完）：md 这条路没有可比对的东西，
-    // 但字段级的结果照常带上 —— 两者互不依赖。
-    let Some(device) = device_manifest else { return (Vec::new(), Vec::new(), patch_todo) };
+    // 还没收到过这台机器的清单（旧客户端，或刚上线还没扫完）：这一轮没有可比对的东西
+    let Some(device) = device_manifest else { return empty() };
 
     if is_source {
         // 源机：基线要向它看齐。先摘掉源机已经删掉的条目，否则用户在源机删了一个 agent，
@@ -2457,7 +2282,7 @@ async fn sync_configs(
         let baseline = state.configs.read().await.manifest_of(&owner);
         let mut pulls = crate::configsync::diff(&device, &baseline);
         pulls.truncate(crate::configsync::MAX_PULLS_PER_ROUND);
-        (pulls, Vec::new(), patch_todo)
+        (pulls, Vec::new())
     } else {
         // 镜像机：基线里有而它没有（或内容不同）的，发给它
         let store = state.configs.read().await;
@@ -2467,7 +2292,7 @@ async fn sync_configs(
             .take(crate::configsync::MAX_PUSHES_PER_ROUND)
             .filter_map(|rel| store.get(&owner, rel))
             .collect();
-        (Vec::new(), pushes, patch_todo)
+        (Vec::new(), pushes)
     }
 }
 
@@ -2560,8 +2385,6 @@ async fn report(
                 last_select_at: HashMap::new(),
                 new_session_pending: HashMap::new(),
                 config_manifest: None,
-                config_patches: None,
-                config_skips: Vec::new(),
             }
         });
     // 设备上线边沿：新登记 或 之前已判离线（超阈值）
@@ -2575,15 +2398,7 @@ async fn report(
     if let Some(m) = &payload.config_manifest {
         entry.config_manifest = Some(m.clone());
     }
-    // 字段值同理：清单带来的那一轮才有，其余轮次为空 —— 只在有内容时覆盖。
-    // 注意不能用 is_empty 判断「没带」：用户可能确实一个可同步字段都没有。
-    if payload.config_manifest.is_some() {
-        entry.config_patches = Some(payload.config_patches.clone());
-    }
-    // 跳过项每轮都随上报带来（依赖一直缺就一直有），直接覆盖
-    entry.config_skips = payload.config_skips.clone();
     let device_manifest = entry.config_manifest.clone();
-    let device_patches = entry.config_patches.clone();
     // 上线边沿：刷新沉降起点。上线后 NEW_SESSION_SETTLE_SECS 内出现的会话一律当「重连扫回的
     // 已有会话」不推，避免客户端更新/重启后分批扫回历史会话时刷屏「会话开始」。
     // 同时清空会话基线：离线期间「消失」的旧会话不该在重连时逐条推「已结束」，重连后重建基线。
@@ -2983,15 +2798,8 @@ async fn report(
 
     // 配置同步：锁已释放再算 —— 里面要拿 registry 与 configs 两把锁，
     // 在 machines 写锁里嵌套取锁是自找死锁。
-    let (config_pulls, config_pushes, config_patches) = sync_configs(
-        &state,
-        &payload.machine_id,
-        &payload.config_bodies,
-        &payload.config_probe,
-        device_patches,
-        device_manifest,
-    )
-    .await;
+    let (config_pulls, config_pushes) =
+        sync_configs(&state, &payload.machine_id, &payload.config_bodies, device_manifest).await;
 
     // 会话历史：锁已释放，这里统一落（record 内部去重 + 截断 + 标脏，tick 循环负责写盘）
     for (mut rec, anchor) in pending_history {
@@ -3022,8 +2830,6 @@ async fn report(
         // 配置同步：向源机索要的路径 / 向镜像机下发的内容（两者互斥，见 sync_configs）
         "configPulls": config_pulls,
         "configPushes": config_pushes,
-        // 字段级同步（settings.json）：客户端合并进本机，不整份覆盖
-        "configPatches": config_patches,
         "trusted": trusted,
         "hubVersion": ready_desktop_version(&downloads_dir),
         // 强制更新下限：客户端低于它必须更新才能继续使用
