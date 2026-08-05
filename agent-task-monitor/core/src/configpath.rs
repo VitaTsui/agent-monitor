@@ -51,6 +51,12 @@ pub fn is_allowed(rel: &str) -> bool {
 /// 一个判断错误就是在所有设备上改坏用户的配置。
 pub const SETTINGS_SYNC_KEYS: &[&str] = &["model", "hooks"];
 
+/// `~/.claude.json` 里可同步的顶层字段。
+///
+/// 这个文件有几十 KB，混着 OAuth 凭据、逐项目的会话历史与各种运行状态 ——
+/// **只取 `mcpServers` 这一个键**，其余一概不碰、也不上传。
+pub const CLAUDE_JSON_SYNC_KEYS: &[&str] = &["mcpServers"];
+
 /// 本客户端写进用户 settings.json 的 hook 条目所带的 `_source` 前缀（见 client 的 hookrec）。
 ///
 /// hooks 是同步集里唯一需要**拆开处理**的字段：整份覆盖会把配对 hook 一并带走，
@@ -90,26 +96,140 @@ pub fn is_syncable_field(file: &str, key: &str) -> bool {
     }
     match file {
         "claude/settings.json" => SETTINGS_SYNC_KEYS.contains(&key),
+        "claude/claude.json" => CLAUDE_JSON_SYNC_KEYS.contains(&key),
         "codex/config.toml" => CODEX_SYNC_KEYS.contains(&key),
         _ => false,
     }
+}
+
+// ───────────────────────── MCP 服务器配置 ─────────────────────────
+//
+// `mcpServers` 与 hooks 一样需要拆开处理，原因有两个：
+// ① `command` 常是含用户名的绝对路径（`/Users/vita/.local/bin/x`）—— 直接搬到另一台
+//    机器就指向了不存在的位置。所以同步前把 home 前缀归一化成 `~`，落盘时再展开成
+//    对方自己的 home。**这正是配置同步该干的事**：把机器相关的形式转成可移植的。
+// ② `env` 里常放 API key。凭据不离开本机是这个功能的底线，所以一律剥掉 ——
+//    代价是依赖 env 的 server 需要在各机器上自行补齐那几个变量。
+
+/// 递归把值里的 home 绝对路径前缀换成 `~`（同步出去时用）。
+///
+/// `home` 为空时只原样返回：hub 侧复检时并不知道对端的 home，
+/// 空前缀会 match 上每一个字符串，把 `/etc/x` 变成 `~/etc/x` 这种荒唐结果。
+fn normalize_home(v: &serde_json::Value, home: &str) -> serde_json::Value {
+    if home.is_empty() {
+        return v.clone();
+    }
+    match v {
+        serde_json::Value::String(s) => {
+            let out = match s.strip_prefix(home) {
+                Some(rest) if rest.starts_with('/') || rest.is_empty() => format!("~{rest}"),
+                _ => s.clone(),
+            };
+            serde_json::Value::String(out)
+        }
+        serde_json::Value::Array(a) => {
+            serde_json::Value::Array(a.iter().map(|x| normalize_home(x, home)).collect())
+        }
+        serde_json::Value::Object(o) => serde_json::Value::Object(
+            o.iter().map(|(k, x)| (k.clone(), normalize_home(x, home))).collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// 递归把 `~` 展开成本机 home（落盘时用）。
+///
+/// 必须展开：`command` 交给系统直接 exec，不经过 shell，`~` 不会被展开成家目录，
+/// 留着它 MCP server 根本起不来。
+fn localize_home(v: &serde_json::Value, home: &str) -> serde_json::Value {
+    match v {
+        serde_json::Value::String(s) => {
+            let out = if s == "~" {
+                home.to_string()
+            } else if let Some(rest) = s.strip_prefix("~/") {
+                format!("{home}/{rest}")
+            } else {
+                s.clone()
+            };
+            serde_json::Value::String(out)
+        }
+        serde_json::Value::Array(a) => {
+            serde_json::Value::Array(a.iter().map(|x| localize_home(x, home)).collect())
+        }
+        serde_json::Value::Object(o) => serde_json::Value::Object(
+            o.iter().map(|(k, x)| (k.clone(), localize_home(x, home))).collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// 取出可跨机同步的 MCP 配置：剥掉 `env`、把 home 绝对路径归一化成 `~`。
+/// 没有任何 server 时返回 None。
+pub fn portable_mcp(v: &serde_json::Value, home: &str) -> Option<serde_json::Value> {
+    let obj = v.as_object()?;
+    let mut out = serde_json::Map::new();
+    for (name, cfg) in obj {
+        let mut cfg = normalize_home(cfg, home);
+        if let Some(o) = cfg.as_object_mut() {
+            // 凭据不离开本机。留下键名也没意义（值才是密钥），整个 env 摘掉。
+            o.remove("env");
+        }
+        out.insert(name.clone(), cfg);
+    }
+    (!out.is_empty()).then(|| serde_json::Value::Object(out))
+}
+
+/// 把下发的 MCP 配置落到本机形态：`~` 展开成本机 home，并保留本机原有的 `env`。
+///
+/// 保留 env 很关键：同步过来的配置里没有 env（上传时剥掉了），若直接覆盖，
+/// 本机原本配好的那几个 API key 就被抹掉了 —— 用户会发现 server 突然连不上。
+pub fn merge_mcp(
+    local: Option<&serde_json::Value>,
+    incoming: &serde_json::Value,
+    home: &str,
+) -> serde_json::Value {
+    let local_obj = local.and_then(|v| v.as_object());
+    let mut out = serde_json::Map::new();
+    if let Some(obj) = incoming.as_object() {
+        for (name, cfg) in obj {
+            let mut cfg = localize_home(cfg, home);
+            // 把本机该 server 原有的 env 搬回去
+            if let (Some(o), Some(prev_env)) = (
+                cfg.as_object_mut(),
+                local_obj
+                    .and_then(|l| l.get(name))
+                    .and_then(|c| c.get("env"))
+                    .filter(|e| !e.is_null()),
+            ) {
+                o.insert("env".into(), prev_env.clone());
+            }
+            out.insert(name.clone(), cfg);
+        }
+    }
+    serde_json::Value::Object(out)
 }
 
 /// 值里是否出现「只在本机成立」的东西：绝对路径、家目录变量、盘符、UNC 路径。
 ///
 /// 白名单之外的第二道闸：字段名对了，值仍可能是本机路径（用户在任何字段里填绝对路径都是合法的）。
 /// 递归看所有字符串叶子——路径常藏在数组或嵌套对象里，只看顶层标量会漏。
+/// 值里是否出现「只在本机成立」的东西。
+///
+/// **判据是绝对路径，不是「路径」**：`~/`、`$HOME/`、`%USERPROFILE%` 是相对家目录的写法，
+/// 每台机器各自解析到自己的 home，跨机语义完全一致 —— `~/.claude/hooks/x` 在两台机器上
+/// 指的都是「我的 hooks 目录下的 x」，正是该同步的东西。早先把它们一并判为机器相关，
+/// 结果是用户真正想共用的那批 hook 被整个滤掉（实测就是这个现象）。
+///
+/// 真正不可移植的是含用户名或应用安装位置的绝对路径：`/Users/vita/...`、`/Applications/...`、
+/// `C:\Users\...`、UNC。
 pub fn looks_machine_specific(v: &serde_json::Value) -> bool {
     match v {
         serde_json::Value::String(s) => {
             let s = s.trim();
             s.starts_with('/')
-                || s.starts_with("~/")
                 || s.starts_with("\\\\")
                 || s.contains("/Users/")
                 || s.contains("/home/")
-                || s.contains("$HOME")
-                || s.contains("%USERPROFILE%")
                 || s.contains(":\\")
         }
         serde_json::Value::Array(a) => a.iter().any(looks_machine_specific),
@@ -129,12 +249,30 @@ pub fn looks_machine_specific(v: &serde_json::Value) -> bool {
 //
 // 只有 ③ 参与同步。
 
-/// 单个 hook（最内层的 `{type, command, _source?}`）是否属于本客户端自管
+/// 本客户端可执行文件名。配对 hook 的命令一定包含它（`<装在哪>/agent-monitor hook`）。
+const OWN_EXE_NAME: &str = "agent-monitor";
+
+/// 单个 hook（最内层的 `{type, command, _source?}`）是否属于本客户端自管。
+///
+/// **两条判据缺一不可**：
+/// ① `_source` 标记 —— 新版客户端写入时会带；
+/// ② 命令里含本客户端可执行名 —— **早期版本写入的配对 hook 没有标记**（实测本机三条
+///    配对 hook 的 `_source` 全是空的）。只认标记就会漏，漏了就意味着把别人机器的
+///    配对 hook 覆盖掉、或把自己的外传出去。
+///
+/// 判据②宁可宽：误判成「自管」最多是这条 hook 不参与同步，而漏判的代价是配对静默失效。
 fn is_own_hook(h: &serde_json::Value) -> bool {
-    h.get("_source")
+    let tagged = h
+        .get("_source")
         .and_then(|s| s.as_str())
         .map(|s| s.starts_with(HOOK_SOURCE_PREFIX))
-        .unwrap_or(false)
+        .unwrap_or(false);
+    let by_command = h
+        .get("command")
+        .and_then(|c| c.as_str())
+        .map(|c| c.contains(OWN_EXE_NAME))
+        .unwrap_or(false);
+    tagged || by_command
 }
 
 /// 单个 hook 是否可跨机同步：非自管、且命令不含本机路径
@@ -259,16 +397,56 @@ mod tests {
         let hooks = serde_json::json!({
             "PostToolUse": [{
                 "hooks": [
-                    { "type": "command", "command": "~/bin/my-local.sh" },
                     { "type": "command", "command": "/Users/vita/x.sh" },
+                    { "type": "command", "command": "/Applications/Foo.app/bin/x" },
                     { "type": "command", "command": "cargo fmt" }
                 ]
             }]
         });
         let dump = serde_json::to_string(&portable_hooks(&hooks).unwrap()).unwrap();
         assert!(dump.contains("cargo fmt"));
-        assert!(!dump.contains("my-local.sh"), "本机脚本被外传: {dump}");
-        assert!(!dump.contains("/Users/vita"), "本机路径被外传: {dump}");
+        assert!(!dump.contains("/Users/vita"), "本机绝对路径被外传: {dump}");
+        assert!(!dump.contains("Foo.app"), "应用绝对路径被外传: {dump}");
+    }
+
+    #[test]
+    fn home_relative_hooks_are_portable() {
+        // `~/.claude/hooks/*` 在每台机器上各自解析到自己的 home，跨机语义一致 ——
+        // 这正是用户最想共用的一批 hook。早先把 `~/` 一并判为机器相关，把它们全滤掉了。
+        let hooks = serde_json::json!({
+            "SessionStart": [
+                { "matcher": "startup", "hooks": [{ "command": "~/.claude/hooks/cbm-session-reminder" }] },
+                { "matcher": "*", "hooks": [{ "command": "$HOME/.claude/hooks/x" }] }
+            ]
+        });
+        let dump = serde_json::to_string(&portable_hooks(&hooks).unwrap()).unwrap();
+        assert!(dump.contains("cbm-session-reminder"), "~/ 类 hook 该同步: {dump}");
+        assert!(dump.contains("$HOME/.claude/hooks/x"), "$HOME 类 hook 该同步: {dump}");
+    }
+
+    #[test]
+    fn untagged_pairing_hook_is_still_recognized() {
+        // 早期版本写入的配对 hook 没有 _source 标记（实测本机就是这样）。
+        // 只认标记会漏 —— 漏了就意味着把它外传、或覆盖掉别人机器上的那条。
+        let hooks = serde_json::json!({
+            "SessionStart": [{
+                "hooks": [
+                    { "type": "command",
+                      "command": "/Applications/终端任务监控.app/Contents/MacOS/agent-monitor hook" },
+                    { "type": "command", "command": "~/.claude/hooks/mine" }
+                ]
+            }]
+        });
+        let dump = serde_json::to_string(&portable_hooks(&hooks).unwrap()).unwrap();
+        assert!(!dump.contains("agent-monitor"), "无标记的配对 hook 被外传: {dump}");
+        assert!(dump.contains("mine"), "用户自己的 hook 该同步: {dump}");
+
+        // 合并时同样要留住它：即使命令路径与配置源不同，也不能被对方那条顶掉
+        let incoming = serde_json::json!({
+            "SessionStart": [{ "hooks": [{ "command": "~/.claude/hooks/mine" }] }]
+        });
+        let merged = serde_json::to_string(&merge_hooks(Some(&hooks), &incoming)).unwrap();
+        assert!(merged.contains("终端任务监控.app"), "本机无标记配对 hook 被挤掉: {merged}");
     }
 
     #[test]
@@ -290,7 +468,7 @@ mod tests {
                 "hooks": [
                     { "type": "command", "command": "/opt/am/agent-monitor hook",
                       "_source": "agent-monitor:pairing" },
-                    { "type": "command", "command": "~/bin/local-only.sh" },
+                    { "type": "command", "command": "/Users/me/local-only.sh" },
                     { "type": "command", "command": "old-generic" }
                 ]
             }],
@@ -307,9 +485,9 @@ mod tests {
         let merged = merge_hooks(Some(&local), &incoming);
         let dump = serde_json::to_string(&merged).unwrap();
 
-        // 本机自管与本机脚本原样保留
+        // 本机自管与本机绝对路径脚本原样保留
         assert!(dump.contains("agent-monitor:pairing"), "配对 hook 丢了: {dump}");
-        assert!(dump.contains("local-only.sh"), "本机脚本丢了: {dump}");
+        assert!(dump.contains("local-only.sh"), "本机绝对路径脚本丢了: {dump}");
         // PostToolUse 只有配对 hook，也必须留着
         assert!(merged.get("PostToolUse").is_some(), "只含配对 hook 的事件被丢: {dump}");
         // 下发内容进来了
@@ -348,16 +526,78 @@ mod tests {
     }
 
     #[test]
+    fn mcp_strips_env_and_normalizes_home() {
+        let home = "/Users/vita";
+        let mcp = serde_json::json!({
+            "playwright": { "command": "npx", "args": ["-y", "@playwright/mcp@latest"] },
+            "cbm": {
+                "command": "/Users/vita/.local/bin/codebase-memory-mcp",
+                "args": ["--root", "/Users/vita/work"],
+                "env": { "SECRET_TOKEN": "sk-must-not-leave" }
+            }
+        });
+        let p = portable_mcp(&mcp, home).expect("应有可同步内容");
+        let dump = serde_json::to_string(&p).unwrap();
+
+        // 凭据绝不外传
+        assert!(!dump.contains("sk-must-not-leave"), "env 泄露: {dump}");
+        assert!(!dump.contains("SECRET_TOKEN"), "env 泄露: {dump}");
+        // home 绝对路径归一化成 ~，其余原样
+        assert_eq!(p["cbm"]["command"], serde_json::json!("~/.local/bin/codebase-memory-mcp"));
+        assert_eq!(p["cbm"]["args"][1], serde_json::json!("~/work"));
+        assert_eq!(p["playwright"]["command"], serde_json::json!("npx"));
+        assert!(!dump.contains("/Users/vita"), "本机用户名外传: {dump}");
+    }
+
+    #[test]
+    fn mcp_merge_localizes_and_keeps_local_env() {
+        let incoming = serde_json::json!({
+            "cbm": { "command": "~/.local/bin/codebase-memory-mcp", "args": ["--root", "~/work"] }
+        });
+        let local = serde_json::json!({
+            "cbm": {
+                "command": "/Users/bob/.local/bin/codebase-memory-mcp",
+                "env": { "MY_KEY": "local-secret" }
+            }
+        });
+        let merged = merge_mcp(Some(&local), &incoming, "/Users/bob");
+
+        // ~ 必须展开：command 直接 exec，不经 shell，留着 ~ 就起不来
+        assert_eq!(
+            merged["cbm"]["command"],
+            serde_json::json!("/Users/bob/.local/bin/codebase-memory-mcp")
+        );
+        assert_eq!(merged["cbm"]["args"][1], serde_json::json!("/Users/bob/work"));
+        // 本机原有的 env 要留住，否则用户配好的 key 被同步抹掉
+        assert_eq!(merged["cbm"]["env"]["MY_KEY"], serde_json::json!("local-secret"));
+    }
+
+    #[test]
+    fn claude_json_only_exposes_mcp_servers() {
+        // 这个文件里还有 OAuth 凭据与逐项目历史，只有 mcpServers 可以动
+        assert!(is_syncable_field("claude/claude.json", "mcpServers"));
+        for k in ["oauthAccount", "projects", "userID", "hasCompletedOnboarding", "tipsHistory"] {
+            assert!(!is_syncable_field("claude/claude.json", k), "{k} 不该可同步");
+        }
+    }
+
+    #[test]
     fn machine_specific_detection() {
         use serde_json::json;
+        // 绝对路径：含用户名或应用安装位置，换台机器就不成立
         assert!(looks_machine_specific(&json!("/Users/vita/bin/x.sh")));
-        assert!(looks_machine_specific(&json!("~/bin/x.sh")));
         assert!(looks_machine_specific(&json!("C:\\Users\\vita\\x.exe")));
         assert!(looks_machine_specific(&json!("\\\\server\\share")));
-        assert!(looks_machine_specific(&json!("$HOME/x")));
         // 藏在数组/嵌套对象里的也要抓到
         assert!(looks_machine_specific(&json!({"hooks": [{"command": "/opt/am/x"}]})));
         assert!(looks_machine_specific(&json!(["ok", "/abs/path"])));
+
+        // 相对家目录的写法**不是**机器相关：每台机器各自解析到自己的 home，
+        // `~/.claude/hooks/x` 在两台机器上指的都是「我的 hooks 目录下的 x」
+        assert!(!looks_machine_specific(&json!("~/bin/x.sh")));
+        assert!(!looks_machine_specific(&json!("~/.claude/hooks/gate")));
+        assert!(!looks_machine_specific(&json!("$HOME/x")));
+        assert!(!looks_machine_specific(&json!("%USERPROFILE%\\x")));
 
         assert!(!looks_machine_specific(&json!("opus")));
         assert!(!looks_machine_specific(&json!("ccusage")));

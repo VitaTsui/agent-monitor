@@ -13,7 +13,8 @@
 //! ```
 
 use am_core::configpath::{
-    is_allowed, is_syncable_field, looks_machine_specific, portable_hooks, MAX_FILE_BYTES,
+    is_allowed, is_syncable_field, looks_machine_specific, portable_hooks, portable_mcp,
+    MAX_FILE_BYTES,
 };
 use am_core::model::{
     ConfigChange, ConfigFileBody, ConfigManifest, ConfigPatch, ConfigProbe, ConfigPush,
@@ -214,6 +215,20 @@ impl ConfigStore {
                             fields.insert(k.clone(), p);
                         }
                         None => tracing::warn!("hooks 无可同步条目，不入基线"),
+                    }
+                    continue;
+                }
+                // mcpServers 同样走专门通道：兜底剥一次 env（客户端可能被控，
+                // 不能让密钥落进基线再分发）。路径归一化只有客户端做得了——
+                // hub 不知道对端 home，传空串即跳过归一化。
+                // 也因此不能对它跑 looks_machine_specific：MCP 命令合法地含
+                // /opt/homebrew 这类安装路径，一刀切会把整份配置滤没。
+                if k == "mcpServers" {
+                    match portable_mcp(v, "") {
+                        Some(p) => {
+                            fields.insert(k.clone(), p);
+                        }
+                        None => tracing::warn!("mcpServers 为空，不入基线"),
                     }
                     continue;
                 }

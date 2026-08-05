@@ -262,13 +262,21 @@ const ConfigSyncPanel: React.FC = () => {
           <code>commands/</code>、<code>skills/</code>，以及 Codex 的 <code>AGENTS.md</code> 与
           <code>prompts/</code>。
           <br />
-          <strong>按字段同步</strong>：<code>settings.json</code> 与 Codex 的{" "}
-          <code>config.toml</code> 同步 <code>model</code> 与 <code>hooks</code>，合并进本机文件
-          —— 你自己写的其它字段、表段与<strong>注释</strong>一律原样保留。
+          <strong>按字段同步</strong>：<code>settings.json</code> 的 <code>model</code> 与{" "}
+          <code>hooks</code>、<code>~/.claude.json</code> 的 <code>mcpServers</code>（MCP 服务器）、
+          Codex <code>config.toml</code> 的 <code>model</code>，合并进本机文件 ——
+          你自己写的其它字段、表段与<strong>注释</strong>一律原样保留。
+          <code>~/.claude.json</code> 里的登录凭据与项目历史一个字节都不动。
           <br />
-          <strong>hooks 只同步「通用」条目</strong>（<code>npx prettier --write</code> 这类）。
-          本客户端自己写入的配对 hook、以及命令指向本机路径（<code>~/bin/x.sh</code>、
-          绝对路径）的 hook <strong>留在原机不动，也不会外传</strong> —— 它们换台机器就不存在，
+          <strong>MCP</strong>：命令里的家目录路径会自动换算（
+          <code>/Users/你/.local/bin/x</code> 到对方机器上变成他自己的家目录），所以路径不同也能用。
+          但 <code>env</code>（常放 API key）<strong>不同步</strong>，需要在各台机器上自行填；
+          本机已填好的不会被覆盖掉。
+          <br />
+          <strong>hooks 只同步「通用」条目</strong>（<code>npx prettier --write</code>、
+          <code>~/.claude/hooks/x</code> 这类）。本客户端自己写入的配对 hook、以及命令是
+          <strong>绝对路径</strong>（<code>/Users/…</code>、<code>/Applications/…</code>）的 hook
+          <strong>留在原机不动，也不会外传</strong> —— 它们换台机器就不成立，
           覆盖过去会让那台的会话配对静默失效。
           <br />
           <code>apiKeyHelper</code>、<code>statusLine</code>、<code>permissions</code>、

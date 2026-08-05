@@ -11,8 +11,8 @@
 //!    这些是用户自己攒的 CLAUDE.md / agents，被无声盖掉找不回来是不可接受的。
 
 use am_core::configpath::{
-    is_allowed, is_syncable_field, looks_machine_specific, merge_hooks, portable_hooks, DIRS,
-    MAX_FILE_BYTES, SINGLE_FILES,
+    is_allowed, is_syncable_field, looks_machine_specific, merge_hooks, merge_mcp, portable_hooks,
+    portable_mcp, DIRS, MAX_FILE_BYTES, SINGLE_FILES,
 };
 use am_core::model::{
     ConfigFileBody, ConfigFileMeta, ConfigKeyInfo, ConfigManifest, ConfigPatch, ConfigProbe,
@@ -279,6 +279,9 @@ pub fn apply(home: &Path, pushes: &[ConfigPush]) -> usize {
 /// 普查的目标文件：(文件标识, 相对 home 的路径)
 const PROBE_FILES: &[(&str, &str)] = &[
     ("claude/settings.json", ".claude/settings.json"),
+    // MCP 服务器配置在这里。文件本身几十 KB，混着 OAuth 凭据与逐项目历史——
+    // 只有 `mcpServers` 一个键在白名单内，其余读都不读、更不上传（见 core 的 CLAUDE_JSON_SYNC_KEYS）
+    ("claude/claude.json", ".claude.json"),
     ("codex/config.toml", ".codex/config.toml"),
 ];
 
@@ -371,6 +374,12 @@ pub fn read_patches(home: &Path) -> Vec<ConfigPatch> {
                     Some(p) => p,
                     None => continue,
                 }
+            } else if k == "mcpServers" {
+                // 剥 env（凭据不外传）+ home 绝对路径归一化成 ~，见 core 的 portable_mcp
+                match portable_mcp(&v, &home.to_string_lossy()) {
+                    Some(p) => p,
+                    None => continue,
+                }
             } else if looks_machine_specific(&v) {
                 tracing::debug!("配置字段 {id}:{k} 含本机路径，不参与同步");
                 continue;
@@ -424,6 +433,8 @@ pub fn apply_patches(home: &Path, patches: &[ConfigPatch]) -> usize {
         if !root.is_object() {
             continue;
         }
+        // 改动前的快照，供下面「只有白名单字段变了」的自检比对
+        let original = root.clone();
 
         let mut dirty = false;
         {
@@ -437,6 +448,9 @@ pub fn apply_patches(home: &Path, patches: &[ConfigPatch]) -> usize {
                 // 原样留下，只有「通用」条目由配置源接管（见 core 的 merge_hooks）
                 let next = if k == "hooks" {
                     merge_hooks(obj.get(k), v)
+                } else if k == "mcpServers" {
+                    // ~ 展开成本机 home，并保留本机原有的 env（同步过来的不带 env）
+                    merge_mcp(obj.get(k), v, &home.to_string_lossy())
                 } else if looks_machine_specific(v) {
                     tracing::warn!("拒绝合并字段 {}:{k}", patch.file);
                     continue;
@@ -455,8 +469,16 @@ pub fn apply_patches(home: &Path, patches: &[ConfigPatch]) -> usize {
 
         // dry-run：序列化 + 重新解析，确认产物仍是合法且顶层为对象的 JSON
         let Ok(out) = serde_json::to_string_pretty(&root) else { continue };
-        if !serde_json::from_str::<serde_json::Value>(&out).map(|v| v.is_object()).unwrap_or(false) {
-            tracing::warn!("合并结果自检失败，跳过写入: {}", patch.file);
+        let Ok(reparsed) = serde_json::from_str::<serde_json::Value>(&out) else {
+            tracing::warn!("合并结果无法解析，跳过写入: {}", patch.file);
+            continue;
+        };
+        // 「只动该动的」自检：把重新解析的产物与原文逐个顶层键比对，除白名单字段外
+        // 必须**完全相等**。`~/.claude.json` 有几十 KB，装着 OAuth 凭据与逐项目历史，
+        // 而我们是整份反序列化再序列化写回 —— 任何精度丢失或结构走样都会毁掉它，
+        // 用户得重新登录 Claude Code。与其事后发现，不如这里挡住。
+        if !only_expected_changed(&original, &reparsed, &patch.fields) {
+            tracing::warn!("合并影响了白名单以外的内容，跳过写入: {}", patch.file);
             continue;
         }
 
@@ -475,6 +497,28 @@ pub fn apply_patches(home: &Path, patches: &[ConfigPatch]) -> usize {
         changed += 1;
     }
     changed
+}
+
+/// 合并产物是否「只动了该动的」：顶层键集合不变，且除 `changed_keys` 外的每个键
+/// 都与原文全等。
+///
+/// 这是写回大配置文件（尤其 `~/.claude.json`）前的最后一道闸：那里面有 OAuth 凭据，
+/// 一次数值精度丢失或结构走样就要用户重新登录。
+fn only_expected_changed(
+    original: &serde_json::Value,
+    merged: &serde_json::Value,
+    changed_keys: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> bool {
+    let (Some(a), Some(b)) = (original.as_object(), merged.as_object()) else {
+        return false;
+    };
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().all(|(k, v)| match b.get(k) {
+        Some(nv) => changed_keys.contains_key(k) || nv == v,
+        None => false,
+    })
 }
 
 /// 把白名单字段合并进 TOML 文件，返回是否有改动。
@@ -837,6 +881,40 @@ theme = "dark"
         assert_eq!(n, 0);
         let after = std::fs::read_to_string(&p).unwrap();
         assert!(after.contains("theme = \"dark\""), "用户的表段被动了: {after}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mcp_merge_preserves_rest_of_claude_json() {
+        let dir = std::env::temp_dir().join(format!("am-cfg-mcp-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join(".claude.json");
+        // 仿真实文件：MCP 之外还有凭据与历史，一个字节都不能动
+        let original = serde_json::json!({
+            "oauthAccount": { "accountUuid": "abc-123", "emailAddress": "me@example.com" },
+            "mcpServers": { "old": { "command": "/Users/me/.local/bin/old" } },
+            "projects": { "/Users/me/work": { "lastCost": 1.2345678901234567_f64 } },
+            "numberOfStartups": 4321
+        });
+        let _ = std::fs::write(&p, serde_json::to_string_pretty(&original).unwrap());
+
+        let incoming = patch_of(
+            "claude/claude.json",
+            &[("mcpServers", json!({ "cbm": { "command": "~/.local/bin/cbm" } }))],
+        );
+        assert_eq!(apply_patches(&dir, &[incoming]), 1);
+
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        // ~ 展开成本机 home
+        assert_eq!(
+            after["mcpServers"]["cbm"]["command"],
+            json!(format!("{}/.local/bin/cbm", dir.to_string_lossy()))
+        );
+        // 凭据与历史原封不动 —— 这条挂了就意味着用户要重新登录 Claude Code
+        assert_eq!(after["oauthAccount"], original["oauthAccount"]);
+        assert_eq!(after["projects"], original["projects"]);
+        assert_eq!(after["numberOfStartups"], json!(4321));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
