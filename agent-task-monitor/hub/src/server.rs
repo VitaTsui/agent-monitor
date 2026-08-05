@@ -879,6 +879,7 @@ async fn control_task(
         action: req.action,
         text: None,
         id: None,
+        from_select: false,
     });
     tracing::info!("已向机器 {} 下发控制命令: {id}", task.machine_id);
     ok(json!({ "pid": pid, "result": "命令已下发，等待执行" }))
@@ -1042,6 +1043,8 @@ async fn input_task(
         action: am_core::model::ControlAction::Input,
         text: Some(text),
         id: Some(cmd_id.clone()),
+        // 带给客户端：选择卡的作答不能走「补回车」那道保险（见 ControlCmd::from_select）
+        from_select: req.from_select,
     });
     drop(machines); // 释放锁：下面后台任务会再读 machines
     // 记进「远程交互历史」的 user 侧。网页这条路径没走 bot::queue_command（它自己压队列），
@@ -1135,6 +1138,7 @@ async fn termkey_task(
         action: am_core::model::ControlAction::TermKey,
         text: Some(spec),
         id: None,
+        from_select: false,
     });
     ok(json!({ "result": "已下发按键" }))
 }

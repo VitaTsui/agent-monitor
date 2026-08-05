@@ -663,6 +663,7 @@ async fn execute(
     }
     // 输入注入（发布任务）单独处理
     if matches!(cmd.action, am_core::model::ControlAction::Input) {
+        let from_select = cmd.from_select;
         let text = cmd.text.unwrap_or_default();
         let preview: String = text.chars().take(20).collect();
         // 目标是 Cursor/VSCode 内嵌终端（ConPTY/编辑器内置，注入不进去）、且有活着的桥接
@@ -683,7 +684,15 @@ async fn execute(
                 ));
                 // 记一笔待确认提交：下一轮扫描若该会话没出现这条用户消息，就确认没提交、补回车。
                 // 只对桥接（Cursor 内嵌终端）路径记——它才有粘贴态吞回车的问题。
-                if !text.trim().is_empty() {
+                //
+                // 选择卡的作答绝不能记（from_select）：补回车的判据是「会话最新用户消息不是
+                // 刚发的那条 ⇒ 没提交」，而作答（一个「1」或自定义答案）永远不会成为一条用户
+                // 消息 —— 判据恒成立，于是必补满 MAX_RESUBMIT 次。那两个回车正好落在下一题上，
+                // 替人确认了默认高亮项：答完第一题，后面的题就被自动答完、卡片跟着消失。
+                // 线上抓到过：08:47:16 下发「1」，18.1 秒补第一个回车，20.1 秒补第二个。
+                // 选择卡本也不需要这道保险：作答走的是按键（选项序号 + 下一题键，见 web 的
+                // TerminalFeed），压根没有「文字进了输入框却没提交」那回事。
+                if !text.trim().is_empty() && !from_select {
                     let mut g = PENDING_SUBMITS.lock().unwrap();
                     g.get_or_insert_with(HashMap::new).insert(
                         cmd.task_id.clone(),

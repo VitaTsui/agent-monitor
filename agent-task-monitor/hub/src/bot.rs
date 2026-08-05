@@ -614,6 +614,7 @@ pub(crate) async fn recall_input(
         action: am_core::model::ControlAction::TermKey,
         text: Some("up:1".to_string()),
         id: None,
+        from_select: false,
     });
     Ok(Recalled::InjectedUpKey)
 }
@@ -1484,6 +1485,8 @@ pub(crate) async fn queue_command(
         action,
         text: text.clone(),
         id: Some(uuid::Uuid::new_v4().to_string()),
+        // 钉钉侧没有选择卡的作答入口（「⌨️ 需要你选择」只是通知），一律按普通下发处理
+        from_select: false,
     });
     drop(machines); // 记历史要拿别的锁，先放掉
 
