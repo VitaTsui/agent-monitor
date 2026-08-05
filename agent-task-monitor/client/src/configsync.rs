@@ -446,11 +446,31 @@ pub fn apply_patches(home: &Path, patches: &[ConfigPatch]) -> usize {
                 }
                 // hooks 是合并而非覆盖：本机自管的配对 hook 与指向本机脚本的 hook
                 // 原样留下，只有「通用」条目由配置源接管（见 core 的 merge_hooks）
+                // 「跑不起来就不写」的过滤一律**只作用于下发内容**，绝不碰本机原有的东西。
+                // 作用在合并产物上是错的：本机自己配的绝对路径 hook、以及本客户端写入的
+                // 配对 hook（安装路径一旦含空格，取第一个 token 就判成不存在）会被连坐删掉。
                 let next = if k == "hooks" {
-                    merge_hooks(obj.get(k), v)
+                    let mut inc = v.clone();
+                    for (event, cmd) in drop_unrunnable_hooks(&mut inc, home) {
+                        crate::state::client_log(&format!(
+                            "[configsync] 跳过 hook（脚本不在本机）{event}: {cmd}"
+                        ));
+                    }
+                    merge_hooks(obj.get(k), &inc)
                 } else if k == "mcpServers" {
-                    // ~ 展开成本机 home，并保留本机原有的 env（同步过来的不带 env）
-                    merge_mcp(obj.get(k), v, &home.to_string_lossy())
+                    // 先剔掉本机跑不起来的：对端没装那个二进制、或 server 引用的配置文件
+                    // 没跟过来（这些文件不在同步集里）。跨平台尤其常见 ——
+                    // mac 的 ~/.local/bin/xxx 在 Windows 上根本不存在。
+                    // 照写只是搬来一份注定连接失败的配置。
+                    let mut inc = v.clone();
+                    for (name, why) in drop_unrunnable_mcp(&mut inc, home) {
+                        tracing::warn!("MCP server「{name}」在本机跑不起来，已跳过：{why}");
+                        crate::state::client_log(&format!(
+                            "[configsync] 跳过 MCP「{name}」：{why}"
+                        ));
+                    }
+                    // 再 ~ 展开成本机 home，并保留本机原有的 env 与本机独有的 server
+                    merge_mcp(obj.get(k), &inc, &home.to_string_lossy())
                 } else if looks_machine_specific(v) {
                     tracing::warn!("拒绝合并字段 {}:{k}", patch.file);
                     continue;
@@ -497,6 +517,132 @@ pub fn apply_patches(home: &Path, patches: &[ConfigPatch]) -> usize {
         changed += 1;
     }
     changed
+}
+
+/// 这个字符串看起来是不是一个文件路径（而非包名/参数）。
+///
+/// `@playwright/mcp@0.0.70` 含 `/` 却是包名，不能当路径查 —— 只认以 `/`、`~/`、`./` 开头的。
+fn looks_like_path(s: &str) -> bool {
+    s.starts_with('/') || s.starts_with("~/") || s.starts_with("./")
+}
+
+/// 某个 MCP server 在本机是否真的跑得起来：可执行文件在、且它引用的文件也在。
+fn mcp_runnable(cfg: &serde_json::Value, home: &Path) -> Result<(), String> {
+    let expand = |s: &str| -> std::path::PathBuf {
+        match s.strip_prefix("~/") {
+            Some(rest) => home.join(rest),
+            None => std::path::PathBuf::from(s),
+        }
+    };
+    if let Some(cmd) = cfg.get("command").and_then(|c| c.as_str()) {
+        if looks_like_path(cmd) {
+            let p = expand(cmd);
+            if !p.exists() {
+                return Err(format!("可执行文件不存在: {}", p.display()));
+            }
+        } else if which_in_path(cmd).is_none() {
+            // 裸命令（npx / uvx / docker …）：PATH 里找不到就跑不起来
+            return Err(format!("命令不在 PATH 里: {cmd}"));
+        }
+    }
+    for a in cfg.get("args").and_then(|a| a.as_array()).into_iter().flatten() {
+        let Some(a) = a.as_str() else { continue };
+        if looks_like_path(a) {
+            let p = expand(a);
+            if !p.exists() {
+                return Err(format!("引用的文件不存在: {}", p.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 在 PATH 里找一个命令（不依赖外部 which 进程）。
+///
+/// Windows 必须带上 PATHEXT：那边 `npx` 实际是 `npx.cmd`、`node` 是 `node.exe`，
+/// 只按裸名字找必然找不到 —— 会把从 mac 同步过去的 `npx` 类 server 全部误判成「跑不起来」。
+fn which_in_path(cmd: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let exts: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".into())
+            .split(';')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    std::env::split_paths(&path).find_map(|dir| {
+        let direct = dir.join(cmd);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        exts.iter().find_map(|e| {
+            let p = dir.join(format!("{cmd}{e}"));
+            p.is_file().then_some(p)
+        })
+    })
+}
+
+/// 剔除本机跑不起来的 MCP server，返回被剔除的 (名字, 原因)。
+///
+/// 不这么做的话，同步只是把一份**注定连不上**的配置搬过来：对端没装那个二进制、
+/// 或者 server 引用的配置文件没跟过来，Claude Code 每次启动都连接失败 ——
+/// 用户看到的是「同步完 MCP 就坏了」，比不同步还糟。
+fn drop_unrunnable_mcp(v: &mut serde_json::Value, home: &Path) -> Vec<(String, String)> {
+    let Some(obj) = v.as_object_mut() else { return Vec::new() };
+    let mut dropped = Vec::new();
+    obj.retain(|name, cfg| match mcp_runnable(cfg, home) {
+        Ok(()) => true,
+        Err(why) => {
+            dropped.push((name.clone(), why));
+            false
+        }
+    });
+    dropped
+}
+
+/// 剔除本机跑不起来的 hook（脚本文件没跟过来），返回被剔除的 (事件, 命令)。
+///
+/// 与 MCP 同一个道理：hook 脚本本身不在同步集里，对端没有那个文件时，
+/// 同步过去只会让它**每次触发都报错**。跨平台更明显 —— mac 的
+/// `~/.claude/hooks/xxx` 是 shell 脚本，Windows 上往往根本没有。
+///
+/// 判断刻意保守：只查「命令第一个 token 是路径」的情况。hook 是交给 shell 跑的，
+/// 裸命令可能来自别名/函数/临时 PATH，查不到不代表跑不了，不能当作剔除依据。
+fn drop_unrunnable_hooks(v: &mut serde_json::Value, home: &Path) -> Vec<(String, String)> {
+    let Some(events) = v.as_object_mut() else { return Vec::new() };
+    let mut dropped = Vec::new();
+    for (event, entries) in events.iter_mut() {
+        let Some(arr) = entries.as_array_mut() else { continue };
+        for entry in arr.iter_mut() {
+            let Some(hooks) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+                continue;
+            };
+            hooks.retain(|h| {
+                let Some(cmd) = h.get("command").and_then(|c| c.as_str()) else { return true };
+                let first = cmd.split_whitespace().next().unwrap_or("");
+                if !looks_like_path(first) {
+                    return true;
+                }
+                let p = match first.strip_prefix("~/") {
+                    Some(rest) => home.join(rest),
+                    None => std::path::PathBuf::from(first),
+                };
+                if p.exists() {
+                    true
+                } else {
+                    dropped.push((event.clone(), cmd.to_string()));
+                    false
+                }
+            });
+        }
+        // 内层清空的条目要一并摘掉，别留下空壳
+        arr.retain(|e| e.get("hooks").and_then(|h| h.as_array()).map(|a| !a.is_empty()).unwrap_or(true));
+    }
+    events.retain(|_, v| v.as_array().map(|a| !a.is_empty()).unwrap_or(true));
+    dropped
 }
 
 /// 合并产物是否「只动了该动的」：顶层键集合不变，且除 `changed_keys` 外的每个键
@@ -887,7 +1033,9 @@ theme = "dark"
     #[test]
     fn mcp_merge_preserves_rest_of_claude_json() {
         let dir = std::env::temp_dir().join(format!("am-cfg-mcp-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::create_dir_all(dir.join(".local/bin"));
+        // 目标二进制必须真实存在，否则会被「跑不起来就不写」的过滤剔除
+        let _ = std::fs::write(dir.join(".local/bin/cbm"), b"#!/bin/sh\n");
         let p = dir.join(".claude.json");
         // 仿真实文件：MCP 之外还有凭据与历史，一个字节都不能动
         let original = serde_json::json!({
@@ -915,6 +1063,98 @@ theme = "dark"
         assert_eq!(after["oauthAccount"], original["oauthAccount"]);
         assert_eq!(after["projects"], original["projects"]);
         assert_eq!(after["numberOfStartups"], json!(4321));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unrunnable_hooks_are_dropped() {
+        let dir = std::env::temp_dir().join(format!("am-cfg-hookrun-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".claude/hooks"));
+        let _ = std::fs::write(dir.join(".claude/hooks/present"), b"#!/bin/sh\n");
+        // 本机已有一条配对 hook，合并后必须还在
+        let _ = std::fs::write(
+            dir.join(".claude/settings.json"),
+            br#"{"hooks":{"SessionStart":[{"hooks":[{"command":"/Applications/X.app/agent-monitor hook"}]}]}}"#,
+        );
+
+        let incoming = patch_of(
+            "claude/settings.json",
+            &[(
+                "hooks",
+                json!({
+                    "PreToolUse": [
+                        { "matcher": "*", "hooks": [
+                            { "command": "~/.claude/hooks/present --flag" },
+                            { "command": "~/.claude/hooks/absent" }
+                        ]}
+                    ],
+                    // 整条都跑不起来 → 事件应被整个摘掉，不留空壳
+                    "Stop": [{ "hooks": [{ "command": "~/.claude/hooks/gone" }] }],
+                    // 裸命令不查 PATH（hook 走 shell，别名/函数都可能） → 保留
+                    "SubagentStart": [{ "hooks": [{ "command": "npx prettier --write" }] }]
+                }),
+            )],
+        );
+        assert_eq!(apply_patches(&dir, &[incoming]), 1);
+
+        let after: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        let dump = serde_json::to_string(&after).unwrap();
+        assert!(dump.contains("present --flag"), "脚本在的该保留: {dump}");
+        assert!(!dump.contains("absent"), "脚本不在的该剔除: {dump}");
+        assert!(after["hooks"].get("Stop").is_none(), "空事件该摘掉: {dump}");
+        assert!(dump.contains("npx prettier"), "裸命令不该被误杀: {dump}");
+        // 本机配对 hook 依旧在
+        assert!(dump.contains("agent-monitor hook"), "配对 hook 丢了: {dump}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unrunnable_mcp_is_dropped_not_written() {
+        let dir = std::env::temp_dir().join(format!("am-cfg-mcprun-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".local/bin"));
+        // 本机真实存在的可执行文件
+        let real = dir.join(".local/bin/present");
+        let _ = std::fs::write(&real, b"#!/bin/sh\n");
+        let cfgfile = dir.join(".claude/cfg.json");
+        let _ = std::fs::create_dir_all(dir.join(".claude"));
+        let _ = std::fs::write(&cfgfile, b"{}");
+        let _ = std::fs::write(dir.join(".claude.json"), br#"{"mcpServers":{}}"#);
+
+        let incoming = patch_of(
+            "claude/claude.json",
+            &[(
+                "mcpServers",
+                json!({
+                    // 存在 → 应写入
+                    "ok":        { "command": "~/.local/bin/present" },
+                    // 二进制不存在 → 剔除（对端没装，正是用户遇到的情况）
+                    "missing":   { "command": "~/.local/bin/absent" },
+                    // 命令在但引用的配置文件不存在 → 剔除
+                    "badcfg":    { "command": "~/.local/bin/present",
+                                   "args": ["--config", "~/.claude/nope.json"] },
+                    // 命令在且引用的文件也在 → 应写入
+                    "goodcfg":   { "command": "~/.local/bin/present",
+                                   "args": ["--config", "~/.claude/cfg.json"] },
+                    // 包名含 / 但不是路径，不该被当成文件去查
+                    "pkgarg":    { "command": "~/.local/bin/present",
+                                   "args": ["@playwright/mcp@0.0.70"] }
+                }),
+            )],
+        );
+        assert_eq!(apply_patches(&dir, &[incoming]), 1);
+
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(".claude.json")).unwrap())
+                .unwrap();
+        let m = after["mcpServers"].as_object().unwrap();
+        assert!(m.contains_key("ok"), "可用的 server 应写入");
+        assert!(m.contains_key("goodcfg"), "引用文件存在的应写入");
+        assert!(m.contains_key("pkgarg"), "包名参数不该被当路径误杀: {m:?}");
+        assert!(!m.contains_key("missing"), "二进制不存在的不该写入");
+        assert!(!m.contains_key("badcfg"), "引用文件缺失的不该写入");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

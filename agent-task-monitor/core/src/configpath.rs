@@ -147,7 +147,11 @@ fn localize_home(v: &serde_json::Value, home: &str) -> serde_json::Value {
             let out = if s == "~" {
                 home.to_string()
             } else if let Some(rest) = s.strip_prefix("~/") {
-                format!("{home}/{rest}")
+                // 用平台分隔符拼：mac 上写的 `~/a/b` 同步到 Windows 要变成
+                // `C:\Users\你\a\b`。混合分隔符 Windows 多半也认，但没必要赌。
+                let sep = std::path::MAIN_SEPARATOR;
+                let rest = if sep == '/' { rest.to_string() } else { rest.replace('/', "\\") };
+                format!("{home}{sep}{rest}")
             } else {
                 s.clone()
             };
@@ -189,7 +193,10 @@ pub fn merge_mcp(
     home: &str,
 ) -> serde_json::Value {
     let local_obj = local.and_then(|v| v.as_object());
-    let mut out = serde_json::Map::new();
+    // **以本机现有的为底**，再用下发的覆盖同名条目。
+    // 从空表开始是错的：那会把本机独有的 server（对方没有的那些）整个抹掉 ——
+    // 用户在这台机器上配好的 MCP 会在一次同步后凭空消失、随即连不上。
+    let mut out = local_obj.cloned().unwrap_or_default();
     if let Some(obj) = incoming.as_object() {
         for (name, cfg) in obj {
             let mut cfg = localize_home(cfg, home);
@@ -570,6 +577,21 @@ mod tests {
         assert_eq!(merged["cbm"]["args"][1], serde_json::json!("/Users/bob/work"));
         // 本机原有的 env 要留住，否则用户配好的 key 被同步抹掉
         assert_eq!(merged["cbm"]["env"]["MY_KEY"], serde_json::json!("local-secret"));
+    }
+
+    #[test]
+    fn mcp_merge_keeps_servers_only_this_machine_has() {
+        // 本机独有的 server 必须活下来。从空表开始合并会让它们在一次同步后凭空消失，
+        // 用户只会看到「同步完 MCP 就连不上了」。
+        let incoming = serde_json::json!({ "shared": { "command": "npx" } });
+        let local = serde_json::json!({
+            "shared": { "command": "npx" },
+            "ludo":   { "command": "/opt/ludo/bin/server", "env": { "K": "v" } }
+        });
+        let merged = merge_mcp(Some(&local), &incoming, "/Users/bob");
+        assert_eq!(merged["ludo"]["command"], serde_json::json!("/opt/ludo/bin/server"));
+        assert_eq!(merged["ludo"]["env"]["K"], serde_json::json!("v"));
+        assert!(merged.get("shared").is_some());
     }
 
     #[test]

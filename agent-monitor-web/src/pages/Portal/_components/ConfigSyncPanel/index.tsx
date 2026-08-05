@@ -269,9 +269,15 @@ const ConfigSyncPanel: React.FC = () => {
           <code>~/.claude.json</code> 里的登录凭据与项目历史一个字节都不动。
           <br />
           <strong>MCP</strong>：命令里的家目录路径会自动换算（
-          <code>/Users/你/.local/bin/x</code> 到对方机器上变成他自己的家目录），所以路径不同也能用。
-          但 <code>env</code>（常放 API key）<strong>不同步</strong>，需要在各台机器上自行填；
-          本机已填好的不会被覆盖掉。
+          <code>/Users/你/.local/bin/x</code> 到对方机器上变成他自己的家目录、Windows 上换成
+          反斜杠），所以路径不同也能用。但 <code>env</code>（常放 API key）
+          <strong>不同步</strong>，需要在各台机器上自行填；本机已填好的不会被覆盖掉。
+          <br />
+          <strong>跑不起来的不会写进去</strong>：MCP 的可执行文件、或它 / hook 引用的脚本
+          若在这台机器上不存在（对端没装、或 mac 的脚本同步到 Windows），
+          该条会被<strong>跳过</strong>而不是照搬 —— 否则只是搬来一份必然连接失败的配置。
+          跳过了什么会记在客户端日志里。<strong>同步不会替你安装依赖</strong>，
+          那些二进制与脚本仍需在各台机器上自行装好。
           <br />
           <strong>hooks 只同步「通用」条目</strong>（<code>npx prettier --write</code>、
           <code>~/.claude/hooks/x</code> 这类）。本客户端自己写入的配对 hook、以及命令是
