@@ -626,6 +626,45 @@ fn exec_exts() -> Vec<String> {
     }
 }
 
+/// 本机常见的可执行文件安装位置。按文件名兜底查找时用。
+fn common_bin_dirs(home: &Path) -> Vec<std::path::PathBuf> {
+    let mut v = vec![home.join(".local").join("bin"), home.join("bin"), home.join(".cargo").join("bin")];
+    if cfg!(windows) {
+        for (var, sub) in [("LOCALAPPDATA", "Programs"), ("APPDATA", "npm"), ("LOCALAPPDATA", "")] {
+            if let Some(base) = std::env::var_os(var) {
+                let p = std::path::PathBuf::from(base);
+                v.push(if sub.is_empty() { p } else { p.join(sub) });
+            }
+        }
+    } else {
+        v.extend([
+            std::path::PathBuf::from("/opt/homebrew/bin"),
+            std::path::PathBuf::from("/usr/local/bin"),
+            std::path::PathBuf::from("/usr/bin"),
+        ]);
+    }
+    v
+}
+
+/// 按**文件名**在本机找这个可执行文件的真实位置。
+///
+/// 同步来的路径是**源机**上的位置（mac 的 `~/.local/bin/x`），同一个工具在目标机器上
+/// 完全可能装在别处（Windows 的 `%LOCALAPPDATA%\Programs\x.exe`）。只展开 `~` 是不够的 ——
+/// 那只是把源机的目录结构原样套过来，落到对端就是个不存在的位置。
+///
+/// 先查 PATH（最权威，用户怎么装的就怎么找得到），再查几个常见安装目录。
+/// 按名字匹配理论上可能撞上同名的别的程序，但 MCP server 的名字都相当特异
+/// （`codebase-memory-mcp` 这种），而代价那边是「写一个必然连不上的路径」—— 值得。
+fn resolve_by_name(name: &str, home: &Path) -> Option<std::path::PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
+    if let Some(p) = which_in_path(name) {
+        return Some(p);
+    }
+    common_bin_dirs(home).into_iter().find_map(|d| resolve_exec(&d.join(name)))
+}
+
 /// 找出这个路径对应的**实际**可执行文件。
 ///
 /// Windows 上可执行文件带后缀：配置里写的 `~/.local/bin/foo` 在那边实际是 `foo.exe`。
@@ -652,9 +691,14 @@ fn mcp_runnable(cfg: &mut serde_json::Value, home: &Path) -> Result<(), String> 
     if let Some(cmd) = cfg.get("command").and_then(|c| c.as_str()).map(str::to_string) {
         if looks_like_path(&cmd) {
             let p = expand_home(&cmd, home);
-            match resolve_exec(&p) {
+            // 先按原路径找（同系统之间通常直接命中），再退回**按文件名**在本机找 ——
+            // 跨系统时源机那个路径在这里根本不成立，得看这台机器把它装在哪。
+            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let resolved =
+                resolve_exec(&p).or_else(|| resolve_by_name(&name, home));
+            match resolved {
                 Some(actual) => {
-                    // 回写实际路径：分隔符已归一化，Windows 上还可能带上了 .exe
+                    // 回写**本机实际路径**：跨系统同步过来的源机路径就在这里被换成本地的
                     if let Some(o) = cfg.as_object_mut() {
                         o.insert(
                             "command".into(),
@@ -662,7 +706,11 @@ fn mcp_runnable(cfg: &mut serde_json::Value, home: &Path) -> Result<(), String> 
                         );
                     }
                 }
-                None => return Err(format!("可执行文件不存在: {}", p.display())),
+                None => {
+                    return Err(format!(
+                        "本机找不到可执行文件「{name}」（PATH 与常见安装目录都没有）"
+                    ))
+                }
             }
         } else if which_in_path(&cmd).is_none() {
             // 裸命令（npx / uvx / docker …）：PATH 里找不到就跑不起来
@@ -1261,6 +1309,32 @@ theme = "dark"
         // 不再有波浪号，且指向真实存在的文件
         assert!(!cmd.contains('~'), "~ 没展开: {cmd}");
         assert!(std::path::Path::new(cmd).is_file(), "回写的路径不是真实文件: {cmd}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mcp_resolves_to_local_install_location() {
+        // 跨系统同步来的是**源机**的路径；本机把同一个工具装在别处时，
+        // 要按文件名找到本地的实际位置并改写，而不是把源机的目录结构套过来。
+        let dir = std::env::temp_dir().join(format!("am-cfg-byname-{}", std::process::id()));
+        // 源机路径 ~/.local/bin/mytool 在本机不存在，但 ~/bin/mytool 有
+        let _ = std::fs::create_dir_all(dir.join("bin"));
+        let _ = std::fs::write(dir.join("bin/mytool"), b"#!/bin/sh\n");
+        let _ = std::fs::write(dir.join(".claude.json"), br#"{"mcpServers":{}}"#);
+
+        let incoming = patch_of(
+            "claude/claude.json",
+            &[("mcpServers", json!({ "t": { "command": "~/.local/bin/mytool" } }))],
+        );
+        assert_eq!(apply_patches(&dir, &[incoming]).0, 1);
+
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(".claude.json")).unwrap())
+                .unwrap();
+        let cmd = after["mcpServers"]["t"]["command"].as_str().unwrap();
+        assert!(std::path::Path::new(cmd).is_file(), "没解析到本机实际位置: {cmd}");
+        assert!(cmd.ends_with("mytool"), "解析到的不是同一个工具: {cmd}");
+        assert!(!cmd.contains(".local"), "还在用源机的目录结构: {cmd}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
