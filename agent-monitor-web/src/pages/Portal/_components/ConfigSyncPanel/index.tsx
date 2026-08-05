@@ -4,12 +4,13 @@ import React, { useCallback, useEffect, useState } from "react";
 import { Badge, Empty, Popconfirm, Spin, Tag, message } from "antd";
 import { CloudSyncOutlined } from "@ant-design/icons";
 
-import { Button } from "@hsu-react/ui";
+import { Button, Switch } from "@hsu-react/ui";
 
 import {
   ConfigSyncDevice,
   ConfigSyncInfo,
   getConfigSync,
+  setConfigFieldSync,
   setConfigSource,
 } from "@/services/apis/portal";
 import { localMachineId } from "@/utils/clientAuth";
@@ -52,6 +53,14 @@ const ConfigSyncPanel: React.FC = () => {
     const timer = setInterval(() => load(true), 4000);
     return () => clearInterval(timer);
   }, [load]);
+
+  const toggleFieldSync = async (enabled: boolean) => {
+    const res = await setConfigFieldSync(enabled);
+    if (res.code === 0) {
+      message.success(res.data?.result ?? "已保存");
+      load(true);
+    }
+  };
 
   const choose = async (machineId: string) => {
     setSaving(machineId || "off");
@@ -125,6 +134,11 @@ const ConfigSyncPanel: React.FC = () => {
   }
 
   const devices = info?.devices ?? [];
+  // 「当前同步：settings.json 的 model」——如实说明会动用户什么，而不是只说「已开启」
+  const syncedFieldsText = (info?.syncedFields ?? [])
+    .filter((f) => f.fields.length > 0)
+    .map((f) => `${f.file.split("/").pop()} 的 ${f.fields.join("、")}`)
+    .join("；");
 
   return (
     <div className={styles.ConfigSyncPanel}>
@@ -149,6 +163,26 @@ const ConfigSyncPanel: React.FC = () => {
       ) : (
         devices.map(renderDevice)
       )}
+
+      {/* 字段级同步是独立开关：改 settings.json 的风险比搬 md 高得多，
+          用户完全可能只想共用 CLAUDE.md 而不希望别的机器来动自己的 settings */}
+      <div className={styles.device}>
+        <div className={styles.devInfo}>
+          <div className={styles.devName}>同步 settings.json 里的配置项</div>
+          <div className={styles.devMeta}>
+            {syncedFieldsText
+              ? `当前同步：${syncedFieldsText}`
+              : "只同步 model，其余字段与 hooks 一律不动"}
+          </div>
+        </div>
+        <div className={styles.devActions}>
+          <Switch
+            checked={!!info?.fieldSyncEnabled}
+            disabled={!info?.enabled}
+            onChange={(checked) => toggleFieldSync(!!checked)}
+          />
+        </div>
+      </div>
 
       <div className={styles.note}>
         <div className={styles.noteTitle}>同步范围</div>

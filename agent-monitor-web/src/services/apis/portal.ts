@@ -547,6 +547,10 @@ export interface ConfigSyncInfo {
   /** 服务端基线里的份数 */
   baselineCount: number;
   devices: ConfigSyncDevice[];
+  /** 是否开启了 settings.json 的字段级同步（独立于配置源） */
+  fieldSyncEnabled: boolean;
+  /** 基线里实际在同步的配置项（按文件分组） */
+  syncedFields: { file: string; fields: string[] }[];
 }
 
 /** 配置同步状态：谁是配置源、各设备还差多少份 */
@@ -557,4 +561,9 @@ export const getConfigSync = async () => {
 /** 指定配置源设备；machineId 传空 = 关闭配置同步 */
 export const setConfigSource = async (machineId: string) => {
   return await post<{ result: string }>("/monitor/config/source", { machineId });
+};
+
+/** 开关 settings.json 的字段级同步（独立于配置源） */
+export const setConfigFieldSync = async (enabled: boolean) => {
+  return await post<{ result: string }>("/monitor/config/fields", { enabled });
 };

@@ -146,6 +146,7 @@ pub fn router(state: SharedState) -> Router {
         // ---- 配置同步（Claude Code / Codex 的 md 类配置跨设备镜像）----
         .route("/monitor/config/sync", get(config_sync_status))
         .route("/monitor/config/source", post(set_config_source))
+        .route("/monitor/config/fields", post(set_config_field_sync))
         // ---- 用户自助机器人集成 ----
         // 配置读写（登录用户，返回各渠道配置 + 专属回调地址）
         .route("/monitor/integrations", get(integrations_get))
@@ -1395,9 +1396,13 @@ async fn config_sync_status(State(state): State<SharedState>, headers: HeaderMap
     let Some(user) = auth_user(&state, &headers).await else {
         return err(401, "未登录");
     };
-    let (source, devices) = {
+    let (source, devices, field_sync) = {
         let reg = state.registry.read().await;
-        (reg.config_source_of(&user), reg.devices_of(&user))
+        (
+            reg.config_source_of(&user),
+            reg.devices_of(&user),
+            reg.config_field_sync_enabled(&user),
+        )
     };
     let store = state.configs.read().await;
     let baseline = store.manifest_of(&user);
@@ -1469,12 +1474,21 @@ async fn config_sync_status(State(state): State<SharedState>, headers: HeaderMap
         })
         .collect();
 
+    // 字段级同步：开关状态 + 基线里实际有哪几个字段（供界面如实说明「会动你什么」）
+    let synced_fields: Vec<Value> = store
+        .patches_of(&user)
+        .into_iter()
+        .map(|p| json!({ "file": p.file, "fields": p.fields.keys().collect::<Vec<_>>() }))
+        .collect();
+
     ok(json!({
         "enabled": source.is_some(),
         "source": source,
         "baselineCount": store.file_count(&user),
         "devices": list,
         "probe": probe,
+        "fieldSyncEnabled": field_sync,
+        "syncedFields": synced_fields,
     }))
 }
 
@@ -1501,6 +1515,29 @@ async fn set_config_source(
         Ok(()) => ok(json!({ "result": "已设为配置源" })),
         Err(e) => err(400, &e),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigFieldSyncReq {
+    enabled: bool,
+}
+
+/// POST /monitor/config/fields —— 开关字段级同步（settings.json）
+///
+/// 独立于配置源：搬 md 文件和改 settings.json 的风险不在一个量级。
+async fn set_config_field_sync(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<ConfigFieldSyncReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    state.registry.write().await.set_config_field_sync(&user, req.enabled);
+    ok(json!({
+        "result": if req.enabled { "已开启配置项同步" } else { "已关闭配置项同步" }
+    }))
 }
 
 /// 校验当前用户对设备的管理权限（超级管理员或归属本人）
@@ -2270,7 +2307,7 @@ async fn sync_configs(
 
     // 归属账号 + 该账号选定的配置源。未信任的设备一概不参与：
     // 它连会话都不许上报，更不该往别人的机器上写文件。
-    let (owner, source) = {
+    let (owner, source, field_sync) = {
         let reg = state.registry.read().await;
         let meta = reg.device_meta(machine_id);
         if !meta.trusted {
@@ -2278,7 +2315,8 @@ async fn sync_configs(
         }
         let Some(owner) = meta.owner else { return empty() };
         let source = reg.config_source_of(&owner);
-        (owner, source)
+        let field_sync = reg.config_field_sync_enabled(&owner);
+        (owner, source, field_sync)
     };
     // 没指定配置源 = 该账号没开配置同步。默认关闭：往用户机器上写文件这件事，
     // 必须是他自己点开的。
@@ -2294,8 +2332,12 @@ async fn sync_configs(
     // 字段级同步：源机的字段值进基线；镜像机缺什么就下发什么。
     // 与 md 类走两条独立路径 —— 那边整份覆盖，这边只带白名单字段、由客户端合并。
     // 算出来先存着，最后与 md 的结果一起返回：两条路径互不阻塞，同一轮里都能推进。
+    // 独立开关：没开就完全不碰 settings.json —— 连基线都不收，避免留下一份
+    // 用户从没同意上传的字段值。md 类同步不受影响，照常进行。
     let mut patch_todo: Vec<am_core::model::ConfigPatch> = Vec::new();
-    if is_source {
+    if !field_sync {
+        // 什么都不做
+    } else if is_source {
         if !patches.is_empty() {
             state.configs.write().await.put_patches(&owner, patches);
         }
