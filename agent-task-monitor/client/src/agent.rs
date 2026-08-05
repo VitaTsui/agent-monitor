@@ -88,6 +88,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     let mut last_cfg_scan: Option<std::time::Instant> = None;
     let mut pending_cfg_bodies: Vec<am_core::model::ConfigFileBody> = Vec::new();
     let mut cfg_probe: Vec<am_core::model::ConfigProbe> = Vec::new();
+    let mut cfg_patches: Vec<am_core::model::ConfigPatch> = Vec::new();
 
     // 监听会话目录：文件一有写入（用户在终端里发了任务、助手产生输出）就立刻唤醒本
     // 循环扫描上报，而不必干等 1.5s 轮询——后者在窗口关到托盘/失焦后会被 macOS
@@ -240,6 +241,8 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                     // 结构化配置的字段普查（只有键与类型，没有值）：与清单同频，
                     // 二期定字段白名单要靠它，见 configsync::probe
                     cfg_probe = crate::configsync::probe(&home);
+                    // 结构化配置里白名单字段的当前值（字段级同步）
+                    cfg_patches = crate::configsync::read_patches(&home);
                 }
                 last_cfg_scan = Some(std::time::Instant::now());
             }
@@ -259,6 +262,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             config_manifest: cfg_manifest.take(),
             config_bodies: std::mem::take(&mut pending_cfg_bodies),
             config_probe: std::mem::take(&mut cfg_probe),
+            config_patches: std::mem::take(&mut cfg_patches),
         };
 
         let mut req = client.post(format!("{hub}/monitor/report"));
@@ -398,6 +402,18 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                             if crate::configsync::apply(&home, &cfg_pushes) > 0 {
                                 // 落盘改变了本机状态，立刻重扫一次报上去，
                                 // 否则 hub 手里的清单还是旧的，下一轮会把同样的文件再推一遍。
+                                last_cfg_scan = None;
+                            }
+                        }
+                    }
+                    // 配置同步（字段级）：合并进本机 settings.json，只动白名单字段
+                    let cfg_patch_pushes: Vec<am_core::model::ConfigPatch> = body
+                        .pointer("/data/configPatches")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    if !cfg_patch_pushes.is_empty() {
+                        if let Some(home) = dirs::home_dir() {
+                            if crate::configsync::apply_patches(&home, &cfg_patch_pushes) > 0 {
                                 last_cfg_scan = None;
                             }
                         }

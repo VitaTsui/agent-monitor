@@ -2263,9 +2263,10 @@ async fn sync_configs(
     machine_id: &str,
     bodies: &[am_core::model::ConfigFileBody],
     probes: &[am_core::model::ConfigProbe],
+    patches: &[am_core::model::ConfigPatch],
     device_manifest: Option<am_core::model::ConfigManifest>,
-) -> (Vec<String>, Vec<am_core::model::ConfigPush>) {
-    let empty = || (Vec::new(), Vec::new());
+) -> (Vec<String>, Vec<am_core::model::ConfigPush>, Vec<am_core::model::ConfigPatch>) {
+    let empty = || (Vec::new(), Vec::new(), Vec::new());
 
     // 归属账号 + 该账号选定的配置源。未信任的设备一概不参与：
     // 它连会话都不许上报，更不该往别人的机器上写文件。
@@ -2290,6 +2291,33 @@ async fn sync_configs(
         state.configs.read().await.put_probe(&owner, machine_id, probes);
     }
 
+    // 字段级同步：源机的字段值进基线；镜像机缺什么就下发什么。
+    // 与 md 类走两条独立路径 —— 那边整份覆盖，这边只带白名单字段、由客户端合并。
+    // 算出来先存着，最后与 md 的结果一起返回：两条路径互不阻塞，同一轮里都能推进。
+    let mut patch_todo: Vec<am_core::model::ConfigPatch> = Vec::new();
+    if is_source {
+        if !patches.is_empty() {
+            state.configs.write().await.put_patches(&owner, patches);
+        }
+    } else {
+        let baseline = state.configs.read().await.patches_of(&owner);
+        // 镜像机已有的字段值，用于逐字段比对（只发真正不一致的，避免每轮重复下发）
+        let have: std::collections::HashMap<&str, &am_core::model::ConfigPatch> =
+            patches.iter().map(|p| (p.file.as_str(), p)).collect();
+        patch_todo = baseline
+            .into_iter()
+            .filter_map(|b| {
+                let mine = have.get(b.file.as_str());
+                let fields: std::collections::BTreeMap<_, _> = b
+                    .fields
+                    .into_iter()
+                    .filter(|(k, v)| mine.map(|m| m.fields.get(k) != Some(v)).unwrap_or(true))
+                    .collect();
+                (!fields.is_empty()).then_some(am_core::model::ConfigPatch { file: b.file, fields })
+            })
+            .collect();
+    }
+
     // 源机回传的内容入基线。只认源机的上传——否则任何一台被控设备都能往基线里塞东西，
     // 而基线随后会被分发到该账号的全部设备上。
     if is_source && !bodies.is_empty() {
@@ -2299,8 +2327,9 @@ async fn sync_configs(
         }
     }
 
-    // 还没收到过这台机器的清单（旧客户端，或刚上线还没扫完）：这一轮没有可比对的东西
-    let Some(device) = device_manifest else { return empty() };
+    // 还没收到过这台机器的清单（旧客户端，或刚上线还没扫完）：md 这条路没有可比对的东西，
+    // 但字段级的结果照常带上 —— 两者互不依赖。
+    let Some(device) = device_manifest else { return (Vec::new(), Vec::new(), patch_todo) };
 
     if is_source {
         // 源机：基线要向它看齐。先摘掉源机已经删掉的条目，否则用户在源机删了一个 agent，
@@ -2319,7 +2348,7 @@ async fn sync_configs(
         let baseline = state.configs.read().await.manifest_of(&owner);
         let mut pulls = crate::configsync::diff(&device, &baseline);
         pulls.truncate(crate::configsync::MAX_PULLS_PER_ROUND);
-        (pulls, Vec::new())
+        (pulls, Vec::new(), patch_todo)
     } else {
         // 镜像机：基线里有而它没有（或内容不同）的，发给它
         let store = state.configs.read().await;
@@ -2329,7 +2358,7 @@ async fn sync_configs(
             .take(crate::configsync::MAX_PUSHES_PER_ROUND)
             .filter_map(|rel| store.get(&owner, rel))
             .collect();
-        (Vec::new(), pushes)
+        (Vec::new(), pushes, patch_todo)
     }
 }
 
@@ -2835,11 +2864,12 @@ async fn report(
 
     // 配置同步：锁已释放再算 —— 里面要拿 registry 与 configs 两把锁，
     // 在 machines 写锁里嵌套取锁是自找死锁。
-    let (config_pulls, config_pushes) = sync_configs(
+    let (config_pulls, config_pushes, config_patches) = sync_configs(
         &state,
         &payload.machine_id,
         &payload.config_bodies,
         &payload.config_probe,
+        &payload.config_patches,
         device_manifest,
     )
     .await;
@@ -2873,6 +2903,8 @@ async fn report(
         // 配置同步：向源机索要的路径 / 向镜像机下发的内容（两者互斥，见 sync_configs）
         "configPulls": config_pulls,
         "configPushes": config_pushes,
+        // 字段级同步（settings.json）：客户端合并进本机，不整份覆盖
+        "configPatches": config_patches,
         "trusted": trusted,
         "hubVersion": ready_desktop_version(&downloads_dir),
         // 强制更新下限：客户端低于它必须更新才能继续使用

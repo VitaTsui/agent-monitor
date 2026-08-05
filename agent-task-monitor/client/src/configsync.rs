@@ -10,9 +10,12 @@
 //! ② **落盘一律「备份 + 原子写」**，不用 `agent::write_transfer` 那条整份覆盖的路径。
 //!    这些是用户自己攒的 CLAUDE.md / agents，被无声盖掉找不回来是不可接受的。
 
-use am_core::configpath::{is_allowed, DIRS, MAX_FILE_BYTES, SINGLE_FILES};
+use am_core::configpath::{
+    is_allowed, is_syncable_field, looks_machine_specific, DIRS, MAX_FILE_BYTES, SINGLE_FILES,
+};
 use am_core::model::{
-    ConfigFileBody, ConfigFileMeta, ConfigKeyInfo, ConfigManifest, ConfigProbe, ConfigPush,
+    ConfigFileBody, ConfigFileMeta, ConfigKeyInfo, ConfigManifest, ConfigPatch, ConfigProbe,
+    ConfigPush,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use sha2::{Digest, Sha256};
@@ -343,28 +346,114 @@ fn walk_keys(v: &serde_json::Value, prefix: &str, depth: usize, out: &mut Vec<Co
     }
 }
 
-/// 值里是否出现「只在本机成立」的东西：绝对路径、家目录变量、盘符。
+// ───────────────────── 结构化配置的字段级同步（二期）─────────────────────
+
+/// 读出本机结构化配置里**白名单内、且值不含本机路径**的字段。
 ///
-/// 递归看所有字符串叶子——机器相关的路径常常藏在数组或嵌套对象里
-/// （比如 hook 命令数组、指向本机脚本的 helper 配置），只看顶层标量会漏掉。
-fn looks_machine_specific(v: &serde_json::Value) -> bool {
-    match v {
-        serde_json::Value::String(s) => {
-            let s = s.trim();
-            s.starts_with('/')
-                || s.starts_with("~/")
-                || s.contains("/Users/")
-                || s.contains("/home/")
-                || s.contains("$HOME")
-                || s.contains("%USERPROFILE%")
-                || s.contains(":\\")
-                // Windows 反斜杠路径（`C:\x` 已被上一条覆盖，这里抓 `\\server\share`）
-                || s.starts_with("\\\\")
+/// 两道闸都在这里：字段名过 `is_syncable_field`，值再过 `looks_machine_specific`。
+/// 后者不能省——字段名对了，用户仍可能在里面填了一个绝对路径（那是完全合法的写法），
+/// 同步过去只会让另一台机器指向一个不存在的位置。
+pub fn read_patches(home: &Path) -> Vec<ConfigPatch> {
+    let mut out = Vec::new();
+    for (id, rel) in PROBE_FILES {
+        let Some(value) = read_structured(&home.join(rel), rel) else { continue };
+        let serde_json::Value::Object(map) = value else { continue };
+        let mut fields = std::collections::BTreeMap::new();
+        for (k, v) in map {
+            if !is_syncable_field(id, &k) {
+                continue;
+            }
+            if looks_machine_specific(&v) {
+                tracing::debug!("配置字段 {id}:{k} 含本机路径，不参与同步");
+                continue;
+            }
+            fields.insert(k, v);
         }
-        serde_json::Value::Array(a) => a.iter().any(looks_machine_specific),
-        serde_json::Value::Object(o) => o.values().any(looks_machine_specific),
-        _ => false,
+        if !fields.is_empty() {
+            out.push(ConfigPatch { file: (*id).to_string(), fields });
+        }
     }
+    out
+}
+
+/// 读一份结构化配置（按扩展名选解析器）。读不到/解析不了都返回 None。
+fn read_structured(path: &Path, rel: &str) -> Option<serde_json::Value> {
+    let txt = std::fs::read_to_string(path).ok()?;
+    if rel.ends_with(".toml") {
+        toml::from_str(&txt).ok()
+    } else {
+        serde_json::from_str(&txt).ok()
+    }
+}
+
+/// 把 hub 下发的字段合并进本机结构化配置，返回实际改动的文件数。
+///
+/// **只覆盖白名单字段，绝不整份替换**：用户手写的一切（尤其 `hooks` 里那条命令指向
+/// 本机 exe 的配对 hook）原样保留。落盘前 dry-run 校验合并结果仍能解析且顶层是对象——
+/// settings.json 写坏了 Claude Code 会直接起不来，这个代价远高于「这次没同步上」。
+///
+/// 目前只处理 JSON。Codex 的 config.toml 回写需要 `toml_edit`（`toml` crate 序列化会吞掉
+/// 用户的注释与字段顺序），留到下一步单独做，这里遇到 .toml 直接跳过。
+pub fn apply_patches(home: &Path, patches: &[ConfigPatch]) -> usize {
+    let mut changed = 0;
+    for patch in patches {
+        let Some(rel) = PROBE_FILES.iter().find(|(id, _)| *id == patch.file).map(|(_, r)| *r) else {
+            tracing::warn!("拒绝合并未知配置文件: {}", patch.file);
+            continue;
+        };
+        if rel.ends_with(".toml") {
+            // 还没接 toml_edit，宁可不同步也不吞掉用户的注释
+            continue;
+        }
+        let target = home.join(rel);
+        // 本机还没有这个文件就不去创建：凭空造一个 settings.json 可能改变
+        // Claude Code 的默认行为，而用户从没要求过我们创建它。
+        let Some(mut root) = read_structured(&target, rel) else { continue };
+        if !root.is_object() {
+            continue;
+        }
+
+        let mut dirty = false;
+        {
+            let Some(obj) = root.as_object_mut() else { continue };
+            for (k, v) in &patch.fields {
+                // hub 下发的字段同样不可信：再过一遍两道闸
+                if !is_syncable_field(&patch.file, k) || looks_machine_specific(v) {
+                    tracing::warn!("拒绝合并字段 {}:{k}", patch.file);
+                    continue;
+                }
+                if obj.get(k) != Some(v) {
+                    obj.insert(k.clone(), v.clone());
+                    dirty = true;
+                }
+            }
+        }
+        if !dirty {
+            continue;
+        }
+
+        // dry-run：序列化 + 重新解析，确认产物仍是合法且顶层为对象的 JSON
+        let Ok(out) = serde_json::to_string_pretty(&root) else { continue };
+        if !serde_json::from_str::<serde_json::Value>(&out).map(|v| v.is_object()).unwrap_or(false) {
+            tracing::warn!("合并结果自检失败，跳过写入: {}", patch.file);
+            continue;
+        }
+
+        let bak = with_suffix(&target, ".am-bak");
+        let _ = std::fs::copy(&target, &bak);
+        let tmp = with_suffix(&target, ".am-tmp");
+        if std::fs::write(&tmp, out.as_bytes()).is_err() {
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &target) {
+            let _ = std::fs::remove_file(&tmp);
+            tracing::warn!("替换配置文件失败 {}: {e}", patch.file);
+            continue;
+        }
+        tracing::info!("已同步配置字段: {} ({} 项)", patch.file, patch.fields.len());
+        changed += 1;
+    }
+    changed
 }
 
 /// 在**完整文件名**后追加后缀（`x.md` → `x.md.am-bak`）。
@@ -380,6 +469,7 @@ fn with_suffix(p: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     // 白名单本身的用例在 am_core::configpath —— 规则只有那一份，测试也只放那一份
 
@@ -481,6 +571,105 @@ mod tests {
         let codex = probes.iter().find(|p| p.file == "codex/config.toml").expect("有 config.toml");
         assert!(codex.keys.iter().any(|k| k.path == "tui.theme"));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn patch_of(file: &str, pairs: &[(&str, serde_json::Value)]) -> ConfigPatch {
+        ConfigPatch {
+            file: file.into(),
+            fields: pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+        }
+    }
+
+    #[test]
+    fn read_patches_takes_whitelisted_only() {
+        let dir = std::env::temp_dir().join(format!("am-cfg-rp-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".claude"));
+        let _ = std::fs::write(
+            dir.join(".claude/settings.json"),
+            br#"{"model":"opus","apiKeyHelper":"/Users/x/k.sh","hooks":{"a":1},"tui":"dark"}"#,
+        );
+        let patches = read_patches(&dir);
+        let p = patches.iter().find(|p| p.file == "claude/settings.json").unwrap();
+        assert_eq!(p.fields.keys().collect::<Vec<_>>(), vec!["model"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_patches_skips_machine_specific_values() {
+        let dir = std::env::temp_dir().join(format!("am-cfg-rpm-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".claude"));
+        // 白名单字段，但值是本机路径 —— 不该被带走
+        let _ = std::fs::write(
+            dir.join(".claude/settings.json"),
+            br#"{"model":"/Users/vita/custom-model"}"#,
+        );
+        assert!(read_patches(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_patches_preserves_hooks_and_user_fields() {
+        let dir = std::env::temp_dir().join(format!("am-cfg-ap-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".claude"));
+        let original = r#"{
+  "model": "sonnet",
+  "hooks": {"PreToolUse": [{"hooks": [{"command": "/opt/am/agent-monitor hook"}]}]},
+  "myOwnField": {"deep": [1, 2, 3]}
+}"#;
+        let p = dir.join(".claude/settings.json");
+        let _ = std::fs::write(&p, original);
+
+        let n = apply_patches(&dir, &[patch_of("claude/settings.json", &[("model", json!("opus"))])]);
+        assert_eq!(n, 1);
+
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        // 白名单字段被更新
+        assert_eq!(after["model"], json!("opus"));
+        // 配对 hook 与用户自己的字段**原样保留** —— 这条挂了就是二期最危险的回归
+        assert_eq!(
+            after["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            json!("/opt/am/agent-monitor hook")
+        );
+        assert_eq!(after["myOwnField"], json!({"deep": [1, 2, 3]}));
+        // 旧版留在备份里
+        assert!(std::fs::read_to_string(dir.join(".claude/settings.json.am-bak"))
+            .unwrap()
+            .contains("sonnet"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_patches_rejects_blacklisted_and_machine_specific() {
+        let dir = std::env::temp_dir().join(format!("am-cfg-apr-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".claude"));
+        let p = dir.join(".claude/settings.json");
+        let _ = std::fs::write(&p, br#"{"model":"sonnet","hooks":{"keep":"me"}}"#);
+
+        // hub 下发黑名单字段 + 白名单字段但值是本机路径 —— 两者都必须被拒
+        let n = apply_patches(
+            &dir,
+            &[patch_of(
+                "claude/settings.json",
+                &[("hooks", json!({"evil": "x"})), ("model", json!("/Users/attacker/m"))],
+            )],
+        );
+        assert_eq!(n, 0, "不该有任何写入");
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(after["hooks"], json!({"keep": "me"}));
+        assert_eq!(after["model"], json!("sonnet"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_patches_does_not_create_missing_file() {
+        let dir = std::env::temp_dir().join(format!("am-cfg-apc-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".claude"));
+        let n = apply_patches(&dir, &[patch_of("claude/settings.json", &[("model", json!("opus"))])]);
+        assert_eq!(n, 0);
+        assert!(!dir.join(".claude/settings.json").exists(), "不该凭空创建配置文件");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

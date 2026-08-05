@@ -12,8 +12,8 @@
 //! <data_dir>/configs/<safe_user>/files/<rel>     文件内容，<rel> 同 ConfigFileMeta::path
 //! ```
 
-use am_core::configpath::{is_allowed, MAX_FILE_BYTES};
-use am_core::model::{ConfigFileBody, ConfigManifest, ConfigProbe, ConfigPush};
+use am_core::configpath::{is_allowed, is_syncable_field, looks_machine_specific, MAX_FILE_BYTES};
+use am_core::model::{ConfigFileBody, ConfigManifest, ConfigPatch, ConfigProbe, ConfigPush};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -184,6 +184,54 @@ impl ConfigStore {
             sha256: sha256_hex(&bytes),
             content_b64: B64.encode(&bytes),
         })
+    }
+
+    /// 把配置源的字段值写进基线（字段级同步）。
+    ///
+    /// 入库前**再过一遍白名单**：上报来自客户端，不能因为「它说这是可同步字段」就照收——
+    /// 一台被控设备否则就能把 `hooks` 塞进基线，再由 hub 分发到该账号的所有机器上。
+    pub fn put_patches(&mut self, user: &str, patches: &[ConfigPatch]) -> bool {
+        let mut clean = Vec::new();
+        for p in patches {
+            let mut fields = std::collections::BTreeMap::new();
+            for (k, v) in &p.fields {
+                if is_syncable_field(&p.file, k) && !looks_machine_specific(v) {
+                    fields.insert(k.clone(), v.clone());
+                } else {
+                    tracing::warn!("拒绝把字段 {}:{k} 收进基线", p.file);
+                }
+            }
+            if !fields.is_empty() {
+                clean.push(ConfigPatch { file: p.file.clone(), fields });
+            }
+        }
+        if clean == self.patches_of(user) {
+            return false;
+        }
+        let dir = self.user_dir(user);
+        if std::fs::create_dir_all(&dir).is_err() {
+            return false;
+        }
+        let Ok(txt) = serde_json::to_string_pretty(&clean) else { return false };
+        let path = dir.join("patches.json");
+        let tmp = dir.join("patches.json.tmp");
+        if std::fs::write(&tmp, &txt).is_err() {
+            return false;
+        }
+        if std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return false;
+        }
+        true
+    }
+
+    /// 基线里的字段值（没有则空）
+    pub fn patches_of(&self, user: &str) -> Vec<ConfigPatch> {
+        let path = self.user_dir(user).join("patches.json");
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
     }
 
     /// 存下某设备的结构化配置字段普查（二期定白名单用）。
@@ -374,6 +422,35 @@ mod tests {
         assert!(!store.put("u", &body("claude/CLAUDE.md", &big)));
 
         assert_eq!(store.file_count("u"), 0);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn put_patches_filters_blacklisted_fields() {
+        let d = tmp_dir("patch");
+        let mut store = ConfigStore::load(&d);
+        let patch = ConfigPatch {
+            file: "claude/settings.json".into(),
+            fields: [
+                ("model".to_string(), serde_json::json!("opus")),
+                // 客户端可能被控 —— hub 必须自己再过一遍白名单
+                ("hooks".to_string(), serde_json::json!({"evil": "x"})),
+                ("apiKeyHelper".to_string(), serde_json::json!("/Users/a/k.sh")),
+                // 白名单字段但值是本机路径
+                ("model2".to_string(), serde_json::json!("/abs/path")),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        assert!(store.put_patches("u", &[patch]));
+
+        let saved = store.patches_of("u");
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].fields.keys().collect::<Vec<_>>(), vec!["model"]);
+        assert_eq!(saved[0].fields["model"], serde_json::json!("opus"));
+
+        // 重启后还在
+        assert_eq!(ConfigStore::load(&d).patches_of("u"), saved);
         let _ = std::fs::remove_dir_all(&d);
     }
 

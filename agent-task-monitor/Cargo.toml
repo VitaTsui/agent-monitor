@@ -11,7 +11,9 @@ license = "MIT"
 am-core = { path = "core" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order：JSON 对象保留原有键顺序。配置同步要改用户的 settings.json，
+# 默认的字母序重排会让用户 diff 自己的配置时看到一堆与本次改动无关的变化。
+serde_json = { version = "1", features = ["preserve_order"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 anyhow = "1"

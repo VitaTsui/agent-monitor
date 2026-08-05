@@ -153,15 +153,19 @@ const ConfigSyncPanel: React.FC = () => {
       <div className={styles.note}>
         <div className={styles.noteTitle}>同步范围</div>
         <div className={styles.noteBody}>
-          只同步 Markdown 类配置：<code>CLAUDE.md</code>、<code>agents/</code>、
+          <strong>整份同步</strong>：<code>CLAUDE.md</code>、<code>agents/</code>、
           <code>commands/</code>、<code>skills/</code>，以及 Codex 的 <code>AGENTS.md</code> 与
           <code>prompts/</code>。
           <br />
-          <strong>登录凭据不会同步</strong>，它们不会离开你本机；
-          <code>settings.json</code> 也不同步 —— 里面混着机器相关的路径（包括本客户端写入的配对
-          hook），整份覆盖会让另一台机器的配对失效。
+          <strong>按字段同步</strong>：<code>settings.json</code> 只同步 <code>model</code>，
+          合并进本机文件 —— 你自己写的其它字段一律原样保留，<code>hooks</code>、
+          <code>apiKeyHelper</code>、<code>statusLine</code>、<code>permissions</code>
+          等含本机路径的字段<strong>永不同步</strong>（覆盖过去会让另一台机器的会话配对失效）。
+          即使是可同步字段，值里含绝对路径时也会自动跳过。
           <br />
-          被覆盖的文件会在原地留一份 <code>.am-bak</code> 备份。源机删除的文件<strong>不会</strong>
+          <strong>登录凭据不会同步</strong>，它们不会离开你本机。
+          <br />
+          被改动的文件会在原地留一份 <code>.am-bak</code> 备份。源机删除的文件<strong>不会</strong>
           在其它设备上被删除。
         </div>
       </div>

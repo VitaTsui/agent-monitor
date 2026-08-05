@@ -234,6 +234,10 @@ pub struct ReportPayload {
     /// 二期字段级同步的准备工作，见 `ConfigProbe`。
     #[serde(default)]
     pub config_probe: Vec<ConfigProbe>,
+    /// 本机结构化配置里**白名单字段**的当前值（字段级同步用）。
+    /// 只有配置源机器上报的会进基线；镜像机上报的仅用于判断它是否已同步到位。
+    #[serde(default)]
+    pub config_patches: Vec<ConfigPatch>,
 }
 
 /// 结构化配置里的一个字段（**不含值**）。
@@ -265,6 +269,37 @@ pub struct ConfigProbe {
     /// 文件标识：`claude/settings.json` 或 `codex/config.toml`
     pub file: String,
     pub keys: Vec<ConfigKeyInfo>,
+}
+
+/// 结构化配置的**字段级**同步单元（二期）。
+///
+/// 与 md 类配置的 `ConfigPush` 是两条完全不同的路径，不要混用：
+/// 那边整份覆盖，这边只带白名单内的几个顶层字段，客户端读到后**合并**进本机文件，
+/// 用户手写的其余字段（尤其 `hooks`）原样保留。
+///
+/// hub 上因此永远不存在一份完整的用户 settings.json 副本 —— 基线里只有
+/// `SETTINGS_SYNC_KEYS` 圈定的那几个值。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigPatch {
+    /// 文件标识：`claude/settings.json` 或 `codex/config.toml`
+    pub file: String,
+    /// 顶层字段名 → 值。只会出现白名单内、且值不含本机路径的字段。
+    pub fields: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl ConfigPatch {
+    /// 内容指纹：字段集合一致则一致。用于判断某台设备是否已经与基线同步。
+    ///
+    /// 用 BTreeMap 是为了这个：HashMap 的迭代顺序不稳定，同样的内容会算出不同的指纹，
+    /// 于是每一轮都判定「不一致」，无休止地重复下发。
+    pub fn fingerprint(&self) -> String {
+        serde_json::to_string(&self.fields).unwrap_or_default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
 }
 
 /// 配置同步：单个文件的指纹。
