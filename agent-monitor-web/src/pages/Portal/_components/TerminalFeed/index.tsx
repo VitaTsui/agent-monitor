@@ -118,20 +118,28 @@ export const SelectCard: React.FC<{
     );
 
   /**
-   * 多选提交：勾选序号 + 末尾补一个 Submit 的序号，连成一串发出去。
+   * 「提交本题 / 去下一题」在终端选择卡里的按键编号，单选多选都是它。
    *
-   * 终端多选卡里 **Submit 自己也占一个编号**：N 个选项占 1..N，其后是「其它/自定义」
-   * 占 N+1，Submit 就是 N+2。按下它即提交，不必用 ↓ 导航过去（实测确认）。
-   * 于是 4 选项里勾 1、3 就发 "136" —— 逐个数字键勾选，最后一下落在 Submit 上。
+   * 编号排布：N 个选项占 1..N，其后「其它/自定义」占 N+1，这个键就是 N+2。
+   * 按下它即落定并翻页，不必用 ↓ 导航过去（实测确认）。
    *
-   * 此前一律按单选只发单个序号，终端勾上一项后仍停在卡上等 Submit，表现为「提交卡住」：
-   * pendingSelect 不被清除，其他端的卡也跟着一直挂着不消失。
+   * **数字键只是把选中落在那一项上，并不会翻页。** 少发这一下，终端就停在本题等着，
+   * 而客户端两秒后自动补的那个回车正好替它确认 —— 那个回车落在下一题上，把下一题也
+   * 按默认高亮项答掉了。「答完第一题，后面的题没等你点就自己没了」就是这么来的。
+   */
+  const nextKey = () => String((q?.options?.length ?? 0) + 2);
+
+  /**
+   * 多选提交：勾选序号 + 末尾补一个 [`nextKey`]，连成一串发出去。
+   * 4 选项里勾 1、3 就发 "136" —— 逐个数字键勾选，最后一下落在 Submit 上。
    *
    * 序号连写不加分隔符，因为终端认的是按键而不是文本。AskUserQuestion 每题至多 4 个
-   * 选项，Submit 编号最大到 6，不会出现两位数带来的歧义。
+   * 选项，编号最大到 6，不会出现两位数带来的歧义。
    */
-  const submitPicked = () =>
-    submit(picked.join("") + String((q?.options?.length ?? 0) + 2));
+  const submitPicked = () => submit(picked.join("") + nextKey());
+
+  /** 单选提交：选中序号 + [`nextKey`]。与多选同构，区别只在单选不用先攒勾选。 */
+  const submitOne = (n: number) => submit(String(n) + nextKey());
 
   if (!q) return null;
 
@@ -160,15 +168,15 @@ export const SelectCard: React.FC<{
               role={onAnswer ? "button" : undefined}
               tabIndex={onAnswer ? 0 : undefined}
               aria-pressed={multi ? picked.includes(oi + 1) : undefined}
-              // 单选点一下即落定；多选只切换勾选，攒齐了再由下方按钮一次性提交
-              onClick={() => (multi ? toggle(oi + 1) : submit(String(oi + 1)))}
+              // 单选点一下即落定（序号 + 下一题键）；多选只切换勾选，攒齐了再由下方按钮一次性提交
+              onClick={() => (multi ? toggle(oi + 1) : submitOne(oi + 1))}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   if (multi) {
                     toggle(oi + 1);
                   } else {
-                    submit(String(oi + 1));
+                    submitOne(oi + 1);
                   }
                 }
               }}
