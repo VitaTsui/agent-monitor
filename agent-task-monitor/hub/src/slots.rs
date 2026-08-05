@@ -30,6 +30,22 @@ const PLACEHOLDER_KEEP_SECS: u64 = 600;
 /// seen 续期到差多久才值得标脏落盘（避免每条钉钉消息都写一次盘）
 const SEEN_FLUSH_SECS: u64 = 3600;
 
+/// 号池上限：号位总数摸到它，就不再干等 [`SLOT_KEEP_SECS`]，提前回收已经不在的终端。
+///
+/// 光靠一周的保留期回收不住 —— 一周里开过的终端窗口累计几十个，号位一路涨到 80 多，
+/// 而同时活着的不过十来个。「@83」既难记又难念，等一周才回收等于没有回收。
+///
+/// 30 给「实际十来个终端」留了两倍余量：日常根本摸不到这条线（行为与从前完全一致），
+/// 只有号池真的膨胀了才触发。活着的终端**永远不回收**，超过 30 个也照常发号。
+const SLOT_MAX: usize = 30;
+
+/// 提前回收的最短静默期：不在本批活跃列表、且至少这么久没露过面，才准回收。
+///
+/// 活跃列表来自客户端上报，一轮抖动（网络、客户端重启、扫描慢了一拍）就可能少几个会话。
+/// 没有这道闸门，一次抖动就会把还开着的终端的号收走、转手发给别人 —— 用户照旧列表发的
+/// 「@N」于是打进毫不相干的终端，正是号位锚设计要避免的那件事。半小时足够盖住任何抖动。
+const SLOT_MIN_IDLE_SECS: u64 = 1800;
+
 /// 一个用户的号位表（落盘于 data_dir/bot_slots.json）
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct SlotTable {
@@ -74,6 +90,40 @@ impl SlotTable {
             self.slots.remove(k);
             self.seen.remove(k);
             dirty = true;
+        }
+
+        // 号池上限：还差多少个号位才装得下这一批，就提前回收多少个「已经不在的」终端。
+        //
+        // 只挑本批活跃锚之外、且静默够久（SLOT_MIN_IDLE_SECS）的，按最久没见到的先收 ——
+        // 排序天然把「几天前关掉的临时终端」排在「昨晚关机的常用机器」前面，轮不到后者。
+        // 一个活着的锚都不动：活跃会话超过 SLOT_MAX 时收不到候选，照常往上发号。
+        let alive: HashSet<&str> = keys.iter().map(String::as_str).collect();
+        let fresh = alive.iter().filter(|k| !self.slots.contains_key(**k)).count();
+        let over = (self.slots.len() + fresh).saturating_sub(SLOT_MAX);
+        if over > 0 {
+            let mut dead: Vec<(u64, &String)> = self
+                .slots
+                .keys()
+                .filter(|k| !alive.contains(k.as_str()))
+                .filter_map(|k| {
+                    let at = self.seen.get(k).copied().unwrap_or(0);
+                    (now.saturating_sub(at) >= SLOT_MIN_IDLE_SECS).then_some((at, k))
+                })
+                .collect();
+            dead.sort_unstable();
+            let doomed: Vec<String> =
+                dead.into_iter().take(over).map(|(_, k)| k.clone()).collect();
+            for k in doomed {
+                // 号位马上要转给新终端了，「连续对话」还锁着它就会串台：
+                // 用户以为在跟原来那个终端说话，实际发进了刚顶上来的陌生会话。解锁，让他重新 @N。
+                if let Some(no) = self.slots.remove(&k) {
+                    if self.sticky == Some(no) {
+                        self.sticky = None;
+                    }
+                }
+                self.seen.remove(&k);
+                dirty = true;
+            }
         }
 
         let mut used: HashSet<u32> = self.slots.values().copied().collect();
@@ -298,6 +348,81 @@ mod tests {
         assert!(is_placeholder("m1|task:aaa"));
         assert!(!is_placeholder("m1|sh:100@9"));
         assert!(!is_placeholder("task:weird-hostname|sh:100@9"));
+    }
+
+    /// 造一张已经装满 SLOT_MAX 个号位的表：`live_n` 个还活着，其余是很久没露面的僵尸。
+    /// 返回（表，活锚集合，僵尸锚集合）。
+    fn packed_table(live_n: usize, born: u64) -> (SlotTable, Vec<String>, Vec<String>) {
+        let all: Vec<String> = (0..SLOT_MAX).map(|i| format!("m|sh:{i}@{i}")).collect();
+        let mut t = SlotTable::default();
+        t.assign(&all, born);
+        let (live, dead) = all.split_at(live_n);
+        (t, live.to_vec(), dead.to_vec())
+    }
+
+    /// 号池摸到上限：提前回收已经不在的终端，新终端捡回小号 —— 号位不再一路涨到 80 多
+    #[test]
+    fn slot_pool_recycles_dead_at_cap() {
+        let (mut t, live, dead) = packed_table(10, 1000);
+        // 僵尸静默够久（> SLOT_MIN_IDLE_SECS），此时来个新终端
+        let now = 1000 + SLOT_MIN_IDLE_SECS + 1;
+        let newcomer = "m|sh:999@999".to_string();
+        let mut batch = live.clone();
+        batch.push(newcomer.clone());
+        let out = t.assign(&batch, now);
+
+        assert!(out.0[&newcomer] <= SLOT_MAX as u32, "新终端应捡回已释放的小号，而不是 31");
+        assert!(t.slots.len() <= SLOT_MAX, "号池不得超过上限");
+        for k in &live {
+            assert!(t.slots.contains_key(k), "活着的锚 {k} 不该被回收");
+        }
+        assert!(dead.iter().any(|k| !t.slots.contains_key(k)), "该回收掉一些僵尸");
+    }
+
+    /// 活着的锚号位钉死：触发上限回收也不能动它们的号
+    #[test]
+    fn cap_recycle_never_touches_live_slots() {
+        let (mut t, live, _) = packed_table(10, 1000);
+        let before: Vec<u32> = live.iter().map(|k| t.slots[k]).collect();
+        let now = 1000 + SLOT_MIN_IDLE_SECS + 1;
+        let mut batch = live.clone();
+        batch.push("m|sh:999@999".to_string());
+        t.assign(&batch, now);
+        let after: Vec<u32> = live.iter().map(|k| t.slots[k]).collect();
+        assert_eq!(before, after, "活跃终端的号位必须原样不动");
+    }
+
+    /// 上报抖动保护：刚从列表里消失一轮的锚（静默不足 SLOT_MIN_IDLE_SECS）不许提前回收 ——
+    /// 收了就等于把还开着的终端的号转手发给别人，用户的「@N」会打进陌生会话
+    #[test]
+    fn cap_recycle_spares_recently_seen() {
+        let (mut t, live, dead) = packed_table(10, 1000);
+        // 只过了几秒，僵尸其实是「刚抖没的」
+        let now = 1000 + 10;
+        let newcomer = "m|sh:999@999".to_string();
+        let mut batch = live.clone();
+        batch.push(newcomer.clone());
+        t.assign(&batch, now);
+        for k in &dead {
+            assert!(t.slots.contains_key(k), "静默不足的锚 {k} 不该被回收");
+        }
+        assert_eq!(t.slots[&newcomer], SLOT_MAX as u32 + 1, "收不到候选就照常往上发号");
+    }
+
+    /// 被回收的号若正被「连续对话」锁着，必须一并解锁 —— 否则号转手后消息串进陌生终端
+    #[test]
+    fn cap_recycle_clears_stale_sticky() {
+        let (mut t, live, dead) = packed_table(10, 1000);
+        // 锁定一个即将被回收的僵尸的号
+        let doomed_no = t.slots[&dead[0]];
+        t.sticky = Some(doomed_no);
+        let now = 1000 + SLOT_MIN_IDLE_SECS + 1;
+        let mut batch = live.clone();
+        batch.push("m|sh:999@999".to_string());
+        t.assign(&batch, now);
+        if !t.slots.contains_key(&dead[0]) {
+            assert_eq!(t.sticky, None, "锁定的号被回收了，sticky 必须清掉");
+        }
     }
 
     /// 落盘脏标：只在号位真变或 seen 跨过续期阈值时置位，日常刷列表不写盘
