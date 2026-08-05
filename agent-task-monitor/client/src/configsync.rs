@@ -547,29 +547,83 @@ fn looks_like_path(s: &str) -> bool {
     s.starts_with('/') || s.starts_with("~/") || s.starts_with("./")
 }
 
-/// 某个 MCP server 在本机是否真的跑得起来：可执行文件在、且它引用的文件也在。
-fn mcp_runnable(cfg: &serde_json::Value, home: &Path) -> Result<(), String> {
-    let expand = |s: &str| -> std::path::PathBuf {
-        match s.strip_prefix("~/") {
-            Some(rest) => home.join(rest),
-            None => std::path::PathBuf::from(s),
+/// `~/x/y` → 本机绝对路径。分隔符一并归一化：`home.join(rest)` 不会动 rest 里的 `/`，
+/// 在 Windows 上会拼出 `C:\Users\你\.local/bin/x` 这种混合形态 —— 能用，但写进用户的
+/// 配置文件里既难看又容易在别处出岔子。
+fn expand_home(s: &str, home: &Path) -> std::path::PathBuf {
+    let Some(rest) = s.strip_prefix("~/") else { return std::path::PathBuf::from(s) };
+    let mut p = home.to_path_buf();
+    for seg in rest.split('/') {
+        p.push(seg);
+    }
+    p
+}
+
+/// Windows 上的可执行文件后缀
+fn exec_exts() -> Vec<String> {
+    if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".into())
+            .split(';')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// 找出这个路径对应的**实际**可执行文件。
+///
+/// Windows 上可执行文件带后缀：配置里写的 `~/.local/bin/foo` 在那边实际是 `foo.exe`。
+/// 只查无后缀的话，装了也会被判成没装 —— 而且就算判过了，Claude Code 照原样 exec
+/// 同样起不来。所以这里返回真实存在的那个路径，供回写进配置。
+fn resolve_exec(p: &Path) -> Option<std::path::PathBuf> {
+    if p.is_file() {
+        return Some(p.to_path_buf());
+    }
+    for ext in exec_exts() {
+        let mut name = p.as_os_str().to_os_string();
+        name.push(&ext);
+        let q = std::path::PathBuf::from(name);
+        if q.is_file() {
+            return Some(q);
         }
-    };
-    if let Some(cmd) = cfg.get("command").and_then(|c| c.as_str()) {
-        if looks_like_path(cmd) {
-            let p = expand(cmd);
-            if !p.exists() {
-                return Err(format!("可执行文件不存在: {}", p.display()));
+    }
+    None
+}
+
+/// 某个 MCP server 在本机是否真的跑得起来：可执行文件在、且它引用的文件也在。
+/// 跑得起来时，把 command 就地改写成**实际解析到的路径**（Windows 上可能补了 .exe）。
+fn mcp_runnable(cfg: &mut serde_json::Value, home: &Path) -> Result<(), String> {
+    if let Some(cmd) = cfg.get("command").and_then(|c| c.as_str()).map(str::to_string) {
+        if looks_like_path(&cmd) {
+            let p = expand_home(&cmd, home);
+            match resolve_exec(&p) {
+                Some(actual) => {
+                    // 回写实际路径：分隔符已归一化，Windows 上还可能带上了 .exe
+                    if let Some(o) = cfg.as_object_mut() {
+                        o.insert(
+                            "command".into(),
+                            serde_json::Value::String(actual.to_string_lossy().to_string()),
+                        );
+                    }
+                }
+                None => return Err(format!("可执行文件不存在: {}", p.display())),
             }
-        } else if which_in_path(cmd).is_none() {
+        } else if which_in_path(&cmd).is_none() {
             // 裸命令（npx / uvx / docker …）：PATH 里找不到就跑不起来
             return Err(format!("命令不在 PATH 里: {cmd}"));
         }
     }
-    for a in cfg.get("args").and_then(|a| a.as_array()).into_iter().flatten() {
-        let Some(a) = a.as_str() else { continue };
+    let args: Vec<String> = cfg
+        .get("args")
+        .and_then(|a| a.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    for a in &args {
         if looks_like_path(a) {
-            let p = expand(a);
+            let p = expand_home(a, home);
             if !p.exists() {
                 return Err(format!("引用的文件不存在: {}", p.display()));
             }
@@ -614,6 +668,8 @@ fn which_in_path(cmd: &str) -> Option<std::path::PathBuf> {
 fn drop_unrunnable_mcp(v: &mut serde_json::Value, home: &Path) -> Vec<(String, String)> {
     let Some(obj) = v.as_object_mut() else { return Vec::new() };
     let mut dropped = Vec::new();
+    // 注意 mcp_runnable 会**就地改写** command 为实际解析到的路径
+    // （Windows 上补 .exe、分隔符归一化），所以这里传 &mut
     obj.retain(|name, cfg| match mcp_runnable(cfg, home) {
         Ok(()) => true,
         Err(why) => {
@@ -1129,6 +1185,29 @@ theme = "dark"
         assert!(dump.contains("npx prettier"), "裸命令不该被误杀: {dump}");
         // 本机配对 hook 依旧在
         assert!(dump.contains("agent-monitor hook"), "配对 hook 丢了: {dump}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mcp_command_is_rewritten_to_resolved_path() {
+        // 解析到的实际路径要回写进配置：Windows 上补 .exe、分隔符归一化。
+        // 只判断「存在」而不回写是不够的 —— Claude Code 照原样 exec 一样起不来。
+        let dir = std::env::temp_dir().join(format!("am-cfg-mcpres-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".local/bin"));
+        let _ = std::fs::write(dir.join(".local/bin/tool"), b"#!/bin/sh\n");
+        let _ = std::fs::write(dir.join(".claude.json"), br#"{"mcpServers":{}}"#);
+
+        let incoming =
+            patch_of("claude/claude.json", &[("mcpServers", json!({ "t": { "command": "~/.local/bin/tool" } }))]);
+        assert_eq!(apply_patches(&dir, &[incoming]).0, 1);
+
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(".claude.json")).unwrap())
+                .unwrap();
+        let cmd = after["mcpServers"]["t"]["command"].as_str().unwrap();
+        // 不再有波浪号，且指向真实存在的文件
+        assert!(!cmd.contains('~'), "~ 没展开: {cmd}");
+        assert!(std::path::Path::new(cmd).is_file(), "回写的路径不是真实文件: {cmd}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
