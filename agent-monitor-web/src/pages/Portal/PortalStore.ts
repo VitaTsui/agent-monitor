@@ -487,12 +487,17 @@ class PortalStore {
     });
     // 本地回显（刚发出、终端还没同步回来的那条）跟着搬家，否则存活清理连它一起丢，
     // 看着就像「刚发的消息凭空没了」。继任者已有内容时不覆盖，只清掉旧账。
+    //
+    // **只搬本地回显，绝不搬旧会话的历史**：继任会话是另一份 jsonl，内容由它自己
+    // 说了算。把旧账整份倒过去，配上 fetchMessages 的「累积合并（只增不减）」，
+    // 旧内容就再也退不掉了 —— 现象是下发 `/clear` 后终端已经清空，网页对话流却
+    // 还挂着清空前的全部内容，要切走再切回（走 dropMessageCache 清缓存）才正常。
     if (carried.length) {
       const next = { ...this._messagesById };
       carried.forEach(([from, to]) => {
-        const old = next[from];
-        if (old?.length && !next[to]?.length) {
-          next[to] = old;
+        const echoes = (next[from] ?? []).filter((m) => m.local);
+        if (echoes.length && !next[to]?.length) {
+          next[to] = echoes;
         }
         delete next[from];
       });
