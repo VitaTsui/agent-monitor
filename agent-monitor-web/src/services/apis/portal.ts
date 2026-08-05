@@ -519,3 +519,42 @@ export const getFsopResult = async (id: string, opId: string) => {
     `/monitor/tasks/${id}/fsop/${opId}`,
   );
 };
+
+/** 配置同步：单台设备的同步状态 */
+export interface ConfigSyncDevice {
+  machineId: string;
+  hostname: string;
+  platform: string;
+  trusted: boolean;
+  online: boolean;
+  /** 是否为配置源（其余设备向它看齐） */
+  isSource: boolean;
+  /** 客户端是否已支持配置同步（没上报过清单则为 false，通常是版本旧或刚上线） */
+  supported: boolean;
+  /** 本机在管配置份数 */
+  fileCount: number;
+  /** 还差多少份：源机 = 服务端基线尚未收全，镜像机 = 本机尚缺 */
+  behind: number;
+  /** 最近一次扫描时刻（unix 秒，0 = 没扫过） */
+  scannedAt: number;
+}
+
+/** 配置同步总览 */
+export interface ConfigSyncInfo {
+  enabled: boolean;
+  /** 配置源设备 id；未开启时为 null */
+  source: string | null;
+  /** 服务端基线里的份数 */
+  baselineCount: number;
+  devices: ConfigSyncDevice[];
+}
+
+/** 配置同步状态：谁是配置源、各设备还差多少份 */
+export const getConfigSync = async () => {
+  return await get<ConfigSyncInfo>("/monitor/config/sync");
+};
+
+/** 指定配置源设备；machineId 传空 = 关闭配置同步 */
+export const setConfigSource = async (machineId: string) => {
+  return await post<{ result: string }>("/monitor/config/source", { machineId });
+};

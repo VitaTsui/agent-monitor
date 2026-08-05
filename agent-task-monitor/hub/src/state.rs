@@ -65,6 +65,10 @@ pub struct MachineEntry {
     /// 见 NEW_SESSION_PAIR_SETTLE_SECS —— 新会话要等终端锚稳定一段时间才推，免得推出去的
     /// 编号指向隔壁终端。锚一变就重新计时。
     pub new_session_pending: HashMap<String, (Instant, String)>,
+    /// 该设备最近上报的配置清单。客户端每 30s 才带一次（配置几乎不动，每轮都发是浪费），
+    /// 所以这里要缓存住 —— 中间轮次的 pull/push 全靠它算差异，才能每轮推进而不是 30s 一步。
+    /// None = 该设备还没报过（旧客户端，或刚上线还没到第一次扫描）。
+    pub config_manifest: Option<am_core::model::ConfigManifest>,
 }
 
 /// 机器离线判定阈值
@@ -285,6 +289,8 @@ pub struct AppState {
     /// 锁定的会话冷却后（久未对话），第一条不带 `@` 的消息不直接下发，先回一句确认、把内容
     /// 存在这里；用户回「确认」就发它，省得重打一遍。短期数据，不落盘。
     pub bot_sticky_pending: RwLock<HashMap<String, (String, u64)>>,
+    /// 配置同步基线：账号 → 其「配置源」设备的在管配置。见 crate::configsync。
+    pub configs: RwLock<crate::configsync::ConfigStore>,
     /// 钉钉「挂起待发」的文件：用户名 → 待随下一条任务一起发的文件。
     /// 用户先发文件（或图文一起发图片）→ 暂存于此 → 下一条发任务的指令把它落到会话 tmp 目录、
     /// 并把相对路径回填到任务文字开头。
@@ -395,6 +401,8 @@ impl AppState {
         let slots = crate::slots::load(&config.data_dir);
         // 会话历史持久化：hub 重启后仍能回看之前派出去的活的结果
         let history = crate::history::load(&config.data_dir);
+        // 配置基线持久化：hub 重启后镜像机不必等源机重传一遍全部配置
+        let configs = crate::configsync::ConfigStore::load(&config.data_dir);
         Arc::new(Self {
             machines: RwLock::new(HashMap::new()),
             tokens: RwLock::new(sessions),
@@ -417,6 +425,7 @@ impl AppState {
             bot_sticky_pending: RwLock::new(HashMap::new()),
             bot_pending_files: RwLock::new(HashMap::new()),
             bot_pending_batch: RwLock::new(HashMap::new()),
+            configs: RwLock::new(configs),
         })
     }
 

@@ -1,0 +1,168 @@
+$border: rgba(36, 61, 66, 0.09);
+$text: #243d42;
+$muted: #7c9096;
+$accent: #0f9bad;
+
+.ConfigSyncPanel {
+  .loading {
+    display: flex;
+    justify-content: center;
+    padding: 32px 0;
+  }
+
+  // 顶部总览：当前是否开启 + 基线份数
+  .summary {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    border: 1px solid $border;
+    border-radius: 14px;
+    margin-bottom: 12px;
+    background: #fff;
+
+    .sumIcon {
+      flex: none;
+      width: 40px;
+      height: 40px;
+      border-radius: 11px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 21px;
+      color: #fff;
+      background: linear-gradient(135deg, #0f9bad 0%, #0b7d8c 100%);
+    }
+
+    .sumText {
+      flex: 1;
+      min-width: 0;
+
+      .sumTitle {
+        font-size: 14.5px;
+        font-weight: 600;
+        color: $text;
+      }
+
+      .sumMeta {
+        margin-top: 3px;
+        font-size: 11.5px;
+        color: $muted;
+      }
+    }
+  }
+
+  // 设备行：与设备管理同一视觉语言
+  .device {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid $border;
+    border-radius: 12px;
+    margin-bottom: 8px;
+
+    .devInfo {
+      min-width: 0;
+
+      .devName {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        font-weight: 600;
+        color: $text;
+        flex-wrap: wrap;
+      }
+
+      .devMeta {
+        margin-top: 4px;
+        font-size: 11px;
+        color: $muted;
+      }
+    }
+
+    .devActions {
+      display: flex;
+      gap: 6px;
+      white-space: nowrap;
+      align-items: center;
+
+      .actBtn,
+      .sourceBtn {
+        height: 28px;
+        border-radius: 999px;
+        padding-inline: 14px;
+        font-size: 12px;
+      }
+
+      .sourceBtn {
+        background: $accent;
+        border-color: $accent;
+
+        &:hover:not(:disabled) {
+          background: #0b7d8c;
+          border-color: #0b7d8c;
+        }
+      }
+    }
+  }
+
+  // 同步范围说明：这里写清「什么不同步」比写「什么同步」更要紧
+  .note {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: rgba(15, 155, 173, 0.05);
+    border: 1px solid rgba(15, 155, 173, 0.14);
+
+    .noteTitle {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: $text;
+      margin-bottom: 5px;
+    }
+
+    .noteBody {
+      font-size: 11.5px;
+      line-height: 1.75;
+      color: $muted;
+
+      code {
+        padding: 1px 5px;
+        border-radius: 5px;
+        background: rgba(36, 61, 66, 0.06);
+        font-size: 11px;
+        color: $text;
+      }
+
+      strong {
+        color: $text;
+      }
+    }
+  }
+
+  // 移动端：设备行竖排，按钮换行到右下
+  @media (max-width: 640px) {
+    .device {
+      flex-direction: column;
+      align-items: stretch;
+
+      .devActions {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        margin-top: 6px;
+
+        // !important 盖过 antd-overload 里移动端弹窗按钮的 min-height:42px
+        .actBtn,
+        .sourceBtn {
+          height: 28px !important;
+          min-height: 28px !important;
+          padding-inline: 12px !important;
+          font-size: 12px !important;
+        }
+      }
+    }
+  }
+}

@@ -165,6 +165,10 @@ struct Persisted {
     /// 自己配了机器人的用户不必绑：谁配的机器人，消息就归谁。
     #[serde(default)]
     dingtalk_ids: HashMap<String, DingtalkIdBinding>,
+    /// 配置同步的「配置源」：账号 → machine_id。没有条目 = 该账号没开配置同步，
+    /// hub 既不收清单也不下发（默认关闭，用户必须显式指定以谁为准）。
+    #[serde(default)]
+    config_source: HashMap<String, String>,
 }
 
 /// 钉钉 id 绑定：一个 staffId 唯一归属一个账号；一个账号可绑多个钉钉号。
@@ -209,6 +213,8 @@ pub struct Registry {
     dingtalk_recv_dirs: HashMap<String, HashMap<String, String>>,
     /// staffId → 账号。只有走全局机器人时才需要（那一个机器人服务所有人）。
     dingtalk_ids: HashMap<String, DingtalkIdBinding>,
+    /// 配置同步的源设备：账号 → machine_id。空 = 该账号未开启配置同步。
+    config_source: HashMap<String, String>,
 }
 
 impl Registry {
@@ -239,7 +245,7 @@ impl Registry {
                 p.super_user
             };
             let dingtalk_apps = p.dingtalk_apps;
-            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk_apps, dingtalk_recv_dirs: p.dingtalk_recv_dirs, dingtalk_ids: p.dingtalk_ids }
+            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk_apps, dingtalk_recv_dirs: p.dingtalk_recv_dirs, dingtalk_ids: p.dingtalk_ids, config_source: p.config_source }
         } else {
             Registry {
                 dir,
@@ -249,6 +255,7 @@ impl Registry {
                 dingtalk_apps: HashMap::new(),
                 dingtalk_recv_dirs: HashMap::new(),
                 dingtalk_ids: HashMap::new(),
+                config_source: HashMap::new(),
             }
         };
         if reg.users.is_empty() {
@@ -282,6 +289,7 @@ impl Registry {
             dingtalk_apps: self.dingtalk_apps.clone(),
             dingtalk_recv_dirs: self.dingtalk_recv_dirs.clone(),
             dingtalk_ids: self.dingtalk_ids.clone(),
+            config_source: self.config_source.clone(),
             // 已废弃字段（群机器人 / 企业微信）：写出时一律为空，
             // Persisted 上标了 skip_serializing，这里给默认值只为满足结构体字面量
             dingtalk: HashMap::new(),
@@ -587,6 +595,35 @@ impl Registry {
         self.save();
     }
 
+    /// 该账号的配置源设备（None = 未开启配置同步）
+    pub fn config_source_of(&self, username: &str) -> Option<String> {
+        self.config_source.get(username).cloned()
+    }
+
+    /// 指定配置源设备；`machine_id` 为空则关闭该账号的配置同步。
+    ///
+    /// 必须校验设备确实归该账号所有 —— 否则填一个别人的 machine_id 就能把对方的
+    /// 配置拉进自己的基线（而基线随后会分发给自己名下的所有设备，等于隔账号窃取）。
+    pub fn set_config_source(&mut self, username: &str, machine_id: &str) -> Result<(), String> {
+        let id = machine_id.trim();
+        if id.is_empty() {
+            self.config_source.remove(username);
+            self.save();
+            return Ok(());
+        }
+        if !self.owned_by(id, username) {
+            return Err("该设备不属于当前账号".into());
+        }
+        self.config_source.insert(username.to_string(), id.to_string());
+        self.save();
+        Ok(())
+    }
+
+    /// 设备被删除/换绑时清掉指向它的配置源，免得留下一个永远同步不动的悬空来源
+    pub fn clear_config_source_of_device(&mut self, machine_id: &str) {
+        self.config_source.retain(|_, v| v != machine_id);
+    }
+
     /// 该用户名下全部设备（含离线；设备管理列表用）
     pub fn devices_of(&self, username: &str) -> Vec<(String, DeviceMeta)> {
         self.devices
@@ -779,6 +816,9 @@ impl Registry {
     pub fn delete_device(&mut self, machine_id: &str) -> bool {
         let removed = self.devices.remove(machine_id).is_some();
         if removed {
+            // 它可能正是某账号的配置源：留着就是一个永远不再上报的来源，
+            // 其余设备会一直显示「同步中」却等不到任何东西。
+            self.clear_config_source_of_device(machine_id);
             self.save();
         }
         removed

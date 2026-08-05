@@ -3,6 +3,8 @@
 
 mod admin;
 mod commands;
+/// 配置同步：各账号的配置基线与差异计算
+mod configsync;
 mod crypto;
 mod dingtalk;
 mod dingtalk_stream;

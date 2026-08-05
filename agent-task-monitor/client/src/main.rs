@@ -5,6 +5,8 @@
 mod agent;
 /// Cursor/VSCode 扩展桥接（文件 IPC）——全平台内嵌终端都靠它下发
 mod bridge;
+/// Claude Code / Codex 配置的跨设备同步（白名单扫描 + 备份原子写）
+mod configsync;
 /// Claude Code hook 上报：让 agent 自报会话身份，取代猜配对
 mod hookrec;
 mod secrets;

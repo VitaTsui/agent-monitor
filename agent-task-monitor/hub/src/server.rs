@@ -143,6 +143,9 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/share/:id/kick", post(share_kick))
         .route("/monitor/share/connect", post(share_connect))
         .route("/monitor/share/disconnect", post(share_disconnect))
+        // ---- 配置同步（Claude Code / Codex 的 md 类配置跨设备镜像）----
+        .route("/monitor/config/sync", get(config_sync_status))
+        .route("/monitor/config/source", post(set_config_source))
         // ---- 用户自助机器人集成 ----
         // 配置读写（登录用户，返回各渠道配置 + 专属回调地址）
         .route("/monitor/integrations", get(integrations_get))
@@ -1384,6 +1387,92 @@ async fn list_devices(State(state): State<SharedState>, headers: HeaderMap) -> J
     machines(State(state), headers).await
 }
 
+/// GET /monitor/config/sync —— 配置同步状态：谁是配置源、各设备还差多少份。
+///
+/// 「差多少」对源机与镜像机含义相反：源机是「基线还没收全的份数」，
+/// 镜像机是「本机还缺的份数」，前端按 isSource 分别措辞。
+async fn config_sync_status(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let (source, devices) = {
+        let reg = state.registry.read().await;
+        (reg.config_source_of(&user), reg.devices_of(&user))
+    };
+    let store = state.configs.read().await;
+    let baseline = store.manifest_of(&user);
+    let machines = state.machines.read().await;
+
+    let list: Vec<Value> = devices
+        .iter()
+        .map(|(id, meta)| {
+            let entry = machines.get(id);
+            let online = entry
+                .map(|e| e.last_report.elapsed().as_secs() < crate::state::OFFLINE_AFTER_SECS)
+                .unwrap_or(false);
+            let is_source = source.as_deref() == Some(id.as_str());
+            // 没有清单 = 客户端版本还不支持配置同步，或刚上线还没扫完第一轮
+            let (supported, file_count, behind, scanned_at) = match entry
+                .and_then(|e| e.config_manifest.as_ref())
+            {
+                Some(m) => {
+                    let behind = if is_source {
+                        crate::configsync::diff(m, &baseline).len()
+                    } else {
+                        crate::configsync::diff(&baseline, m).len()
+                    };
+                    (true, m.files.len(), behind, m.scanned_at)
+                }
+                None => (false, 0usize, 0usize, 0u64),
+            };
+            json!({
+                "machineId": id,
+                "hostname": meta.hostname,
+                "platform": am_core::model::platform_dsr(&meta.platform),
+                "trusted": meta.trusted,
+                "online": online,
+                "isSource": is_source,
+                "supported": supported,
+                "fileCount": file_count,
+                "behind": behind,
+                "scannedAt": scanned_at,
+            })
+        })
+        .collect();
+
+    ok(json!({
+        "enabled": source.is_some(),
+        "source": source,
+        "baselineCount": store.file_count(&user),
+        "devices": list,
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigSourceReq {
+    /// 作为配置源的设备；空字符串 = 关闭该账号的配置同步
+    #[serde(default)]
+    machine_id: String,
+}
+
+/// POST /monitor/config/source —— 指定配置源设备（空 = 关闭同步）
+async fn set_config_source(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<ConfigSourceReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    // 归属校验在 registry 里做（填别人的 machine_id 就能把对方配置拉进自己的基线）
+    match state.registry.write().await.set_config_source(&user, &req.machine_id) {
+        Ok(()) if req.machine_id.trim().is_empty() => ok(json!({ "result": "已关闭配置同步" })),
+        Ok(()) => ok(json!({ "result": "已设为配置源" })),
+        Err(e) => err(400, &e),
+    }
+}
+
 /// 校验当前用户对设备的管理权限（超级管理员或归属本人）
 async fn ensure_owner(state: &SharedState, headers: &HeaderMap, id: &str) -> Result<String, Json<Value>> {
     let Some(user) = auth_user(state, headers).await else {
@@ -2131,6 +2220,82 @@ async fn agent_status(State(state): State<SharedState>, headers: HeaderMap) -> J
     }))
 }
 
+/// 配置同步的一轮：算出「要向这台机器索要哪些文件」与「要下发哪些文件给它」。
+///
+/// 差异每轮现算，**不进 `pending_*` 队列**：队列会在设备离线期间积压出一堆早已过期的内容，
+/// 上线后一股脑写下去；而配置差异是幂等的，重算一次比维护队列正确得多，也天然容错——
+/// 任何一轮丢了，下一轮照样算得出来。
+///
+/// 返回 `(要索要的路径, 要下发的内容)`，两者互斥：一台机器要么是配置源（只上传），
+/// 要么是镜像（只下载）。
+async fn sync_configs(
+    state: &SharedState,
+    machine_id: &str,
+    bodies: &[am_core::model::ConfigFileBody],
+    device_manifest: Option<am_core::model::ConfigManifest>,
+) -> (Vec<String>, Vec<am_core::model::ConfigPush>) {
+    let empty = || (Vec::new(), Vec::new());
+
+    // 归属账号 + 该账号选定的配置源。未信任的设备一概不参与：
+    // 它连会话都不许上报，更不该往别人的机器上写文件。
+    let (owner, source) = {
+        let reg = state.registry.read().await;
+        let meta = reg.device_meta(machine_id);
+        if !meta.trusted {
+            return empty();
+        }
+        let Some(owner) = meta.owner else { return empty() };
+        let source = reg.config_source_of(&owner);
+        (owner, source)
+    };
+    // 没指定配置源 = 该账号没开配置同步。默认关闭：往用户机器上写文件这件事，
+    // 必须是他自己点开的。
+    let Some(source) = source else { return empty() };
+    let is_source = source == machine_id;
+
+    // 源机回传的内容入基线。只认源机的上传——否则任何一台被控设备都能往基线里塞东西，
+    // 而基线随后会被分发到该账号的全部设备上。
+    if is_source && !bodies.is_empty() {
+        let mut store = state.configs.write().await;
+        for b in bodies {
+            store.put(&owner, b);
+        }
+    }
+
+    // 还没收到过这台机器的清单（旧客户端，或刚上线还没扫完）：这一轮没有可比对的东西
+    let Some(device) = device_manifest else { return empty() };
+
+    if is_source {
+        // 源机：基线要向它看齐。先摘掉源机已经删掉的条目，否则用户在源机删了一个 agent，
+        // 基线还留着，反手又会把它推回给其它机器。
+        //
+        // 空清单不 prune：客户端扫不到目录（权限、home 取不到）时也会报空，
+        // 那不是「用户删光了配置」，照单执行会清空整个基线。
+        if !device.files.is_empty() {
+            let keep: std::collections::HashSet<&str> =
+                device.files.iter().map(|f| f.path.as_str()).collect();
+            let dropped = state.configs.write().await.retain(&owner, &keep);
+            if dropped > 0 {
+                tracing::info!("配置基线移除 {dropped} 份（源机已删除）: {owner}");
+            }
+        }
+        let baseline = state.configs.read().await.manifest_of(&owner);
+        let mut pulls = crate::configsync::diff(&device, &baseline);
+        pulls.truncate(crate::configsync::MAX_PULLS_PER_ROUND);
+        (pulls, Vec::new())
+    } else {
+        // 镜像机：基线里有而它没有（或内容不同）的，发给它
+        let store = state.configs.read().await;
+        let want = crate::configsync::diff(&store.manifest_of(&owner), &device);
+        let pushes: Vec<_> = want
+            .iter()
+            .take(crate::configsync::MAX_PUSHES_PER_ROUND)
+            .filter_map(|rel| store.get(&owner, rel))
+            .collect();
+        (Vec::new(), pushes)
+    }
+}
+
 /// POST /monitor/report —— agent 上报快照，响应携带待执行命令。
 /// 未知设备登记为该 owner 的 pending（未信任）；非信任设备的会话不对外暴露。
 async fn report(
@@ -2219,6 +2384,7 @@ async fn report(
                 session_last_seen: HashMap::new(),
                 last_select_at: HashMap::new(),
                 new_session_pending: HashMap::new(),
+                config_manifest: None,
             }
         });
     // 设备上线边沿：新登记 或 之前已判离线（超阈值）
@@ -2227,6 +2393,12 @@ async fn report(
     entry.platform = payload.platform;
     entry.version = payload.version;
     entry.last_report = Instant::now();
+    // 配置清单：客户端每 30s 才带一次，其余轮次是 None —— 所以只覆盖、不清空，
+    // 中间轮次的差异计算全靠这份缓存才能每轮推进（见 configsync）。
+    if let Some(m) = &payload.config_manifest {
+        entry.config_manifest = Some(m.clone());
+    }
+    let device_manifest = entry.config_manifest.clone();
     // 上线边沿：刷新沉降起点。上线后 NEW_SESSION_SETTLE_SECS 内出现的会话一律当「重连扫回的
     // 已有会话」不推，避免客户端更新/重启后分批扫回历史会话时刷屏「会话开始」。
     // 同时清空会话基线：离线期间「消失」的旧会话不该在重连时逐条推「已结束」，重连后重建基线。
@@ -2624,6 +2796,11 @@ async fn report(
     let fs_ops: Vec<am_core::model::FsOp> = entry.pending_fsop.drain(..).collect();
     drop(machines);
 
+    // 配置同步：锁已释放再算 —— 里面要拿 registry 与 configs 两把锁，
+    // 在 machines 写锁里嵌套取锁是自找死锁。
+    let (config_pulls, config_pushes) =
+        sync_configs(&state, &payload.machine_id, &payload.config_bodies, device_manifest).await;
+
     // 会话历史：锁已释放，这里统一落（record 内部去重 + 截断 + 标脏，tick 循环负责写盘）
     for (mut rec, anchor) in pending_history {
         // 补号位，让历史里的编号与钉钉的「@N」对得上。会话可能已结束、活跃列表里查不到，
@@ -2650,6 +2827,9 @@ async fn report(
         "files": files,
         "dirQueries": dir_queries,
         "fsOps": fs_ops,
+        // 配置同步：向源机索要的路径 / 向镜像机下发的内容（两者互斥，见 sync_configs）
+        "configPulls": config_pulls,
+        "configPushes": config_pushes,
         "trusted": trusted,
         "hubVersion": ready_desktop_version(&downloads_dir),
         // 强制更新下限：客户端低于它必须更新才能继续使用

@@ -4,6 +4,7 @@ import { Button, Input, Modal, Switch } from "@hsu-react/ui";
 import { Badge, Empty, Modal as AntModal, Popconfirm, Progress, Tag, message } from "antd";
 import {
   CloseOutlined,
+  CloudSyncOutlined,
   CodeOutlined,
   InfoCircleOutlined,
   LaptopOutlined,
@@ -27,6 +28,7 @@ import { localMachineId } from "@/utils/clientAuth";
 import PortalStore from "../../PortalStore";
 import ShareModal from "../ShareModal";
 import IntegrationsPanel from "../IntegrationsPanel";
+import ConfigSyncPanel from "../ConfigSyncPanel";
 import {
   BUILTIN_DANGER_PATTERNS,
   loadGuardConfig,
@@ -34,7 +36,13 @@ import {
 } from "../../_utils/dangerCheck";
 import styles from "./index.module.scss";
 
-export type SettingsTab = "account" | "devices" | "bots" | "security" | "about";
+export type SettingsTab =
+  | "account"
+  | "devices"
+  | "configs"
+  | "bots"
+  | "security"
+  | "about";
 
 interface SettingsModalProps {
   open?: boolean;
@@ -316,6 +324,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
   }[] = [
     { key: "account", label: "账户", icon: <UserOutlined />, color: "#0f9bad" },
     { key: "devices", label: "设备管理", icon: <LaptopOutlined />, color: "#3a8cff", badge: pendingCount },
+    { key: "configs", label: "配置同步", icon: <CloudSyncOutlined />, color: "#0f9bad" },
     { key: "bots", label: "机器人管理", icon: <RobotOutlined />, color: "#21b34a" },
     { key: "security", label: "安全防护", icon: <SafetyOutlined />, color: "#f2933c" },
     { key: "about", label: "关于", icon: <InfoCircleOutlined />, color: "#8a94a6" },
@@ -752,6 +761,18 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                 </div>
                 <RightOutlined className={styles.connectEntryArrow} />
               </div>
+            </div>
+          )}
+
+          {tab === "configs" && (
+            <div className={styles.pane}>
+              <div className={styles.paneTitle}>配置同步</div>
+              <div className={styles.hint}>
+                让多台电脑共用同一套 Claude Code / Codex 配置：选一台设备作为
+                <strong>配置源</strong>，其余设备自动向它看齐。改动几十秒内送达，
+                设备离线时等它上线继续。
+              </div>
+              <ConfigSyncPanel />
             </div>
           )}
 

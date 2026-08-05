@@ -223,6 +223,66 @@ pub struct ReportPayload {
     /// 上一轮 hub 请求的文件夹操作结果（回传）。旧客户端不带 → 空。
     #[serde(default)]
     pub fs_op_results: Vec<FsOpResult>,
+    /// 本机 agent 配置清单（只有哈希，没有内容）。旧客户端不带 → None，
+    /// hub 据此判定「这台机器还不支持配置同步」，既不索要也不下发。
+    #[serde(default)]
+    pub config_manifest: Option<ConfigManifest>,
+    /// 上一轮 hub 通过 `configPulls` 点名索要的文件内容（回传）。
+    #[serde(default)]
+    pub config_bodies: Vec<ConfigFileBody>,
+}
+
+/// 配置同步：单个文件的指纹。
+///
+/// `path` 一律是**归一化相对路径**（`claude/agents/x.md`、`codex/AGENTS.md`），
+/// 绝不放绝对路径 —— mac 的 `/Users/vita/...` 推到 Windows 机器上既拼不出目标位置，
+/// 又把本机用户名泄露给同账号的其它设备。目标绝对路径由客户端自己用本机 home 拼。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigFileMeta {
+    pub path: String,
+    /// 内容的 sha256（小写十六进制）。差异判定只看它，不看 mtime ——
+    /// 各机器时钟不一定同步，mtime 比大小会把「时钟慢的那台」永远判成落后。
+    pub sha256: String,
+    pub size: u64,
+    /// 本机修改时间（unix 秒）。仅用于客户端自己的扫描缓存与界面展示。
+    #[serde(default)]
+    pub mtime: u64,
+}
+
+/// 配置同步：一台机器的全部在管配置文件指纹
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigManifest {
+    pub files: Vec<ConfigFileMeta>,
+    /// 扫描完成时刻（unix 秒）
+    #[serde(default)]
+    pub scanned_at: u64,
+}
+
+/// agent → hub：被点名索要的配置文件内容
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigFileBody {
+    pub path: String,
+    pub content_b64: String,
+    /// 内容哈希，hub 落基线前复验，防止传输途中截断
+    pub sha256: String,
+}
+
+/// hub → agent：待写入的配置文件。
+///
+/// 不复用 `FileTransfer`：那条链路的 `dir` 是**绝对路径**（hub 并不知道对端 home 在哪），
+/// 且 `write_transfer` 是直接整份覆盖、不备份 —— 用户的 CLAUDE.md / agents 被无声盖掉
+/// 是不可接受的。这里只给相对路径，客户端拼本机 home 并走「备份 + 原子写」。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigPush {
+    /// 归一化相对路径，同 `ConfigFileMeta::path`
+    pub path: String,
+    pub content_b64: String,
+    /// 内容哈希，客户端落盘前复验
+    pub sha256: String,
 }
 
 /// hub → agent：列出会话目录下某相对子路径的子目录（上传选目录用）
