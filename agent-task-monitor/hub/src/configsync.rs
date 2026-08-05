@@ -13,11 +13,16 @@
 //! ```
 
 use am_core::configpath::{is_allowed, is_syncable_field, looks_machine_specific, MAX_FILE_BYTES};
-use am_core::model::{ConfigFileBody, ConfigManifest, ConfigPatch, ConfigProbe, ConfigPush};
+use am_core::model::{
+    ConfigChange, ConfigFileBody, ConfigManifest, ConfigPatch, ConfigProbe, ConfigPush,
+};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// 配置项改动记录的保留条数（给人看近期动态，不是审计日志）
+const MAX_CHANGES: usize = 50;
 
 /// 单轮向源机索要的文件数上限
 pub const MAX_PULLS_PER_ROUND: usize = 3;
@@ -229,6 +234,49 @@ impl ConfigStore {
     pub fn patches_of(&self, user: &str) -> Vec<ConfigPatch> {
         let path = self.user_dir(user).join("patches.json");
         std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    /// 记一条配置项改动。**同一台设备的同一字段、目标值没变时不重复记** ——
+    /// 下发后客户端要到下一次扫描（30s）才报回新值，中间每一轮都会重新算出同样的差异，
+    /// 不去重的话历史里会瞬间堆满几十条一模一样的记录。
+    pub fn append_change(&mut self, user: &str, change: ConfigChange) {
+        let mut list = self.changes_of(user);
+        if let Some(last) = list
+            .iter()
+            .rev()
+            .find(|c| c.machine_id == change.machine_id && c.file == change.file && c.field == change.field)
+        {
+            if last.to == change.to {
+                return;
+            }
+        }
+        list.push(change);
+        // 只留最近这些条：这是给人看的近期动态，不是审计日志
+        let len = list.len();
+        if len > MAX_CHANGES {
+            list.drain(..len - MAX_CHANGES);
+        }
+        let dir = self.user_dir(user);
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let Ok(txt) = serde_json::to_string_pretty(&list) else { return };
+        let path = dir.join("changes.json");
+        let tmp = dir.join("changes.json.tmp");
+        if std::fs::write(&tmp, &txt).is_err() {
+            return;
+        }
+        if std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    /// 该账号的配置项改动记录（旧→新）
+    pub fn changes_of(&self, user: &str) -> Vec<ConfigChange> {
+        std::fs::read_to_string(self.user_dir(user).join("changes.json"))
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default()

@@ -85,6 +85,20 @@ const ConfigSyncPanel: React.FC = () => {
             {d.isSource ? <Tag color="green">配置源</Tag> : null}
           </div>
           <div className={styles.devMeta}>{describe(d, info?.enabled)}</div>
+          {/* 字段级差异逐条列出：settings.json 的改动比 md 隐蔽，
+              只说「差 N 项」用户仍然不知道会被动什么 */}
+          {d.fieldDiff?.length > 0 && (
+            <div className={styles.fieldDiff}>
+              {d.fieldDiff.map((f) => (
+                <div key={`${f.file}.${f.field}`} className={styles.diffRow}>
+                  <code>{f.field}</code>
+                  <span className={styles.diffFrom}>{fmt(f.current)}</span>
+                  <span className={styles.diffArrow}>→</span>
+                  <span className={styles.diffTo}>{fmt(f.target)}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
         <div className={styles.devActions}>
           {d.isSource ? (
@@ -184,6 +198,24 @@ const ConfigSyncPanel: React.FC = () => {
         </div>
       </div>
 
+      {/* 近期改动：字段级同步是静默生效的，用户不会察觉自己的 model 被另一台机器改了。
+          开关说明「会动什么」，这里回答「已经动了什么」 */}
+      {(info?.recentChanges?.length ?? 0) > 0 && (
+        <div className={styles.changes}>
+          <div className={styles.changesTitle}>近期改动</div>
+          {info!.recentChanges.map((c, i) => (
+            <div key={`${c.at}-${c.machineId}-${c.field}-${i}`} className={styles.changeRow}>
+              <span className={styles.changeHost}>{c.hostname || c.machineId}</span>
+              <code>{c.field}</code>
+              <span className={styles.diffFrom}>{fmt(c.from)}</span>
+              <span className={styles.diffArrow}>→</span>
+              <span className={styles.diffTo}>{fmt(c.to)}</span>
+              <span className={styles.changeAt}>{ago(c.at)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className={styles.note}>
         <div className={styles.noteTitle}>同步范围</div>
         <div className={styles.noteBody}>
@@ -207,6 +239,23 @@ const ConfigSyncPanel: React.FC = () => {
   );
 };
 
+/** 配置项值的展示形态。对象/数组不展开，只标类型 —— 一行里塞不下，也没必要。 */
+function fmt(v: unknown): string {
+  if (v === undefined || v === null) return "（无）";
+  if (typeof v === "string") return v;
+  if (typeof v === "object") return Array.isArray(v) ? `[${(v as unknown[]).length} 项]` : "{…}";
+  return String(v);
+}
+
+/** 相对时间。改动是几十秒级别发生的，所以要精确到分钟以内。 */
+function ago(at: number): string {
+  const s = Math.max(0, Math.floor(Date.now() / 1000) - at);
+  if (s < 60) return "刚刚";
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+  return `${Math.floor(s / 86400)} 天前`;
+}
+
 /** 单台设备的状态描述。源机与镜像机的「差多少」含义相反，措辞要分开。 */
 function describe(d: ConfigSyncDevice, enabled?: boolean): string {
   if (!d.trusted) {
@@ -227,6 +276,14 @@ function describe(d: ConfigSyncDevice, enabled?: boolean): string {
     return d.online
       ? `本机 ${d.fileCount} 份配置 · 还差 ${d.behind} 份，同步中`
       : `本机 ${d.fileCount} 份配置 · 还差 ${d.behind} 份，等设备上线后继续`;
+  }
+  // 文件都到齐了，但配置项可能还没跟上 —— 此时不能说「已一致」，
+  // 否则会和下面逐条列出的字段差异自相矛盾
+  const fields = d.fieldDiff?.length ?? 0;
+  if (fields > 0) {
+    return d.online
+      ? `本机 ${d.fileCount} 份配置 · 文件已一致，${fields} 个配置项同步中`
+      : `本机 ${d.fileCount} 份配置 · 文件已一致，${fields} 个配置项等上线后同步`;
   }
   return `本机 ${d.fileCount} 份配置 · 已与配置源一致`;
 }

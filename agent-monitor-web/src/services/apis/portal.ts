@@ -537,6 +537,26 @@ export interface ConfigSyncDevice {
   behind: number;
   /** 最近一次扫描时刻（unix 秒，0 = 没扫过） */
   scannedAt: number;
+  /** 与基线不一致的配置项（源机恒为空） */
+  fieldDiff: {
+    file: string;
+    field: string;
+    /** 本机当前值；本机没有该字段时为 null */
+    current: unknown;
+    /** 配置源上的值 */
+    target: unknown;
+  }[];
+}
+
+/** 一条「某台设备的某个配置项被改动」的记录 */
+export interface ConfigChange {
+  at: number;
+  machineId: string;
+  hostname: string;
+  file: string;
+  field: string;
+  from?: unknown;
+  to: unknown;
 }
 
 /** 配置同步总览 */
@@ -551,6 +571,8 @@ export interface ConfigSyncInfo {
   fieldSyncEnabled: boolean;
   /** 基线里实际在同步的配置项（按文件分组） */
   syncedFields: { file: string; fields: string[] }[];
+  /** 近期配置项改动（新→旧，最多 10 条） */
+  recentChanges: ConfigChange[];
 }
 
 /** 配置同步状态：谁是配置源、各设备还差多少份 */

@@ -288,6 +288,28 @@ pub struct ConfigPatch {
     pub fields: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
+/// 一条「某台设备的某个配置项被改动」的记录。
+///
+/// 字段级同步是静默生效的，而 settings.json 的改动比 md 文件隐蔽得多——用户不会察觉
+/// 自己的 `model` 被另一台机器改了。开关只说明「会动什么」，这里回答「已经动了什么」。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigChange {
+    /// 发生时刻（unix 秒）
+    pub at: u64,
+    /// 被改动的设备
+    pub machine_id: String,
+    /// 展示名（设备可能之后被删掉，留一份当时的名字）
+    #[serde(default)]
+    pub hostname: String,
+    pub file: String,
+    pub field: String,
+    /// 该设备原来的值。设备上原本没有这个字段时为 None。
+    #[serde(default)]
+    pub from: Option<serde_json::Value>,
+    pub to: serde_json::Value,
+}
+
 impl ConfigPatch {
     /// 内容指纹：字段集合一致则一致。用于判断某台设备是否已经与基线同步。
     ///

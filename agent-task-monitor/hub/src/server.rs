@@ -1406,6 +1406,7 @@ async fn config_sync_status(State(state): State<SharedState>, headers: HeaderMap
     };
     let store = state.configs.read().await;
     let baseline = store.manifest_of(&user);
+    let baseline_patches = store.patches_of(&user);
     let machines = state.machines.read().await;
 
     let list: Vec<Value> = devices
@@ -1430,6 +1431,24 @@ async fn config_sync_status(State(state): State<SharedState>, headers: HeaderMap
                 }
                 None => (false, 0usize, 0usize, 0u64),
             };
+            // 字段级差异：这台机器上哪些配置项与基线不一致（源机恒为 0，它就是基线）
+            let field_diff: Vec<Value> = if is_source || !field_sync {
+                Vec::new()
+            } else {
+                let mine = entry.and_then(|e| e.config_patches.as_ref());
+                baseline_patches
+                    .iter()
+                    .flat_map(|b| {
+                        let mine_file = mine.and_then(|ps| ps.iter().find(|p| p.file == b.file));
+                        b.fields.iter().filter_map(move |(k, v)| {
+                            let cur = mine_file.and_then(|m| m.fields.get(k));
+                            (cur != Some(v)).then(|| {
+                                json!({ "file": b.file, "field": k, "current": cur, "target": v })
+                            })
+                        })
+                    })
+                    .collect()
+            };
             json!({
                 "machineId": id,
                 "hostname": meta.hostname,
@@ -1441,6 +1460,7 @@ async fn config_sync_status(State(state): State<SharedState>, headers: HeaderMap
                 "fileCount": file_count,
                 "behind": behind,
                 "scannedAt": scanned_at,
+                "fieldDiff": field_diff,
             })
         })
         .collect();
@@ -1489,6 +1509,8 @@ async fn config_sync_status(State(state): State<SharedState>, headers: HeaderMap
         "probe": probe,
         "fieldSyncEnabled": field_sync,
         "syncedFields": synced_fields,
+        // 近期改动（新→旧）：字段级同步是静默的，这里让用户看得见「已经动了什么」
+        "recentChanges": store.changes_of(&user).into_iter().rev().take(10).collect::<Vec<_>>(),
     }))
 }
 
@@ -2300,7 +2322,10 @@ async fn sync_configs(
     machine_id: &str,
     bodies: &[am_core::model::ConfigFileBody],
     probes: &[am_core::model::ConfigProbe],
-    patches: &[am_core::model::ConfigPatch],
+    // device_patches：该设备**最近一次**报告的字段值（缓存值，不是本轮 payload）。
+    // 用本轮 payload 是错的：字段值和清单一样每 30s 才带一次，其余轮次为空，
+    // 会让镜像机被判成「基线字段全缺」而每轮重复下发，改动记录里的旧值也全成了「无」。
+    device_patches: Option<Vec<am_core::model::ConfigPatch>>,
     device_manifest: Option<am_core::model::ConfigManifest>,
 ) -> (Vec<String>, Vec<am_core::model::ConfigPush>, Vec<am_core::model::ConfigPatch>) {
     let empty = || (Vec::new(), Vec::new(), Vec::new());
@@ -2338,14 +2363,14 @@ async fn sync_configs(
     if !field_sync {
         // 什么都不做
     } else if is_source {
-        if !patches.is_empty() {
-            state.configs.write().await.put_patches(&owner, patches);
+        if let Some(p) = device_patches.as_ref().filter(|p| !p.is_empty()) {
+            state.configs.write().await.put_patches(&owner, p);
         }
-    } else {
+    } else if let Some(mine_all) = device_patches.as_ref() {
         let baseline = state.configs.read().await.patches_of(&owner);
         // 镜像机已有的字段值，用于逐字段比对（只发真正不一致的，避免每轮重复下发）
         let have: std::collections::HashMap<&str, &am_core::model::ConfigPatch> =
-            patches.iter().map(|p| (p.file.as_str(), p)).collect();
+            mine_all.iter().map(|p| (p.file.as_str(), p)).collect();
         patch_todo = baseline
             .into_iter()
             .filter_map(|b| {
@@ -2358,6 +2383,38 @@ async fn sync_configs(
                 (!fields.is_empty()).then_some(am_core::model::ConfigPatch { file: b.file, fields })
             })
             .collect();
+
+        // 记下「把这台机器的哪个字段从什么改成了什么」。字段级同步是静默生效的，
+        // 用户不会察觉自己的 model 被另一台机器改了 —— 开关说明「会动什么」，
+        // 这里回答「已经动了什么」。（append_change 内部按目标值去重，不会每轮重复记。）
+        if !patch_todo.is_empty() {
+            let hostname = state
+                .machines
+                .read()
+                .await
+                .get(machine_id)
+                .map(|e| e.hostname.clone())
+                .unwrap_or_default();
+            let now = crate::state::now_secs();
+            let mut store = state.configs.write().await;
+            for p in &patch_todo {
+                let mine = have.get(p.file.as_str());
+                for (field, to) in &p.fields {
+                    store.append_change(
+                        &owner,
+                        am_core::model::ConfigChange {
+                            at: now,
+                            machine_id: machine_id.to_string(),
+                            hostname: hostname.clone(),
+                            file: p.file.clone(),
+                            field: field.clone(),
+                            from: mine.and_then(|m| m.fields.get(field).cloned()),
+                            to: to.clone(),
+                        },
+                    );
+                }
+            }
+        }
     }
 
     // 源机回传的内容入基线。只认源机的上传——否则任何一台被控设备都能往基线里塞东西，
@@ -2493,6 +2550,7 @@ async fn report(
                 last_select_at: HashMap::new(),
                 new_session_pending: HashMap::new(),
                 config_manifest: None,
+                config_patches: None,
             }
         });
     // 设备上线边沿：新登记 或 之前已判离线（超阈值）
@@ -2506,7 +2564,13 @@ async fn report(
     if let Some(m) = &payload.config_manifest {
         entry.config_manifest = Some(m.clone());
     }
+    // 字段值同理：清单带来的那一轮才有，其余轮次为空 —— 只在有内容时覆盖。
+    // 注意不能用 is_empty 判断「没带」：用户可能确实一个可同步字段都没有。
+    if payload.config_manifest.is_some() {
+        entry.config_patches = Some(payload.config_patches.clone());
+    }
     let device_manifest = entry.config_manifest.clone();
+    let device_patches = entry.config_patches.clone();
     // 上线边沿：刷新沉降起点。上线后 NEW_SESSION_SETTLE_SECS 内出现的会话一律当「重连扫回的
     // 已有会话」不推，避免客户端更新/重启后分批扫回历史会话时刷屏「会话开始」。
     // 同时清空会话基线：离线期间「消失」的旧会话不该在重连时逐条推「已结束」，重连后重建基线。
@@ -2911,7 +2975,7 @@ async fn report(
         &payload.machine_id,
         &payload.config_bodies,
         &payload.config_probe,
-        &payload.config_patches,
+        device_patches,
         device_manifest,
     )
     .await;

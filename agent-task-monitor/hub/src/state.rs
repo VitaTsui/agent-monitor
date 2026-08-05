@@ -69,6 +69,9 @@ pub struct MachineEntry {
     /// 所以这里要缓存住 —— 中间轮次的 pull/push 全靠它算差异，才能每轮推进而不是 30s 一步。
     /// None = 该设备还没报过（旧客户端，或刚上线还没到第一次扫描）。
     pub config_manifest: Option<am_core::model::ConfigManifest>,
+    /// 该设备最近上报的结构化配置字段值（白名单内）。同样每 30s 一次，故要缓存住 ——
+    /// 界面靠它显示「这台机器的 model 现在是什么、与基线差在哪」。
+    pub config_patches: Option<Vec<am_core::model::ConfigPatch>>,
 }
 
 /// 机器离线判定阈值
