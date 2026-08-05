@@ -2386,6 +2386,31 @@ async fn sync_configs(
             })
             .collect();
 
+        // 跨操作系统：含本机路径的 MCP server 不下发。mac 的 `~/.local/bin/x` 展开到
+        // Windows 上是 `C:\Users\你\.local\bin\x` —— 那是 mac 的目录惯例，那台机器上
+        // 不会有东西，推过去只会把它**原本正确的**配置覆盖坏。
+        let src_platform = state.registry.read().await.device_meta(&source).platform;
+        let dev_platform = state.registry.read().await.device_meta(machine_id).platform;
+        if !src_platform.is_empty() && !dev_platform.is_empty() && src_platform != dev_platform {
+            for p in patch_todo.iter_mut() {
+                if let Some(mcp) = p.fields.get("mcpServers") {
+                    let (kept, blocked) = am_core::configpath::cross_platform_mcp_only(mcp);
+                    if !blocked.is_empty() {
+                        tracing::info!(
+                            "跨系统（{src_platform}→{dev_platform}）不下发含本机路径的 MCP: {}",
+                            blocked.join("、")
+                        );
+                    }
+                    if kept.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                        p.fields.remove("mcpServers");
+                    } else {
+                        p.fields.insert("mcpServers".into(), kept);
+                    }
+                }
+            }
+            patch_todo.retain(|p| !p.fields.is_empty());
+        }
+
         // 记下「把这台机器的哪个字段从什么改成了什么」。字段级同步是静默生效的，
         // 用户不会察觉自己的 model 被另一台机器改了 —— 开关说明「会动什么」，
         // 这里回答「已经动了什么」。（append_change 内部按目标值去重，不会每轮重复记。）

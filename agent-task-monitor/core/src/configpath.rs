@@ -210,6 +210,51 @@ fn localize_home(v: &serde_json::Value, home: &str) -> serde_json::Value {
     }
 }
 
+/// 这个 MCP server 能不能**跨操作系统**搬。
+///
+/// 判据是 command 有没有文件路径：`npx` / `uvx` / `docker` 这类由 PATH 解析的裸命令，
+/// 换个系统照样找得到（Windows 上是 `npx.cmd`，客户端按 PATHEXT 解析）；
+/// 而 `~/.local/bin/x` 是 mac/Linux 的目录惯例，推到 Windows 上展开成
+/// `C:\Users\你\.local\bin\x` —— 那里不会有东西，还会把那台机器上**原本正确的**
+/// 配置覆盖掉。
+///
+/// args 里 `~/.claude/` 下的路径不算障碍：那些文件会随同步一起过去（见 referenced_configs）。
+pub fn is_cross_platform_mcp(cfg: &serde_json::Value) -> bool {
+    let path_like = |s: &str| {
+        s.starts_with('/') || s.starts_with("~/") || s.starts_with("./") || s.contains('\\')
+    };
+    if let Some(c) = cfg.get("command").and_then(|c| c.as_str()) {
+        if path_like(c) {
+            return false;
+        }
+    }
+    for a in cfg.get("args").and_then(|a| a.as_array()).into_iter().flatten() {
+        if let Some(s) = a.as_str() {
+            if path_like(s) && !s.starts_with("~/.claude/") {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// 只保留跨系统能用的 MCP server（配置源与目标机系统不同时用）。
+/// 返回 (可跨系统的配置, 被挡下的 server 名)。
+pub fn cross_platform_mcp_only(v: &serde_json::Value) -> (serde_json::Value, Vec<String>) {
+    let mut out = serde_json::Map::new();
+    let mut blocked = Vec::new();
+    if let Some(obj) = v.as_object() {
+        for (name, cfg) in obj {
+            if is_cross_platform_mcp(cfg) {
+                out.insert(name.clone(), cfg.clone());
+            } else {
+                blocked.push(name.clone());
+            }
+        }
+    }
+    (serde_json::Value::Object(out), blocked)
+}
+
 /// 取出可跨机同步的 MCP 配置：剥掉 `env`、把 home 绝对路径归一化成 `~`。
 /// 没有任何 server 时返回 None。
 pub fn portable_mcp(v: &serde_json::Value, home: &str) -> Option<serde_json::Value> {
@@ -620,6 +665,28 @@ mod tests {
         assert_eq!(merged["cbm"]["args"][1], serde_json::json!("/Users/bob/work"));
         // 本机原有的 env 要留住，否则用户配好的 key 被同步抹掉
         assert_eq!(merged["cbm"]["env"]["MY_KEY"], serde_json::json!("local-secret"));
+    }
+
+    #[test]
+    fn cross_platform_blocks_path_based_mcp() {
+        let mcp = serde_json::json!({
+            // 裸命令：换系统照样解析得到（Windows 上是 npx.cmd）
+            "playwright": { "command": "npx",
+                            "args": ["@playwright/mcp@0.0.70", "--config", "~/.claude/pw.json"] },
+            // mac/Linux 的目录惯例：推到 Windows 只会指向不存在的位置，
+            // 还会把那台原本正确的配置覆盖掉
+            "cbm": { "command": "~/.local/bin/codebase-memory-mcp" },
+            "abs": { "command": "/opt/tools/x" },
+            "win": { "command": "C:\\tools\\x.exe" }
+        });
+        let (kept, blocked) = cross_platform_mcp_only(&mcp);
+        assert!(kept.get("playwright").is_some(), "裸命令该放行");
+        // args 里 ~/.claude/ 下的文件会随同步一起过去，不算障碍
+        assert_eq!(kept.as_object().unwrap().len(), 1);
+        assert_eq!(blocked.len(), 3);
+        for n in ["cbm", "abs", "win"] {
+            assert!(blocked.contains(&n.to_string()), "{n} 该被挡下");
+        }
     }
 
     #[test]

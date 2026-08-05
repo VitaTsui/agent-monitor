@@ -290,7 +290,12 @@ const ConfigSyncPanel: React.FC = () => {
           以及 MCP / hook 用 <code>--config</code> 引用到的 <code>~/.claude/*.json</code>
           都会同步（脚本自动补执行位；只带**被引用到的**配置文件，不会把目录里其它东西搬走）。
           <br />
-          <strong>但二进制不分发</strong> —— 平台相关（mac 编的 Windows 用不了）。
+          <strong>跨系统（mac ↔ Windows）时，命令里带本机路径的 MCP 不会推过去</strong> ——
+          <code>~/.local/bin/x</code> 是 mac 的目录惯例，推到 Windows 只会指向不存在的位置、
+          还会把那台原本正确的配置覆盖坏。<code>npx</code> / <code>uvx</code>
+          这类免安装形式则照常同步。
+          <br />
+          <strong>二进制本身也不分发</strong> —— 平台相关（mac 编的 Windows 用不了）。
           可执行文件在这台机器上找不到时，该条会被<strong>跳过</strong>而不是照搬，
           并在上面标出「缺依赖」和原因；把它装好，下一轮自己就恢复了。
           <br />
@@ -378,6 +383,11 @@ function describe(d: ConfigSyncDevice, enabled?: boolean): string {
   // 否则会和下面逐条列出的字段差异自相矛盾
   const fields = d.fieldDiff?.length ?? 0;
   if (fields > 0) {
+    // 缺依赖造成的差异是**停在那里**的，不是「同步中」——依赖装上之前它永远不会自己好。
+    // 说成同步中，用户会一直等一个不会到来的结果。
+    if ((d.skips?.length ?? 0) > 0) {
+      return `本机 ${d.fileCount} 份配置 · 文件已一致，${fields} 个配置项未同步（缺依赖，见下）`;
+    }
     return d.online
       ? `本机 ${d.fileCount} 份配置 · 文件已一致，${fields} 个配置项同步中`
       : `本机 ${d.fileCount} 份配置 · 文件已一致，${fields} 个配置项等上线后同步`;
