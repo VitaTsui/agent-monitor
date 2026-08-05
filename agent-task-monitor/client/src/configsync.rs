@@ -11,7 +11,9 @@
 //!    这些是用户自己攒的 CLAUDE.md / agents，被无声盖掉找不回来是不可接受的。
 
 use am_core::configpath::{is_allowed, DIRS, MAX_FILE_BYTES, SINGLE_FILES};
-use am_core::model::{ConfigFileBody, ConfigFileMeta, ConfigManifest, ConfigPush};
+use am_core::model::{
+    ConfigFileBody, ConfigFileMeta, ConfigKeyInfo, ConfigManifest, ConfigProbe, ConfigPush,
+};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -264,6 +266,107 @@ pub fn apply(home: &Path, pushes: &[ConfigPush]) -> usize {
     done
 }
 
+// ───────────────────────── 结构化配置的字段普查（二期准备）─────────────────────────
+//
+// 只读出「有哪些字段、什么类型、值里是否含本机路径」，**绝不传值**。
+// 二期要对 settings.json 做字段级合并，白名单必须建立在用户实际用了哪些字段之上；
+// 凭空猜一份白名单，等于拿猜测去改用户的配置文件。
+
+/// 普查的目标文件：(文件标识, 相对 home 的路径)
+const PROBE_FILES: &[(&str, &str)] = &[
+    ("claude/settings.json", ".claude/settings.json"),
+    ("codex/config.toml", ".codex/config.toml"),
+];
+
+/// 单份文件最多记多少个字段（防异常巨大的配置把上报撑爆）
+const MAX_PROBE_KEYS: usize = 200;
+/// 键路径最大深度：顶层 + 两层子键足够看清结构
+const MAX_PROBE_DEPTH: usize = 2;
+
+/// 普查本机的结构化配置。读不到/解析不了的文件直接跳过——
+/// 普查是二期的准备工作，不该让任何一份坏配置影响上报循环。
+pub fn probe(home: &Path) -> Vec<ConfigProbe> {
+    let mut out = Vec::new();
+    for (id, rel) in PROBE_FILES {
+        let path = home.join(rel);
+        let Ok(txt) = std::fs::read_to_string(&path) else { continue };
+        let value = if rel.ends_with(".toml") {
+            toml::from_str::<serde_json::Value>(&txt).ok()
+        } else {
+            serde_json::from_str::<serde_json::Value>(&txt).ok()
+        };
+        let Some(value) = value else {
+            tracing::warn!("配置普查跳过（解析失败）: {id}");
+            continue;
+        };
+        let mut keys = Vec::new();
+        walk_keys(&value, "", 0, &mut keys);
+        if !keys.is_empty() {
+            out.push(ConfigProbe { file: (*id).to_string(), keys });
+        }
+    }
+    out
+}
+
+fn type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+fn walk_keys(v: &serde_json::Value, prefix: &str, depth: usize, out: &mut Vec<ConfigKeyInfo>) {
+    let serde_json::Value::Object(map) = v else { return };
+    for (k, val) in map {
+        if out.len() >= MAX_PROBE_KEYS {
+            return;
+        }
+        let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+        let len = match val {
+            serde_json::Value::Array(a) => a.len(),
+            serde_json::Value::Object(o) => o.len(),
+            _ => 0,
+        };
+        out.push(ConfigKeyInfo {
+            path: path.clone(),
+            ty: type_name(val).to_string(),
+            len,
+            machine_specific: looks_machine_specific(val),
+        });
+        if depth < MAX_PROBE_DEPTH {
+            walk_keys(val, &path, depth + 1, out);
+        }
+    }
+}
+
+/// 值里是否出现「只在本机成立」的东西：绝对路径、家目录变量、盘符。
+///
+/// 递归看所有字符串叶子——机器相关的路径常常藏在数组或嵌套对象里
+/// （比如 hook 命令数组、指向本机脚本的 helper 配置），只看顶层标量会漏掉。
+fn looks_machine_specific(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::String(s) => {
+            let s = s.trim();
+            s.starts_with('/')
+                || s.starts_with("~/")
+                || s.contains("/Users/")
+                || s.contains("/home/")
+                || s.contains("$HOME")
+                || s.contains("%USERPROFILE%")
+                || s.contains(":\\")
+                // Windows 反斜杠路径（`C:\x` 已被上一条覆盖，这里抓 `\\server\share`）
+                || s.starts_with("\\\\")
+        }
+        serde_json::Value::Array(a) => a.iter().any(looks_machine_specific),
+        serde_json::Value::Object(o) => o.values().any(looks_machine_specific),
+        _ => false,
+    }
+}
+
 /// 在**完整文件名**后追加后缀（`x.md` → `x.md.am-bak`）。
 ///
 /// 不用 `Path::with_extension`：那会把 `x.md` 变成 `x.am-bak`，
@@ -333,6 +436,51 @@ mod tests {
         assert_eq!(std::fs::read(agents.join("a.md")).unwrap(), body);
         // 旧内容留在备份里
         assert_eq!(std::fs::read(agents.join("a.md.am-bak")).unwrap(), b"old");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_reports_structure_without_values() {
+        let dir = std::env::temp_dir().join(format!("am-cfgsync-p-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".claude"));
+        let _ = std::fs::create_dir_all(dir.join(".codex"));
+        let _ = std::fs::write(
+            dir.join(".claude/settings.json"),
+            br#"{
+              "model": "opus",
+              "apiKeyHelper": "/Users/someone/bin/key.sh",
+              "permissions": {"allow": ["Bash(ls:*)"], "deny": []},
+              "hooks": {"PreToolUse": [{"hooks": [{"command": "/opt/am/agent-monitor hook"}]}]}
+            }"#,
+        );
+        let _ = std::fs::write(dir.join(".codex/config.toml"), b"model = \"gpt\"\n[tui]\ntheme = \"dark\"\n");
+
+        let probes = probe(&dir);
+        let settings = probes.iter().find(|p| p.file == "claude/settings.json").expect("有 settings");
+        let by = |p: &str| settings.keys.iter().find(|k| k.path == p).cloned();
+
+        // 结构被记录
+        assert_eq!(by("model").unwrap().ty, "string");
+        assert_eq!(by("permissions").unwrap().ty, "object");
+        assert_eq!(by("permissions.allow").unwrap().len, 1);
+
+        // 机器相关性：本机路径要被标出来（二期白名单据此排除）
+        assert!(by("apiKeyHelper").unwrap().machine_specific);
+        // 嵌在数组深处的 hook 命令同样要被抓到
+        assert!(by("hooks").unwrap().machine_specific);
+        assert!(!by("model").unwrap().machine_specific);
+        assert!(!by("permissions").unwrap().machine_specific);
+
+        // 最要紧的一条：普查结果里**不能出现任何值**
+        let dump = serde_json::to_string(&probes).unwrap();
+        assert!(!dump.contains("opus"), "普查泄露了值: {dump}");
+        assert!(!dump.contains("key.sh"), "普查泄露了值: {dump}");
+        assert!(!dump.contains("Bash(ls"), "普查泄露了值: {dump}");
+
+        // TOML 也能普查
+        let codex = probes.iter().find(|p| p.file == "codex/config.toml").expect("有 config.toml");
+        assert!(codex.keys.iter().any(|k| k.path == "tui.theme"));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

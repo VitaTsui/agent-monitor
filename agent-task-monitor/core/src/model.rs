@@ -230,6 +230,41 @@ pub struct ReportPayload {
     /// 上一轮 hub 通过 `configPulls` 点名索要的文件内容（回传）。
     #[serde(default)]
     pub config_bodies: Vec<ConfigFileBody>,
+    /// 结构化配置（settings.json / config.toml）的**字段普查**：只有键路径与类型，没有值。
+    /// 二期字段级同步的准备工作，见 `ConfigProbe`。
+    #[serde(default)]
+    pub config_probe: Vec<ConfigProbe>,
+}
+
+/// 结构化配置里的一个字段（**不含值**）。
+///
+/// 二期要做 settings.json 的字段级合并，而白名单必须建立在「用户实际用了哪些字段」之上——
+/// 凭空猜一份白名单，等于拿猜测去改用户的配置文件。所以先做这一步只读普查。
+///
+/// 刻意不传值：settings.json 里混着 API key helper 路径之类的东西，
+/// 上传值等于把它们复制进 hub，而普查根本不需要值。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigKeyInfo {
+    /// 点分键路径，如 `permissions.allow`
+    pub path: String,
+    /// 值类型：string / number / bool / array / object / null
+    pub ty: String,
+    /// 数组元素个数或对象键数（标量恒为 0）。用于判断字段规模，仍不涉及内容。
+    #[serde(default)]
+    pub len: usize,
+    /// 值里出现了绝对路径或家目录变量 —— 机器相关，跨机同步会把另一台机器指向不存在的位置。
+    #[serde(default)]
+    pub machine_specific: bool,
+}
+
+/// 一份结构化配置文件的普查结果
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigProbe {
+    /// 文件标识：`claude/settings.json` 或 `codex/config.toml`
+    pub file: String,
+    pub keys: Vec<ConfigKeyInfo>,
 }
 
 /// 配置同步：单个文件的指纹。

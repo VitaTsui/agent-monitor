@@ -87,6 +87,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     let mut cfg_manifest: Option<am_core::model::ConfigManifest> = None;
     let mut last_cfg_scan: Option<std::time::Instant> = None;
     let mut pending_cfg_bodies: Vec<am_core::model::ConfigFileBody> = Vec::new();
+    let mut cfg_probe: Vec<am_core::model::ConfigProbe> = Vec::new();
 
     // 监听会话目录：文件一有写入（用户在终端里发了任务、助手产生输出）就立刻唤醒本
     // 循环扫描上报，而不必干等 1.5s 轮询——后者在窗口关到托盘/失焦后会被 macOS
@@ -236,6 +237,9 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             if due {
                 if let Some(home) = dirs::home_dir() {
                     cfg_manifest = Some(cfg_scanner.scan(&home));
+                    // 结构化配置的字段普查（只有键与类型，没有值）：与清单同频，
+                    // 二期定字段白名单要靠它，见 configsync::probe
+                    cfg_probe = crate::configsync::probe(&home);
                 }
                 last_cfg_scan = Some(std::time::Instant::now());
             }
@@ -254,6 +258,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             // 一个扫描周期后重来——不值得为此在内存里长期挂一份待发清单。
             config_manifest: cfg_manifest.take(),
             config_bodies: std::mem::take(&mut pending_cfg_bodies),
+            config_probe: std::mem::take(&mut cfg_probe),
         };
 
         let mut req = client.post(format!("{hub}/monitor/report"));

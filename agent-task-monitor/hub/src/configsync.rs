@@ -13,7 +13,7 @@
 //! ```
 
 use am_core::configpath::{is_allowed, MAX_FILE_BYTES};
-use am_core::model::{ConfigFileBody, ConfigManifest, ConfigPush};
+use am_core::model::{ConfigFileBody, ConfigManifest, ConfigProbe, ConfigPush};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -184,6 +184,54 @@ impl ConfigStore {
             sha256: sha256_hex(&bytes),
             content_b64: B64.encode(&bytes),
         })
+    }
+
+    /// 存下某设备的结构化配置字段普查（二期定白名单用）。
+    ///
+    /// 按设备分开存而不是合并：不同机器上同一个字段可能一台是机器相关、另一台不是
+    /// （例如 `statusLine` 在 A 上填的是绝对路径、在 B 上是命令名），合并会把这个信息抹平，
+    /// 而它恰恰是「该字段能不能跨机同步」的判据。
+    pub fn put_probe(&self, user: &str, machine_id: &str, probes: &[ConfigProbe]) {
+        if probes.is_empty() {
+            return;
+        }
+        let dir = self.user_dir(user).join("probes");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        // machine_id 来自客户端上报，同样不能直接当文件名
+        let name: String = machine_id
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .take(64)
+            .collect();
+        let Ok(txt) = serde_json::to_string_pretty(probes) else { return };
+        let path = dir.join(format!("{name}.json"));
+        let tmp = dir.join(format!("{name}.json.tmp"));
+        if std::fs::write(&tmp, &txt).is_err() {
+            return;
+        }
+        if std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    /// 读回某账号全部设备的普查结果：(machine_id 安全名, 普查)
+    pub fn probes_of(&self, user: &str) -> Vec<(String, Vec<ConfigProbe>)> {
+        let dir = self.user_dir(user).join("probes");
+        let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
+        let mut out = Vec::new();
+        for e in rd.flatten() {
+            let path = e.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(txt) = std::fs::read_to_string(&path) else { continue };
+            let Ok(probes) = serde_json::from_str::<Vec<ConfigProbe>>(&txt) else { continue };
+            let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            out.push((name, probes));
+        }
+        out
     }
 
     /// 只保留 `keep` 里的路径，其余从基线清单与磁盘上移除，返回移除份数。

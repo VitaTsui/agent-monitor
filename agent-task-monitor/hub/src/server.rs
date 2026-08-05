@@ -1440,11 +1440,41 @@ async fn config_sync_status(State(state): State<SharedState>, headers: HeaderMap
         })
         .collect();
 
+    // 字段普查汇总（二期定白名单用）：按 文件+字段路径 归并所有设备的结果。
+    // `machineSpecific` 取**或**：只要在任何一台机器上是本机路径，这个字段就不能跨机同步。
+    let mut agg: std::collections::BTreeMap<(String, String), (String, bool, usize)> =
+        std::collections::BTreeMap::new();
+    for (_machine, probes) in store.probes_of(&user) {
+        for p in probes {
+            for k in p.keys {
+                let e = agg
+                    .entry((p.file.clone(), k.path.clone()))
+                    .or_insert((k.ty.clone(), false, 0));
+                e.1 |= k.machine_specific;
+                e.2 += 1;
+            }
+        }
+    }
+    let probe: Vec<Value> = agg
+        .into_iter()
+        .map(|((file, path), (ty, machine_specific, seen))| {
+            json!({
+                "file": file,
+                "path": path,
+                "type": ty,
+                "machineSpecific": machine_specific,
+                // 出现在几台设备上：只在一台上出现的字段多半是那台机器的特例
+                "seenOn": seen,
+            })
+        })
+        .collect();
+
     ok(json!({
         "enabled": source.is_some(),
         "source": source,
         "baselineCount": store.file_count(&user),
         "devices": list,
+        "probe": probe,
     }))
 }
 
@@ -2232,6 +2262,7 @@ async fn sync_configs(
     state: &SharedState,
     machine_id: &str,
     bodies: &[am_core::model::ConfigFileBody],
+    probes: &[am_core::model::ConfigProbe],
     device_manifest: Option<am_core::model::ConfigManifest>,
 ) -> (Vec<String>, Vec<am_core::model::ConfigPush>) {
     let empty = || (Vec::new(), Vec::new());
@@ -2252,6 +2283,12 @@ async fn sync_configs(
     // 必须是他自己点开的。
     let Some(source) = source else { return empty() };
     let is_source = source == machine_id;
+
+    // 字段普查（只有键与类型，没有值）：源机与镜像机都收 —— 同一字段在不同机器上
+    // 是否机器相关可能不同，而那正是「它能不能跨机同步」的判据。
+    if !probes.is_empty() {
+        state.configs.read().await.put_probe(&owner, machine_id, probes);
+    }
 
     // 源机回传的内容入基线。只认源机的上传——否则任何一台被控设备都能往基线里塞东西，
     // 而基线随后会被分发到该账号的全部设备上。
@@ -2798,8 +2835,14 @@ async fn report(
 
     // 配置同步：锁已释放再算 —— 里面要拿 registry 与 configs 两把锁，
     // 在 machines 写锁里嵌套取锁是自找死锁。
-    let (config_pulls, config_pushes) =
-        sync_configs(&state, &payload.machine_id, &payload.config_bodies, device_manifest).await;
+    let (config_pulls, config_pushes) = sync_configs(
+        &state,
+        &payload.machine_id,
+        &payload.config_bodies,
+        &payload.config_probe,
+        device_manifest,
+    )
+    .await;
 
     // 会话历史：锁已释放，这里统一落（record 内部去重 + 截断 + 标脏，tick 循环负责写盘）
     for (mut rec, anchor) in pending_history {

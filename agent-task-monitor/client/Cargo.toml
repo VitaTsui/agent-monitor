@@ -31,6 +31,9 @@ reqwest.workspace = true
 base64 = "0.22"
 # 配置同步：算文件指纹（与 hub 同一版本，差异判定只认哈希不认 mtime）
 sha2 = "0.10"
+# 只用于**读** Codex 的 config.toml 做字段普查。二期真要回写 TOML 时必须换 toml_edit：
+# 这个 crate 序列化会吞掉用户的注释与字段顺序。
+toml = "0.8"
 # 监听会话目录：文件一变（用户发了任务）立即扫描上报，不必等被系统节流的轮询定时器
 notify = "6"
 tauri = { version = "2", features = ["tray-icon"] }
