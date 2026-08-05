@@ -1224,21 +1224,39 @@ return "notfound""#
     }
 
     // Terminal.app：do script "..." in <tab> 会键入**并回车**，没有「只键入不提交」的写法。
-    // 选择卡的选项作答要的正是不提交，只能在这里认输 —— 返回 Err 让上层回退 TIOCSTI，
-    // 那条路支持 submit=false。
-    if !submit {
-        return Err(anyhow!("Terminal.app 无法只键入不提交，改走 TIOCSTI"));
-    }
+    //
+    // 选项作答（submit=false）在这里做等价变换：**去掉末位那个「提交/下一题」键**，让
+    // do script 自带的回车充当它。回车在选择卡里就是「确认当前选中项」，与那个键作用相同
+    // —— 0.11.8 的实测可证：发「14」时 4 提交了本题、紧随的回车又确认了下一题的默认项。
+    // 于是「15」在这里发成「1」+回车：选中同一个选项、同样提交，也不会多出一个键落到
+    // 下一题上。
+    //
+    // 为什么不像 iTerm2 那样干脆不提交：mac 从 10.12 起默认禁用 TIOCSTI，一旦在这里
+    // 返回 Err「回退 TIOCSTI」，那条路根本走不通，选项作答就彻底失效 —— 0.11.9 正是
+    // 这么干的，表现为「网页卡片收起了，终端的选择卡还在原地等人手动选」。
+    let keys_only = !submit && !text.is_empty() && text.chars().all(|c| c.is_ascii_digit());
+    let term_text_e = if keys_only {
+        // 纯 ASCII 数字，按字节切末位是安全的
+        esc(&text[..text.len() - 1])
+    } else {
+        text_e.clone()
+    };
+    // 兜底二次回车只对「发布任务」有意义（长内容的首个回车可能被粘贴态吞掉）。
+    // 选项作答绝不能补：第一个回车已经提交了本题，这一下会落在下一题上替人确认默认项。
+    let term_fallback = if keys_only {
+        ""
+    } else {
+        "        delay 0.35\n\
+         \x20       -- 兜底二次回车（同 iTerm2）：长/多行内容被粘贴态吞掉回车时补一下提交\n\
+         \x20       do script \"\" in t\n"
+    };
     let terminal = format!(
         r#"tell application "Terminal"
   repeat with w in windows
     repeat with t in tabs of w
       if (tty of t) is "{tty_e}" then
-        do script "{text_e}" in t
-        delay 0.35
-        -- 兜底二次回车（同 iTerm2）：长/多行内容被粘贴态吞掉回车时补一下提交
-        do script "" in t
-        return "ok"
+        do script "{term_text_e}" in t
+{term_fallback}        return "ok"
       end if
     end repeat
   end repeat
