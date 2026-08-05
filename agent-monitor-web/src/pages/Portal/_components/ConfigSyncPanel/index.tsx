@@ -22,8 +22,9 @@ import styles from "./index.module.scss";
  * 模型是**单向镜像**：选一台设备当「配置源」，其余设备向它看齐。之所以不做双向合并——
  * 两台机器同时改同一个 CLAUDE.md 时，任何自动合并都会在用户毫不知情的情况下丢掉一边的内容。
  *
- * 同步的只有 md 类配置（CLAUDE.md、agents/、commands/、skills/、Codex 的 AGENTS.md 与
- * prompts/）。凭据与 settings.json 一律不同步，原因见下面的说明文案。
+ * 两条路径：md 类整份同步；settings.json / config.toml 按**字段**合并（另有独立开关）。
+ * 凭据永不同步；hooks 只同步「通用」条目，配对 hook 与指向本机路径的 hook 留在原机。
+ * 详见下面的说明文案与 core 的 configpath。
  */
 const ConfigSyncPanel: React.FC = () => {
   const [info, setInfo] = useState<ConfigSyncInfo | null>(null);
@@ -92,9 +93,9 @@ const ConfigSyncPanel: React.FC = () => {
               {d.fieldDiff.map((f) => (
                 <div key={`${f.file}.${f.field}`} className={styles.diffRow}>
                   <code>{f.field}</code>
-                  <span className={styles.diffFrom}>{fmt(f.current)}</span>
+                  <span className={styles.diffFrom}>{fmt(f.current, f.field)}</span>
                   <span className={styles.diffArrow}>→</span>
-                  <span className={styles.diffTo}>{fmt(f.target)}</span>
+                  <span className={styles.diffTo}>{fmt(f.target, f.field)}</span>
                 </div>
               ))}
             </div>
@@ -186,7 +187,7 @@ const ConfigSyncPanel: React.FC = () => {
           <div className={styles.devMeta}>
             {syncedFieldsText
               ? `当前同步：${syncedFieldsText}`
-              : "只同步 model，其余字段与 hooks 一律不动"}
+              : "同步 model 与通用 hooks；配对 hook 和指向本机路径的字段不动"}
           </div>
         </div>
         <div className={styles.devActions}>
@@ -207,9 +208,9 @@ const ConfigSyncPanel: React.FC = () => {
             <div key={`${c.at}-${c.machineId}-${c.field}-${i}`} className={styles.changeRow}>
               <span className={styles.changeHost}>{c.hostname || c.machineId}</span>
               <code>{c.field}</code>
-              <span className={styles.diffFrom}>{fmt(c.from)}</span>
+              <span className={styles.diffFrom}>{fmt(c.from, c.field)}</span>
               <span className={styles.diffArrow}>→</span>
-              <span className={styles.diffTo}>{fmt(c.to)}</span>
+              <span className={styles.diffTo}>{fmt(c.to, c.field)}</span>
               <span className={styles.changeAt}>{ago(c.at)}</span>
             </div>
           ))}
@@ -224,11 +225,17 @@ const ConfigSyncPanel: React.FC = () => {
           <code>prompts/</code>。
           <br />
           <strong>按字段同步</strong>：<code>settings.json</code> 与 Codex 的{" "}
-          <code>config.toml</code> 只同步 <code>model</code>，合并进本机文件 ——
-          你自己写的其它字段、表段与<strong>注释</strong>一律原样保留，<code>hooks</code>、
-          <code>apiKeyHelper</code>、<code>statusLine</code>、<code>permissions</code>
-          等含本机路径的字段<strong>永不同步</strong>（覆盖过去会让另一台机器的会话配对失效）。
-          即使是可同步字段，值里含绝对路径时也会自动跳过。
+          <code>config.toml</code> 同步 <code>model</code> 与 <code>hooks</code>，合并进本机文件
+          —— 你自己写的其它字段、表段与<strong>注释</strong>一律原样保留。
+          <br />
+          <strong>hooks 只同步「通用」条目</strong>（<code>npx prettier --write</code> 这类）。
+          本客户端自己写入的配对 hook、以及命令指向本机路径（<code>~/bin/x.sh</code>、
+          绝对路径）的 hook <strong>留在原机不动，也不会外传</strong> —— 它们换台机器就不存在，
+          覆盖过去会让那台的会话配对静默失效。
+          <br />
+          <code>apiKeyHelper</code>、<code>statusLine</code>、<code>permissions</code>、
+          <code>env</code> 等字段<strong>永不同步</strong>；即使是可同步字段，
+          值里含绝对路径时也会自动跳过。
           <br />
           <strong>登录凭据不会同步</strong>，它们不会离开你本机。
           <br />
@@ -240,11 +247,31 @@ const ConfigSyncPanel: React.FC = () => {
   );
 };
 
-/** 配置项值的展示形态。对象/数组不展开，只标类型 —— 一行里塞不下，也没必要。 */
-function fmt(v: unknown): string {
+/** hooks 里的命令条数。顶层只有事件数（改一条命令前后都是「2 项」，等于没说），
+ *  真正会变的是内层条目，所以数到命令这一层。 */
+function countHooks(v: unknown): number {
+  if (!v || typeof v !== "object") return 0;
+  return Object.values(v as Record<string, unknown>).reduce<number>((n, entries) => {
+    if (!Array.isArray(entries)) return n;
+    return (
+      n +
+      entries.reduce<number>((m, e) => {
+        const inner = (e as Record<string, unknown> | null)?.hooks;
+        return m + (Array.isArray(inner) ? inner.length : 0);
+      }, 0)
+    );
+  }, 0);
+}
+
+/** 配置项值的展示形态。复合值不展开，只给规模 —— 一行里塞不下，但「{…}」等于没说。 */
+function fmt(v: unknown, field?: string): string {
   if (v === undefined || v === null) return "（无）";
   if (typeof v === "string") return v;
-  if (typeof v === "object") return Array.isArray(v) ? `[${(v as unknown[]).length} 项]` : "{…}";
+  if (field === "hooks" && typeof v === "object") {
+    return `${Object.keys(v as object).length} 个事件 · ${countHooks(v)} 条`;
+  }
+  if (Array.isArray(v)) return `${v.length} 项`;
+  if (typeof v === "object") return `${Object.keys(v as object).length} 项`;
   return String(v);
 }
 

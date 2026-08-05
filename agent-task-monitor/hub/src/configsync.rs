@@ -12,7 +12,9 @@
 //! <data_dir>/configs/<safe_user>/files/<rel>     文件内容，<rel> 同 ConfigFileMeta::path
 //! ```
 
-use am_core::configpath::{is_allowed, is_syncable_field, looks_machine_specific, MAX_FILE_BYTES};
+use am_core::configpath::{
+    is_allowed, is_syncable_field, looks_machine_specific, portable_hooks, MAX_FILE_BYTES,
+};
 use am_core::model::{
     ConfigChange, ConfigFileBody, ConfigManifest, ConfigPatch, ConfigProbe, ConfigPush,
 };
@@ -200,11 +202,26 @@ impl ConfigStore {
         for p in patches {
             let mut fields = std::collections::BTreeMap::new();
             for (k, v) in &p.fields {
-                if is_syncable_field(&p.file, k) && !looks_machine_specific(v) {
-                    fields.insert(k.clone(), v.clone());
-                } else {
+                if !is_syncable_field(&p.file, k) {
                     tracing::warn!("拒绝把字段 {}:{k} 收进基线", p.file);
+                    continue;
                 }
+                // hooks 只收「通用」条目：客户端可能被控，不能让它把带 _source 标记的
+                // 条目或指向本机路径的 hook 塞进基线，再由 hub 分发到该账号的所有机器
+                if k == "hooks" {
+                    match portable_hooks(v) {
+                        Some(p) => {
+                            fields.insert(k.clone(), p);
+                        }
+                        None => tracing::warn!("hooks 无可同步条目，不入基线"),
+                    }
+                    continue;
+                }
+                if looks_machine_specific(v) {
+                    tracing::warn!("拒绝把字段 {}:{k} 收进基线", p.file);
+                    continue;
+                }
+                fields.insert(k.clone(), v.clone());
             }
             if !fields.is_empty() {
                 clean.push(ConfigPatch { file: p.file.clone(), fields });

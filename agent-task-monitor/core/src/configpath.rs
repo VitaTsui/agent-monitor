@@ -49,7 +49,14 @@ pub fn is_allowed(rel: &str) -> bool {
 /// 起手只放 `model` —— 双实例普查显示它两台都有、且不含任何本机路径。这个列表要靠
 /// 普查数据（`GET /monitor/config/sync` 的 `probe`）逐个确认后再扩，不要凭想象添加：
 /// 一个判断错误就是在所有设备上改坏用户的配置。
-pub const SETTINGS_SYNC_KEYS: &[&str] = &["model"];
+pub const SETTINGS_SYNC_KEYS: &[&str] = &["model", "hooks"];
+
+/// 本客户端写进用户 settings.json 的 hook 条目所带的 `_source` 前缀（见 client 的 hookrec）。
+///
+/// hooks 是同步集里唯一需要**拆开处理**的字段：整份覆盖会把配对 hook 一并带走，
+/// 而它的命令是本机 exe 的绝对路径（mac 与 Windows 还不一样），覆盖到另一台机器上
+/// 会让那台的会话配对静默失效 —— 不报错、不阻断，只是再也认不出会话。
+pub const HOOK_SOURCE_PREFIX: &str = "agent-monitor:";
 
 /// 可跨机同步的 Codex config.toml 顶层字段。
 ///
@@ -60,16 +67,12 @@ pub const CODEX_SYNC_KEYS: &[&str] = &["model"];
 
 /// **永不同步**的字段，即使将来被误加进白名单也挡住。
 ///
-/// - `hooks`：本客户端自己写进去的配对 hook，命令是**本机 exe 的绝对路径**
-///   （见 client 的 hookrec），覆盖到另一台机器上会让那台的会话配对静默失效——
-///   不报错、不阻断，只是再也认不出会话。这是整个二期最危险的一个字段。
 /// - `apiKeyHelper` / `awsAuthRefresh` / `awsCredentialExport`：值几乎必然是本机脚本路径。
 /// - `env`：环境变量里混着各种本机路径。
 /// - `statusLine`：普查实测一台填的是绝对路径。
 /// - `enabledPlugins` / `extraKnownMarketplaces`：插件装没装是每台机器自己的事，
 ///   同步过去会指向对方没有的插件。
 pub const SETTINGS_NEVER_SYNC: &[&str] = &[
-    "hooks",
     "apiKeyHelper",
     "awsAuthRefresh",
     "awsCredentialExport",
@@ -115,23 +118,225 @@ pub fn looks_machine_specific(v: &serde_json::Value) -> bool {
     }
 }
 
+// ───────────────────────── hooks 的拆分与合并 ─────────────────────────
+//
+// hooks 的结构：`{ "<事件>": [ { matcher?, hooks: [ {type, command, _source?} ] } ] }`
+//
+// 里面混着三类东西，必须拆开对待：
+// ① 本客户端自己写的配对 hook（带 `_source: agent-monitor:*`）—— 客户端自管，绝不外传也绝不覆盖；
+// ② 命令指向本机路径的 hook（`~/bin/x.sh`）—— 换台机器就不存在，同步过去只会报错；
+// ③ 其余「通用」hook（`npx prettier --write` 这种）—— 这才是真正值得跨机共用的。
+//
+// 只有 ③ 参与同步。
+
+/// 单个 hook（最内层的 `{type, command, _source?}`）是否属于本客户端自管
+fn is_own_hook(h: &serde_json::Value) -> bool {
+    h.get("_source")
+        .and_then(|s| s.as_str())
+        .map(|s| s.starts_with(HOOK_SOURCE_PREFIX))
+        .unwrap_or(false)
+}
+
+/// 单个 hook 是否可跨机同步：非自管、且命令不含本机路径
+fn is_portable_hook(h: &serde_json::Value) -> bool {
+    !is_own_hook(h) && !looks_machine_specific(h)
+}
+
+/// 把一个事件下的条目数组按「可跨机 / 只属本机」拆成两份。
+///
+/// 拆的是**条目内部**的 hooks 数组，而不是整条：同一条 entry（同一个 matcher）下
+/// 完全可能既有通用命令又有本机脚本，整条丢弃会连带丢掉本该同步的那个。
+fn split_entries(entries: &[serde_json::Value]) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    let (mut portable, mut local) = (Vec::new(), Vec::new());
+    for e in entries {
+        let Some(inner) = e.get("hooks").and_then(|h| h.as_array()) else {
+            // 结构不认识就整条留在本机，绝不外传
+            local.push(e.clone());
+            continue;
+        };
+        let (p, l): (Vec<_>, Vec<_>) =
+            inner.iter().cloned().partition(is_portable_hook);
+        for (list, target) in [(p, &mut portable), (l, &mut local)] {
+            if list.is_empty() {
+                continue;
+            }
+            let mut cloned = e.clone();
+            if let Some(obj) = cloned.as_object_mut() {
+                obj.insert("hooks".into(), serde_json::Value::Array(list));
+            }
+            target.push(cloned);
+        }
+    }
+    (portable, local)
+}
+
+/// 取出 hooks 里**可跨机同步**的部分。没有可同步内容时返回 None。
+pub fn portable_hooks(v: &serde_json::Value) -> Option<serde_json::Value> {
+    let obj = v.as_object()?;
+    let mut out = serde_json::Map::new();
+    for (event, entries) in obj {
+        let Some(arr) = entries.as_array() else { continue };
+        let (portable, _) = split_entries(arr);
+        if !portable.is_empty() {
+            out.insert(event.clone(), serde_json::Value::Array(portable));
+        }
+    }
+    (!out.is_empty()).then(|| serde_json::Value::Object(out))
+}
+
+/// 把下发的 hooks 合并进本机 hooks。
+///
+/// 结果 =「本机只属本机的部分」+「下发的通用部分」。前者原封不动 ——
+/// 配对 hook 与指向本机脚本的 hook 因此永远不会被另一台机器的配置挤掉。
+pub fn merge_hooks(
+    local: Option<&serde_json::Value>,
+    incoming: &serde_json::Value,
+) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    if let Some(obj) = local.and_then(|v| v.as_object()) {
+        for (event, entries) in obj {
+            let Some(arr) = entries.as_array() else {
+                out.insert(event.clone(), entries.clone());
+                continue;
+            };
+            let (_, keep) = split_entries(arr);
+            if !keep.is_empty() {
+                out.insert(event.clone(), serde_json::Value::Array(keep));
+            }
+        }
+    }
+    if let Some(obj) = incoming.as_object() {
+        for (event, entries) in obj {
+            let Some(arr) = entries.as_array() else { continue };
+            // 下发内容同样不可信：再滤一遍，只接受通用条目
+            let (portable, _) = split_entries(arr);
+            if portable.is_empty() {
+                continue;
+            }
+            match out.get_mut(event).and_then(|v| v.as_array_mut()) {
+                Some(existing) => existing.extend(portable),
+                None => {
+                    out.insert(event.clone(), serde_json::Value::Array(portable));
+                }
+            }
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn hooks_is_never_syncable() {
-        // 这条挂了就意味着配对 hook 会被跨机覆盖 —— 二期最危险的回归
-        assert!(!is_syncable_field("claude/settings.json", "hooks"));
+    fn whitelist_and_blacklist_do_not_overlap() {
         for k in SETTINGS_SYNC_KEYS {
             assert!(!SETTINGS_NEVER_SYNC.contains(k), "{k} 同时在白名单和黑名单里");
         }
     }
 
     #[test]
+    fn own_pairing_hook_never_leaves_the_machine() {
+        // 这条挂了就意味着配对 hook 会被外传/跨机覆盖 —— 整个功能最危险的回归
+        let hooks = serde_json::json!({
+            "PreToolUse": [{
+                "matcher": "*",
+                "hooks": [
+                    { "type": "command", "command": "/opt/am/agent-monitor hook",
+                      "_source": "agent-monitor:pairing" },
+                    { "type": "command", "command": "npx prettier --write" }
+                ]
+            }]
+        });
+        let portable = portable_hooks(&hooks).expect("通用 hook 应可同步");
+        let dump = serde_json::to_string(&portable).unwrap();
+        assert!(!dump.contains("agent-monitor"), "配对 hook 被外传: {dump}");
+        assert!(dump.contains("prettier"), "通用 hook 该被同步: {dump}");
+    }
+
+    #[test]
+    fn machine_specific_hooks_stay_home() {
+        let hooks = serde_json::json!({
+            "PostToolUse": [{
+                "hooks": [
+                    { "type": "command", "command": "~/bin/my-local.sh" },
+                    { "type": "command", "command": "/Users/vita/x.sh" },
+                    { "type": "command", "command": "cargo fmt" }
+                ]
+            }]
+        });
+        let dump = serde_json::to_string(&portable_hooks(&hooks).unwrap()).unwrap();
+        assert!(dump.contains("cargo fmt"));
+        assert!(!dump.contains("my-local.sh"), "本机脚本被外传: {dump}");
+        assert!(!dump.contains("/Users/vita"), "本机路径被外传: {dump}");
+    }
+
+    #[test]
+    fn nothing_portable_yields_none() {
+        // 只有配对 hook 时没有任何可同步内容
+        let only_ours = serde_json::json!({
+            "SessionStart": [{
+                "hooks": [{ "command": "/opt/am/x hook", "_source": "agent-monitor:pairing" }]
+            }]
+        });
+        assert!(portable_hooks(&only_ours).is_none());
+    }
+
+    #[test]
+    fn merge_keeps_local_pairing_hook_and_adds_incoming() {
+        let local = serde_json::json!({
+            "PreToolUse": [{
+                "matcher": "*",
+                "hooks": [
+                    { "type": "command", "command": "/opt/am/agent-monitor hook",
+                      "_source": "agent-monitor:pairing" },
+                    { "type": "command", "command": "~/bin/local-only.sh" },
+                    { "type": "command", "command": "old-generic" }
+                ]
+            }],
+            "PostToolUse": [{
+                "hooks": [{ "command": "/opt/am/agent-monitor hook",
+                            "_source": "agent-monitor:pairing" }]
+            }]
+        });
+        let incoming = serde_json::json!({
+            "PreToolUse": [{ "matcher": "*", "hooks": [{ "command": "npx prettier" }] }],
+            "Stop": [{ "hooks": [{ "command": "echo done" }] }]
+        });
+
+        let merged = merge_hooks(Some(&local), &incoming);
+        let dump = serde_json::to_string(&merged).unwrap();
+
+        // 本机自管与本机脚本原样保留
+        assert!(dump.contains("agent-monitor:pairing"), "配对 hook 丢了: {dump}");
+        assert!(dump.contains("local-only.sh"), "本机脚本丢了: {dump}");
+        // PostToolUse 只有配对 hook，也必须留着
+        assert!(merged.get("PostToolUse").is_some(), "只含配对 hook 的事件被丢: {dump}");
+        // 下发内容进来了
+        assert!(dump.contains("npx prettier"));
+        assert!(dump.contains("echo done"));
+        // 镜像机原有的通用 hook 让位给配置源（单向镜像语义）
+        assert!(!dump.contains("old-generic"), "通用 hook 应被配置源接管: {dump}");
+    }
+
+    #[test]
+    fn merge_rejects_own_source_smuggled_from_hub() {
+        // hub 被攻破也不能借下发把 _source 条目塞进来（否则可伪装成客户端自管条目）
+        let incoming = serde_json::json!({
+            "PreToolUse": [{
+                "hooks": [{ "command": "evil", "_source": "agent-monitor:pairing" }]
+            }]
+        });
+        let merged = merge_hooks(None, &incoming);
+        assert!(!serde_json::to_string(&merged).unwrap().contains("evil"));
+    }
+
+    #[test]
     fn field_whitelist_is_narrow() {
         assert!(is_syncable_field("claude/settings.json", "model"));
         assert!(is_syncable_field("codex/config.toml", "model"));
+        // hooks 可同步，但只同步「通用」条目（见 portable_hooks / merge_hooks）
+        assert!(is_syncable_field("claude/settings.json", "hooks"));
         // 普查判定为机器相关的一律不可同步
         for k in ["apiKeyHelper", "statusLine", "env", "enabledPlugins", "permissions"] {
             assert!(!is_syncable_field("claude/settings.json", k), "{k} 不该可同步");

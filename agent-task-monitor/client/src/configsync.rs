@@ -11,7 +11,8 @@
 //!    这些是用户自己攒的 CLAUDE.md / agents，被无声盖掉找不回来是不可接受的。
 
 use am_core::configpath::{
-    is_allowed, is_syncable_field, looks_machine_specific, DIRS, MAX_FILE_BYTES, SINGLE_FILES,
+    is_allowed, is_syncable_field, looks_machine_specific, merge_hooks, portable_hooks, DIRS,
+    MAX_FILE_BYTES, SINGLE_FILES,
 };
 use am_core::model::{
     ConfigFileBody, ConfigFileMeta, ConfigKeyInfo, ConfigManifest, ConfigPatch, ConfigProbe,
@@ -363,10 +364,19 @@ pub fn read_patches(home: &Path) -> Vec<ConfigPatch> {
             if !is_syncable_field(id, &k) {
                 continue;
             }
-            if looks_machine_specific(&v) {
+            // hooks 要拆开：整份带走会把本客户端自管的配对 hook（命令是本机 exe 绝对路径）
+            // 一并外传，落到别的机器上就是一条永远执行失败的 hook。
+            let v = if k == "hooks" {
+                match portable_hooks(&v) {
+                    Some(p) => p,
+                    None => continue,
+                }
+            } else if looks_machine_specific(&v) {
                 tracing::debug!("配置字段 {id}:{k} 含本机路径，不参与同步");
                 continue;
-            }
+            } else {
+                v
+            };
             fields.insert(k, v);
         }
         if !fields.is_empty() {
@@ -419,13 +429,22 @@ pub fn apply_patches(home: &Path, patches: &[ConfigPatch]) -> usize {
         {
             let Some(obj) = root.as_object_mut() else { continue };
             for (k, v) in &patch.fields {
-                // hub 下发的字段同样不可信：再过一遍两道闸
-                if !is_syncable_field(&patch.file, k) || looks_machine_specific(v) {
+                if !is_syncable_field(&patch.file, k) {
                     tracing::warn!("拒绝合并字段 {}:{k}", patch.file);
                     continue;
                 }
-                if obj.get(k) != Some(v) {
-                    obj.insert(k.clone(), v.clone());
+                // hooks 是合并而非覆盖：本机自管的配对 hook 与指向本机脚本的 hook
+                // 原样留下，只有「通用」条目由配置源接管（见 core 的 merge_hooks）
+                let next = if k == "hooks" {
+                    merge_hooks(obj.get(k), v)
+                } else if looks_machine_specific(v) {
+                    tracing::warn!("拒绝合并字段 {}:{k}", patch.file);
+                    continue;
+                } else {
+                    v.clone()
+                };
+                if obj.get(k) != Some(&next) {
+                    obj.insert(k.clone(), next);
                     dirty = true;
                 }
             }
