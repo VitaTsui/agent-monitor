@@ -78,6 +78,29 @@ src/pages/<category>/<ModuleName>/
 - **antd 兜底（hsu-ui 无对应）**：`message`、`notification`、`Popover`、`Tooltip`、`Divider`、`Segmented`、`Spin`、`Empty`、`Row/Col` 栅格、`Space` 等。
 - 拿不准某组件 hsu-ui 有没有：先查 `node_modules/@hsu-react/ui/es/index.d.ts` 的导出（或文档站 <https://vitatsui.github.io/hsu-ui>），再决定 import 来源。
 
+**同名不等于同物——`Form` 是唯一的例外，别「顺手改正」**：hsu-ui 的 `Form` 只导出 `Modal` / `Drawer` / `Import` / `useForm` 四个成员（见 `Form/index.d.ts` 的 `FormType`），**它本身不是表单容器**。需要一个裸的 `<Form>` 包住若干 `FormItem`（登录页就是典型）时，容器只能从 antd 拿：
+
+```tsx
+// ✅ 正确：容器走 antd，FormItem / Button 仍走 hsu-ui
+import { Form } from "antd";
+import { Button, FormItem } from "@hsu-react/ui";
+```
+
+这类「看着违规、实则正确」的写法，在文件顶部留一行注释说明原因，免得下一轮审计又被当成违规改回去。
+
+反例：
+
+```tsx
+// ❌ hsu-ui 已有同名组件却从 antd 导入 —— 观感与行为都会偏离项目规范
+import { Table, Modal, Switch, Button } from "antd";
+```
+
+```tsx
+// ✅ 同名组件一律走 hsu-ui，antd 只补缺
+import { Table, Modal, Switch, Button } from "@hsu-react/ui";
+import { message, Tooltip } from "antd";
+```
+
 反例：
 
 ```tsx
@@ -800,6 +823,46 @@ public loadRoles = (fn?: (list: RoleItem[]) => void) => {
 
 配套：**`useState` 只存 `id`，不存整行**（见「tsx 消费 store」的两条推论；真实风险就是过期 `version`）。
 
+### 弹窗产生、关闭后才展示的数据，连同展示弹窗收进同一模块
+
+上一条判据有个边界情形：**数据是弹窗动作的产物，但要在该弹窗关闭之后才展示**。典型是「新建后只给一次」的凭据/密钥/导出结果。
+
+放页面 store 就得让弹窗用回调把它回传给页面，那正是被点名的反模式。正解是**把展示弹窗也认成这条流程的后半段**，一起收进弹窗模块：
+
+```
+XxxForm/
+├── index.tsx          # 创建表单 Form.Modal ＋ 结果展示 Modal（两个都在这）
+├── index.module.scss  # 连同结果区的样式一起搬过来
+└── XxxFormStore.ts    # 一次性结果的状态在这里，页面完全不感知
+```
+
+页面只留 `onOk={loadList}` 刷新列表。判据补充为：**这份数据是页面自身的状态，还是某条流程的中间产物？**中间产物跟着流程走，不要为了「归页面」而制造回调。
+
+### 一套 formItems 服务两个弹窗时，合并成一个组件
+
+「新建」和「编辑」用同一组表单项、只是必填规则或附加区块不同时，不要开两个目录，**合并成一个组件，用 `id` 有无区分**：
+
+```tsx
+// id 有值＝编辑，无值＝新建
+required: !id || someCondition,
+outsideChildren={extra ? <附加区块 /> : undefined}
+```
+
+两个目录会让同一套字段定义分叉，改一处忘另一处。
+
+### 抽完弹窗，回头清页面 store 里的孤儿方法
+
+弹窗独立成目录后，提交逻辑搬进了弹窗 store，**页面 store 里原来的 `addXxx` / `editXxx` 就失去了全部调用点**。它们不会报错，但属于死代码，且下次有人照着它改会改到没人跑的分支上。
+
+抽取的最后一步固定是：
+
+```bash
+# 逐个确认外部调用数为 0，再删方法 + 清掉随之失效的 import
+grep -rn "\.addXxx(\|\.editXxx(" src/pages/ | grep -v XxxStore.ts
+```
+
+删完 `tsc` 会直接报出失效的 import，照着清即可。一轮抽 8 处弹窗，通常就能清出 8 组孤儿方法。
+
 ### 跨页 import 私有 store 禁止
 
 `_components/` 与页面目录下的 store 都属页面私有。需要同一份数据时：
@@ -833,6 +896,56 @@ public loadRoles = (fn?: (list: RoleItem[]) => void) => {
 仍用受控（传 `open`）的**唯一场景**：触发点不是元素而是配置对象，例如 Dropdown 的 `menu.items`、`Operate` 的操作项——此时无处可包，只能自持 `open` 并在外层渲染 `SecondConf`。
 
 不要在项目内再包一层自己的确认组件。组件能力不够时改回 hsu-ui 仓库发版、本项目升依赖——曾经有项目自建过一个 `ConfirmAction`，后来触发器模式并进 `SecondConf` 本体，本地组件随即删除。
+
+## INPUTNUMBER 交出的是字符串（必踩，提交前必须转）
+
+hsu-ui 的 `type: "INPUTNUMBER"` 表单项，`handleOk` 拿到的是 **`"1"` 而不是 `1`**。后端若把该字段声明为整型（如 Rust 的 `Option<i32>`），直接提交会被反序列化拒掉（**422**），且报错里看不出是哪个字段；若后端宽松些不报错，则会把字符串存进库或 JSON 字段，之后排序、比较、查重全走字符串序（`"10" < "9"`）。
+
+凡是带 `INPUTNUMBER` 的表单，提交前一律过一个归一助手：
+
+```ts
+// src/utils/form.ts
+/**
+ * hsu-ui 的 INPUTNUMBER 交出的是字符串，提交前要把这些字段转成数字。
+ * 空串/undefined/null 一律转成 undefined（＝不提交该字段），而不是 0——
+ * 0 对「初登场章」「目标字数」这类字段是有含义的真实取值。
+ */
+export const toNumberFields = <T extends Record<string, unknown>>(
+  data: T,
+  keys: readonly string[]
+): T => {
+  const out = { ...data } as Record<string, unknown>;
+  for (const key of keys) {
+    const raw = out[key];
+    if (raw === "" || raw === null || raw === undefined) {
+      out[key] = undefined;
+      continue;
+    }
+    const n = Number(raw);
+    // 转不动就原样留着，让后端报出真正的问题，而不是在这里悄悄吞成 undefined
+    out[key] = Number.isNaN(n) ? raw : n;
+  }
+  return out as T;
+};
+```
+
+调用方式：
+
+```tsx
+import { toNumberFields } from "@/utils/form";
+
+/** hsu-ui 的 INPUTNUMBER 交出的是字符串，提交前要转成数字 */
+const NUMBER_FIELDS = ["seq", "priority"] as const;
+
+const handleOk = (raw: Record<string, unknown>) => {
+  const data = toNumberFields(raw, NUMBER_FIELDS);
+  // …照常提交
+};
+```
+
+**动态字段同理但更隐蔽**：由字段定义生成的表单项（用户自定义列），值往往落进 JSON 列，字符串不会报错但会造成类型漂移。这类要在**收口函数**里按字段定义的 `kind` 统一转，不要散落到各个 `handleOk`。
+
+搜索项里的 `INPUTNUMBER` 不用转——它进 query string，不影响存储。
 
 ## 静态内容页变体（`Panel.Default`）
 
@@ -1338,3 +1451,8 @@ import { getYyyList } from "@/services/apis/<category>/yyy";
 - ❌ 后端没详情接口就用 props 把整行传给弹窗 —— 推动后端补 `GET /xxx/{id}`，否则会拿旧 `version` 撞乐观锁
 - ❌ 表格文本列裸 `String(value)` —— 截断后看不到全文，包 `TextEllipsis`
 - ❌ flex 列容器不给 `height: 100%` —— 子元素 `flex: 1` 不生效，下半屏空着
+- ❌ 带 `INPUTNUMBER` 的表单直接提交 —— 交出的是字符串 `"1"`，整型字段会被拒成 422，要过 `toNumberFields`
+- ❌ 弹窗抽成独立目录后不回头删页面 store 里的 `addXxx`/`editXxx` —— 失去调用点即死代码
+- ❌ 把「弹窗产生、关闭后才展示」的一次性结果放页面 store —— 会被迫用回调回传，应连同展示弹窗收进弹窗模块
+- ❌ 新建和编辑用同一套 formItems 却开两个弹窗目录 —— 字段定义会分叉，应合并成一个组件用 `id` 有无区分
+- ❌ 看到 `import { Form } from "antd"` 就当违规改成 hsu-ui —— hsu-ui 的 `Form` 不是容器，只有 `Modal`/`Drawer`/`Import`/`useForm`
