@@ -662,36 +662,42 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           }
         }
 
-        // 多选的提交行，对应终端选择卡底部的 Submit。做成整行按钮而不是小标签：
-        // 它是多选的唯一出口，漏看了就会以为卡片没反应。
-        .selectSubmit {
-          margin-top: 2px;
-          padding: 7px 8px;
-          border-radius: 6px;
-          text-align: center;
-          font-size: 12px;
-          background: rgba(217, 164, 65, 0.22);
-          color: #f0c674;
-          border: 1px solid rgba(217, 164, 65, 0.42);
+      }
 
-          &.clickable {
-            cursor: pointer;
+      // 多选的提交行，对应终端选择卡底部的 Submit。做成整行按钮而不是小标签：
+      // 它是多选的唯一出口，漏看了就会以为卡片没反应。
+      //
+      // 必须与 .selectOpt **同级**：JSX 里它是 .selectOpts 的直接子元素、选项行的兄弟。
+      // 曾经写在 .selectOpt 里面，编译出来是 `.selectOpt .selectSubmit`，永远匹配不到 ——
+      // 按钮照常渲染却一丝样式都没有，看着就是一行普通小字。表现为「能勾选，但选完不知道
+      // 怎么提交」，而多选除了它没有别的出口。
+      .selectSubmit {
+        margin-top: 2px;
+        padding: 7px 8px;
+        border-radius: 6px;
+        text-align: center;
+        font-size: 12px;
+        background: rgba(217, 164, 65, 0.22);
+        color: #f0c674;
+        border: 1px solid rgba(217, 164, 65, 0.42);
 
-            @media (hover: hover) {
-              &:hover {
-                background: rgba(217, 164, 65, 0.36);
-              }
-            }
+        &.clickable {
+          cursor: pointer;
 
-            &:active {
-              background: rgba(217, 164, 65, 0.44);
+          @media (hover: hover) {
+            &:hover {
+              background: rgba(217, 164, 65, 0.36);
             }
           }
 
-          &.disabled {
-            opacity: 0.45;
-            pointer-events: none;
+          &:active {
+            background: rgba(217, 164, 65, 0.44);
           }
+        }
+
+        &.disabled {
+          opacity: 0.45;
+          pointer-events: none;
         }
       }
     }
