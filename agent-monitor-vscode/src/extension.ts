@@ -117,7 +117,7 @@ export function activate(context: vscode.ExtensionContext) {
           // 修法：先只粘文本、不带回车；等粘贴态吃完后再【单独送一个】回车提交。
           // 关键——只送一个回车（不是补第二个）：若某次首个回车已提交、或后面弹出了
           // 交互式选择/权限确认框，多按一个回车会误触发下一步/误确认选择。单回车最稳。
-          term.sendText(text, false);
+          term.sendText(bracketed(text), false);
           const delay = Math.min(1200, 300 + text.length / 3);
           setTimeout(() => {
             try {
@@ -127,7 +127,7 @@ export function activate(context: vscode.ExtensionContext) {
             }
           }, delay);
         } else {
-          term.sendText(text, false);
+          term.sendText(bracketed(text), false);
         }
         safeUnlink(fp);
         // 诊断：记录命中的终端，便于排查「下发到错误终端」
@@ -175,6 +175,21 @@ export function activate(context: vscode.ExtensionContext) {
       );
     }),
   );
+}
+
+/**
+ * 多行内容用 bracketed paste（ESC[200~ … ESC[201~）包住再送。
+ *
+ * `sendText` 是直接写进 pty 的：文本里的每个 `\n` 到了终端就是一次**回车提交**，
+ * 于是一段多行内容会被拆成好几次提交逐条跑掉 —— 钉钉那边刚把几条转发合并成一段，
+ * 到这里又被拆回去，合并等于白做。包上 bracketed paste 后，TUI（Claude Code 等）
+ * 会把块内换行当普通文本，整段只在末尾那个单独的回车处提交一次。
+ *
+ * 与原生 TTY 注入的做法保持一致（见 core/src/process.rs 的 inject_tiocsti）。
+ * 单行不包：普通 shell 不认这对转义序列时会把它显示成乱码，能不用就不用。
+ */
+function bracketed(text: string): string {
+  return text.includes("\n") ? `\x1b[200~${text}\x1b[201~` : text;
 }
 
 function safeUnlink(fp: string) {

@@ -1520,7 +1520,7 @@ pub fn self_update_probe(hub: &str) {
 }
 
 /// 桥接扩展版本：随扩展 package.json 的 version 走；变更时改这里，客户端会重装一次。
-const BRIDGE_EXT_VERSION: &str = "0.1.4";
+const BRIDGE_EXT_VERSION: &str = "0.1.5";
 
 /// 默认把 Cursor/VSCode 桥接扩展装上：从 hub 下 vsix → 检测 cursor/code CLI → 安装。
 /// 每个扩展版本只装一次（标记文件）。装不上（未装编辑器/CLI 不在 PATH）静默跳过。
@@ -1532,12 +1532,10 @@ fn ensure_bridge_extension(hub: &str, data_dir: &std::path::Path, force: bool) -
     }
     let vsix = data_dir.join("agent-monitor-bridge.vsix");
     // 静默下载（report=false，不动更新进度 UB）、最小 1KB（vsix 才几 KB）
-    if let Err(e) = download_to(
-        &format!("{hub}/downloads/agent-monitor-bridge.vsix"),
-        &vsix,
-        false,
-        1024,
-    ) {
+    // 同样带 cache-buster：vsix 也是 CDN 默认缓存的类型，发了新版却下到旧的，
+    // 表现就是「扩展装上了、行为还是老的」——比自更新那次更难查（版本号还对得上）
+    if let Err(e) = download_to(&cache_busted(hub, "agent-monitor-bridge.vsix"), &vsix, false, 1024)
+    {
         ulog(&format!("[bridge] 扩展 vsix 下载失败: {e}"));
         return 0;
     }
@@ -1673,9 +1671,8 @@ fn install_vsix(cli: &str, vsix: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-// mac 与 Windows 两条自更新路径都要用它
-#[cfg(any(target_os = "macos", windows))]
-/// 自更新包的下载地址，带一次性查询参数绕开任何中间层缓存。
+/// 下载地址加一次性查询参数，绕开任何中间层缓存。
+/// mac / Windows 的自更新包与桥接扩展 vsix 都走它（后者在所有平台都会下载）。
 ///
 /// 踩过的坑：域名挂在 Cloudflare 后面，`.zip`/`.exe` 属于它默认缓存的类型（TTL 4h）。
 /// 发新版后 CDN 仍分发上一版的包 —— 客户端日志一路「下载完成/解包完成/新版本已就位」，
