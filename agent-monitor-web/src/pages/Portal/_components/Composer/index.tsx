@@ -26,6 +26,32 @@ import PortalStore from "../../PortalStore";
 import HistoryModal from "../HistoryModal";
 import styles from "./index.module.scss";
 
+/**
+ * 撞名就在扩展名前挂序号：`a.png` → `a (1).png` → `a (2).png`。
+ *
+ * 必须与客户端 `unique_target`（client/src/agent.rs）**同一套规则** —— 那边是最终落盘的
+ * 兜底，这边是为了让回填进输入框的路径与实际落盘名对得上。两边算法一致时，正常情况下
+ * 这边给的名字就是最终名，客户端那道兜底不会被触发。
+ *
+ * 扩展名按最后一个点切，与 Rust 的 file_stem/extension 一致：`a.tar.gz` → `a.tar (1).gz`；
+ * `.gitignore` 这类隐藏文件整体当主名（点在首位不算扩展名分隔）。
+ */
+const uniqueName = (name: string, taken: Set<string>): string => {
+  if (!taken.has(name)) {
+    return name;
+  }
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  for (let i = 1; i < 10000; i += 1) {
+    const cand = `${stem} (${i})${ext}`;
+    if (!taken.has(cand)) {
+      return cand;
+    }
+  }
+  return name;
+};
+
 interface ComposerProps {
   taskId: string;
   disabled?: boolean;
@@ -253,6 +279,37 @@ const Composer: React.FC<ComposerProps> = (props) => {
       });
   };
 
+  /**
+   * 查 rel 目录下已有的文件名，供上传前定最终名用（见 doUpload）。
+   *
+   * 与 loadDirs 同一个接口，但那个是往 state 里灌、给目录树用的，这里要的是「等到结果
+   * 再往下走」。目录清单由 agent 异步回带（hub 只是转发），pending 时同样要轮询。
+   * 任何异常都返回空集合 —— 拿不到清单顶多是回填名对不上，不该把整批上传挡在门外。
+   */
+  const fetchTakenNames = async (rel: string): Promise<Set<string>> => {
+    if (!taskId) {
+      return new Set();
+    }
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        const res = await getTaskDirs(taskId, rel);
+        if (res.code !== 0) {
+          break;
+        }
+        if (res.data?.pending) {
+          await new Promise((resolve) => {
+            window.setTimeout(resolve, 1200);
+          });
+          continue;
+        }
+        return new Set(res.data?.files ?? []);
+      } catch {
+        break;
+      }
+    }
+    return new Set();
+  };
+
   const enterDir = (name: string) => {
     const next = dirRel ? `${dirRel}/${name}` : name;
     setDirRel(next);
@@ -464,15 +521,31 @@ const Composer: React.FC<ComposerProps> = (props) => {
 
     const ok: string[] = [];
     const failed: string[] = [];
+    // 先问一次目标目录里已有哪些文件，好在这边就把最终名定下来。
+    //
+    // 客户端撞名会自动改名（a.png → a (1).png，见 client 的 unique_target），而回填进
+    // 输入框的路径是这边拼的 —— 不先算出最终名，回填的就会指向目录里那个**旧文件**。
+    // 那比覆盖更隐蔽：agent 照着路径读到的是上一版内容，却没有任何迹象表明它拿错了。
+    // 查不到就退回原名（客户端仍会兜底改名，只是回填可能对不上），不因此挡住上传。
+    const taken = await fetchTakenNames(dirRel);
     for (const file of files) {
+      // 本批内也要互相避让：一次选中两个同名文件时，后一个不能再叫同一个名字
+      const name = uniqueName(file.name, taken);
+      taken.add(name);
       try {
-        const res = await uploadPortalFile(machineId, dir, file, (sent, total) => {
-          // 大文件单个就要传一会儿，只报「第几个文件」看着像卡住了，带上本文件的百分比
-          setUploadPct(total > 0 ? Math.round((sent / total) * 100) : 0);
-        });
+        const res = await uploadPortalFile(
+          machineId,
+          dir,
+          file,
+          (sent, total) => {
+            // 大文件单个就要传一会儿，只报「第几个文件」看着像卡住了，带上本文件的百分比
+            setUploadPct(total > 0 ? Math.round((sent / total) * 100) : 0);
+          },
+          name,
+        );
         if (res.code === 0) {
-          // 回填相对路径（相对会话目录，正斜杠通用）
-          ok.push(dirRel ? `./${dirRel}/${file.name}` : `./${file.name}`);
+          // 回填相对路径（相对会话目录，正斜杠通用）——用最终名，不是本地文件名
+          ok.push(dirRel ? `./${dirRel}/${name}` : `./${name}`);
         } else {
           failed.push(file.name);
         }

@@ -325,17 +325,25 @@ export const uploadPortalFile = async (
   id: string,
   dir: string,
   file: File,
-  onProgress?: (sent: number, total: number) => void
+  onProgress?: (sent: number, total: number) => void,
+  /**
+   * 指定落盘文件名（默认用 file.name）。
+   *
+   * 调用方先查过目标目录、算出了不撞名的名字时传它 —— 这样「实际落盘的名字」与
+   * 「回填进输入框的名字」出自同一处，不会各说各话。
+   */
+  asName?: string,
 ) => {
   const url = `/monitor/devices/${id}/upload`;
   const total = file.size;
+  const name = asName || file.name;
   // 小文件不切：多带两个字段没意义，也省得旧版 hub/agent 走到分片分支上
   if (total <= UPLOAD_CHUNK_SIZE) {
     const form = new FormData();
     form.append("dir", dir);
     // 显式传文件名（UTF-8 文本字段）：multipart 的 Content-Disposition filename 对非 ASCII
     // （如粘贴图片的「粘贴-xxx.png」）编码在服务端会被解歪，导致落盘名与回填名对不上。
-    form.append("name", file.name);
+    form.append("name", name);
     form.append("file", file);
     const res = await post<{ path?: string; result?: string; size: number }>(url, form);
     onProgress?.(total, total);
@@ -349,10 +357,10 @@ export const uploadPortalFile = async (
     const blob = file.slice(start, Math.min(start + UPLOAD_CHUNK_SIZE, total));
     const form = new FormData();
     form.append("dir", dir);
-    form.append("name", file.name);
+    form.append("name", name);
     form.append("chunkIndex", String(i));
     form.append("chunkTotal", String(chunkTotal));
-    form.append("file", blob, file.name);
+    form.append("file", blob, name);
     last = await post<{ path?: string; result?: string; size: number }>(url, form);
     // 任一片失败即中止：继续传后面的只会在 agent 那边拼出一个残缺却"看着成功"的文件
     if (last.code !== 0) {
