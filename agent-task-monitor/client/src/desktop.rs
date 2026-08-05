@@ -1673,6 +1673,23 @@ fn install_vsix(cli: &str, vsix: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+// mac 与 Windows 两条自更新路径都要用它
+#[cfg(any(target_os = "macos", windows))]
+/// 自更新包的下载地址，带一次性查询参数绕开任何中间层缓存。
+///
+/// 踩过的坑：域名挂在 Cloudflare 后面，`.zip`/`.exe` 属于它默认缓存的类型（TTL 4h）。
+/// 发新版后 CDN 仍分发上一版的包 —— 客户端日志一路「下载完成/解包完成/新版本已就位」，
+/// 重启后却还是旧版，且**所有设备一起中招**，看起来极像自更新代码坏了。
+/// 服务端已加 `Cache-Control: no-store`，这里再加一道：下载地址每次都不同，
+/// 就算哪天 CDN 配置被改回去也不会重演。
+fn cache_busted(hub: &str, name: &str) -> String {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{hub}/downloads/{name}?t={ts}")
+}
+
 #[cfg(target_os = "macos")]
 fn do_self_update(hub: &str) -> anyhow::Result<()> {
     // 定位自身 .app：exe 位于 <bundle>.app/Contents/MacOS/ 下
@@ -1689,7 +1706,7 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
     let zip = tmp.join("update.zip");
-    download_to(&format!("{hub}/downloads/agent-monitor-mac.zip"), &zip, true, 1024 * 1024)?;
+    download_to(&cache_busted(hub, "agent-monitor-mac.zip"), &zip, true, 1024 * 1024)?;
     ulog("[update] 下载完成");
     set_update_progress("installing", 0, 0);
 
@@ -1753,7 +1770,7 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let tmp = std::env::temp_dir();
     let installer = tmp.join("agent-monitor-setup.exe");
-    download_to(&format!("{hub}/downloads/agent-monitor-setup.exe"), &installer, true, 1024 * 1024)?;
+    download_to(&cache_busted(hub, "agent-monitor-setup.exe"), &installer, true, 1024 * 1024)?;
     ulog("[update] 安装器下载完成，静默安装");
     set_update_progress("installing", 0, 0);
     // 全静默更新，不出安装向导：NSIS /S 静默安装（沿用上次安装目录与组件选择），
