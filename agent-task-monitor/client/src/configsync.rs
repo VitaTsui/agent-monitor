@@ -12,7 +12,7 @@
 
 use am_core::configpath::{
     is_allowed, is_syncable_field, looks_machine_specific, merge_hooks, merge_mcp, portable_hooks,
-    portable_mcp, DIRS, EXEC_DIRS, MAX_FILE_BYTES, SINGLE_FILES,
+    portable_mcp, is_root_config, DIRS, EXEC_DIRS, MAX_FILE_BYTES, SINGLE_FILES,
 };
 use am_core::model::{
     ConfigFileBody, ConfigFileMeta, ConfigKeyInfo, ConfigManifest, ConfigPatch, ConfigProbe,
@@ -112,6 +112,15 @@ impl ConfigScanner {
             let Some(dir) = dir_abs(home, d) else { continue };
             collect_files(&dir, 0, true, &mut paths);
         }
+        // MCP / hook 引用到的根层配置文件。**只收被引用的** ——
+        // 不是把 .claude/ 根下所有 json 都搬走，那里面可能有别的工具塞的东西。
+        for rel in referenced_configs(home) {
+            if let Some(p) = abs_path(home, &rel) {
+                if p.is_file() {
+                    paths.push(p);
+                }
+            }
+        }
         paths.sort();
         paths.truncate(MAX_FILES);
 
@@ -144,6 +153,50 @@ impl ConfigScanner {
         self.cache = next_cache;
         ConfigManifest { files, scanned_at: now_secs() }
     }
+}
+
+/// 一个字符串若指向 `~/.claude/` 根层的文件，返回它的同步集相对路径。
+/// 认两种写法：`~/.claude/x.json` 与展开后的 `<home>/.claude/x.json`。
+fn to_claude_rel(s: &str, home: &Path) -> Option<String> {
+    let home_prefix = format!("{}/.claude/", home.to_string_lossy().replace('\\', "/"));
+    let normalized = s.replace('\\', "/");
+    let rest = normalized
+        .strip_prefix("~/.claude/")
+        .or_else(|| normalized.strip_prefix(home_prefix.as_str()))?;
+    let rel = format!("claude/{rest}");
+    is_root_config(&rel).then_some(rel)
+}
+
+/// 递归找出 JSON 里所有指向 `.claude/` 根层配置文件的字符串
+fn collect_refs(v: &serde_json::Value, home: &Path, out: &mut std::collections::HashSet<String>) {
+    match v {
+        serde_json::Value::String(s) => {
+            if let Some(rel) = to_claude_rel(s, home) {
+                out.insert(rel);
+            }
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| collect_refs(x, home, out)),
+        serde_json::Value::Object(o) => o.values().for_each(|x| collect_refs(x, home, out)),
+        _ => {}
+    }
+}
+
+/// MCP 与 hook 配置里引用到的根层配置文件（`--config ~/.claude/xxx.json` 这类）。
+///
+/// 只收**被引用的**：把 `.claude/` 根下所有 json 一股脑搬走太粗暴，
+/// 那里可能有别的工具塞进来的东西。
+fn referenced_configs(home: &Path) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for (_, rel) in PROBE_FILES {
+        let Some(v) = read_structured(&home.join(rel), rel) else { continue };
+        // 只看这两个字段，不扫整份文件（.claude.json 里还有项目历史等无关内容）
+        for key in ["mcpServers", "hooks"] {
+            if let Some(section) = v.get(key) {
+                collect_refs(section, home, &mut out);
+            }
+        }
+    }
+    out
 }
 
 fn dir_abs(home: &Path, rel_dir: &str) -> Option<PathBuf> {
@@ -1265,6 +1318,29 @@ theme = "dark"
         let (n, _) = apply_patches(&dir, &[patch_of("claude/settings.json", &[("model", json!("opus"))])]);
         assert_eq!(n, 0);
         assert!(!dir.join(".claude/settings.json").exists(), "不该凭空创建配置文件");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_referenced_root_configs_are_synced() {
+        let dir = std::env::temp_dir().join(format!("am-cfg-ref-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".claude"));
+        // 被 MCP 引用 → 该同步
+        let _ = std::fs::write(dir.join(".claude/playwright.mcp.config.json"), b"{}");
+        // 没人引用 → 不该被搬走（.claude 根下可能有别的工具塞的东西）
+        let _ = std::fs::write(dir.join(".claude/other-tool.json"), br#"{"token":"secret"}"#);
+        // 设置文件走字段级同步，整份搬会把配对 hook 一起带走
+        let _ = std::fs::write(dir.join(".claude/settings.json"), b"{}");
+        let _ = std::fs::write(
+            dir.join(".claude.json"),
+            br#"{"mcpServers":{"pw":{"command":"npx","args":["--config","~/.claude/playwright.mcp.config.json"]}}}"#,
+        );
+
+        let m = ConfigScanner::new().scan(&dir);
+        let paths: Vec<&str> = m.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&"claude/playwright.mcp.config.json"), "被引用的该同步: {paths:?}");
+        assert!(!paths.contains(&"claude/other-tool.json"), "没被引用的不该搬走: {paths:?}");
+        assert!(!paths.iter().any(|p| p.contains("settings.json")), "设置不该整份同步");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -26,6 +26,25 @@ pub fn is_exec_path(rel: &str) -> bool {
     EXEC_DIRS.iter().any(|d| rel.starts_with(&format!("{d}/")))
 }
 
+/// `.claude/` **根层**的配置文件：MCP 与 hook 常用 `--config ~/.claude/xxx.json` 引用它们，
+/// 那个文件不跟过去，server 照样起不来。
+///
+/// 只放根层、非隐藏、且**排除 `settings*`**（它走字段级同步，整份搬会把配对 hook 一起带走）。
+/// `~/.claude.json` 不在这个目录下，不受影响。
+///
+/// 注意这只是「允许落盘」的边界；**上传侧另有一道**：客户端只把真正被 MCP/hook 引用到的
+/// 文件放进同步集，不会把根目录下所有 json 都搬走（见 client 的 referenced_configs）。
+pub fn is_root_config(rel: &str) -> bool {
+    let Some(name) = rel.strip_prefix("claude/") else { return false };
+    if name.contains('/') || name.starts_with("settings.") {
+        return false;
+    }
+    matches!(
+        name.rsplit_once('.').map(|(_, e)| e),
+        Some("json") | Some("yaml") | Some("yml") | Some("toml") | Some("txt")
+    )
+}
+
 /// 单文件体积上限。配置类文本几 KB 顶天，超了多半是有人把日志/数据丢了进来——
 /// 这种东西挤进 1.5s 一轮的心跳会把上报撑到 413。
 pub const MAX_FILE_BYTES: u64 = 256 * 1024;
@@ -45,6 +64,10 @@ pub fn is_allowed(rel: &str) -> bool {
     }
     // hooks 目录：脚本没有固定扩展名，按 .md 规则会被整个漏掉（见 EXEC_DIRS）
     if is_exec_path(rel) {
+        return true;
+    }
+    // MCP / hook 引用的根层配置文件（`--config ~/.claude/xxx.json`）
+    if is_root_config(rel) {
         return true;
     }
     // 其余一律只收 .md：白名单目录里混着别的东西时（比如 skills 下的脚本），不碰。
@@ -664,10 +687,17 @@ mod tests {
         assert!(is_allowed("claude/hooks/sub/dir/script.sh"));
         assert!(is_exec_path("claude/hooks/cbm-session-reminder"));
 
-        // 放开的只有 hooks 这一个目录 —— 隔壁的设置与凭据绝不能跟着开
+        // 设置与凭据绝不能跟着开
         assert!(!is_allowed("claude/settings.json"));
+        assert!(!is_allowed("claude/settings.local.json"));
         assert!(!is_allowed("claude/.credentials.json"));
-        assert!(!is_allowed("claude/playwright.mcp.config.json"));
+        // 根层配置文件可以（MCP 的 --config 引用它），但上传侧只收被引用的
+        assert!(is_allowed("claude/playwright.mcp.config.json"));
+        assert!(is_root_config("claude/playwright.mcp.config.json"));
+        // 仅根层，且排除 settings*
+        assert!(!is_root_config("claude/sub/x.json"));
+        assert!(!is_root_config("claude/settings.json"));
+        assert!(!is_root_config("claude/x.exe"));
         assert!(!is_exec_path("claude/agents/x.md"));
         // 穿越与隐藏文件在 hooks 目录下同样挡住
         assert!(!is_allowed("claude/hooks/../settings.json"));

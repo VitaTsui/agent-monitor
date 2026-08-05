@@ -286,11 +286,13 @@ const ConfigSyncPanel: React.FC = () => {
           反斜杠），所以路径不同也能用。但 <code>env</code>（常放 API key）
           <strong>不同步</strong>，需要在各台机器上自行填；本机已填好的不会被覆盖掉。
           <br />
-          <strong>跑不起来的不会写进去</strong>：MCP 的可执行文件、或它 / hook 引用的脚本
-          若在这台机器上不存在（对端没装、或 mac 的脚本同步到 Windows），
-          该条会被<strong>跳过</strong>而不是照搬 —— 否则只是搬来一份必然连接失败的配置。
-          跳过了什么会记在客户端日志里。<strong>同步不会替你安装依赖</strong>，
-          那些二进制与脚本仍需在各台机器上自行装好。
+          <strong>依赖会尽量一起带过去</strong>：<code>~/.claude/hooks/</code> 下的脚本、
+          以及 MCP / hook 用 <code>--config</code> 引用到的 <code>~/.claude/*.json</code>
+          都会同步（脚本自动补执行位；只带**被引用到的**配置文件，不会把目录里其它东西搬走）。
+          <br />
+          <strong>但二进制不分发</strong> —— 平台相关（mac 编的 Windows 用不了）。
+          可执行文件在这台机器上找不到时，该条会被<strong>跳过</strong>而不是照搬，
+          并在上面标出「缺依赖」和原因；把它装好，下一轮自己就恢复了。
           <br />
           <strong>hooks 只同步「通用」条目</strong>（<code>npx prettier --write</code>、
           <code>~/.claude/hooks/x</code> 这类）。本客户端自己写入的配对 hook、以及命令是
