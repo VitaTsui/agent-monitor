@@ -401,11 +401,13 @@ pub fn apply_patches(home: &Path, patches: &[ConfigPatch]) -> usize {
             tracing::warn!("拒绝合并未知配置文件: {}", patch.file);
             continue;
         };
+        let target = home.join(rel);
         if rel.ends_with(".toml") {
-            // 还没接 toml_edit，宁可不同步也不吞掉用户的注释
+            if apply_toml_patch(&target, patch) {
+                changed += 1;
+            }
             continue;
         }
-        let target = home.join(rel);
         // 本机还没有这个文件就不去创建：凭空造一个 settings.json 可能改变
         // Claude Code 的默认行为，而用户从没要求过我们创建它。
         let Some(mut root) = read_structured(&target, rel) else { continue };
@@ -454,6 +456,95 @@ pub fn apply_patches(home: &Path, patches: &[ConfigPatch]) -> usize {
         changed += 1;
     }
     changed
+}
+
+/// 把白名单字段合并进 TOML 文件，返回是否有改动。
+///
+/// 用 `toml_edit` 而不是 `toml`：后者是「解析成数据结构再重新序列化」，用户写在
+/// config.toml 里的**注释与字段顺序会被整个吞掉** —— 文件还能用，但用户下次打开会发现
+/// 自己的注释没了，这种破坏比报错更糟。`toml_edit` 保留原文格式，只改动到的那一处。
+fn apply_toml_patch(target: &Path, patch: &ConfigPatch) -> bool {
+    let Ok(txt) = std::fs::read_to_string(target) else { return false };
+    let Ok(mut doc) = txt.parse::<toml_edit::DocumentMut>() else {
+        tracing::warn!("解析失败，跳过合并: {}", patch.file);
+        return false;
+    };
+
+    let mut dirty = false;
+    for (k, v) in &patch.fields {
+        // hub 下发的字段同样不可信：与 JSON 分支同样的两道闸
+        if !is_syncable_field(&patch.file, k) || looks_machine_specific(v) {
+            tracing::warn!("拒绝合并字段 {}:{k}", patch.file);
+            continue;
+        }
+        let Some(new_val) = json_to_toml(v) else {
+            // 复合结构映射到 TOML 有多种合法写法（内联表 / 独立表段），
+            // 猜错就会改乱用户的文件结构。当前白名单只有标量，遇到复合直接跳过。
+            tracing::warn!("配置项 {}:{k} 不是标量，暂不支持同步", patch.file);
+            continue;
+        };
+        dirty |= set_scalar(&mut doc, k, new_val);
+    }
+    if !dirty {
+        return false;
+    }
+
+    // dry-run：产物必须仍能解析成 TOML
+    let out = doc.to_string();
+    if out.parse::<toml_edit::DocumentMut>().is_err() {
+        tracing::warn!("合并结果自检失败，跳过写入: {}", patch.file);
+        return false;
+    }
+
+    let bak = with_suffix(target, ".am-bak");
+    let _ = std::fs::copy(target, &bak);
+    let tmp = with_suffix(target, ".am-tmp");
+    if std::fs::write(&tmp, out.as_bytes()).is_err() {
+        return false;
+    }
+    if let Err(e) = std::fs::rename(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        tracing::warn!("替换配置文件失败 {}: {e}", patch.file);
+        return false;
+    }
+    tracing::info!("已同步配置字段: {} ({} 项)", patch.file, patch.fields.len());
+    true
+}
+
+/// 就地替换一个标量字段的**值**，返回是否有改动。
+///
+/// 关键在于只换值、把原有的 decor（前后缀空白与注释）搬回去。直接 `doc[k] = value(..)`
+/// 是替换整个 Item，会把 `model = "x"   # 主模型` 里的行尾注释一起丢掉 ——
+/// 单测 apply_toml_preserves_comments_and_order 就是抓这个的。
+fn set_scalar(doc: &mut toml_edit::DocumentMut, key: &str, new_val: toml_edit::Value) -> bool {
+    match doc.get_mut(key).and_then(|i| i.as_value_mut()) {
+        Some(slot) => {
+            if slot.to_string().trim() == new_val.to_string().trim() {
+                return false;
+            }
+            let decor = slot.decor().clone();
+            *slot = new_val;
+            *slot.decor_mut() = decor;
+            true
+        }
+        // 本机原本没有这个字段：直接追加，没有 decor 可保留
+        None => {
+            doc[key] = toml_edit::Item::Value(new_val);
+            true
+        }
+    }
+}
+
+/// JSON 标量 → TOML 值。复合结构返回 None（见 `apply_toml_patch` 里的说明）。
+fn json_to_toml(v: &serde_json::Value) -> Option<toml_edit::Value> {
+    match v {
+        serde_json::Value::String(s) => Some(s.as_str().into()),
+        serde_json::Value::Bool(b) => Some((*b).into()),
+        serde_json::Value::Number(n) => {
+            n.as_i64().map(Into::into).or_else(|| n.as_f64().map(Into::into))
+        }
+        _ => None,
+    }
 }
 
 /// 在**完整文件名**后追加后缀（`x.md` → `x.md.am-bak`）。
@@ -660,6 +751,73 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
         assert_eq!(after["hooks"], json!({"keep": "me"}));
         assert_eq!(after["model"], json!("sonnet"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_toml_preserves_comments_and_order() {
+        let dir = std::env::temp_dir().join(format!("am-cfg-toml-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".codex"));
+        let p = dir.join(".codex/config.toml");
+        // 注释、字段顺序、表段 —— 用 `toml` crate 回写会把这些全吞掉
+        let original = r#"# 我的 Codex 配置
+# 别乱改
+
+model = "gpt-5"        # 主模型
+approval_policy = "on-request"
+
+[tui]
+# 界面主题
+theme = "dark"
+"#;
+        let _ = std::fs::write(&p, original);
+
+        let n = apply_patches(&dir, &[patch_of("codex/config.toml", &[("model", json!("o3"))])]);
+        assert_eq!(n, 1);
+
+        let after = std::fs::read_to_string(&p).unwrap();
+        // 值改了
+        assert!(after.contains("model = \"o3\""), "model 没改: {after}");
+        assert!(!after.contains("gpt-5"));
+        // 注释一条都不能少
+        assert!(after.contains("# 我的 Codex 配置"), "顶部注释丢了: {after}");
+        assert!(after.contains("# 别乱改"));
+        assert!(after.contains("# 主模型"), "行尾注释丢了: {after}");
+        assert!(after.contains("# 界面主题"));
+        // 其它字段与表段原样保留
+        assert!(after.contains("approval_policy = \"on-request\""));
+        assert!(after.contains("[tui]"));
+        assert!(after.contains("theme = \"dark\""));
+        // 顺序不变：model 仍在 approval_policy 之前，[tui] 仍在最后
+        let i_model = after.find("model").unwrap();
+        let i_policy = after.find("approval_policy").unwrap();
+        let i_tui = after.find("[tui]").unwrap();
+        assert!(i_model < i_policy && i_policy < i_tui, "字段顺序被打乱: {after}");
+        // 旧版进备份
+        assert!(std::fs::read_to_string(dir.join(".codex/config.toml.am-bak"))
+            .unwrap()
+            .contains("gpt-5"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_toml_rejects_blacklisted_and_non_scalar() {
+        let dir = std::env::temp_dir().join(format!("am-cfg-tomlr-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".codex"));
+        let p = dir.join(".codex/config.toml");
+        let _ = std::fs::write(&p, "model = \"gpt-5\"\n[tui]\ntheme = \"dark\"\n");
+
+        // 黑名单字段 + 复合值：都不该落地
+        let n = apply_patches(
+            &dir,
+            &[patch_of(
+                "codex/config.toml",
+                &[("tui", json!({"theme": "light"})), ("env", json!({"X": "1"}))],
+            )],
+        );
+        assert_eq!(n, 0);
+        let after = std::fs::read_to_string(&p).unwrap();
+        assert!(after.contains("theme = \"dark\""), "用户的表段被动了: {after}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

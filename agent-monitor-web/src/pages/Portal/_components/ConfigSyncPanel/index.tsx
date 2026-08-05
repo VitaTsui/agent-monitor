@@ -223,8 +223,9 @@ const ConfigSyncPanel: React.FC = () => {
           <code>commands/</code>、<code>skills/</code>，以及 Codex 的 <code>AGENTS.md</code> 与
           <code>prompts/</code>。
           <br />
-          <strong>按字段同步</strong>：<code>settings.json</code> 只同步 <code>model</code>，
-          合并进本机文件 —— 你自己写的其它字段一律原样保留，<code>hooks</code>、
+          <strong>按字段同步</strong>：<code>settings.json</code> 与 Codex 的{" "}
+          <code>config.toml</code> 只同步 <code>model</code>，合并进本机文件 ——
+          你自己写的其它字段、表段与<strong>注释</strong>一律原样保留，<code>hooks</code>、
           <code>apiKeyHelper</code>、<code>statusLine</code>、<code>permissions</code>
           等含本机路径的字段<strong>永不同步</strong>（覆盖过去会让另一台机器的会话配对失效）。
           即使是可同步字段，值里含绝对路径时也会自动跳过。

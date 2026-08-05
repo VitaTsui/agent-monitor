@@ -53,11 +53,10 @@ pub const SETTINGS_SYNC_KEYS: &[&str] = &["model"];
 
 /// 可跨机同步的 Codex config.toml 顶层字段。
 ///
-/// **暂时为空**：客户端还没接 `toml_edit`，落盘那步会跳过 .toml（用 `toml` crate 回写会吞掉
-/// 用户的注释与字段顺序）。若这里放开字段，基线会收下它、界面会显示「正在同步 config.toml
-/// 的 model」，而实际上一个字节都没落到对端 —— 界面说了不算数的话，比不做还糟。
-/// 接入 toml_edit 后再放开。
-pub const CODEX_SYNC_KEYS: &[&str] = &[];
+/// 客户端用 `toml_edit` 回写，保留用户的注释与字段顺序。这里只放**标量**字段：
+/// 复合结构映射到 TOML 有多种合法写法（内联表 / 独立表段），猜错会改乱文件结构，
+/// 客户端遇到非标量会直接跳过（见 configsync::json_to_toml）。
+pub const CODEX_SYNC_KEYS: &[&str] = &["model"];
 
 /// **永不同步**的字段，即使将来被误加进白名单也挡住。
 ///
@@ -132,9 +131,7 @@ mod tests {
     #[test]
     fn field_whitelist_is_narrow() {
         assert!(is_syncable_field("claude/settings.json", "model"));
-        // Codex 暂不同步任何字段：客户端还不能安全回写 TOML（见 CODEX_SYNC_KEYS）。
-        // 这条挂了说明有人放开了字段却没接 toml_edit —— 界面会显示在同步，实际没落地。
-        assert!(!is_syncable_field("codex/config.toml", "model"));
+        assert!(is_syncable_field("codex/config.toml", "model"));
         // 普查判定为机器相关的一律不可同步
         for k in ["apiKeyHelper", "statusLine", "env", "enabledPlugins", "permissions"] {
             assert!(!is_syncable_field("claude/settings.json", k), "{k} 不该可同步");
