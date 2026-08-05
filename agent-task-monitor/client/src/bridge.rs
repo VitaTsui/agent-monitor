@@ -53,14 +53,18 @@ pub fn has_live_terminal(data_dir: &Path, shell_pid: u32) -> bool {
 }
 
 /// 给某内嵌终端投递一条输入（写 outbox 文件，等扩展取走）。成功写盘返回 true。
-pub fn send_via_extension(data_dir: &Path, shell_pid: u32, text: &str) -> bool {
+///
+/// `submit` = 送完文本后是否再补一个回车提交。发布任务当然要（true）；
+/// **选择卡的选项作答不要**：那串数字的最后一个已经是「提交/下一题」键，再补回车就落到
+/// 翻页后的下一题上、把它按默认高亮项答掉（见 agent 里 from_select 的判断）。
+pub fn send_via_extension(data_dir: &Path, shell_pid: u32, text: &str, submit: bool) -> bool {
     let dir = bridge_dir(data_dir).join("outbox");
     if std::fs::create_dir_all(&dir).is_err() {
         return false;
     }
     let ts = now_ms();
     let file = dir.join(format!("{ts}-{shell_pid}.json"));
-    let body = serde_json::json!({ "pid": shell_pid, "text": text, "ts": ts, "submit": true });
+    let body = serde_json::json!({ "pid": shell_pid, "text": text, "ts": ts, "submit": submit });
     std::fs::write(&file, body.to_string()).is_ok()
 }
 

@@ -539,7 +539,7 @@ fn check_pending_submits(state: &SharedState, tasks: &[Task]) {
                 }
                 // 经桥接补一个回车（空文本 → 扩展只送一个提交回车）
                 let sent =
-                    crate::bridge::send_via_extension(&state.config.data_dir, p.shell_pid, "");
+                    crate::bridge::send_via_extension(&state.config.data_dir, p.shell_pid, "", true);
                 p.retries += 1;
                 p.last_ms = now;
                 crate::state::client_log(&format!(
@@ -725,6 +725,13 @@ async fn execute(
         let from_select = cmd.from_select;
         let text = cmd.text.unwrap_or_default();
         let preview: String = text.chars().take(20).collect();
+        // 选项作答不补提交回车。它是一串纯序号按键（"14"/"24"/"136"），最后一个数字已经是
+        // 「提交/下一题」键 —— 再补一个回车就落到翻页后的下一题上，把它按默认高亮项答掉。
+        // 实测：下发「14」（选项1 + 下一题），第二题当场被那个回车替人选了默认项。
+        //
+        // 只认纯数字：选择卡的「自行输入」发的是文本，那条路仍要回车才提交得了。
+        // from_select 已经限定了这是在回答选择卡，此时纯数字不会是别的东西。
+        let submit = !(from_select && !text.is_empty() && text.chars().all(|c| c.is_ascii_digit()));
         // 目标是 Cursor/VSCode 内嵌终端（ConPTY/编辑器内置，注入不进去）、且有活着的桥接
         // 扩展在管这个终端，就把任务写进文件桥交给扩展 terminal.sendText 送达（全平台）。
         // 终端 shell pid 用扫描时已算好的终端锚（与配对同锚）；本轮没扫到（罕见）再退回
@@ -737,7 +744,9 @@ async fn execute(
                 "桥接判定：会话 {} claude pid={pid} → 内嵌终端 shell pid={shell_pid}，扩展在管={live}",
                 cmd.task_id
             ));
-            if live && crate::bridge::send_via_extension(&state.config.data_dir, shell_pid, &text) {
+            if live
+                && crate::bridge::send_via_extension(&state.config.data_dir, shell_pid, &text, submit)
+            {
                 crate::state::client_log(&format!(
                     "注入输入：经 Cursor/VSCode 扩展桥接（终端 pid={shell_pid}，{preview}…）"
                 ));
@@ -768,7 +777,9 @@ async fn execute(
         }
         // send_input 在 macOS 上走 osascript，会遍历 Terminal/iTerm 的每个窗口与标签页，
         // 常态就要数秒，终端处于模态/无响应时还可能一直挂着 —— 绝不能占住 async worker。
-        let res = tokio::task::spawn_blocking(move || am_core::process::send_input(pid, &text)).await;
+        let res =
+            tokio::task::spawn_blocking(move || am_core::process::send_input_ex(pid, &text, submit))
+                .await;
         match res {
             Ok(Ok(m)) => crate::state::client_log(&format!(
                 "注入输入成功：pid={pid} {m}（{preview}…）"

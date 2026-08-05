@@ -471,6 +471,15 @@ pub fn control(pid: u32, action: ControlAction) -> Result<&'static str> {
 /// macOS: 先按 tty 匹配 Terminal/iTerm2 会话用 AppleScript 写入（无需 root）；
 ///        失败再回退 TIOCSTI。其它 Unix: 直接 TIOCSTI。
 pub fn send_input(pid: u32, text: &str) -> Result<&'static str> {
+    send_input_ex(pid, text, true)
+}
+
+/// 同 [`send_input`]，但可选择**不补末尾那个提交回车**。
+///
+/// `submit = false` 只有一个用途：回答终端的选择卡。那串内容是纯序号按键（"14" = 选项 1
+/// 再按「下一题」），最后一下已经把本题提交掉了 —— 再补一个回车就落到翻页后的下一题上，
+/// 把它按默认高亮项答掉，表现为「答完第一题，后面的题自己跳掉了」。
+pub fn send_input_ex(pid: u32, text: &str, submit: bool) -> Result<&'static str> {
     if pid == 0 || pid > i32::MAX as u32 {
         return Err(anyhow!("非法 pid: {pid}"));
     }
@@ -479,19 +488,19 @@ pub fn send_input(pid: u32, text: &str) -> Result<&'static str> {
         let tty = tty_of(pid).ok_or_else(|| anyhow!("无法定位进程 {pid} 的终端设备"))?;
 
         #[cfg(target_os = "macos")]
-        if let Ok(label) = applescript_write(&tty, text) {
+        if let Ok(label) = applescript_write(&tty, text, submit) {
             return Ok(label);
         }
 
-        inject_tiocsti(&tty, text)
+        inject_tiocsti(&tty, text, submit)
     }
     #[cfg(windows)]
     {
-        windows_send_input(pid, text)
+        windows_send_input(pid, text, submit)
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (pid, text);
+        let _ = (pid, text, submit);
         Err(anyhow!("当前平台暂不支持远程发布任务"))
     }
 }
@@ -737,7 +746,7 @@ if([AmKey]::Send([uint32]$TargetPid,[uint16]$Vk,[char]$Uch,$Count)){{ exit 0 }} 
 /// PowerShell 脚本（Add-Type P/Invoke）执行，文本走临时文件传递以彻底避开转义问题。
 /// 多行用 bracketed paste 包裹，内部换行只当文本、不提前提交（与 Unix 路径一致）。
 #[cfg(windows)]
-fn windows_send_input(pid: u32, text: &str) -> Result<&'static str> {
+fn windows_send_input(pid: u32, text: &str, submit: bool) -> Result<&'static str> {
     use std::io::Write;
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -746,7 +755,7 @@ fn windows_send_input(pid: u32, text: &str) -> Result<&'static str> {
     // 「成功却没送达」），故先判定——父链里有 WindowsTerminal.exe 就直接走聚焦粘贴，不再
     // 尝试 WriteConsoleInput。传统 conhost 控制台父链里没有它，继续走下面的 WriteConsoleInput。
     if let Some(wt_pid) = windows_wt_pid(pid) {
-        return windows_paste_send(wt_pid, text);
+        return windows_paste_send(wt_pid, text, submit);
     }
 
     // 多行包 bracketed paste：ESC[200~ … ESC[201~，末尾 Enter 在包裹外提交整块
@@ -764,7 +773,7 @@ fn windows_send_input(pid: u32, text: &str) -> Result<&'static str> {
         .map_err(|e| anyhow!("写入临时文本失败: {e}"))?;
 
     // 脚本：读文本 → 逐字符写 KEY_EVENT_RECORD → 末尾补一个回车提交
-    let script = r#"param([int]$TargetPid,[string]$TextFile)
+    let script = r#"param([int]$TargetPid,[string]$TextFile,[int]$Submit=1)
 $ErrorActionPreference='Stop'
 $code=@'
 using System;
@@ -795,7 +804,7 @@ public class AmConIn {
     }
     return true;
   }
-  public static bool Send(uint pid, string text){
+  public static bool Send(uint pid, string text, bool submit){
     FreeConsole();
     if(!AttachConsole(pid)) return false;
     try {
@@ -819,7 +828,9 @@ public class AmConIn {
         }
         prev=c;
       }
-      recs.Add(Mk('\r',0x0D,true)); recs.Add(Mk('\r',0x0D,false));
+      // 末尾提交回车。选择卡的选项作答不补（submit=false）：那串数字的最后一下已经提交了
+      // 本题，再来一个回车会落在翻页后的下一题上、把它按默认高亮项答掉。
+      if(submit){ recs.Add(Mk('\r',0x0D,true)); recs.Add(Mk('\r',0x0D,false)); }
       return WriteAll(h, recs);
     } finally { FreeConsole(); }
   }
@@ -827,7 +838,7 @@ public class AmConIn {
 '@
 Add-Type -TypeDefinition $code -Language CSharp
 $t=[System.IO.File]::ReadAllText($TextFile,[System.Text.Encoding]::UTF8)
-if([AmConIn]::Send([uint32]$TargetPid,$t)){ exit 0 } else { exit 2 }
+if([AmConIn]::Send([uint32]$TargetPid,$t,($Submit -ne 0))){ exit 0 } else { exit 2 }
 "#;
     std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
 
@@ -845,6 +856,8 @@ if([AmConIn]::Send([uint32]$TargetPid,$t)){ exit 0 } else { exit 2 }
         .arg(pid.to_string())
         .arg("-TextFile")
         .arg(&txt_path)
+        .arg("-Submit")
+        .arg(if submit { "1" } else { "0" })
         .creation_flags(CREATE_NO_WINDOW)
         .output();
 
@@ -861,7 +874,7 @@ if([AmConIn]::Send([uint32]$TargetPid,$t)){ exit 0 } else { exit 2 }
             // 「聚焦该 Windows Terminal 窗口 + 剪贴板粘贴 + 回车」模拟输入。
             let primary = String::from_utf8_lossy(&o.stderr).trim().to_string();
             match windows_wt_pid(pid) {
-                Some(wt_pid) => windows_paste_send(wt_pid, text).map_err(|e| {
+                Some(wt_pid) => windows_paste_send(wt_pid, text, submit).map_err(|e| {
                     anyhow!("WriteConsoleInput 失败；Windows Terminal 粘贴回退也失败：{e}（原始：{primary}）")
                 }),
                 None => Err(anyhow!(
@@ -1011,7 +1024,7 @@ if([AmFKey]::Run([uint32]$WtPid,[byte]$Vk,$Count)){ exit 0 } else { exit 4 }
 /// 局限：会抢前台焦点；多标签页时粘到「当前活动标签」，claude 不在活动标签则会送错——
 /// 这是已有 WT 标签页对外注入的固有限制（见 CreatePseudoConsole 文档）。
 #[cfg(windows)]
-fn windows_paste_send(wt_pid: u32, text: &str) -> Result<&'static str> {
+fn windows_paste_send(wt_pid: u32, text: &str, submit: bool) -> Result<&'static str> {
     use std::io::Write;
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -1024,7 +1037,7 @@ fn windows_paste_send(wt_pid: u32, text: &str) -> Result<&'static str> {
 
     // 找到该进程的可见顶层窗口 → SetForegroundWindow → keybd_event 发 Ctrl+V、回车。
     // 剪贴板用 PowerShell 的 Set-Clipboard/Get-Clipboard 存取并复原，省去 C# 剪贴板 P/Invoke。
-    let script = r#"param([int]$WtPid,[string]$TextFile)
+    let script = r#"param([int]$WtPid,[string]$TextFile,[int]$Submit=1)
 $ErrorActionPreference='Stop'
 $code=@'
 using System;
@@ -1043,7 +1056,7 @@ public class AmPaste {
     EnumWindows((h,p)=>{ uint wp; GetWindowThreadProcessId(h,out wp); if(wp==target && IsWindowVisible(h)){ found=h; return false; } return true; }, IntPtr.Zero);
     return found;
   }
-  public static bool Run(uint pid){
+  public static bool Run(uint pid, bool submit){
     IntPtr h=FindWin(pid);
     if(h==IntPtr.Zero) return false;
     ShowWindow(h,9); SetForegroundWindow(h);
@@ -1055,7 +1068,9 @@ public class AmPaste {
     keybd_event(VK_CTRL,0,0,IntPtr.Zero); keybd_event(VK_V,0,0,IntPtr.Zero);
     keybd_event(VK_V,0,KEYUP,IntPtr.Zero); keybd_event(VK_CTRL,0,KEYUP,IntPtr.Zero);
     System.Threading.Thread.Sleep(140);
-    keybd_event(VK_RET,0,0,IntPtr.Zero); keybd_event(VK_RET,0,KEYUP,IntPtr.Zero);
+    // 选择卡的选项作答不补这个回车：粘进去的那串数字最后一下已经提交了本题，
+    // 再回车就落到翻页后的下一题上、把它按默认高亮项答掉。
+    if(submit){ keybd_event(VK_RET,0,0,IntPtr.Zero); keybd_event(VK_RET,0,KEYUP,IntPtr.Zero); }
     return true;
   }
 }
@@ -1065,7 +1080,7 @@ $t=[System.IO.File]::ReadAllText($TextFile,[System.Text.Encoding]::UTF8)
 $old=''
 try { $old=Get-Clipboard -Raw } catch {}
 Set-Clipboard -Value $t
-$ok=[AmPaste]::Run([uint32]$WtPid)
+$ok=[AmPaste]::Run([uint32]$WtPid,($Submit -ne 0))
 Start-Sleep -Milliseconds 250
 try { if($old -ne $null){ Set-Clipboard -Value $old } } catch {}
 if($ok){ exit 0 } else { exit 4 }
@@ -1086,6 +1101,8 @@ if($ok){ exit 0 } else { exit 4 }
         .arg(wt_pid.to_string())
         .arg("-TextFile")
         .arg(&txt_path)
+        .arg("-Submit")
+        .arg(if submit { "1" } else { "0" })
         .creation_flags(CREATE_NO_WINDOW)
         .output();
     let _ = std::fs::remove_file(&txt_path);
@@ -1103,7 +1120,7 @@ if($ok){ exit 0 } else { exit 4 }
 
 /// TIOCSTI 逐字节注入（需能打开目标 tty；跨会话通常需 root）
 #[cfg(unix)]
-fn inject_tiocsti(tty: &str, text: &str) -> Result<&'static str> {
+fn inject_tiocsti(tty: &str, text: &str, submit: bool) -> Result<&'static str> {
     use std::os::unix::io::AsRawFd;
 
     let file = std::fs::OpenOptions::new()
@@ -1130,7 +1147,10 @@ fn inject_tiocsti(tty: &str, text: &str) -> Result<&'static str> {
     }
     // 提交键必须是回车 CR(\r=0x0D)，不能用换行 LF(\n)：TUI（Claude Code 等）把 CR 当
     // 「提交」、把 LF 当「输入里换一行」。之前推 \n 导致文字进了输入框却只换行、不提交。
-    bytes.push(b'\r');
+    // 选择卡的选项作答不补（submit=false）：见 send_input_ex。
+    if submit {
+        bytes.push(b'\r');
+    }
     for b in bytes {
         let c = b as libc::c_char;
         let ret = unsafe { libc::ioctl(fd, libc::TIOCSTI, &c) };
@@ -1143,7 +1163,7 @@ fn inject_tiocsti(tty: &str, text: &str) -> Result<&'static str> {
 
 /// macOS：按 tty 匹配 Terminal.app / iTerm2 的会话并写入文本（等价于键入并回车）
 #[cfg(target_os = "macos")]
-fn applescript_write(tty: &str, text: &str) -> Result<&'static str> {
+fn applescript_write(tty: &str, text: &str, submit: bool) -> Result<&'static str> {
     // 转义 AppleScript 字符串字面量。
     // 换行必须一起转：AppleScript 的字符串字面量不能跨行，文本里一个裸换行
     // 就会把字面量提前闭合，后面的内容被当成脚本解析（＝任意 AppleScript 注入）。
@@ -1170,6 +1190,20 @@ fn applescript_write(tty: &str, text: &str) -> Result<&'static str> {
     // 粘贴态，紧跟的回车会被并进粘贴而不提交（表现为「只换行」）；等它把粘贴吃完再回车才稳。
     // 停顿按内容长度递增：0.12s 起步、封顶 1s。
     let submit_delay = (0.12 + text.chars().count() as f64 / 3000.0).min(1.0);
+    // 提交段（submit=false 时整段不出现）：选择卡的选项作答那串数字最后一下已经提交了本题，
+    // 再补回车就落到翻页后的下一题上、把它按默认高亮项答掉。
+    let iterm_submit = if submit {
+        format!(
+            "          delay {submit_delay:.2}\n\
+             \x20         tell s to write text (character id 13) newline no\n\
+             \x20         delay 0.35\n\
+             \x20         -- 兜底二次回车：若上面的回车被粘贴态吞掉（任务只换行没提交），这一下把它提交；\n\
+             \x20         -- 若已提交则此时输入为空，claude 对空回车无动作，安全。\n\
+             \x20         tell s to write text (character id 13) newline no\n"
+        )
+    } else {
+        String::new()
+    };
     let iterm = format!(
         r#"tell application "iTerm2"
   repeat with w in windows
@@ -1177,13 +1211,7 @@ fn applescript_write(tty: &str, text: &str) -> Result<&'static str> {
       repeat with s in sessions of t
         if (tty of s) is "{tty_e}" then
           tell s to write text "{text_e}" newline no
-          delay {submit_delay:.2}
-          tell s to write text (character id 13) newline no
-          delay 0.35
-          -- 兜底二次回车：若上面的回车被粘贴态吞掉（任务只换行没提交），这一下把它提交；
-          -- 若已提交则此时输入为空，claude 对空回车无动作，安全。
-          tell s to write text (character id 13) newline no
-          return "ok"
+{iterm_submit}          return "ok"
         end if
       end repeat
     end repeat
@@ -1195,7 +1223,12 @@ return "notfound""#
         return Ok("已发送");
     }
 
-    // Terminal.app：do script "..." in <tab> 会键入并回车
+    // Terminal.app：do script "..." in <tab> 会键入**并回车**，没有「只键入不提交」的写法。
+    // 选择卡的选项作答要的正是不提交，只能在这里认输 —— 返回 Err 让上层回退 TIOCSTI，
+    // 那条路支持 submit=false。
+    if !submit {
+        return Err(anyhow!("Terminal.app 无法只键入不提交，改走 TIOCSTI"));
+    }
     let terminal = format!(
         r#"tell application "Terminal"
   repeat with w in windows
