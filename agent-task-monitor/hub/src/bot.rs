@@ -4,7 +4,7 @@
 //! 路由靠回调 URL 里的 channel：`/monitor/int/dingtalk/<channel>`。
 //! channel 反查到配置所属用户 → 指令即以该用户身份执行（URL 即绑定，无需绑定码）。
 
-use crate::state::SharedState;
+use crate::state::{BotBatch, SharedState};
 use crate::dingtalk;
 use am_core::model::{ControlAction, ControlCmd, TaskStatus};
 use axum::extract::{Path, State};
@@ -127,6 +127,111 @@ fn parse_at_commands(text: &str) -> Option<Vec<(String, String)>> {
         targets.iter().map(|n| ("发".to_string(), format!("{n} {rest}"))).collect()
     };
     Some(cmds)
+}
+
+/// `run_command` 认识的全部一级指令词（含别名）。**在 run_command 里新增指令时必须同步这里。**
+///
+/// 只服务于钉钉合并窗口的豁免判断（[`is_immediate`]）：命中的消息立即执行、不进窗口。
+/// 漏加一个词的后果是那条指令可能被并进同批内容里、当成正文发进终端 —— 宁可多列，别漏。
+/// 刻意没有复用 run_command 的 match：那边靠「不认识就返回 None 且无副作用」来试探，
+/// 试探本身会把认识的指令执行掉，没法用来做「要不要攒着」的前置判断。
+const ALL_CMDS: &[&str] = &[
+    "帮助", "help", "?", "？", "菜单",
+    "会话", "列表", "ls", "任务",
+    "设备", "devices",
+    "暂停", "恢复", "中断", "终止", "停止",
+    "发", "发送", "回复", "输入",
+    "排队", "队列", "queue",
+    "监控", "watch",
+    "停止监控", "取消监控", "结束监控", "unwatch",
+    "撤回", "recall",
+    "锁定",
+    "历史", "history",
+    "文件", "附件", "files",
+    "清空文件", "清空附件", "清空",
+    "删除文件", "删文件", "删附件", "删除附件",
+];
+
+/// 连续对话冷却后的确认词（见 [`sticky_send`]）：同样必须立即执行 ——
+/// 被并进内容里，那句「回『确认』即发出」就永远等不到确认了。
+const CONFIRM_WORDS: &[&str] = &["确认", "确定", "是", "y", "Y", "ok", "OK"];
+
+/// 这条钉钉消息该立即执行，还是先进合并窗口攒着？
+///
+/// 判据只有一条：**它是不是指令**。指令的语义依赖「单独成条」——「@2 暂停」跟后面一条内容
+/// 拼在一起，`parse_at_commands` 见 tail 非空就整段当内容，暂停指令当场消失。内容则相反：
+/// 逐条转发的那几条本就该拼成一段，agent 才能一次看全（否则第一条就带着它开跑了）。
+pub(crate) fn is_immediate(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() || CONFIRM_WORDS.contains(&t) {
+        return true;
+    }
+    // 「@N …」：解析成会话级指令（暂停/撤回/锁定…）才算指令；
+    // 「@N 正文」解析出来的是「发」，那是内容，要参与合并。
+    if let Some(cmds) = parse_at_commands(t) {
+        // 空 = @ 用法错误，立即回提示，别攒
+        return cmds.is_empty() || cmds.iter().any(|(c, _)| c != "发");
+    }
+    let (cmd, _) = split_cmd(t);
+    ALL_CMDS.contains(&cmd.as_str())
+}
+
+/// 把一条内容消息投进钉钉合并窗口，静默满 [`BOT_BATCH_WINDOW_MS`] 后合并下发。
+///
+/// 返回 `Some(回执)` = 这一批已到期并发出，由本次调用负责回复；
+/// 返回 `None` = 窗口被后来的消息重置了，本次静默退场，改由最后那条负责回。
+///
+/// 为什么要攒：钉钉逐条转发给机器人的是几次**完全独立**的回调，payload 里没有转发标记、
+/// 没有批次号、也没有「共 N 条」—— hub 无从知道一批有几条，只能拿「消息是连着到的」当判据。
+pub(crate) async fn batch_and_dispatch(
+    state: &SharedState,
+    username: &str,
+    text: &str,
+    ctx: &ReplyCtx,
+) -> Option<String> {
+    let my_gen = {
+        let mut map = state.bot_pending_batch.write().await;
+        let b = map.entry(username.to_string()).or_insert_with(|| BotBatch {
+            lines: Vec::new(),
+            webhook: String::new(),
+            expiry_ms: 0,
+            staff_id: String::new(),
+            robot_code: String::new(),
+            gen: 0,
+        });
+        b.lines.push(text.to_string());
+        // 回执地址取最新的一条：窗口 3s 远短于 sessionWebhook 的有效期，用哪条都行，
+        // 用最新的最稳妥（前面几条离过期更近）。
+        b.webhook = ctx.webhook.clone();
+        b.expiry_ms = ctx.expiry_ms;
+        b.staff_id = ctx.staff_id.clone();
+        b.robot_code = ctx.robot_code.clone();
+        b.gen += 1;
+        b.gen
+    };
+
+    tokio::time::sleep(std::time::Duration::from_millis(crate::state::BOT_BATCH_WINDOW_MS)).await;
+
+    let batch = {
+        let mut map = state.bot_pending_batch.write().await;
+        // 世代号变了 = 睡着的这 3s 里又来了消息，窗口被它重置 —— 那批由它 flush
+        match map.get(username) {
+            Some(b) if b.gen == my_gen => map.remove(username)?,
+            _ => return None,
+        }
+    };
+
+    let n = batch.lines.len();
+    let merged = batch.lines.join("\n");
+    let ctx = ReplyCtx {
+        webhook: batch.webhook,
+        expiry_ms: batch.expiry_ms,
+        staff_id: batch.staff_id,
+        robot_code: batch.robot_code,
+    };
+    let reply = dispatch(state, username, &merged, Some(&ctx)).await;
+    // 单条时行为与合并前完全一致（只是晚了一个窗口），不必多嘴
+    Some(if n > 1 { format!("✅ 已合并 {n} 条\n{reply}") } else { reply })
 }
 
 pub(crate) async fn dispatch(
@@ -1412,7 +1517,7 @@ pub(crate) async fn queue_command(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_at_commands, split_cmd};
+    use super::{is_immediate, parse_at_commands, split_cmd};
 
     #[test]
     fn split_command() {
@@ -1459,5 +1564,30 @@ mod tests {
         // 单发「@N」= 切到 N 号继续对话；多目标时没有「当前会话」可言，退回用法提示
         assert_eq!(c("@2"), Some(vec![("锁定".into(), "2".into())]));
         assert_eq!(c("@1 @2"), Some(vec![]));
+    }
+
+    /// 钉钉合并窗口的豁免判断：指令必须单独成条立即执行，内容才攒着合并。
+    /// 判错的代价不对称 —— 指令被误判成内容，会原样发进终端当正文。
+    #[test]
+    fn immediate_vs_batched() {
+        // —— 立即执行：指令 ——
+        assert!(is_immediate("会话"));
+        assert!(is_immediate("暂停 3"));
+        assert!(is_immediate("发 2 继续执行"));
+        assert!(is_immediate("清空文件"));
+        assert!(is_immediate("@2 暂停")); // 会话级指令
+        assert!(is_immediate("@2")); // = 锁定 2 号
+        assert!(is_immediate("@abc")); // @ 用法错误 → 立即回提示
+        assert!(is_immediate("确认")); // sticky 冷却确认，攒了就等不到了
+        assert!(is_immediate("OK"));
+
+        // —— 进合并窗口：内容 ——
+        assert!(!is_immediate("@2 帮我看这段日志")); // @N + 正文 = 发内容
+        assert!(!is_immediate("重启一下服务"));
+        assert!(!is_immediate("[转发] 昨天那个报错又出现了"));
+        // 「继续」不是指令（见 at_commands），自然也该参与合并
+        assert!(!is_immediate("@3 继续"));
+        // 指令词开头但后面还有正文 → 是内容
+        assert!(!is_immediate("@3 暂停一下再说"));
     }
 }

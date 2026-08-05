@@ -252,18 +252,32 @@ async fn connect_once(
                             staff_id,
                             robot_code,
                         };
+                        // None = 这条进了合并窗口、还在攒，本次不回执（见 bot::batch_and_dispatch）
                         let reply = match account {
                             // 绑定指令：直接回它的结果（此时 account 是占位的 Err）
-                            _ if bind_reply.is_some() => bind_reply.unwrap_or_default(),
+                            _ if bind_reply.is_some() => bind_reply,
                             // 未绑定：回引导（登录链接 + 绑定码两条路）
-                            Err(guide) => guide,
+                            Err(guide) => Some(guide),
                             Ok(acct) if file_only => {
                                 let _ = &acct;
-                                "📎 已收到文件，随下一条任务一起发出（如「@2 处理这个文件」），\
-                                 会存到该会话目录的 tmp/ 下并把路径拼到任务开头。"
-                                    .to_string()
+                                Some(
+                                    "📎 已收到文件，随下一条任务一起发出（如「@2 处理这个文件」），\
+                                     会存到该会话目录的 tmp/ 下并把路径拼到任务开头。"
+                                        .to_string(),
+                                )
                             }
-                            Ok(acct) => crate::bot::dispatch(&st, &acct, &content, Some(&ctx)).await,
+                            // 指令立即执行 —— 它的语义依赖单独成条，攒起来会被并进正文。
+                            Ok(acct) if crate::bot::is_immediate(&content) => {
+                                Some(crate::bot::dispatch(&st, &acct, &content, Some(&ctx)).await)
+                            }
+                            // 内容进合并窗口：逐条转发的几条要拼成一段一次性交给 agent，
+                            // 否则它看到第一条就开跑，后面几条全成了打断。
+                            Ok(acct) => {
+                                crate::bot::batch_and_dispatch(&st, &acct, &content, &ctx).await
+                            }
+                        };
+                        let Some(reply) = reply else {
+                            return; // 窗口未到期，由这一批的最后一条负责回执
                         };
                         match cl
                             .post(&sw)

@@ -289,6 +289,13 @@ pub struct AppState {
     /// 用户先发文件（或图文一起发图片）→ 暂存于此 → 下一条发任务的指令把它落到会话 tmp 目录、
     /// 并把相对路径回填到任务文字开头。
     pub bot_pending_files: RwLock<HashMap<String, Vec<BotPendingFile>>>,
+    /// 钉钉「合并窗口」缓冲：用户名 → 正在攒的一批内容。
+    ///
+    /// 逐条转发多条消息时，钉钉给的是几次完全独立的回调 —— payload 里没有转发标记、没有批次
+    /// 号、更没有「共 N 条」，hub 无从知道一批到底有几条。唯一能用的判据是时间：转发是连着
+    /// 到的。于是内容类消息先不下发，攒在这里，静默满 [`BOT_BATCH_WINDOW_MS`] 才拼成一段
+    /// 一次性发出 —— 否则 agent 看到第一条就开跑了，后面几条全变成打断。
+    pub bot_pending_batch: RwLock<HashMap<String, BotBatch>>,
     /// 钉钉绑定 —— 两个方向，都是一次性、都会过期：
     ///
     /// · `dingtalk_binds`：**钉钉那头先开口**。陌生 staffId 给全局机器人发消息，
@@ -299,6 +306,26 @@ pub struct AppState {
     /// 两条路解决的是同一件事在不同起点：人在电脑前就用码，人在手机上就用链接。
     pub dingtalk_binds: RwLock<HashMap<String, PendingDingtalkBind>>,
     pub dingtalk_bind_codes: RwLock<HashMap<String, PendingBindCode>>,
+}
+
+/// 钉钉合并窗口：多久没有新消息就认为这一批发完了（毫秒）。
+///
+/// 逐条转发时消息通常几百毫秒一条，3s 足够兜住手抖的间隔；再长就开始伤害正常单条对话的
+/// 体感了（每条内容都要等满这个窗口才真正下发）。
+pub const BOT_BATCH_WINDOW_MS: u64 = 3_000;
+
+/// 钉钉合并窗口里攒着的一批内容
+pub struct BotBatch {
+    /// 按到达顺序攒下的原文，flush 时用 `\n` 拼成一段
+    pub lines: Vec<String>,
+    /// 最后一条消息的回执地址：合并后只回一次，用最新的那个（窗口 3s 远短于 webhook 有效期）
+    pub webhook: String,
+    pub expiry_ms: u64,
+    pub staff_id: String,
+    pub robot_code: String,
+    /// 世代号：每来一条消息 +1。到点的延时任务比对它，认出自己是否已被后续消息取代 ——
+    /// 取代了就静默退场，由最后那条消息起的任务负责 flush（这就是「静默窗口重置」）。
+    pub gen: u64,
 }
 
 /// 钉钉待绑定上下文（一次性 token 指向它）
@@ -389,6 +416,7 @@ impl AppState {
             bot_monitors: RwLock::new(HashMap::new()),
             bot_sticky_pending: RwLock::new(HashMap::new()),
             bot_pending_files: RwLock::new(HashMap::new()),
+            bot_pending_batch: RwLock::new(HashMap::new()),
         })
     }
 
