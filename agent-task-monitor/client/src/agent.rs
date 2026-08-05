@@ -25,6 +25,14 @@ struct PendingSubmit {
 static PENDING_SUBMITS: std::sync::Mutex<Option<HashMap<String, PendingSubmit>>> =
     std::sync::Mutex::new(None);
 
+/// 分片传输中「这一次传输实际落到哪个文件」：`dir|filename` → 真实落盘路径。
+///
+/// 同名文件不再覆盖而是自动改名（见 [`unique_target`]），但改名只能在**第 0 片**定一次：
+/// 后续片若各自再算一遍，第 1 片会看到第 0 片刚建好的 `a (1).png` 已存在、于是算出
+/// `a (2).png`，每片各自成文件，传完一个都不完整。故第 0 片把结果记在这里，后续片照取。
+static CHUNK_TARGETS: std::sync::Mutex<Option<HashMap<String, std::path::PathBuf>>> =
+    std::sync::Mutex::new(None);
+
 /// 确认没提交后，等多久补第一个回车 / 两次补回车之间的间隔
 /// 配置清单的扫描/上报间隔。心跳是 1.5s 一轮，但配置文件几乎不动，
 /// 每轮都扫盘、都把几百条指纹塞进上报纯属浪费。hub 会把收到的清单缓存住，
@@ -600,13 +608,32 @@ fn write_transfer(f: &am_core::model::FileTransfer, session_dirs: &[std::path::P
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "file.bin".into());
-    let target = dir.join(&safe);
 
     // 分片：第 0 片建/截断，其余追加。hub 的下发队列是 FIFO、agent 也按序处理，
     // 所以顺序有保证，不必在文件里按 offset 定位。
     //
     // chunk_total 为 0 或 1 都当整份处理 —— 0 是旧版 hub（没有这个字段）落到的默认值。
     let chunked = f.chunk_total > 1;
+    // 落盘路径：同名不覆盖，改名成 `a (1).png`（见 unique_target）。
+    // 分片只在第 0 片定名，后续片必须落回同一个文件（见 CHUNK_TARGETS）。
+    let key = format!("{}|{}", f.dir, safe);
+    let target = if !chunked || f.chunk_index == 0 {
+        let t = unique_target(&dir, &safe);
+        if chunked {
+            let mut g = CHUNK_TARGETS.lock().unwrap();
+            g.get_or_insert_with(HashMap::new).insert(key.clone(), t.clone());
+        }
+        t
+    } else {
+        // 取不到（客户端在传输中途重启过）就退回原名：宁可写到原名去，也不要把这一片
+        // 丢进一个凭空另起的文件里 —— 那种残片没人认得出来，只会在目录里越积越多。
+        CHUNK_TARGETS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|m| m.get(&key).cloned())
+            .unwrap_or_else(|| dir.join(&safe))
+    };
     let res = if !chunked || f.chunk_index == 0 {
         std::fs::write(&target, &bytes)
     } else {
@@ -630,6 +657,38 @@ fn write_transfer(f: &am_core::model::FileTransfer, session_dirs: &[std::path::P
             f.chunk_total.max(1)
         ),
     }
+    // 最后一片落完就撤掉登记，免得这张表随传输次数一直长
+    if chunked && f.chunk_index + 1 >= f.chunk_total {
+        if let Some(m) = CHUNK_TARGETS.lock().unwrap().as_mut() {
+            m.remove(&key);
+        }
+    }
+}
+
+/// 目标目录下取一个不会撞名的路径：已存在就在扩展名前挂序号，`a.png` → `a (1).png`。
+///
+/// 原来是直接 `fs::write` 覆盖 —— 上传一个同名文件，目标目录里那份就没了，且毫无提示。
+/// 传上去的多半是「刚改过的同一个文件」或「另一批同名图片」，两种情形下被悄悄抹掉的
+/// 都可能是还需要的东西。
+///
+/// 序号格式跟资源管理器、浏览器下载一致，一眼能看出是同名文件的第几份。
+/// 上限一万：真排到那儿说明目录已经不对劲了，再找下去不如退回原名，别在这儿空转。
+fn unique_target(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let target = dir.join(name);
+    if !target.exists() {
+        return target;
+    }
+    let p = std::path::Path::new(name);
+    let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    // 扩展名连点一起带上；没有扩展名（Makefile、LICENSE）就是空串，序号直接缀在末尾
+    let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    for i in 1..10_000u32 {
+        let cand = dir.join(format!("{stem} ({i}){ext}"));
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    target
 }
 
 /// 执行 hub 下发的控制命令。
