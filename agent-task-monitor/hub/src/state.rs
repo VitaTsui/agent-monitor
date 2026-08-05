@@ -72,6 +72,9 @@ pub struct MachineEntry {
     /// 该设备最近上报的结构化配置字段值（白名单内）。同样每 30s 一次，故要缓存住 ——
     /// 界面靠它显示「这台机器的 model 现在是什么、与基线差在哪」。
     pub config_patches: Option<Vec<am_core::model::ConfigPatch>>,
+    /// 该设备因缺少依赖而跳过的同步项（MCP 二进制/hook 脚本不在那台机器上）。
+    /// 界面靠它说明「为什么这台和配置源不一致」——否则用户只看到永远对不齐。
+    pub config_skips: Vec<am_core::model::ConfigSkip>,
 }
 
 /// 机器离线判定阈值

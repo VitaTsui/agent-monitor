@@ -89,6 +89,19 @@ const ConfigSyncPanel: React.FC = () => {
             {d.isSource ? <Tag color="green">配置源</Tag> : null}
           </div>
           <div className={styles.devMeta}>{describe(d, info?.enabled)}</div>
+          {/* 缺依赖被跳过的：如实说明「这台为什么和配置源不一致」，
+              否则用户只会看到两台死活对不齐却不知道差在哪 */}
+          {d.skips?.length > 0 && (
+            <div className={styles.fieldDiff}>
+              {d.skips.map((s) => (
+                <div key={`${s.file}.${s.item}`} className={styles.skipRow}>
+                  <span className={styles.skipTag}>缺依赖</span>
+                  <code>{s.item}</code>
+                  <span className={styles.skipWhy}>{s.reason}</span>
+                </div>
+              ))}
+            </div>
+          )}
           {/* 字段级差异逐条列出：settings.json 的改动比 md 隐蔽，
               只说「差 N 项」用户仍然不知道会被动什么 */}
           {d.fieldDiff?.length > 0 && (

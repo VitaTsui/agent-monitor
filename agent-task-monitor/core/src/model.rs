@@ -234,6 +234,10 @@ pub struct ReportPayload {
     /// 二期字段级同步的准备工作，见 `ConfigProbe`。
     #[serde(default)]
     pub config_probe: Vec<ConfigProbe>,
+    /// 因本机缺少依赖而**被跳过**的同步项（MCP server / hook）。
+    /// 用于在界面上如实说明「这台机器为什么和配置源不一致」。
+    #[serde(default)]
+    pub config_skips: Vec<ConfigSkip>,
     /// 本机结构化配置里**白名单字段**的当前值（字段级同步用）。
     /// 只有配置源机器上报的会进基线；镜像机上报的仅用于判断它是否已同步到位。
     #[serde(default)]
@@ -269,6 +273,22 @@ pub struct ConfigProbe {
     /// 文件标识：`claude/settings.json` 或 `codex/config.toml`
     pub file: String,
     pub keys: Vec<ConfigKeyInfo>,
+}
+
+/// 一条「因本机缺少依赖而没同步过来」的记录。
+///
+/// 同步只搬配置，不装依赖：MCP 的二进制、hook 的脚本若不在这台机器上，
+/// 照搬过来只会得到一份必然失败的配置，所以客户端会跳过它。跳过必须**说出来** ——
+/// 否则用户看到的就是「两台机器配置死活不一致」，却不知道差在哪、为什么。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigSkip {
+    /// 所属文件：`claude/claude.json`（MCP）或 `claude/settings.json`（hook）
+    pub file: String,
+    /// 被跳过的东西：MCP 的 server 名，或 hook 的「事件: 命令」
+    pub item: String,
+    /// 人话原因，如「可执行文件不存在: /Users/x/.local/bin/y」
+    pub reason: String,
 }
 
 /// 结构化配置的**字段级**同步单元（二期）。

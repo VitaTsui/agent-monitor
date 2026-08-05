@@ -537,6 +537,8 @@ export interface ConfigSyncDevice {
   behind: number;
   /** 最近一次扫描时刻（unix 秒，0 = 没扫过） */
   scannedAt: number;
+  /** 因本机缺少依赖而被跳过的同步项（MCP 二进制 / hook 脚本不在这台机器上） */
+  skips: { file: string; item: string; reason: string }[];
   /** 与基线不一致的配置项（源机恒为空） */
   fieldDiff: {
     file: string;

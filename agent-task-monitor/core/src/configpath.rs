@@ -11,6 +11,21 @@ pub const SINGLE_FILES: &[&str] = &["claude/CLAUDE.md", "codex/AGENTS.md"];
 /// 目录规则：递归收集其下的 .md（其余扩展名一律不收）
 pub const DIRS: &[&str] = &["claude/agents", "claude/commands", "claude/skills", "codex/prompts"];
 
+/// **可执行脚本目录**：其下的文件不限扩展名，落盘后补上执行位。
+///
+/// hook 脚本通常没有扩展名（`~/.claude/hooks/cbm-session-reminder`），按 .md 规则会被整个
+/// 漏掉 —— 于是 hooks 配置同步过去了、脚本没有，每次触发都报错。
+///
+/// 放开这个目录意味着**分发会被自动执行的内容**：脚本落地后 Claude Code 触发 hook 时会直接
+/// 跑它，不需要用户点任何东西。边界因此划得很死：仅此一个目录，不含隐藏文件，
+/// 单文件仍受 `MAX_FILE_BYTES` 限制。
+pub const EXEC_DIRS: &[&str] = &["claude/hooks"];
+
+/// 该相对路径是否属于「落盘后要补执行位」的脚本
+pub fn is_exec_path(rel: &str) -> bool {
+    EXEC_DIRS.iter().any(|d| rel.starts_with(&format!("{d}/")))
+}
+
 /// 单文件体积上限。配置类文本几 KB 顶天，超了多半是有人把日志/数据丢了进来——
 /// 这种东西挤进 1.5s 一轮的心跳会把上报撑到 413。
 pub const MAX_FILE_BYTES: u64 = 256 * 1024;
@@ -20,20 +35,25 @@ pub const MAX_FILE_BYTES: u64 = 256 * 1024;
 /// 路径一律是归一化的相对形式（`claude/agents/x.md`），第一段是根标识
 /// （`claude` → `~/.claude`，`codex` → `~/.codex`），由各端自己拼本机绝对路径。
 pub fn is_allowed(rel: &str) -> bool {
-    // 只收 .md：白名单目录里混着别的东西时（比如 skills 下的脚本），不碰。
-    // 凭据（.credentials.json / auth.json）与设置（settings.json / config.toml）
-    // 都因此天然落在同步集之外——前者进 hub 就是一份明文账号副本，
-    // 后者混着机器相关内容（尤其本客户端写进 settings.json 的配对 hook，
-    // 命令是本机 exe 的绝对路径），整份同步会让另一台机器的配对静默失效。
-    if !rel.ends_with(".md") {
-        return false;
-    }
     // 路径穿越与反斜杠（Windows 上 `a\..\..\x` 同样能越出）一律拒
     if rel.contains("..") || rel.contains('\\') || rel.starts_with('/') {
         return false;
     }
     // 隐藏段不收，且挡掉空段（`a//b`）
     if rel.split('/').any(|seg| seg.is_empty() || seg.starts_with('.')) {
+        return false;
+    }
+    // hooks 目录：脚本没有固定扩展名，按 .md 规则会被整个漏掉（见 EXEC_DIRS）
+    if is_exec_path(rel) {
+        return true;
+    }
+    // 其余一律只收 .md：白名单目录里混着别的东西时（比如 skills 下的脚本），不碰。
+    // 凭据（.credentials.json / auth.json）与设置（settings.json / config.toml）
+    // 都因此天然落在文件同步集之外——前者进 hub 就是一份明文账号副本，
+    // 后者混着机器相关内容（尤其本客户端写进 settings.json 的配对 hook，
+    // 命令是本机 exe 的绝对路径），整份同步会让另一台机器的配对静默失效。
+    // settings.json / config.toml / claude.json 走的是**字段级**同步，不是整份搬。
+    if !rel.ends_with(".md") {
         return false;
     }
     SINGLE_FILES.contains(&rel) || DIRS.iter().any(|d| rel.starts_with(&format!("{d}/")))
@@ -635,6 +655,23 @@ mod tests {
         assert!(is_allowed("claude/skills/deep/nested/x.md"));
         assert!(is_allowed("codex/AGENTS.md"));
         assert!(is_allowed("codex/prompts/a.md"));
+    }
+
+    #[test]
+    fn hooks_scripts_sync_but_neighbours_do_not() {
+        // 脚本没有扩展名，正是按 .md 规则会被漏掉的那批
+        assert!(is_allowed("claude/hooks/cbm-session-reminder"));
+        assert!(is_allowed("claude/hooks/sub/dir/script.sh"));
+        assert!(is_exec_path("claude/hooks/cbm-session-reminder"));
+
+        // 放开的只有 hooks 这一个目录 —— 隔壁的设置与凭据绝不能跟着开
+        assert!(!is_allowed("claude/settings.json"));
+        assert!(!is_allowed("claude/.credentials.json"));
+        assert!(!is_allowed("claude/playwright.mcp.config.json"));
+        assert!(!is_exec_path("claude/agents/x.md"));
+        // 穿越与隐藏文件在 hooks 目录下同样挡住
+        assert!(!is_allowed("claude/hooks/../settings.json"));
+        assert!(!is_allowed("claude/hooks/.hidden"));
     }
 
     #[test]

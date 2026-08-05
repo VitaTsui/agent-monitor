@@ -12,11 +12,11 @@
 
 use am_core::configpath::{
     is_allowed, is_syncable_field, looks_machine_specific, merge_hooks, merge_mcp, portable_hooks,
-    portable_mcp, DIRS, MAX_FILE_BYTES, SINGLE_FILES,
+    portable_mcp, DIRS, EXEC_DIRS, MAX_FILE_BYTES, SINGLE_FILES,
 };
 use am_core::model::{
     ConfigFileBody, ConfigFileMeta, ConfigKeyInfo, ConfigManifest, ConfigPatch, ConfigProbe,
-    ConfigPush,
+    ConfigPush, ConfigSkip,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use sha2::{Digest, Sha256};
@@ -105,7 +105,12 @@ impl ConfigScanner {
         }
         for d in DIRS {
             let Some(dir) = dir_abs(home, d) else { continue };
-            collect_md(&dir, 0, &mut paths);
+            collect_files(&dir, 0, false, &mut paths);
+        }
+        // 脚本目录：不限扩展名（hook 脚本通常没有扩展名）
+        for d in EXEC_DIRS {
+            let Some(dir) = dir_abs(home, d) else { continue };
+            collect_files(&dir, 0, true, &mut paths);
         }
         paths.sort();
         paths.truncate(MAX_FILES);
@@ -151,8 +156,9 @@ fn dir_abs(home: &Path, rel_dir: &str) -> Option<PathBuf> {
     Some(base.join(rest))
 }
 
-/// 递归收集目录下的 .md。跟随符号链接会成环，靠深度上限兜住。
-fn collect_md(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+/// 递归收集目录下的文件。`any_ext` 为真时不限扩展名（脚本目录用）。
+/// 跟随符号链接会成环，靠深度上限兜住。
+fn collect_files(dir: &Path, depth: usize, any_ext: bool, out: &mut Vec<PathBuf>) {
     if depth > MAX_DEPTH || out.len() >= MAX_FILES {
         return;
     }
@@ -164,8 +170,8 @@ fn collect_md(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
             continue;
         }
         match e.file_type() {
-            Ok(t) if t.is_dir() => collect_md(&p, depth + 1, out),
-            Ok(_) if name.ends_with(".md") => out.push(p),
+            Ok(t) if t.is_dir() => collect_files(&p, depth + 1, any_ext, out),
+            Ok(_) if any_ext || name.ends_with(".md") => out.push(p),
             _ => {}
         }
     }
@@ -263,6 +269,17 @@ pub fn apply(home: &Path, pushes: &[ConfigPush]) -> usize {
             let _ = std::fs::remove_file(&tmp);
             tracing::warn!("替换配置文件失败 {}: {e}", push.path);
             continue;
+        }
+        // 脚本落地后要能直接跑：hook 是被 Claude Code 直接 exec 的，
+        // 少了执行位就是「文件在、一触发就 Permission denied」，比没同步更难查。
+        #[cfg(unix)]
+        if am_core::configpath::is_exec_path(&push.path) {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&target) {
+                let mut perm = meta.permissions();
+                perm.set_mode(perm.mode() | 0o755);
+                let _ = std::fs::set_permissions(&target, perm);
+            }
         }
         tracing::info!("已同步配置: {}", push.path);
         done += 1;
@@ -413,8 +430,9 @@ fn read_structured(path: &Path, rel: &str) -> Option<serde_json::Value> {
 ///
 /// 目前只处理 JSON。Codex 的 config.toml 回写需要 `toml_edit`（`toml` crate 序列化会吞掉
 /// 用户的注释与字段顺序），留到下一步单独做，这里遇到 .toml 直接跳过。
-pub fn apply_patches(home: &Path, patches: &[ConfigPatch]) -> usize {
+pub fn apply_patches(home: &Path, patches: &[ConfigPatch]) -> (usize, Vec<ConfigSkip>) {
     let mut changed = 0;
+    let mut skips: Vec<ConfigSkip> = Vec::new();
     for patch in patches {
         let Some(rel) = PROBE_FILES.iter().find(|(id, _)| *id == patch.file).map(|(_, r)| *r) else {
             tracing::warn!("拒绝合并未知配置文件: {}", patch.file);
@@ -452,9 +470,11 @@ pub fn apply_patches(home: &Path, patches: &[ConfigPatch]) -> usize {
                 let next = if k == "hooks" {
                     let mut inc = v.clone();
                     for (event, cmd) in drop_unrunnable_hooks(&mut inc, home) {
-                        crate::state::client_log(&format!(
-                            "[configsync] 跳过 hook（脚本不在本机）{event}: {cmd}"
-                        ));
+                        skips.push(ConfigSkip {
+                            file: patch.file.clone(),
+                            item: format!("{event}: {cmd}"),
+                            reason: "脚本不在本机".into(),
+                        });
                     }
                     merge_hooks(obj.get(k), &inc)
                 } else if k == "mcpServers" {
@@ -464,10 +484,11 @@ pub fn apply_patches(home: &Path, patches: &[ConfigPatch]) -> usize {
                     // 照写只是搬来一份注定连接失败的配置。
                     let mut inc = v.clone();
                     for (name, why) in drop_unrunnable_mcp(&mut inc, home) {
-                        tracing::warn!("MCP server「{name}」在本机跑不起来，已跳过：{why}");
-                        crate::state::client_log(&format!(
-                            "[configsync] 跳过 MCP「{name}」：{why}"
-                        ));
+                        skips.push(ConfigSkip {
+                            file: patch.file.clone(),
+                            item: name,
+                            reason: why,
+                        });
                     }
                     // 再 ~ 展开成本机 home，并保留本机原有的 env 与本机独有的 server
                     merge_mcp(obj.get(k), &inc, &home.to_string_lossy())
@@ -516,7 +537,7 @@ pub fn apply_patches(home: &Path, patches: &[ConfigPatch]) -> usize {
         tracing::info!("已同步配置字段: {} ({} 项)", patch.file, patch.fields.len());
         changed += 1;
     }
-    changed
+    (changed, skips)
 }
 
 /// 这个字符串看起来是不是一个文件路径（而非包名/参数）。
@@ -920,7 +941,7 @@ mod tests {
         let p = dir.join(".claude/settings.json");
         let _ = std::fs::write(&p, original);
 
-        let n = apply_patches(&dir, &[patch_of("claude/settings.json", &[("model", json!("opus"))])]);
+        let (n, _) = apply_patches(&dir, &[patch_of("claude/settings.json", &[("model", json!("opus"))])]);
         assert_eq!(n, 1);
 
         let after: serde_json::Value =
@@ -948,7 +969,7 @@ mod tests {
         let _ = std::fs::write(&p, br#"{"model":"sonnet","hooks":{"keep":"me"}}"#);
 
         // hub 下发黑名单字段 + 白名单字段但值是本机路径 —— 两者都必须被拒
-        let n = apply_patches(
+        let (n, _) = apply_patches(
             &dir,
             &[patch_of(
                 "claude/settings.json",
@@ -981,7 +1002,7 @@ theme = "dark"
 "#;
         let _ = std::fs::write(&p, original);
 
-        let n = apply_patches(&dir, &[patch_of("codex/config.toml", &[("model", json!("o3"))])]);
+        let (n, _) = apply_patches(&dir, &[patch_of("codex/config.toml", &[("model", json!("o3"))])]);
         assert_eq!(n, 1);
 
         let after = std::fs::read_to_string(&p).unwrap();
@@ -1017,7 +1038,7 @@ theme = "dark"
         let _ = std::fs::write(&p, "model = \"gpt-5\"\n[tui]\ntheme = \"dark\"\n");
 
         // 黑名单字段 + 复合值：都不该落地
-        let n = apply_patches(
+        let (n, _) = apply_patches(
             &dir,
             &[patch_of(
                 "codex/config.toml",
@@ -1050,7 +1071,7 @@ theme = "dark"
             "claude/claude.json",
             &[("mcpServers", json!({ "cbm": { "command": "~/.local/bin/cbm" } }))],
         );
-        assert_eq!(apply_patches(&dir, &[incoming]), 1);
+        assert_eq!(apply_patches(&dir, &[incoming]).0, 1);
 
         let after: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
@@ -1095,7 +1116,7 @@ theme = "dark"
                 }),
             )],
         );
-        assert_eq!(apply_patches(&dir, &[incoming]), 1);
+        assert_eq!(apply_patches(&dir, &[incoming]).0, 1);
 
         let after: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(dir.join(".claude/settings.json")).unwrap(),
@@ -1144,7 +1165,7 @@ theme = "dark"
                 }),
             )],
         );
-        assert_eq!(apply_patches(&dir, &[incoming]), 1);
+        assert_eq!(apply_patches(&dir, &[incoming]).0, 1);
 
         let after: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join(".claude.json")).unwrap())
@@ -1162,9 +1183,39 @@ theme = "dark"
     fn apply_patches_does_not_create_missing_file() {
         let dir = std::env::temp_dir().join(format!("am-cfg-apc-{}", std::process::id()));
         let _ = std::fs::create_dir_all(dir.join(".claude"));
-        let n = apply_patches(&dir, &[patch_of("claude/settings.json", &[("model", json!("opus"))])]);
+        let (n, _) = apply_patches(&dir, &[patch_of("claude/settings.json", &[("model", json!("opus"))])]);
         assert_eq!(n, 0);
         assert!(!dir.join(".claude/settings.json").exists(), "不该凭空创建配置文件");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hook_scripts_are_scanned_and_land_executable() {
+        let dir = std::env::temp_dir().join(format!("am-cfg-hookfile-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".claude/hooks"));
+        let _ = std::fs::write(dir.join(".claude/hooks/reminder"), b"#!/bin/sh\necho hi\n");
+        let _ = std::fs::write(dir.join(".claude/settings.json"), b"{}");
+
+        // 扫描：脚本进同步集，隔壁的 settings.json 不进
+        let m = ConfigScanner::new().scan(&dir);
+        let paths: Vec<&str> = m.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&"claude/hooks/reminder"), "脚本没被收: {paths:?}");
+        assert!(!paths.iter().any(|p| p.ends_with("settings.json")), "设置不该整份同步");
+
+        // 落盘：必须带执行位，否则 hook 一触发就是 Permission denied
+        let body = b"#!/bin/sh\necho new\n";
+        let push = ConfigPush {
+            path: "claude/hooks/fresh".into(),
+            content_b64: B64.encode(body),
+            sha256: sha256_hex(body),
+        };
+        assert_eq!(apply(&dir, &[push]), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join(".claude/hooks/fresh")).unwrap().permissions().mode();
+            assert!(mode & 0o111 != 0, "脚本落盘没有执行位: {mode:o}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

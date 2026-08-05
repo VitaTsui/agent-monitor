@@ -1461,6 +1461,8 @@ async fn config_sync_status(State(state): State<SharedState>, headers: HeaderMap
                 "behind": behind,
                 "scannedAt": scanned_at,
                 "fieldDiff": field_diff,
+                // 因这台机器缺依赖而没同步过来的项（MCP 二进制 / hook 脚本不在）
+                "skips": entry.map(|e| e.config_skips.clone()).unwrap_or_default(),
             })
         })
         .collect();
@@ -2551,6 +2553,7 @@ async fn report(
                 new_session_pending: HashMap::new(),
                 config_manifest: None,
                 config_patches: None,
+                config_skips: Vec::new(),
             }
         });
     // 设备上线边沿：新登记 或 之前已判离线（超阈值）
@@ -2569,6 +2572,8 @@ async fn report(
     if payload.config_manifest.is_some() {
         entry.config_patches = Some(payload.config_patches.clone());
     }
+    // 跳过项每轮都随上报带来（依赖一直缺就一直有），直接覆盖
+    entry.config_skips = payload.config_skips.clone();
     let device_manifest = entry.config_manifest.clone();
     let device_patches = entry.config_patches.clone();
     // 上线边沿：刷新沉降起点。上线后 NEW_SESSION_SETTLE_SECS 内出现的会话一律当「重连扫回的

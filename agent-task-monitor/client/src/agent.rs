@@ -89,6 +89,8 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     let mut pending_cfg_bodies: Vec<am_core::model::ConfigFileBody> = Vec::new();
     let mut cfg_probe: Vec<am_core::model::ConfigProbe> = Vec::new();
     let mut cfg_patches: Vec<am_core::model::ConfigPatch> = Vec::new();
+    // 因本机缺依赖被跳过的同步项（每次 apply 覆盖式重算，持续随上报发出）
+    let mut cfg_skips: Vec<am_core::model::ConfigSkip> = Vec::new();
 
     // 监听会话目录：文件一有写入（用户在终端里发了任务、助手产生输出）就立刻唤醒本
     // 循环扫描上报，而不必干等 1.5s 轮询——后者在窗口关到托盘/失焦后会被 macOS
@@ -263,6 +265,8 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             config_bodies: std::mem::take(&mut pending_cfg_bodies),
             config_probe: std::mem::take(&mut cfg_probe),
             config_patches: std::mem::take(&mut cfg_patches),
+            // 不 take：跳过状态会持续存在（依赖一直缺），每轮都要如实报上去
+            config_skips: cfg_skips.clone(),
         };
 
         let mut req = client.post(format!("{hub}/monitor/report"));
@@ -413,7 +417,21 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         .unwrap_or_default();
                     if !cfg_patch_pushes.is_empty() {
                         if let Some(home) = dirs::home_dir() {
-                            if crate::configsync::apply_patches(&home, &cfg_patch_pushes) > 0 {
+                            let (n, skips) =
+                                crate::configsync::apply_patches(&home, &cfg_patch_pushes);
+                            // 因本机缺依赖被跳过的项：随下次上报发给 hub，界面上如实说明
+                            // 「这台机器为什么和配置源不一致」。每次 apply 覆盖式重算 ——
+                            // 用户把依赖装上之后，下一轮它自然就从列表里消失了。
+                            if cfg_skips != skips {
+                                for s in &skips {
+                                    crate::state::client_log(&format!(
+                                        "[configsync] 跳过 {}「{}」：{}",
+                                        s.file, s.item, s.reason
+                                    ));
+                                }
+                                cfg_skips = skips;
+                            }
+                            if n > 0 {
                                 last_cfg_scan = None;
                             }
                         }
