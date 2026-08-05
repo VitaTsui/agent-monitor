@@ -14,6 +14,7 @@ import {
   setConfigSource,
 } from "@/services/apis/portal";
 import { localMachineId } from "@/utils/clientAuth";
+import DiffModal, { DiffTarget } from "./DiffModal";
 import styles from "./index.module.scss";
 
 /**
@@ -30,6 +31,8 @@ const ConfigSyncPanel: React.FC = () => {
   const [info, setInfo] = useState<ConfigSyncInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState("");
+  // 点开某一项看详情（hooks 展开到命令级）
+  const [diff, setDiff] = useState<DiffTarget | null>(null);
   // 客户端窗口内标出「本机」（浏览器里取不到，为 null）
   const [localId, setLocalId] = useState<string | null>(null);
   useEffect(() => {
@@ -91,11 +94,29 @@ const ConfigSyncPanel: React.FC = () => {
           {d.fieldDiff?.length > 0 && (
             <div className={styles.fieldDiff}>
               {d.fieldDiff.map((f) => (
-                <div key={`${f.file}.${f.field}`} className={styles.diffRow}>
+                <div
+                  key={`${f.file}.${f.field}`}
+                  className={`${styles.diffRow} ${styles.clickable}`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() =>
+                    setDiff({
+                      field: f.field,
+                      file: f.file,
+                      from: f.current,
+                      to: f.target,
+                      hostname: d.hostname,
+                      fromLabel: "本机当前",
+                      toLabel: "配置源",
+                    })
+                  }
+                  onKeyDown={(e) => e.key === "Enter" && e.currentTarget.click()}
+                >
                   <code>{f.field}</code>
                   <span className={styles.diffFrom}>{fmt(f.current, f.field)}</span>
                   <span className={styles.diffArrow}>→</span>
                   <span className={styles.diffTo}>{fmt(f.target, f.field)}</span>
+                  <span className={styles.detail}>详情</span>
                 </div>
               ))}
             </div>
@@ -205,7 +226,24 @@ const ConfigSyncPanel: React.FC = () => {
         <div className={styles.changes}>
           <div className={styles.changesTitle}>近期改动</div>
           {info!.recentChanges.map((c, i) => (
-            <div key={`${c.at}-${c.machineId}-${c.field}-${i}`} className={styles.changeRow}>
+            <div
+              key={`${c.at}-${c.machineId}-${c.field}-${i}`}
+              className={`${styles.changeRow} ${styles.clickable}`}
+              role="button"
+              tabIndex={0}
+              onClick={() =>
+                setDiff({
+                  field: c.field,
+                  file: c.file,
+                  from: c.from,
+                  to: c.to,
+                  hostname: c.hostname || c.machineId,
+                  fromLabel: "改动前",
+                  toLabel: "改动后",
+                })
+              }
+              onKeyDown={(e) => e.key === "Enter" && e.currentTarget.click()}
+            >
               <span className={styles.changeHost}>{c.hostname || c.machineId}</span>
               <code>{c.field}</code>
               <span className={styles.diffFrom}>{fmt(c.from, c.field)}</span>
@@ -243,6 +281,8 @@ const ConfigSyncPanel: React.FC = () => {
           在其它设备上被删除。
         </div>
       </div>
+
+      <DiffModal target={diff} onClose={() => setDiff(null)} />
     </div>
   );
 };

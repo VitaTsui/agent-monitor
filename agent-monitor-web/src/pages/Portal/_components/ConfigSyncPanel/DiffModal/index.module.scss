@@ -1,0 +1,183 @@
+$border: rgba(36, 61, 66, 0.09);
+$text: #243d42;
+$muted: #7c9096;
+$accent: #0f9bad;
+$addBg: rgba(33, 179, 74, 0.08);
+$addFg: #1a8c3a;
+$delBg: rgba(214, 69, 69, 0.07);
+$delFg: #c04545;
+
+.DiffModal {
+  .head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+
+    .headField {
+      font-size: 15px;
+      font-weight: 600;
+      color: $text;
+    }
+
+    .headMeta {
+      font-size: 11.5px;
+      color: $muted;
+    }
+  }
+
+  .hookDiff {
+    .summary {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+      color: $muted;
+      margin-bottom: 8px;
+
+      .legend {
+        margin-left: auto;
+        display: flex;
+        gap: 10px;
+
+        em {
+          font-style: normal;
+          font-size: 11px;
+        }
+      }
+    }
+
+    // 一行 = 一条命令。等宽字体让前缀 +/- 对齐，读起来像 diff
+    .row {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      padding: 5px 8px;
+      border-radius: 7px;
+      font-size: 12px;
+      margin-bottom: 2px;
+
+      .mark {
+        flex: none;
+        width: 10px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-weight: 700;
+      }
+
+      .event {
+        flex: none;
+        font-weight: 600;
+        color: $text;
+      }
+
+      .matcher {
+        flex: none;
+        padding: 0 6px;
+        border-radius: 5px;
+        background: rgba(36, 61, 66, 0.06);
+        font-size: 10.5px;
+        color: $muted;
+      }
+
+      .command {
+        flex: 1;
+        min-width: 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11.5px;
+        word-break: break-all;
+        color: $text;
+      }
+
+      &.same {
+        color: $muted;
+
+        .command {
+          opacity: 0.72;
+        }
+      }
+
+      &.added {
+        background: $addBg;
+
+        .mark,
+        .command {
+          color: $addFg;
+        }
+      }
+
+      &.removed {
+        background: $delBg;
+
+        .mark,
+        .command {
+          color: $delFg;
+          text-decoration: line-through;
+        }
+      }
+    }
+
+    .empty {
+      padding: 20px 0;
+      text-align: center;
+      font-size: 12px;
+      color: $muted;
+    }
+
+    .note {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(15, 155, 173, 0.05);
+      border: 1px solid rgba(15, 155, 173, 0.14);
+      font-size: 11px;
+      line-height: 1.7;
+      color: $muted;
+    }
+  }
+
+  // 非 hooks：左右对照
+  .valueDiff {
+    display: flex;
+    gap: 12px;
+
+    .side {
+      flex: 1;
+      min-width: 0;
+
+      .sideTitle {
+        font-size: 11.5px;
+        color: $muted;
+        margin-bottom: 5px;
+      }
+
+      pre {
+        margin: 0;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid $border;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11.5px;
+        line-height: 1.6;
+        white-space: pre-wrap;
+        word-break: break-all;
+        max-height: 320px;
+        overflow: auto;
+      }
+
+      .removed {
+        background: $delBg;
+        color: $delFg;
+      }
+
+      .added {
+        background: $addBg;
+        color: $addFg;
+      }
+    }
+  }
+
+  @media (max-width: 640px) {
+    .valueDiff {
+      flex-direction: column;
+    }
+  }
+}

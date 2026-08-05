@@ -136,6 +136,31 @@ $accent: #0f9bad;
     }
   }
 
+  // 可点开看详情的行（hooks 这类复合值，一行里只放得下规模）
+  .clickable {
+    cursor: pointer;
+    border-radius: 7px;
+    padding-inline: 6px;
+    margin-inline: -6px;
+    transition: background 0.16s;
+
+    &:hover {
+      background: rgba(15, 155, 173, 0.06);
+
+      .detail {
+        opacity: 1;
+      }
+    }
+  }
+
+  .detail {
+    flex: none;
+    font-size: 10.5px;
+    color: $accent;
+    opacity: 0;
+    transition: opacity 0.16s;
+  }
+
   .diffFrom {
     text-decoration: line-through;
     opacity: 0.75;
