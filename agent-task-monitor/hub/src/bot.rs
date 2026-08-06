@@ -176,20 +176,23 @@ pub(crate) fn is_immediate(text: &str) -> bool {
     ALL_CMDS.contains(&cmd.as_str())
 }
 
-/// 把一条内容消息投进钉钉合并窗口，静默满 [`BOT_BATCH_WINDOW_MS`] 后合并下发。
-///
-/// 返回 `Some(回执)` = 这一批已到期并发出，由本次调用负责回复；
-/// 返回 `None` = 窗口被后来的消息重置了，本次静默退场，改由最后那条负责回。
+/// 把一条内容消息投进钉钉合并窗口，返回本次的世代号（交给 [`batch_flush`] 比对）。
 ///
 /// 为什么要攒：钉钉逐条转发给机器人的是几次**完全独立**的回调，payload 里没有转发标记、
 /// 没有批次号、也没有「共 N 条」—— hub 无从知道一批有几条，只能拿「消息是连着到的」当判据。
-pub(crate) async fn batch_and_dispatch(
+///
+/// **必须在收帧循环里按到达顺序同步调用，不能挪进 spawn 的任务里。** 任务的启动顺序由
+/// tokio 调度决定，与消息到达顺序无关。入队一旦放进任务里，就会出现这种局面：一批四条
+/// 转发，第三条的任务起晚了一步，1/2/4 先攒齐、窗口到期、合并下发，它才 push 进来自成
+/// 一批单独发出 —— 用户看到的是「明明一起转发的，却有一条被单独下发」，而且顺序还是跳的。
+/// 线上抓到过一次（合并 3 条 + 「一起显示」单独一条）。
+pub(crate) async fn batch_push(
     state: &SharedState,
     username: &str,
     text: &str,
     ctx: &ReplyCtx,
-) -> Option<String> {
-    let my_gen = {
+) -> u64 {
+    {
         let mut map = state.bot_pending_batch.write().await;
         let b = map.entry(username.to_string()).or_insert_with(|| BotBatch {
             lines: Vec::new(),
@@ -208,8 +211,18 @@ pub(crate) async fn batch_and_dispatch(
         b.robot_code = ctx.robot_code.clone();
         b.gen += 1;
         b.gen
-    };
+    }
+}
 
+/// 等满 [`BOT_BATCH_WINDOW_MS`] 后把这一批合并成一段、一次性下发。
+///
+/// 返回 `Some(回执)` = 这一批已到期并发出，由本次调用负责回复；
+/// 返回 `None` = 窗口被后来的消息重置了，本次静默退场，改由最后那条负责回。
+pub(crate) async fn batch_flush(
+    state: &SharedState,
+    username: &str,
+    my_gen: u64,
+) -> Option<String> {
     tokio::time::sleep(std::time::Duration::from_millis(crate::state::BOT_BATCH_WINDOW_MS)).await;
 
     let batch = {

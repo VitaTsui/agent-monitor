@@ -242,17 +242,33 @@ async fn connect_once(
 
                 // dispatch + 通过 sessionWebhook 回发，另起任务避免阻塞收帧（心跳要及时）
                 if !session_webhook.is_empty() {
+                    let ctx = crate::bot::ReplyCtx {
+                        webhook: session_webhook.clone(),
+                        expiry_ms: webhook_expiry,
+                        staff_id,
+                        robot_code,
+                    };
+                    // 入队必须在这里、在 spawn **之前**做，按消息到达的顺序。
+                    //
+                    // 攒批本身可以慢慢来（下面的 spawn 负责等窗口），但「第几个入队」不能交给
+                    // 任务调度决定：spawn 的启动顺序与消息到达顺序无关，放进任务里就会出现
+                    // 一批四条转发、第三条的任务起晚一步，1/2/4 先攒齐并下发、它才入队自成一批
+                    // 的情况（线上抓到过）。这里只是拿锁 push 一下，不会挡住心跳。
+                    let batch_gen = match &account {
+                        Ok(acct)
+                            if bind_reply.is_none()
+                                && !file_only
+                                && !crate::bot::is_immediate(&content) =>
+                        {
+                            Some(crate::bot::batch_push(&state, acct, &content, &ctx).await)
+                        }
+                        _ => None,
+                    };
                     let st = state.clone();
                     let cl = client.clone();
                     let sw = session_webhook.clone();
                     tokio::spawn(async move {
-                        let ctx = crate::bot::ReplyCtx {
-                            webhook: sw.clone(),
-                            expiry_ms: webhook_expiry,
-                            staff_id,
-                            robot_code,
-                        };
-                        // None = 这条进了合并窗口、还在攒，本次不回执（见 bot::batch_and_dispatch）
+                        // None = 这条进了合并窗口、还在攒，本次不回执（见 bot::batch_flush）
                         let reply = match account {
                             // 绑定指令：直接回它的结果（此时 account 是占位的 Err）
                             _ if bind_reply.is_some() => bind_reply,
@@ -266,15 +282,15 @@ async fn connect_once(
                                         .to_string(),
                                 )
                             }
-                            // 指令立即执行 —— 它的语义依赖单独成条，攒起来会被并进正文。
-                            Ok(acct) if crate::bot::is_immediate(&content) => {
-                                Some(crate::bot::dispatch(&st, &acct, &content, Some(&ctx)).await)
-                            }
-                            // 内容进合并窗口：逐条转发的几条要拼成一段一次性交给 agent，
-                            // 否则它看到第一条就开跑，后面几条全成了打断。
-                            Ok(acct) => {
-                                crate::bot::batch_and_dispatch(&st, &acct, &content, &ctx).await
-                            }
+                            Ok(acct) => match batch_gen {
+                                // 已入合并窗口：等它到期，由最后一条负责合并下发与回执
+                                Some(g) => crate::bot::batch_flush(&st, &acct, g).await,
+                                // 没入队 = 指令，立即执行 —— 它的语义依赖单独成条，
+                                // 攒起来会被并进正文。
+                                None => Some(
+                                    crate::bot::dispatch(&st, &acct, &content, Some(&ctx)).await,
+                                ),
+                            },
                         };
                         let Some(reply) = reply else {
                             return; // 窗口未到期，由这一批的最后一条负责回执
