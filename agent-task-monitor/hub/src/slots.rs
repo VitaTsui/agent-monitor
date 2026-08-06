@@ -136,6 +136,32 @@ impl SlotTable {
             }
         }
 
+        // 锁定的终端关掉了就把锁放开。
+        //
+        // sticky 只被下一个 `@M` 改变、不会超时（那是为了让活跃对话期间完全无感），可它指着
+        // 一个已经不在的终端时，之后每条不带 `@` 的消息都投不出去，而从钉钉那头完全看不出
+        // 锁还在 —— 用户只看到「发了没反应」。号位本身要留一周（SLOT_KEEP_SECS，防 @N 打错），
+        // 但「锁」没有理由陪着一起留。
+        //
+        // 判据同上面的回收：只在**设备在线**时才敢断定终端真的关了。设备离线只说明没人汇报，
+        // 那时对它名下的锚一律不做判断，免得关机一次锁就掉。
+        match self.slots.iter().find(|(_, &n)| Some(n) == self.sticky) {
+            // 号位还在表里：锚不在活跃列表且其设备在线 → 那个终端确实关了
+            Some((k, _))
+                if !alive.contains(k.as_str())
+                    && k.split('|').next().is_some_and(|m| online.contains(m)) =>
+            {
+                self.sticky = None;
+                dirty = true;
+            }
+            // 号位压根不在表里（早被回收，或指向一个从未分配过的号）：锁也就没有着落了
+            None if self.sticky.is_some() => {
+                self.sticky = None;
+                dirty = true;
+            }
+            _ => {}
+        }
+
         let mut used: HashSet<u32> = self.slots.values().copied().collect();
         let mut out = HashMap::with_capacity(keys.len());
         for key in keys {
@@ -439,6 +465,34 @@ mod tests {
         let after: Vec<u32> = m1.iter().map(|k| t.slots[k]).collect();
         assert_eq!(before, after, "离线设备的号位必须原样不动");
         assert_eq!(out[&m2], SLOT_MAX as u32 + 1, "收不到候选就照常往上发号");
+    }
+
+    /// 锁定的终端一关，「连续对话」就该自动解锁 —— 号位还留着（防 @N 打错），但锁不该陪着留：
+    /// 指着一个已经不在的终端时，之后每条不带 @ 的消息都投不出去，用户还看不出原因
+    #[test]
+    fn sticky_released_when_locked_terminal_closes() {
+        let (a, b) = ("m|sh:1@1".to_string(), "m|sh:2@2".to_string());
+        let mut t = SlotTable::default();
+        let out = t.assign(&[a.clone(), b.clone()], 1000).0;
+        t.sticky = Some(out[&b]); // 锁定 b
+        // b 的终端关了（不在本批），但 b 所属设备 m 仍在上报（a 还在）
+        t.assign(&[a.clone()], 1100);
+        assert_eq!(t.sticky, None, "锁定的终端已关，锁必须放开");
+        assert!(t.slots.contains_key(&b), "号位本身仍要保留到 SLOT_KEEP_SECS");
+    }
+
+    /// 但设备整台离线时不许解锁：那只说明没人汇报，不代表终端关了 —— 关机一次就掉锁，
+    /// 等回来还得重新 @N，与号位保留一周的初衷相悖
+    #[test]
+    fn sticky_kept_when_machine_offline() {
+        let (a, b) = ("m1|sh:1@1".to_string(), "m2|sh:2@2".to_string());
+        let mut t = SlotTable::default();
+        let out = t.assign(&[a.clone(), b.clone()], 1000).0;
+        let no = out[&b];
+        t.sticky = Some(no);
+        // m2 整台离线，只有 m1 在上报
+        t.assign(&[a.clone()], 1100);
+        assert_eq!(t.sticky, Some(no), "设备离线不该解锁");
     }
 
     /// 被回收的号若正被「连续对话」锁着，必须一并解锁 —— 否则号转手后消息串进陌生终端
