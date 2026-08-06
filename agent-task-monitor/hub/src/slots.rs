@@ -94,10 +94,19 @@ impl SlotTable {
 
         // 号池上限：还差多少个号位才装得下这一批，就提前回收多少个「已经不在的」终端。
         //
-        // 只挑本批活跃锚之外、且静默够久（SLOT_MIN_IDLE_SECS）的，按最久没见到的先收 ——
-        // 排序天然把「几天前关掉的临时终端」排在「昨晚关机的常用机器」前面，轮不到后者。
-        // 一个活着的锚都不动：活跃会话超过 SLOT_MAX 时收不到候选，照常往上发号。
+        // 只挑本批活跃锚之外、静默够久（SLOT_MIN_IDLE_SECS）、**且所属设备此刻在线**的，
+        // 按最久没见到的先收。一个活着的锚都不动：活跃会话超过 SLOT_MAX 时收不到候选，
+        // 照常往上发号。
         let alive: HashSet<&str> = keys.iter().map(String::as_str).collect();
+        // 本批出现过的设备 = 此刻在上报的设备。**只有它们的会话清单才是可信的**。
+        //
+        // 活跃列表来自各设备的上报，设备一离线，它名下的会话就整批从列表里消失 —— 那不代表
+        // 那些终端关了，只代表没人在汇报。少了这道判据，另一台机器关机半小时，它的号位就会
+        // 被这边的新终端抢走；等它回来，用户手上的「@N」已经指向别人，钉钉回执照样说成功
+        // （hub 确实入队了），命令却进了另一台设备的队列，终端毫无反应。
+        // SLOT_KEEP_SECS 那一周的保留期本就是为「下班关机、周末不开机」留的，不能被这里绕过。
+        let online: HashSet<&str> =
+            alive.iter().filter_map(|k| k.split('|').next()).collect();
         let fresh = alive.iter().filter(|k| !self.slots.contains_key(**k)).count();
         let over = (self.slots.len() + fresh).saturating_sub(SLOT_MAX);
         if over > 0 {
@@ -105,6 +114,7 @@ impl SlotTable {
                 .slots
                 .keys()
                 .filter(|k| !alive.contains(k.as_str()))
+                .filter(|k| k.split('|').next().is_some_and(|m| online.contains(m)))
                 .filter_map(|k| {
                     let at = self.seen.get(k).copied().unwrap_or(0);
                     (now.saturating_sub(at) >= SLOT_MIN_IDLE_SECS).then_some((at, k))
@@ -407,6 +417,28 @@ mod tests {
             assert!(t.slots.contains_key(k), "静默不足的锚 {k} 不该被回收");
         }
         assert_eq!(t.slots[&newcomer], SLOT_MAX as u32 + 1, "收不到候选就照常往上发号");
+    }
+
+    /// 设备离线保护：另一台机器整批从活跃列表消失（关机/断网/客户端没跑）时，它的号位
+    /// 一个都不许收 —— 活跃列表只反映「谁在上报」，不代表那些终端关了。收了就等于把号
+    /// 转手给本机新终端，那台机器回来后用户手上的「@N」已经指向别人。
+    #[test]
+    fn cap_recycle_spares_offline_machines() {
+        // m1 一台把号池占满
+        let m1: Vec<String> = (0..SLOT_MAX).map(|i| format!("m1|sh:{i}@{i}")).collect();
+        let mut t = SlotTable::default();
+        t.assign(&m1, 1000);
+        let before: Vec<u32> = m1.iter().map(|k| t.slots[k]).collect();
+        // m1 整台离线（一个锚都不在本批），只剩 m2 在上报，且早已过了静默期
+        let now = 1000 + SLOT_MIN_IDLE_SECS + 1;
+        let m2 = "m2|sh:1@1".to_string();
+        let out = t.assign(&[m2.clone()], now).0;
+        for k in &m1 {
+            assert!(t.slots.contains_key(k), "离线设备的锚 {k} 不该被回收");
+        }
+        let after: Vec<u32> = m1.iter().map(|k| t.slots[k]).collect();
+        assert_eq!(before, after, "离线设备的号位必须原样不动");
+        assert_eq!(out[&m2], SLOT_MAX as u32 + 1, "收不到候选就照常往上发号");
     }
 
     /// 被回收的号若正被「连续对话」锁着，必须一并解锁 —— 否则号转手后消息串进陌生终端
