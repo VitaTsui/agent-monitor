@@ -519,12 +519,20 @@ fn check_pending_submits(state: &SharedState, tasks: &[Task]) {
         return;
     }
     let now = now_ms();
-    let prompt_of: HashMap<&str, &str> =
-        tasks.iter().map(|t| (t.id.as_str(), t.prompt.as_str())).collect();
+    let task_of: HashMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
+    // 「已提交」有两种样子，缺一不可：
+    //   · 会话最新用户消息就是它 —— claude 空闲，输入已被接受；
+    //   · 它还躺在终端的原生排队里 —— claude 正忙，输入进了队列。回车同样是生效了的。
+    // 早先只认前者，于是向正在跑的会话发消息必然误判：排队项不会成为用户消息
+    //（scanner 对 queue-operation 一律不产出简报），submit_landed 恒为 false，每条都要
+    // 白补满 MAX_RESUBMIT 次回车 —— 那几下若落在权限确认框上就是替人误确认。
+    let landed = |t: &Task, text: &str| {
+        submit_landed(&t.prompt, text) || t.queued_inputs.iter().any(|q| submit_landed(q, text))
+    };
     pending.retain(|sid, p| {
-        match prompt_of.get(sid.as_str()) {
-            // 会话最新用户消息就是这条 → 已提交，清除
-            Some(prompt) if submit_landed(prompt, &p.text) => false,
+        match task_of.get(sid.as_str()) {
+            // 已被接受或已进排队 → 提交成功，清除
+            Some(t) if landed(t, &p.text) => false,
             // 会话在本轮扫描里（能确认它当前状态），且最新消息不是这条 → 没提交
             Some(_) => {
                 if now.saturating_sub(p.last_ms) < RESUBMIT_WAIT_MS {
@@ -586,8 +594,11 @@ async fn attach_messages(state: &SharedState, tasks: &mut [Task], cache: &mut Ms
 /// 写入 hub 下发的文件到本机目标目录
 fn write_transfer(f: &am_core::model::FileTransfer, session_dirs: &[std::path::PathBuf]) {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    // 这条链路的成败必须落进 client.log：GUI 客户端的 tracing 输出没人看得到，
+    // 写失败时是彻底静默的 —— 网页说「已上传」、路径也回填进了输入框，终端却报文件
+    // 不存在，从两头都查不出原因。落盘的路径也一并记上，改名后到底叫什么一目了然。
     let Ok(bytes) = B64.decode(f.content_b64.as_bytes()) else {
-        tracing::warn!("文件内容解码失败: {}", f.filename);
+        crate::state::client_log(&format!("下发文件内容解码失败：{}", f.filename));
         return;
     };
     // 目标目录按本机的允许范围复验：不能只信 hub 校验过——
@@ -596,12 +607,15 @@ fn write_transfer(f: &am_core::model::FileTransfer, session_dirs: &[std::path::P
     let dir = match crate::state::safe_upload_dir_within(&f.dir, session_dirs) {
         Ok(d) => d,
         Err(e) => {
-            tracing::warn!("拒绝写入下发文件 {}: {e}", f.filename);
+            crate::state::client_log(&format!(
+                "拒绝写入下发文件 {}：{e}（目标目录 {}，不在本机允许范围内）",
+                f.filename, f.dir
+            ));
             return;
         }
     };
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!("创建目录失败 {}: {e}", dir.display());
+        crate::state::client_log(&format!("创建下发目录失败 {}：{e}", dir.display()));
         return;
     }
     let safe = std::path::Path::new(&f.filename)
@@ -644,18 +658,27 @@ fn write_transfer(f: &am_core::model::FileTransfer, session_dirs: &[std::path::P
             .and_then(|mut fh| fh.write_all(&bytes))
     };
     match res {
-        Ok(_) if !chunked => tracing::info!("已写入下发文件: {}", target.display()),
+        // 记落盘全路径：撞名会改名（见 unique_target），回填进输入框的却是上游算的名字，
+        // 两者对不上时终端就会报「文件不存在」—— 有这行才看得出到底叫什么、落在哪。
+        Ok(_) if !chunked => {
+            crate::state::client_log(&format!("已写入下发文件：{}", target.display()));
+        }
         Ok(_) if f.chunk_index + 1 >= f.chunk_total => {
-            tracing::info!("已写入下发文件（{} 片）: {}", f.chunk_total, target.display());
+            crate::state::client_log(&format!(
+                "已写入下发文件（{} 片）：{}",
+                f.chunk_total,
+                target.display()
+            ));
         }
         Ok(_) => {}
         // 中途某片失败就别再追加了：后续分片会接在残缺内容后面，拼出一个看着"成功"
         // 却是坏的文件。这里只能记日志——协议是单向下发，没有回执通道能叫停后续分片。
-        Err(e) => tracing::warn!(
-            "写入下发文件失败（第 {}/{} 片）: {e}",
+        Err(e) => crate::state::client_log(&format!(
+            "写入下发文件失败（第 {}/{} 片，目标 {}）：{e}",
             f.chunk_index + 1,
-            f.chunk_total.max(1)
-        ),
+            f.chunk_total.max(1),
+            target.display()
+        )),
     }
     // 最后一片落完就撤掉登记，免得这张表随传输次数一直长
     if chunked && f.chunk_index + 1 >= f.chunk_total {
