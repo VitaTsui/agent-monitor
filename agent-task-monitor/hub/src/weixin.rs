@@ -141,25 +141,32 @@ pub struct Incoming {
     pub text: String,
     pub from_user_id: String,
     pub context_token: String,
-    /// 随消息带来的图片（可多张）。内容是加密的，取回要走 [`fetch_image`]。
-    pub images: Vec<ImageRef>,
+    /// 随消息带来的附件（图片/文件，可多个）。内容是加密的，取回要走 [`fetch_media`]。
+    pub files: Vec<Attachment>,
     /// 消息在服务端生成的时刻（毫秒）。图文同发时这个差值其实很小（实测 13ms），
     /// 真正的先后差在投递上 —— 两者一起看才知道「慢」慢在哪一段。
     pub create_time_ms: u64,
 }
 
-/// 一张待取的图片：CDN 直链 + 解密密钥。
-pub struct ImageRef {
+/// 一个待取的附件（图片或文件）：CDN 直链 + 解密密钥 + 校验信息。
+///
+/// 图片与文件走的是**同一套**加解密，只是字段位置不同：
+/// `image_item`(type=2) / `file_item`(type=4)，密钥统一取 `media.aes_key`。
+pub struct Attachment {
     pub url: String,
     /// 32 位十六进制字符串，解码成 16 字节就是 AES-128 的密钥
     pub aeskey: String,
-    /// 服务端声明的明文长度，用来核对解密结果
+    /// 服务端声明的明文长度（0 = 没给）
     pub size: usize,
+    /// 明文 MD5（文件有，图片没有）。比长度强得多的判据，有就用它。
+    pub md5: String,
+    /// 原文件名（文件有，图片没有 —— 图片按魔数猜扩展名另起）
+    pub name: String,
 }
 
-/// 单张图片上限。图片整份进内存（见 `BotPendingFile::bytes`），不设限的话
-/// 连发几张大图就能把 hub 撑爆。
-const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+/// 单个附件上限。内容整份进内存（见 `BotPendingFile::bytes`），不设限的话
+/// 连发几个大文件就能把 hub 撑爆。
+const MAX_MEDIA_BYTES: usize = 20 * 1024 * 1024;
 
 /// 收到文字后，等「一起发出的图片」跟上的窗口。
 ///
@@ -182,15 +189,19 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
 }
 
-/// 取一张图片并解密。
+/// 取一个附件（图片或文件）并解密。
 ///
 /// **AES-128-ECB，密钥 = `aeskey` 十六进制解码后的 16 字节，PKCS#7 补齐** ——
-/// 这是拿真实图片试出来的：密文 53616 字节、声明明文 53605，差 11 正好是补齐位数；
-/// 解出来 PNG 从文件头到 IEND 走完 10 个 chunk 且长度与声明分毫不差。
-/// （别改成 CBC：零 IV 的 CBC 首块也能解出 PNG 文件头，看着像对的，其实后面全是花的。）
-pub async fn fetch_image(img: &ImageRef) -> Result<Vec<u8>, String> {
+/// 图片和文件是同一套，都是拿真实样本验过的：
+/// - 图片：密文 53616、声明明文 53605，差 11 正好是补齐位数；解出的 PNG 从文件头
+///   走完 10 个 chunk 到 IEND，长度与声明分毫不差。
+/// - 文件：密文 13728、声明 13725（补 3）；解出 `PK\x03\x04`（docx），
+///   长度与**明文 MD5** 都对得上。
+///
+/// （别改成 CBC：零 IV 的 CBC 首块也能解出正确的文件头，看着像对的，后面全是花的。）
+pub async fn fetch_media(att: &Attachment) -> Result<Vec<u8>, String> {
     let resp = client()
-        .get(&img.url)
+        .get(&att.url)
         .timeout(std::time::Duration::from_secs(60))
         .send()
         .await
@@ -199,16 +210,21 @@ pub async fn fetch_image(img: &ImageRef) -> Result<Vec<u8>, String> {
         return Err(format!("下载失败: HTTP {}", resp.status()));
     }
     let data = resp.bytes().await.map_err(|e| format!("下载失败: {e}"))?.to_vec();
-    if data.len() > MAX_IMAGE_BYTES {
-        return Err(format!("图片太大（{} MB），暂不接收", data.len() / 1024 / 1024));
+    if data.len() > MAX_MEDIA_BYTES {
+        return Err(format!("附件太大（{} MB），暂不接收", data.len() / 1024 / 1024));
     }
 
-    decrypt_image(data, &img.aeskey, img.size)
+    decrypt_media(data, &att.aeskey, att.size, &att.md5)
 }
 
-/// 解密 + 去补齐。与 [`fetch_image`] 分开是为了能脱网测 —— 这段是整条链路里最容易
+/// 解密 + 去补齐 + 校验。与 [`fetch_media`] 分开是为了能脱网测 —— 这段是整条链路里最容易
 /// 写错又最难事后发现的：改错了 CBC/ECB，首块照样能解出正确的文件头，看着像对的。
-fn decrypt_image(mut data: Vec<u8>, aeskey: &str, size: usize) -> Result<Vec<u8>, String> {
+fn decrypt_media(
+    mut data: Vec<u8>,
+    aeskey: &str,
+    size: usize,
+    want_md5: &str,
+) -> Result<Vec<u8>, String> {
     use aes::cipher::{generic_array::GenericArray, BlockDecrypt, KeyInit};
 
     let key = unhex(aeskey).filter(|k| k.len() == 16).ok_or("aeskey 不是 16 字节十六进制")?;
@@ -225,10 +241,17 @@ fn decrypt_image(mut data: Vec<u8>, aeskey: &str, size: usize) -> Result<Vec<u8>
         return Err("解密结果补齐位异常（密钥不对？）".into());
     }
     data.truncate(data.len() - pad);
-    // 与服务端声明的长度对不上，说明解出来的不是原图，别往下传 ——
-    // 这一条正是「看着像对的」那类错误的兜底
+    // 校验：文件带明文 MD5 就用它（强判据），图片只有长度。这一条正是
+    // 「解出来像模像样、其实后面全是花的」那类错误的兜底。
     if size > 0 && data.len() != size {
         return Err(format!("解密后长度 {} 与声明 {} 不符", data.len(), size));
+    }
+    if !want_md5.is_empty() {
+        use md5::{Digest, Md5};
+        let got = format!("{:x}", Md5::digest(&data));
+        if !got.eq_ignore_ascii_case(want_md5) {
+            return Err(format!("解密后 MD5 {got} 与声明 {want_md5} 不符"));
+        }
     }
     Ok(data)
 }
@@ -273,38 +296,64 @@ pub async fn get_updates(token: &str, buf: &str) -> Result<(Vec<Incoming>, Strin
             tracing::debug!("微信消息字段: {:?}", o.keys().collect::<Vec<_>>());
         }
         let created = m.get("create_time_ms").and_then(Value::as_u64).unwrap_or(0);
-        // 内容散在 item_list 里：type=1 文本、type=2 图片，一条消息里可能都有
+        // 内容散在 item_list 里：type=1 文本、type=2 图片、type=4 文件，一条消息里可能都有
         let mut text = String::new();
-        let mut images = Vec::new();
+        let mut files = Vec::new();
         for it in m.get("item_list").and_then(Value::as_array).unwrap_or(&Vec::new()) {
-            match it.get("type").and_then(Value::as_i64) {
-                Some(1) => {
-                    if let Some(t) = it.pointer("/text_item/text").and_then(Value::as_str) {
-                        text.push_str(t);
-                    }
+            let kind = it.get("type").and_then(Value::as_i64);
+            if kind == Some(1) {
+                if let Some(t) = it.pointer("/text_item/text").and_then(Value::as_str) {
+                    text.push_str(t);
                 }
-                Some(2) => {
-                    let url = it
-                        .pointer("/image_item/media/full_url")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    let aeskey =
-                        it.pointer("/image_item/aeskey").and_then(Value::as_str).unwrap_or_default();
-                    if !url.is_empty() && !aeskey.is_empty() {
-                        images.push(ImageRef {
-                            url: url.to_string(),
-                            aeskey: aeskey.to_string(),
-                            size: it
-                                .pointer("/image_item/hd_size")
-                                .and_then(Value::as_u64)
-                                .unwrap_or(0) as usize,
-                        });
-                    }
-                }
-                _ => {}
+                continue;
             }
+            // 图片与文件除了字段名与附带信息，其它完全同构
+            let Some(item) = (match kind {
+                Some(2) => it.get("image_item"),
+                Some(4) => it.get("file_item"),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let url =
+                item.pointer("/media/full_url").and_then(Value::as_str).unwrap_or_default();
+            // 密钥统一取 media.aes_key（base64 里装的正是十六进制串）：图片另有一个
+            // 顶层 aeskey，文件没有，取这里两边都能用。
+            let aeskey = item
+                .pointer("/media/aes_key")
+                .and_then(Value::as_str)
+                .and_then(|b| {
+                    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+                    B64.decode(b).ok().and_then(|v| String::from_utf8(v).ok())
+                })
+                .or_else(|| item.get("aeskey").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or_default();
+            if url.is_empty() || aeskey.is_empty() {
+                continue;
+            }
+            // 长度：图片在 hd_size(数字)，文件在 len(**字符串**)
+            let size = item
+                .get("hd_size")
+                .and_then(Value::as_u64)
+                .or_else(|| {
+                    item.get("len").and_then(|v| {
+                        v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    })
+                })
+                .unwrap_or(0) as usize;
+            files.push(Attachment {
+                url: url.to_string(),
+                aeskey,
+                size,
+                md5: item.get("md5").and_then(Value::as_str).unwrap_or_default().to_string(),
+                name: item
+                    .get("file_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            });
         }
-        if text.trim().is_empty() && images.is_empty() {
+        if text.trim().is_empty() && files.is_empty() {
             // 语音等还不支持的类型。**不能静默丢**：发的人只会看到石沉大海，
             // 完全不知道是没收到、还是不支持（实际发生过）。带一个空消息出去，
             // 由 handle_message 回一句说明。结构打进 debug 便于以后认字段。
@@ -316,7 +365,7 @@ pub async fn get_updates(token: &str, buf: &str) -> Result<(Vec<Incoming>, Strin
                 text: String::new(),
                 from_user_id: from.to_string(),
                 context_token: ct.to_string(),
-                images: Vec::new(),
+                files: Vec::new(),
                 create_time_ms: created,
             });
             continue;
@@ -325,7 +374,7 @@ pub async fn get_updates(token: &str, buf: &str) -> Result<(Vec<Incoming>, Strin
             text,
             from_user_id: from.to_string(),
             context_token: ct.to_string(),
-            images,
+            files,
             create_time_ms: created,
         });
     }
@@ -432,13 +481,13 @@ async fn supervise(state: crate::state::SharedState, user: String, token: String
                         None => break, // 发端没了（会话过期/凭据变更），收工
                     },
                 };
-                let kind = if !m.images.is_empty() { "图片" } else { "文字" };
+                let kind = if !m.files.is_empty() { "附件" } else { "文字" };
                 tracing::debug!(
                     "微信取到消息 类型={kind} 生成于={} user={u2}",
                     m.create_time_ms
                 );
                 // 图片、以及不支持的类型：没什么可等的，立刻处理
-                if !m.images.is_empty() || m.text.trim().is_empty() {
+                if !m.files.is_empty() || m.text.trim().is_empty() {
                     handle_message(&st, &u2, &t2, m).await;
                     continue;
                 }
@@ -450,22 +499,22 @@ async fn supervise(state: crate::state::SharedState, user: String, token: String
                 let deadline = began + std::time::Duration::from_millis(IMAGE_GRACE_MS);
                 loop {
                     match tokio::time::timeout_at(deadline, rx.recv()).await {
-                        Ok(Some(next)) if !next.images.is_empty() => {
+                        Ok(Some(next)) if !next.files.is_empty() => {
                             // 这行就是这个窗口存在的理由：文字先到、图后到，靠等把图接住了。
                             // 差值 = 图那条比文字晚生成多久（图要先传上 CDN）。
                             tracing::info!(
-                                "微信等图窗口：等了 {}ms 接到图片（两条消息生成时刻差 {}ms）user={u2}",
+                                "微信等附件窗口：等了 {}ms 接到附件（两条消息生成时刻差 {}ms）user={u2}",
                                 began.elapsed().as_millis(),
                                 next.create_time_ms.saturating_sub(m.create_time_ms),
                             );
-                            handle_message(&st, &u2, &t2, next).await; // 先把图挂上
+                            handle_message(&st, &u2, &t2, next).await; // 先把附件挂上
                             break;
                         }
                         // 窗口里来的又是文字：排到后面，等当前这条处理完再说
                         Ok(Some(next)) => queue.push_back(next),
                         _ => {
                             tracing::debug!(
-                                "微信等图窗口：等满 {}ms 没有图，直接执行 user={u2}",
+                                "微信等附件窗口：等满 {}ms 没有附件，直接执行 user={u2}",
                                 began.elapsed().as_millis()
                             );
                             break;
@@ -531,15 +580,15 @@ async fn handle_message(state: &crate::state::SharedState, user: &str, token: &s
     // 图片先落到「挂起待发」，再 dispatch —— 顺序不能反：同一条消息里图片配文字时
     // （「@2 看看这张图」），文字那条命令要能把刚挂上的图一起带走。
     let mut notes: Vec<String> = Vec::new();
-    for (i, img) in m.images.iter().enumerate() {
-        match fetch_image(img).await {
+    for (i, att) in m.files.iter().enumerate() {
+        match fetch_media(att).await {
             Ok(bytes) => {
-                let name = crate::bot::stash_weixin_image(state, user, bytes).await;
-                notes.push(format!("📎 已收到图片「{name}」"));
+                let name = crate::bot::stash_weixin_file(state, user, bytes, &att.name).await;
+                notes.push(format!("📎 已收到「{name}」"));
             }
             Err(e) => {
-                tracing::warn!("微信图片取回失败 user={user}: {e}");
-                notes.push(format!("⚠️ 第 {} 张图片取回失败：{e}", i + 1));
+                tracing::warn!("微信附件取回失败 user={user}: {e}");
+                notes.push(format!("⚠️ 第 {} 个附件取回失败：{e}", i + 1));
             }
         }
     }
@@ -551,7 +600,7 @@ async fn handle_message(state: &crate::state::SharedState, user: &str, token: &s
     } else if !notes.is_empty() {
         format!("{}\n随下一条任务一起发出（如「@2 看看这张图」）。", notes.join("\n"))
     } else {
-        "📎 微信这条通道目前只认文字和图片，语音之类还收不了 —— 烦请用文字发一遍。".to_string()
+        "📎 微信这条通道目前认文字、图片和文件，语音之类还收不了 —— 烦请用文字发一遍。".to_string()
     };
     if reply.trim().is_empty() {
         return;
@@ -661,6 +710,7 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<crate::dingt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use md5::Digest;
 
     #[test]
     fn errcode_prefers_errcode_field() {
@@ -693,11 +743,12 @@ mod tests {
     }
 
     #[test]
-    fn decrypt_image_roundtrip_and_rejects_wrong_key() {
+    fn decrypt_media_roundtrip_and_rejects_wrong_key() {
         use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
         let aeskey = "255d38f3384640fbec2b9d9eb2daf064"; // 线上真实那张图的密钥格式
         let key = unhex(aeskey).unwrap();
         let plain = b"\x89PNG\r\n\x1a\n fake image body".to_vec();
+        let md5 = format!("{:x}", md5::Md5::digest(&plain));
 
         // 按认定的方案加密回去：AES-128-ECB + PKCS#7
         let pad = 16 - plain.len() % 16;
@@ -708,11 +759,15 @@ mod tests {
             cipher.encrypt_block(GenericArray::from_mut_slice(b));
         }
 
-        assert_eq!(decrypt_image(ct.clone(), aeskey, plain.len()).unwrap(), plain);
-        // 声明长度对不上要拒——这是「解出来像图其实是花的」的兜底
-        assert!(decrypt_image(ct.clone(), aeskey, plain.len() + 1).is_err());
+        assert_eq!(decrypt_media(ct.clone(), aeskey, plain.len(), &md5).unwrap(), plain);
+        // 没带 md5（图片就是这样）也要能过，靠长度兜
+        assert_eq!(decrypt_media(ct.clone(), aeskey, plain.len(), "").unwrap(), plain);
+        // 声明长度对不上要拒——「解出来像图其实是花的」的兜底
+        assert!(decrypt_media(ct.clone(), aeskey, plain.len() + 1, "").is_err());
+        // md5 对不上要拒（文件走这条更强的判据）
+        assert!(decrypt_media(ct.clone(), aeskey, plain.len(), &"0".repeat(32)).is_err());
         // 换个密钥必须失败，不能悄悄返回一堆乱码
-        assert!(decrypt_image(ct, "00112233445566778899aabbccddeeff", plain.len()).is_err());
+        assert!(decrypt_media(ct, "00112233445566778899aabbccddeeff", plain.len(), "").is_err());
     }
 
     #[test]

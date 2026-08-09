@@ -1095,16 +1095,26 @@ async fn attach_pending_file(
     Ok(rel)
 }
 
-/// 微信图片入挂起队列。内容已在收消息时下载并解密好（微信直链会过期，见
+/// 微信附件入挂起队列。内容已在收消息时下载并解密好（微信直链会过期，见
 /// `BotPendingFile::bytes`），这里只负责起名和排队。返回落盘用的文件名。
-pub(crate) async fn stash_weixin_image(
+///
+/// `origin` 是消息里带的原文件名：**文件有，图片没有** —— 图片只好按魔数猜扩展名
+/// 另起一个。传进来的名字只取 basename，防路径穿越。
+pub(crate) async fn stash_weixin_file(
     state: &SharedState,
     username: &str,
     bytes: Vec<u8>,
+    origin: &str,
 ) -> String {
-    // 微信图片消息不带文件名，用时间戳凑一个；扩展名按魔数猜（见 weixin::image_ext）
-    let ext = crate::weixin::image_ext(&bytes);
-    let base = format!("微信图片-{}.{ext}", crate::state::now_secs());
+    let base = match std::path::Path::new(origin.trim())
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        Some(n) => n,
+        // 图片没有原名，按魔数猜扩展名 + 时间戳凑一个
+        None => format!("微信图片-{}.{}", crate::state::now_secs(), crate::weixin::image_ext(&bytes)),
+    };
     let mut map = state.bot_pending_files.write().await;
     let list = map.entry(username.to_string()).or_default();
     let name = crate::dingtalk_stream::unique_name(list, &base);
@@ -1115,7 +1125,7 @@ pub(crate) async fn stash_weixin_image(
         at: crate::state::now_secs(),
         bytes: Some(bytes),
     });
-    tracing::info!("微信暂存待发图片 account={username} name={name}");
+    tracing::info!("微信暂存待发附件 account={username} name={name}");
     name
 }
 

@@ -33,6 +33,8 @@ base64 = "0.22"
 rsa = { version = "0.9", features = ["sha2"] }
 sha1 = "0.10"
 sha2 = "0.10"
+# 微信附件校验：消息里带的是明文 md5（比长度更强的判据，见 weixin::decrypt_media）
+md-5 = "0.10"
 aes-gcm = "0.10"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
