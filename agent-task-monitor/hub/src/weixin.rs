@@ -166,6 +166,11 @@ pub async fn get_updates(token: &str, buf: &str) -> Result<(Vec<Incoming>, Strin
         if ct.is_empty() {
             continue;
         }
+        // 只打字段名不打内容（内容是用户私聊原文）。留着是为了将来能按时间戳过滤
+        // 陈旧消息 —— 目前只能靠「首轮全丢」，知道时间字段叫什么才能做得更准。
+        if let Some(o) = m.as_object() {
+            tracing::debug!("微信消息字段: {:?}", o.keys().collect::<Vec<_>>());
+        }
         // 文本散在 item_list 里（type=1 才是文本项），可能有多段，拼起来
         let text: String = m
             .get("item_list")
@@ -265,11 +270,26 @@ pub async fn run(state: crate::state::SharedState) {
 async fn supervise(state: crate::state::SharedState, user: String, token: String) {
     let mut buf = String::new();
     let mut backoff = 3u64;
+    // **首轮只取游标、丢掉消息**。空游标会让服务端把这个会话的历史消息全量回放，
+    // 照单处理的后果不只是刷屏——每条老消息都会被当成新指令**重新执行一遍**
+    //（`@1 重启服务` 这种重放出去是会出事的）。绑定后第一次连、以及 hub 每次重启
+    // 都会走到这里，所以必须丢。
+    //
+    // 代价是 hub 停机期间发来的消息收不到。这是有意选的：宁可漏掉一条要你重发，
+    // 也不能把半天前的旧指令翻出来执行。
+    let mut priming = true;
     loop {
         match get_updates(&token, &buf).await {
             Ok((msgs, next)) => {
                 buf = next;
                 backoff = 3;
+                if priming {
+                    priming = false;
+                    if !msgs.is_empty() {
+                        tracing::info!("微信首轮丢弃历史消息 {} 条 user={user}", msgs.len());
+                    }
+                    continue;
+                }
                 // 收到消息 = 会话活着，把可能残留的过期标记清掉
                 if !msgs.is_empty() {
                     state.registry.write().await.set_weixin_expired(&user, false);
