@@ -143,6 +143,9 @@ pub struct Incoming {
     pub context_token: String,
     /// 随消息带来的图片（可多张）。内容是加密的，取回要走 [`fetch_image`]。
     pub images: Vec<ImageRef>,
+    /// 消息在服务端生成的时刻（毫秒）。**图那条通常晚于文字**（要先把图传上 CDN），
+    /// 「图文同发却把图落下」的根因就在这个差值上，排查时靠它看清先后。
+    pub create_time_ms: u64,
 }
 
 /// 一张待取的图片：CDN 直链 + 解密密钥。
@@ -263,6 +266,7 @@ pub async fn get_updates(token: &str, buf: &str) -> Result<(Vec<Incoming>, Strin
         if let Some(o) = m.as_object() {
             tracing::debug!("微信消息字段: {:?}", o.keys().collect::<Vec<_>>());
         }
+        let created = m.get("create_time_ms").and_then(Value::as_u64).unwrap_or(0);
         // 内容散在 item_list 里：type=1 文本、type=2 图片，一条消息里可能都有
         let mut text = String::new();
         let mut images = Vec::new();
@@ -307,6 +311,7 @@ pub async fn get_updates(token: &str, buf: &str) -> Result<(Vec<Incoming>, Strin
                 from_user_id: from.to_string(),
                 context_token: ct.to_string(),
                 images: Vec::new(),
+                create_time_ms: created,
             });
             continue;
         }
@@ -315,6 +320,7 @@ pub async fn get_updates(token: &str, buf: &str) -> Result<(Vec<Incoming>, Strin
             from_user_id: from.to_string(),
             context_token: ct.to_string(),
             images,
+            create_time_ms: created,
         });
     }
     Ok((out, next))
@@ -420,6 +426,11 @@ async fn supervise(state: crate::state::SharedState, user: String, token: String
                         None => break, // 发端没了（会话过期/凭据变更），收工
                     },
                 };
+                let kind = if !m.images.is_empty() { "图片" } else { "文字" };
+                tracing::info!(
+                    "微信取到消息 类型={kind} 生成于={} user={u2}",
+                    m.create_time_ms
+                );
                 // 图片、以及不支持的类型：没什么可等的，立刻处理
                 if !m.images.is_empty() || m.text.trim().is_empty() {
                     handle_message(&st, &u2, &t2, m).await;
@@ -429,17 +440,30 @@ async fn supervise(state: crate::state::SharedState, user: String, token: String
                 //（要先把图传上 CDN），所以「同时发出」到达时往往是文字在前、图在后。
                 // 只按到达顺序处理救不了这种，必须给文字留个窗口等图跟上。
                 // 图一到就立刻往下走，不会白等满。
-                let deadline =
-                    tokio::time::Instant::now() + std::time::Duration::from_millis(IMAGE_GRACE_MS);
+                let began = tokio::time::Instant::now();
+                let deadline = began + std::time::Duration::from_millis(IMAGE_GRACE_MS);
                 loop {
                     match tokio::time::timeout_at(deadline, rx.recv()).await {
                         Ok(Some(next)) if !next.images.is_empty() => {
+                            // 这行就是这个窗口存在的理由：文字先到、图后到，靠等把图接住了。
+                            // 差值 = 图那条比文字晚生成多久（图要先传上 CDN）。
+                            tracing::info!(
+                                "微信等图窗口：等了 {}ms 接到图片（图比文字晚生成 {}ms）user={u2}",
+                                began.elapsed().as_millis(),
+                                next.create_time_ms.saturating_sub(m.create_time_ms),
+                            );
                             handle_message(&st, &u2, &t2, next).await; // 先把图挂上
                             break;
                         }
                         // 窗口里来的又是文字：排到后面，等当前这条处理完再说
                         Ok(Some(next)) => queue.push_back(next),
-                        _ => break, // 等够了，或通道关了
+                        _ => {
+                            tracing::info!(
+                                "微信等图窗口：等满 {}ms 没有图，直接执行 user={u2}",
+                                began.elapsed().as_millis()
+                            );
+                            break;
+                        }
                     }
                 }
                 handle_message(&st, &u2, &t2, m).await;
