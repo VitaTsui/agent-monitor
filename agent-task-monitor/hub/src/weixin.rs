@@ -185,7 +185,22 @@ pub async fn get_updates(token: &str, buf: &str) -> Result<(Vec<Incoming>, Strin
             })
             .unwrap_or_default();
         if text.trim().is_empty() {
-            continue; // 图片/语音等非文本消息本期不处理
+            // 图片/语音等非文本消息还不支持。**但不能静默丢**：发的人只会看到石沉大海，
+            // 完全不知道是没收到、还是不支持（实际发生过）。这里带一个空 text 出去，
+            // 由 handle_message 回一句说明。
+            //
+            // item_list 的结构打到 debug 里（只打类型键，不打内容），
+            // 后面要做图片转发就靠它认字段。
+            tracing::debug!(
+                "微信非文本消息 item_list: {}",
+                m.get("item_list").map(|v| v.to_string()).unwrap_or_default()
+            );
+            out.push(Incoming {
+                text: String::new(),
+                from_user_id: from.to_string(),
+                context_token: ct.to_string(),
+            });
+            continue;
         }
         out.push(Incoming {
             text,
@@ -327,7 +342,12 @@ async fn supervise(state: crate::state::SharedState, user: String, token: String
 /// 微信这边推送另走缓存的 context_token，见 `deliver`。
 async fn handle_message(state: &crate::state::SharedState, user: &str, token: &str, m: Incoming) {
     state.registry.write().await.touch_weixin_context(user, &m.context_token);
-    let reply = crate::bot::dispatch(state, user, &m.text, None).await;
+    // 非文本消息：明确回一句，别让人对着空气发呆
+    let reply = if m.text.trim().is_empty() {
+        "📎 微信这条通道目前只认文字，图片/语音还收不了 —— 内容烦请用文字发一遍。".to_string()
+    } else {
+        crate::bot::dispatch(state, user, &m.text, None).await
+    };
     if reply.trim().is_empty() {
         return;
     }
@@ -343,16 +363,34 @@ async fn handle_message(state: &crate::state::SharedState, user: &str, token: &s
 ///（会话列表里「共 N 个活跃会话」「—— 设备 ——」「〔终端·项目〕」黏成一坨就是它）。
 /// 实测行尾两空格、行尾反斜杠、`<br>` 三种硬换行写法**统统无效**，只有空行分段有用，
 /// 所以每行之间插一个空行。
+///
+/// **表格是例外**：微信能渲染 markdown 表格（实测），但表格要求各行紧挨着 ——
+/// 往里插空行会散成一堆 `| --- | --- |` 字面量。所以连续的表格行整块保持原样，
+/// 只在块与块之间插空行。
 pub fn for_weixin(s: &str) -> String {
     // 先走钉钉那套降级：删掉围栏行、保留代码内容。顺序不能反 —— 围栏还在的时候
     // 按行插空行会把代码块拆散成一堆独立段落。
-    crate::mdfmt::downgrade_for_dingtalk(s)
-        .lines()
-        .map(str::trim_end) // 行尾两空格是给别处的硬换行，这里没用，清掉
-        // 空行不必留：每行都会自成一段，再留就是双倍空隙
-        .filter(|l| !l.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    let downgraded = crate::mdfmt::downgrade_for_dingtalk(s);
+    let mut blocks: Vec<String> = Vec::new();
+    let mut table: Vec<String> = Vec::new();
+    for raw in downgraded.lines() {
+        let line = raw.trim_end(); // 行尾两空格是给别处的硬换行，这里没用，清掉
+        if line.trim().is_empty() {
+            continue; // 空行不必留：每行都会自成一段，再留就是双倍空隙
+        }
+        if line.trim_start().starts_with('|') {
+            table.push(line.to_string());
+            continue;
+        }
+        if !table.is_empty() {
+            blocks.push(std::mem::take(&mut table).join("\n"));
+        }
+        blocks.push(line.to_string());
+    }
+    if !table.is_empty() {
+        blocks.push(table.join("\n"));
+    }
+    blocks.join("\n\n")
 }
 
 // ───────────────────────────── 主动推送 ─────────────────────────────
@@ -447,6 +485,17 @@ mod tests {
         assert_eq!(for_weixin("标题\n\n\n正文  "), "标题\n\n正文");
         // 围栏删掉、代码内容留着（与钉钉同一套降级）
         assert_eq!(for_weixin("说明\n```rust\nlet x = 1;\n```"), "说明\n\nlet x = 1;");
+    }
+
+    #[test]
+    fn for_weixin_keeps_tables_contiguous() {
+        // 微信能渲染 markdown 表格，但插了空行就散成 `| --- | --- |` 字面量。
+        // 表格块内保持单换行，块与前后文之间才空行。
+        let src = "结果如下：\n| 环节 | 结果 |\n| --- | --- |\n| 扫码 | 通过 |\n完毕";
+        assert_eq!(
+            for_weixin(src),
+            "结果如下：\n\n| 环节 | 结果 |\n| --- | --- |\n| 扫码 | 通过 |\n\n完毕"
+        );
     }
 
     #[test]
