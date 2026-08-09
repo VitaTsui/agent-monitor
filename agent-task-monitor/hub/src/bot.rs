@@ -318,7 +318,7 @@ async fn sticky_send(
             .await
             .insert(username.to_string(), (text.to_string(), now));
         let label = sticky_label(state, username, n).await;
-        let preview: String = text.chars().take(40).collect();
+        let preview = one_line(text, 40);
         return format!(
             "⏸ 距上次对话已有一段时间，先确认下目标会话：\n\
              当前锁定 {label}\n\
@@ -341,7 +341,7 @@ async fn sticky_label(state: &SharedState, username: &str, no: u32) -> String {
         .find(|t| t.id == task_id)
         .map(|t| {
             let s = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
-            format!("{no} 号（{} · {}）", t.project_name, s.chars().take(24).collect::<String>())
+            format!("{no} 号（{} · {}）", t.project_name, one_line(&s, 24))
         })
         .unwrap_or_else(|| format!("{no} 号"))
 }
@@ -565,7 +565,7 @@ async fn session_label(state: &SharedState, username: &str, task_id: &str) -> St
             }
         })
         .unwrap_or_default();
-    let title: String = title.chars().take(20).collect();
+    let title = one_line(&title, 20);
     match (n, title.is_empty()) {
         (Some(n), false) => format!("会话 {n}（{title}）"),
         (Some(n), true) => format!("会话 {n}"),
@@ -841,6 +841,17 @@ pub(crate) async fn session_number(
     list.into_iter().find(|(t, _)| crate::slots::anchor_of(t) == anchor).map(|(_, no)| no as usize)
 }
 
+/// 单行化 + 截断。**会话标题来自用户的首条提示词，很可能是多行的**，直接嵌进
+/// 一行文案会把那行撕成两段：漏出去的第二段在微信那种「单换行被当软换行」的渲染里
+/// 还会黏到下一行标题上 —— 实际见过「二级弹 —— 📱 MacBook Pro ——」这种。
+///
+/// 先压平再截断，顺序不能反：否则 24 字的额度会被换行和多余空白吃掉，
+/// 看得见的内容不足 24 字。
+fn one_line(s: &str, limit: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat.chars().take(limit).collect()
+}
+
 /// 活跃会话 + 各自号位，按「设备名 → 终端 → 项目 → 号位」排序。「会话」列表、「@N / 发 N /
 /// 暂停 N」、推送里的 `#N` 全部以它为准。
 ///
@@ -910,7 +921,7 @@ async fn list_sessions(state: &SharedState, username: &str) -> String {
         }
         // 子标题里已带终端·项目，行内只留状态 + 会话标题
         let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
-        let title: String = title.chars().take(24).collect();
+        let title = one_line(&title, 24);
         let mark = if sticky == Some(*no) { " ← 当前" } else { "" };
         lines.push(format!("  {}. [{}] {}{}", no, status_zh(t.status), title, mark));
     }
@@ -1158,7 +1169,7 @@ async fn list_history(state: &SharedState, username: &str, arg: &str) -> String 
             lines.push(format!(
                 "\n—— {slot}{} · {} ——",
                 e.project,
-                title.chars().take(24).collect::<String>()
+                one_line(&title, 24)
             ));
         }
         let when = chrono::DateTime::from_timestamp(e.at as i64, 0)
@@ -1197,7 +1208,7 @@ async fn lock_session(state: &SharedState, username: &str, arg: &str) -> String 
         .find(|t| t.id == task_id)
         .map(|t| {
             let s = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
-            format!("（{} · {}）", t.project_name, s.chars().take(20).collect::<String>())
+            format!("（{} · {}）", t.project_name, one_line(&s, 20))
         })
         .unwrap_or_default();
     format!("✅ 已锁定会话 {n}{title}\n之后直接发内容即可，不用带 @。发「@其它号」可切换。")
@@ -1453,7 +1464,7 @@ async fn list_queued(state: &SharedState, username: &str, arg: &str) -> String {
             list.extend(hub_pending);
             if !list.is_empty() {
                 let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
-                let title: String = title.chars().take(20).collect();
+                let title = one_line(&title, 20);
                 out.push(format!("【{}. {}】{} 条：", no, title, list.len()));
                 for (n, x) in list.iter().enumerate() {
                     out.push(format!("  {}. {}", n + 1, x));
@@ -1533,6 +1544,19 @@ pub(crate) async fn queue_command(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn one_line_flattens_multiline_titles() {
+        use super::one_line;
+        // 就是「二级弹」那条：多行提示词嵌进列表行，换行必须被压掉
+        assert_eq!(
+            one_line("报文大小和报文分析的请求体响应体切换删除\n二级弹要看清楚", 24),
+            "报文大小和报文分析的请求体响应体切换删除 二级弹" // 20 字 + 空格 + 3 字 = 24
+        );
+        // 先压平再截断：额度不该被换行/多余空白吃掉
+        assert_eq!(one_line("甲\n\n  乙   丙", 5), "甲 乙 丙");
+        assert_eq!(one_line("abcdefgh", 3), "abc");
+    }
+
     use super::{is_immediate, parse_at_commands, split_cmd};
 
     #[test]
