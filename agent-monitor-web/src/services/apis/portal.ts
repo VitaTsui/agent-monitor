@@ -416,6 +416,8 @@ export interface IntegrationsInfo {
     linked: boolean;
     /** 会话过期，需要重新扫码 */
     expired: boolean;
+    /** 推送凭据过期期间攒下、等你在微信里开口才能补发的通知数 */
+    pendingPushes: number;
   };
   /** 机器人文件接收目录（所有渠道通用）：按「设备 → 项目」层级列出 */
   recvDirDevices?: {

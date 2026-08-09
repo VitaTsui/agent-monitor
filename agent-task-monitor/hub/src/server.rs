@@ -1634,6 +1634,8 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
         .map(|(staff_id, nick)| json!({ "staffId": staff_id, "nick": nick }))
         .collect();
     drop(reg);
+    let pending_pushes =
+        state.weixin_pending_pushes.read().await.get(&user).map(|v| v.len()).unwrap_or(0);
     ok(json!({
         "recvDirDevices": recv_dir_devices,
         // 自己的机器人（优先生效）。密钥不回显，只回「配没配」+ 通没通。
@@ -1653,6 +1655,8 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
             // 收到过消息 = 拿到了 context_token = 能主动给你推
             "linked": wx.as_ref().is_some_and(|b| !b.context_token.is_empty()),
             "expired": wx.as_ref().is_some_and(|b| b.session_expired),
+            // 推送凭据过期期间攒下、等你开口才能补发的通知数。>0 时界面别再说「已连通」。
+            "pendingPushes": pending_pushes,
         },
     }))
 }

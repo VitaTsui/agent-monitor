@@ -271,6 +271,13 @@ pub struct AppState {
     pub dingtalk_reload: std::sync::Arc<tokio::sync::Notify>,
     /// 同上，微信机器人扫码绑定/解绑后叫醒长轮询循环
     pub weixin_reload: std::sync::Arc<tokio::sync::Notify>,
+    /// 微信推送失败后攒下的通知（账号 → 正文），等用户下次开口时补发。
+    ///
+    /// 微信的 `context_token` 只能来自用户发来的消息，**且约 1.5 小时就失效**
+    ///（线上实测：14:12 最后一条消息，15:43 还能推、15:50 起一律 `-2 prepare failed`），
+    /// hub 自己续不了期（getconfig/sendtyping 都试过，见 weixin.rs）。
+    /// 所以过期后的推送不能直接丢 —— 丢了就是「任务完成了但你永远不知道」。
+    pub weixin_pending_pushes: RwLock<HashMap<String, Vec<String>>>,
     pub started_at: chrono::DateTime<chrono::Local>,
     /// 会话表有未落盘变更（tick 循环定期 flush 到 sessions.json）
     pub sessions_dirty: std::sync::atomic::AtomicBool,
@@ -423,6 +430,7 @@ impl AppState {
             tx,
             dingtalk_reload: std::sync::Arc::new(tokio::sync::Notify::new()),
             weixin_reload: std::sync::Arc::new(tokio::sync::Notify::new()),
+            weixin_pending_pushes: RwLock::new(HashMap::new()),
             dingtalk_binds: RwLock::new(HashMap::new()),
             dingtalk_bind_codes: RwLock::new(HashMap::new()),
             started_at: chrono::Local::now(),

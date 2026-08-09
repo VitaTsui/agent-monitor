@@ -576,6 +576,8 @@ async fn supervise(state: crate::state::SharedState, user: String, token: String
 /// 微信这边推送另走缓存的 context_token，见 `deliver`。
 async fn handle_message(state: &crate::state::SharedState, user: &str, token: &str, m: Incoming) {
     state.registry.write().await.touch_weixin_context(user, &m.context_token);
+    // 手上这个 context_token 是新鲜的 —— 先把过期期间攒下的通知补出去
+    flush_pending(state, user, token, &m.from_user_id, &m.context_token).await;
 
     // 图片先落到「挂起待发」，再 dispatch —— 顺序不能反：同一条消息里图片配文字时
     // （「@2 看看这张图」），文字那条命令要能把刚挂上的图一起带走。
@@ -649,6 +651,55 @@ pub fn for_weixin(s: &str) -> String {
 
 // ───────────────────────────── 主动推送 ─────────────────────────────
 
+/// 推送失败时最多攒多少条。超了丢**最旧**的：真积压了几十条，新的那几条才是你想先看到的。
+const MAX_PENDING_PUSHES: usize = 20;
+
+/// 把发不出去的通知攒起来，等用户下次开口时补发。
+async fn buffer_push(state: &crate::state::SharedState, user: &str, body: &str) {
+    let mut map = state.weixin_pending_pushes.write().await;
+    let list = map.entry(user.to_string()).or_default();
+    list.push(body.to_string());
+    if list.len() > MAX_PENDING_PUSHES {
+        list.remove(0);
+    }
+    tracing::info!("微信推送已攒起（{user}）：待补发 {} 条", list.len());
+}
+
+/// 用户一开口就先把积压的通知补发出去 —— 此刻手上的 `context_token` 是新鲜的。
+///
+/// 在处理这条消息**之前**发：他要问的很可能正是「刚才那个任务怎么样了」，
+/// 先把错过的补上，再回答他。
+async fn flush_pending(
+    state: &crate::state::SharedState,
+    user: &str,
+    token: &str,
+    to: &str,
+    ct: &str,
+) {
+    let pending = {
+        let mut map = state.weixin_pending_pushes.write().await;
+        match map.remove(user) {
+            Some(v) if !v.is_empty() => v,
+            _ => return,
+        }
+    };
+    let n = pending.len();
+    tracing::info!("微信补发积压通知（{user}）：{n} 条");
+    let head = format!("📮 补发 {n} 条你不在时错过的提醒（微信的推送凭据会过期，只能等你开口才补上）");
+    let mut all = vec![head];
+    all.extend(pending);
+    for body in all {
+        for chunk in crate::mdfmt::chunk_text(&body, MAX_LEN) {
+            if let Err(e) = send_text(token, to, ct, &chunk).await {
+                // 补发都失败就别硬撑了，重新攒回去等下一次
+                tracing::warn!("微信补发失败（{user}）: {e}");
+                buffer_push(state, user, &body).await;
+                return;
+            }
+        }
+    }
+}
+
 /// 单条消息长度上限。协议文档没写死，取个保守值，超了按 `chunk_text` 分片逐条发
 /// —— 微信这边没有「附件兜底」，砍掉就是真看不到了。
 const MAX_LEN: usize = 2000;
@@ -691,7 +742,8 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<crate::dingt
         };
 
         let to = if bot.ilink_user_id.is_empty() { &bot.ilink_bot_id } else { &bot.ilink_user_id };
-        let chunks = crate::mdfmt::chunk_text(&for_weixin(&text), MAX_LEN);
+        let body = for_weixin(&text);
+        let chunks = crate::mdfmt::chunk_text(&body, MAX_LEN);
         tracing::info!("微信推送（{}）：{} 片，收件人 {to}", ev.owner, chunks.len());
         for chunk in chunks {
             if let Err(e) = send_text(&bot.bot_token, to, &bot.context_token, &chunk).await {
@@ -701,6 +753,10 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<crate::dingt
                     state.registry.write().await.set_weixin_expired(&ev.owner, true);
                     state.weixin_reload.notify_one();
                 }
+                // **发不出去不等于可以丢**。context_token 约 1.5 小时就失效（`-2 prepare
+                // failed`），而它只能靠用户发消息来刷新 —— 直接丢就是「任务完成了但你
+                // 永远不知道」。攒下来，等用户下次开口时补发（见 flush_pending）。
+                buffer_push(state, &ev.owner, &body).await;
                 break; // 这条发不出去，剩下的分片也别试了
             }
         }

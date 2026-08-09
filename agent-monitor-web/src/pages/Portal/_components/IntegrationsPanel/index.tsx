@@ -55,7 +55,7 @@ const IntegrationsPanel: React.FC = () => {
   const [qrErr, setQrErr] = useState("");
 
   // 微信（个人号）机器人：扫码即绑，没有 key/secret 可填
-  const [wx, setWx] = useState({ bound: false, linked: false, expired: false });
+  const [wx, setWx] = useState({ bound: false, linked: false, expired: false, pending: 0 });
   const [wxQr, setWxQr] = useState<{ qrcodeId: string; link: string } | null>(null);
   const [wxLoading, setWxLoading] = useState(false);
   const [wxErr, setWxErr] = useState("");
@@ -171,6 +171,7 @@ const IntegrationsPanel: React.FC = () => {
           bound: !!d.weixin?.bound,
           linked: !!d.weixin?.linked,
           expired: !!d.weixin?.expired,
+          pending: d.weixin?.pendingPushes ?? 0,
         });
       })
       .catch(() => void 0);
@@ -261,7 +262,7 @@ const IntegrationsPanel: React.FC = () => {
             window.clearInterval(timer);
             wxRefreshed.current = 0;
             setWxQr(null);
-            setWx({ bound: true, linked: false, expired: false });
+            setWx({ bound: true, linked: false, expired: false, pending: 0 });
             message.success("微信已绑定，去微信里给它发句话就能用了");
           } else if (st === "expired") {
             window.clearInterval(timer);
@@ -298,7 +299,7 @@ const IntegrationsPanel: React.FC = () => {
           .then((res) => {
             if (res.code !== 0) return message.error(res.msg ?? "解绑失败");
             message.success("已解绑");
-            setWx({ bound: false, linked: false, expired: false });
+            setWx({ bound: false, linked: false, expired: false, pending: 0 });
             setWxQr(null);
           })
           .catch(() => message.error("解绑失败，请检查网络")),
@@ -509,12 +510,20 @@ const IntegrationsPanel: React.FC = () => {
               title={
                 wx.expired
                   ? "登录态已失效，需要重新扫码"
-                  : wx.linked
-                    ? "已连通，推送会私聊发给你"
-                    : "还没收到过你的消息，暂时推不了"
+                  : wx.pending
+                    ? "推送凭据已过期，通知攒着等你在微信里说句话就补发"
+                    : wx.linked
+                      ? "已连通，推送会私聊发给你"
+                      : "还没收到过你的消息，暂时推不了"
               }
             >
-              {wx.expired ? "需重新扫码" : wx.linked ? "已连通" : "待发首条消息"}
+              {wx.expired
+                ? "需重新扫码"
+                : wx.pending
+                  ? `${wx.pending} 条待补发`
+                  : wx.linked
+                    ? "已连通"
+                    : "待发首条消息"}
             </span>
           ) : null}
         </div>
@@ -522,9 +531,11 @@ const IntegrationsPanel: React.FC = () => {
         {wx.bound && !wx.expired ? (
           <>
             <div className={styles.botHint}>
-              {wx.linked
-                ? "已经能用了：会话提醒私聊推给你，直接在微信里回消息即可控制会话。"
-                : "还差一步：去微信里给这个机器人发句话（比如「会话」），它才知道该把推送发给谁。"}
+              {wx.pending
+                ? `微信的推送凭据约 1.5 小时就失效，且只能靠你发消息来刷新（这是微信侧的限制，服务端无法自行续期）。这期间攒下了 ${wx.pending} 条提醒 —— 去微信里说句话，它们会立刻补发给你。`
+                : wx.linked
+                  ? "已经能用了：会话提醒私聊推给你，直接在微信里回消息即可控制会话。久未说话时推送凭据会失效，期间的提醒会攒着，等你下次开口一并补发。"
+                  : "还差一步：去微信里给这个机器人发句话（比如「会话」），它才知道该把推送发给谁。"}
             </div>
             <div className={styles.botActions}>
               <Button onClick={doUnbindWx}>解绑</Button>
