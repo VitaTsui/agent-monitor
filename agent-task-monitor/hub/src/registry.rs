@@ -169,6 +169,9 @@ struct Persisted {
     /// hub 既不收清单也不下发（默认关闭，用户必须显式指定以谁为准）。
     #[serde(default)]
     config_source: HashMap<String, String>,
+    /// 微信机器人（iLink 扫码绑定）：账号 → 凭据 + 最近一次 context_token
+    #[serde(default)]
+    weixin_bots: HashMap<String, WeixinBot>,
 }
 
 /// 钉钉 id 绑定：一个 staffId 唯一归属一个账号；一个账号可绑多个钉钉号。
@@ -202,6 +205,31 @@ pub struct DingtalkApp {
     pub staff_id: String,
 }
 
+/// 微信（个人号）机器人：走腾讯官方 iLink Bot API，扫码绑定。
+///
+/// 与钉钉的关键差异：**发消息必须带 `context_token`**，而它来自用户发来的消息。
+/// 实测这个 token 可长期复用（1.8 小时后仍可发出），所以把最近一次收到的存下来，
+/// 任务完成时就能主动推送 —— 否则微信这条只能做「你问它答」。
+/// 用户首次绑定后需要给 bot 发一句话来激活推送能力。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WeixinBot {
+    pub bot_token: String,
+    /// 对面（用户本人）的 iLink id，形如 xxx@im.wechat
+    #[serde(default)]
+    pub ilink_user_id: String,
+    #[serde(default)]
+    pub ilink_bot_id: String,
+    /// 最近一次收到消息时的 context_token —— 主动推送靠它
+    #[serde(default)]
+    pub context_token: String,
+    #[serde(default)]
+    pub bound_at: u64,
+    /// 服务端判会话过期（-14）。不直接删绑定 —— 前端要能显示「需重新扫码」，
+    /// 悄悄消失只会让人以为自己没配过。
+    #[serde(default)]
+    pub session_expired: bool,
+}
+
 pub struct Registry {
     dir: PathBuf,
     users: Vec<User>,
@@ -215,6 +243,8 @@ pub struct Registry {
     dingtalk_ids: HashMap<String, DingtalkIdBinding>,
     /// 配置同步的源设备：账号 → machine_id。空 = 该账号未开启配置同步。
     config_source: HashMap<String, String>,
+    /// 微信机器人：账号 → 扫码绑定的 iLink bot
+    weixin_bots: HashMap<String, WeixinBot>,
 }
 
 impl Registry {
@@ -245,7 +275,7 @@ impl Registry {
                 p.super_user
             };
             let dingtalk_apps = p.dingtalk_apps;
-            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk_apps, dingtalk_recv_dirs: p.dingtalk_recv_dirs, dingtalk_ids: p.dingtalk_ids, config_source: p.config_source }
+            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk_apps, dingtalk_recv_dirs: p.dingtalk_recv_dirs, dingtalk_ids: p.dingtalk_ids, config_source: p.config_source, weixin_bots: p.weixin_bots }
         } else {
             Registry {
                 dir,
@@ -256,6 +286,7 @@ impl Registry {
                 dingtalk_recv_dirs: HashMap::new(),
                 dingtalk_ids: HashMap::new(),
                 config_source: HashMap::new(),
+                weixin_bots: HashMap::new(),
             }
         };
         if reg.users.is_empty() {
@@ -290,6 +321,7 @@ impl Registry {
             dingtalk_recv_dirs: self.dingtalk_recv_dirs.clone(),
             dingtalk_ids: self.dingtalk_ids.clone(),
             config_source: self.config_source.clone(),
+            weixin_bots: self.weixin_bots.clone(),
             // 已废弃字段（群机器人 / 企业微信）：写出时一律为空，
             // Persisted 上标了 skip_serializing，这里给默认值只为满足结构体字面量
             dingtalk: HashMap::new(),
@@ -622,6 +654,55 @@ impl Registry {
     /// 设备被删除/换绑时清掉指向它的配置源，免得留下一个永远同步不动的悬空来源
     pub fn clear_config_source_of_device(&mut self, machine_id: &str) {
         self.config_source.retain(|_, v| v != machine_id);
+    }
+
+    /// 该账号绑定的微信机器人
+    pub fn weixin_bot_of(&self, username: &str) -> Option<WeixinBot> {
+        self.weixin_bots.get(username).cloned()
+    }
+
+    /// 扫码绑定完成时写入（context_token 留空，等用户发第一句话才有）
+    pub fn set_weixin_bot(&mut self, username: &str, bot: WeixinBot) {
+        self.weixin_bots.insert(username.to_string(), bot);
+        self.save();
+    }
+
+    /// 刷新最近一次 context_token（收到用户消息时）。
+    ///
+    /// 只在**真的变了**时落盘：长轮询每收到一条消息都会调这里，
+    /// 每次都 save 会把注册表写穿（那可是几十个账号 + 设备的全量 JSON）。
+    pub fn touch_weixin_context(&mut self, username: &str, context_token: &str) {
+        let Some(b) = self.weixin_bots.get_mut(username) else { return };
+        if b.context_token == context_token {
+            return;
+        }
+        b.context_token = context_token.to_string();
+        self.save();
+    }
+
+    /// 标记会话过期与否（长轮询拿到 -14 时置位，重新收到消息时清掉）。
+    /// 同样只在状态**真的翻转**时落盘。
+    pub fn set_weixin_expired(&mut self, username: &str, expired: bool) {
+        let Some(b) = self.weixin_bots.get_mut(username) else { return };
+        if b.session_expired == expired {
+            return;
+        }
+        b.session_expired = expired;
+        self.save();
+    }
+
+    /// 解绑（用户主动解除，或 token 失效需要重扫）
+    pub fn clear_weixin_bot(&mut self, username: &str) -> bool {
+        let removed = self.weixin_bots.remove(username).is_some();
+        if removed {
+            self.save();
+        }
+        removed
+    }
+
+    /// 所有已绑微信的账号（长轮询循环启动时用）
+    pub fn weixin_users(&self) -> Vec<(String, WeixinBot)> {
+        self.weixin_bots.iter().map(|(u, b)| (u.clone(), b.clone())).collect()
     }
 
     /// 该用户名下全部设备（含离线；设备管理列表用）

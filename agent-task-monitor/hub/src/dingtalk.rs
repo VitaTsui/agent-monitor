@@ -314,7 +314,9 @@ pub async fn push_oto(
     Ok(())
 }
 
-/// 一条待推送事件（已格式化为 markdown 文本 + 归属用户 + 事件类别）
+/// 一条待推送事件（已格式化为 markdown 文本 + 归属用户 + 事件类别）。
+/// Clone：同一批事件要分别喂给钉钉和微信两条互不相干的推送通路。
+#[derive(Clone)]
 pub struct NotifyEvent {
     pub owner: String,
     pub kind: EventKind,

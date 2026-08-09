@@ -2,7 +2,12 @@ import React, { useCallback, useEffect, useState } from "react";
 
 // Modal.confirm 这类命令式弹窗 hsu-ui 未提供，按约定用 antd 兜底（组件式仍用 hsu-ui 的 Modal）
 import { message, Modal as AntdModal, QRCode, Spin } from "antd";
-import { DingtalkOutlined, FolderOutlined, RightOutlined } from "@ant-design/icons";
+import {
+  DingtalkOutlined,
+  FolderOutlined,
+  RightOutlined,
+  WechatOutlined,
+} from "@ant-design/icons";
 
 import { Button, Copy, Input, Modal } from "@hsu-react/ui";
 
@@ -17,6 +22,9 @@ import {
   getDingtalkIds,
   unbindDingtalkId,
   claimDingtalkBind,
+  getWeixinQr,
+  getWeixinScan,
+  unbindWeixin,
 } from "@/services/apis/portal";
 import styles from "./index.module.scss";
 
@@ -45,6 +53,13 @@ const IntegrationsPanel: React.FC = () => {
   const [qr, setQr] = useState<{ url: string; command: string } | null>(null);
   const [qrLoading, setQrLoading] = useState(false);
   const [qrErr, setQrErr] = useState("");
+
+  // 微信（个人号）机器人：扫码即绑，没有 key/secret 可填
+  const [wx, setWx] = useState({ bound: false, linked: false, expired: false });
+  const [wxQr, setWxQr] = useState<{ qrcodeId: string; link: string } | null>(null);
+  const [wxLoading, setWxLoading] = useState(false);
+  const [wxErr, setWxErr] = useState("");
+  const wxRefreshed = React.useRef(0);
 
   // 机器人文件接收目录（通用）：按设备分组的项目
   type RecvProj = { cwd: string; name: string; dir: string; taskId?: string | null };
@@ -152,6 +167,11 @@ const IntegrationsPanel: React.FC = () => {
         setLinked(!!d.dingtalk?.linked);
         setGlobalAvailable(!!d.globalBot?.available);
         setBoundIds(d.globalBot?.boundIds ?? []);
+        setWx({
+          bound: !!d.weixin?.bound,
+          linked: !!d.weixin?.linked,
+          expired: !!d.weixin?.expired,
+        });
       })
       .catch(() => void 0);
   }, []);
@@ -211,6 +231,79 @@ const IntegrationsPanel: React.FC = () => {
       })
       .catch(() => message.error("绑定失败，请检查网络"));
   }, []);
+
+  const loadWxQr = useCallback(() => {
+    setWxLoading(true);
+    setWxErr("");
+    getWeixinQr()
+      .then((res) => {
+        if (res.code !== 0 || !res.data) {
+          setWxQr(null);
+          setWxErr(res.msg ?? "取二维码失败");
+          return;
+        }
+        setWxQr(res.data);
+      })
+      .catch(() => setWxErr("取二维码失败，请检查网络"))
+      .finally(() => setWxLoading(false));
+  }, []);
+
+  // 扫码在**手机上**完成，这端只能轮询。微信的码约 2 分钟就过期，过期自动换一张
+  //（不自动换的话，人去拿手机的功夫回来就是一张废码）；连换 5 张还没扫就停下，
+  // 免得面板一直开着无人理会、后台空转。
+  useEffect(() => {
+    if (!wxQr) return;
+    const timer = window.setInterval(() => {
+      getWeixinScan(wxQr.qrcodeId)
+        .then((res) => {
+          const st = res.data?.status;
+          if (st === "confirmed") {
+            window.clearInterval(timer);
+            wxRefreshed.current = 0;
+            setWxQr(null);
+            setWx({ bound: true, linked: false, expired: false });
+            message.success("微信已绑定，去微信里给它发句话就能用了");
+          } else if (st === "expired") {
+            window.clearInterval(timer);
+            if (wxRefreshed.current < 5) {
+              wxRefreshed.current += 1;
+              loadWxQr();
+            } else {
+              setWxQr(null);
+              setWxErr("二维码多次过期，点「重试」再来");
+            }
+          }
+        })
+        .catch(() => void 0);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [wxQr, loadWxQr]);
+
+  // 绑上了但还没收到过消息时，等的就是用户去微信发第一句话 —— 轮询到「已连通」
+  // 就停，省得他发完还得手动刷新页面才看到状态变化。
+  useEffect(() => {
+    if (!wx.bound || wx.linked || wx.expired) return;
+    const timer = window.setInterval(load, 5000);
+    return () => window.clearInterval(timer);
+  }, [wx.bound, wx.linked, wx.expired, load]);
+
+  const doUnbindWx = () => {
+    AntdModal.confirm({
+      title: "解绑微信",
+      content: "解绑后不再收到微信推送，也不能在微信里控制会话。",
+      okText: "解绑",
+      cancelText: "取消",
+      onOk: () =>
+        unbindWeixin()
+          .then((res) => {
+            if (res.code !== 0) return message.error(res.msg ?? "解绑失败");
+            message.success("已解绑");
+            setWx({ bound: false, linked: false, expired: false });
+            setWxQr(null);
+          })
+          .catch(() => message.error("解绑失败，请检查网络")),
+    });
+  };
 
   const doUnbind = (staffId: string, nick: string) => {
     AntdModal.confirm({
@@ -403,6 +496,69 @@ const IntegrationsPanel: React.FC = () => {
           ) : null}
         </div>
       ) : null}
+
+      {/* 微信（个人号）：扫码即绑，不需要建应用、也没有 key/secret */}
+      <div className={styles.groupTitle}>微信</div>
+      <div className={styles.boundCard}>
+        <div className={styles.boundTitle}>
+          <WechatOutlined className={styles.boundTitleIcon} />
+          微信机器人
+          {wx.bound ? (
+            <span
+              className={`${styles.botState} ${wx.linked && !wx.expired ? styles.botOk : ""}`}
+              title={
+                wx.expired
+                  ? "登录态已失效，需要重新扫码"
+                  : wx.linked
+                    ? "已连通，推送会私聊发给你"
+                    : "还没收到过你的消息，暂时推不了"
+              }
+            >
+              {wx.expired ? "需重新扫码" : wx.linked ? "已连通" : "待发首条消息"}
+            </span>
+          ) : null}
+        </div>
+
+        {wx.bound && !wx.expired ? (
+          <>
+            <div className={styles.botHint}>
+              {wx.linked
+                ? "已经能用了：会话提醒私聊推给你，直接在微信里回消息即可控制会话。"
+                : "还差一步：去微信里给这个机器人发句话（比如「会话」），它才知道该把推送发给谁。"}
+            </div>
+            <div className={styles.botActions}>
+              <Button onClick={doUnbindWx}>解绑</Button>
+            </div>
+          </>
+        ) : (
+          <div className={styles.qrRow}>
+            <div className={styles.qrBox}>
+              {wxLoading ? (
+                <Spin />
+              ) : wxQr ? (
+                <QRCode value={wxQr.link} size={148} bordered={false} />
+              ) : (
+                <div className={styles.qrErr}>
+                  {wxErr || (wx.expired ? "登录态已失效" : "点右侧按钮取二维码")}
+                  <Button size="small" onClick={loadWxQr}>
+                    {wxErr ? "重试" : "取二维码"}
+                  </Button>
+                </div>
+              )}
+            </div>
+            <div className={styles.qrSide}>
+              <div className={styles.qrTitle}>用微信扫一扫</div>
+              <div className={styles.qrSub}>
+                {wx.expired
+                  ? "微信这边的登录态过期了（重扫即可恢复，之前的配置都还在）。"
+                  : "扫码授权后即绑到当前账号，不用建应用、也不用填任何密钥。"}
+                绑定后记得在微信里给它发句话 —— 微信协议要求先收到你的消息，
+                才能反过来主动推送。
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* 接收目录配置弹窗：设备 → 项目 层级列全 */}
       <Modal

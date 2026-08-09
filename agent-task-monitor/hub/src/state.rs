@@ -269,6 +269,8 @@ pub struct AppState {
     /// 没有它就要等下一轮 30s 轮询 —— 用户刚保存完就会去钉钉发消息试，
     /// 半分钟没反应只会以为自己配错了。
     pub dingtalk_reload: std::sync::Arc<tokio::sync::Notify>,
+    /// 同上，微信机器人扫码绑定/解绑后叫醒长轮询循环
+    pub weixin_reload: std::sync::Arc<tokio::sync::Notify>,
     pub started_at: chrono::DateTime<chrono::Local>,
     /// 会话表有未落盘变更（tick 循环定期 flush 到 sessions.json）
     pub sessions_dirty: std::sync::atomic::AtomicBool,
@@ -413,6 +415,7 @@ impl AppState {
             login_throttle: RwLock::new(LoginThrottle::default()),
             tx,
             dingtalk_reload: std::sync::Arc::new(tokio::sync::Notify::new()),
+            weixin_reload: std::sync::Arc::new(tokio::sync::Notify::new()),
             dingtalk_binds: RwLock::new(HashMap::new()),
             dingtalk_bind_codes: RwLock::new(HashMap::new()),
             started_at: chrono::Local::now(),

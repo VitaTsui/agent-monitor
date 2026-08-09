@@ -159,6 +159,10 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/integrations/dingtalk-bind", post(dingtalk_bind))
         .route("/monitor/integrations/dingtalk-ids", get(dingtalk_ids_get))
         .route("/monitor/integrations/dingtalk-unbind", post(dingtalk_unbind))
+        // 微信（个人号）：扫码绑定 / 轮询扫码结果 / 解绑
+        .route("/monitor/integrations/weixin-qr", get(weixin_qr))
+        .route("/monitor/integrations/weixin-scan", get(weixin_scan))
+        .route("/monitor/integrations/weixin-unbind", post(weixin_unbind))
         // 回调（每用户 channel 路由）
         .route("/monitor/int/dingtalk/:channel", post(crate::bot::dingtalk_message))
         // ---- 设备配对（注册+安装即可用，无需管理员发令牌）----
@@ -1623,6 +1627,7 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
     let app = reg.dingtalk_app_of(&user);
     // 管理员配了全局机器人 → 没自己配机器人的用户也能用（绑钉钉号即可）
     let has_global = reg.global_dingtalk_app().is_some_and(|a| !a.app_key.is_empty());
+    let wx = reg.weixin_bot_of(&user);
     let bound: Vec<Value> = reg
         .dingtalk_ids_of(&user)
         .into_iter()
@@ -1641,7 +1646,72 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
         },
         // 没配自己的机器人时可用的公共通道：绑定钉钉号即可
         "globalBot": { "available": has_global, "boundIds": bound },
+        // 微信（个人号）：扫码即绑，不需要任何 key/secret
+        "weixin": {
+            "bound": wx.is_some(),
+            "boundAt": wx.as_ref().map(|b| b.bound_at).unwrap_or(0),
+            // 收到过消息 = 拿到了 context_token = 能主动给你推
+            "linked": wx.as_ref().is_some_and(|b| !b.context_token.is_empty()),
+            "expired": wx.as_ref().is_some_and(|b| b.session_expired),
+        },
     }))
+}
+
+// ---------- 微信（个人号）机器人：扫码绑定 ----------
+
+/// GET /monitor/integrations/weixin-qr —— 取一张登录二维码。
+/// 返回待编码的链接，二维码由网页自己画（省得后端引图形库）。码约 2 分钟过期，
+/// 过期就再调一次换一张。
+async fn weixin_qr(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
+    if auth_user(&state, &headers).await.is_none() {
+        return err(401, "未登录");
+    }
+    match crate::weixin::fetch_qrcode().await {
+        Ok(q) => ok(json!({ "qrcodeId": q.id, "link": q.link })),
+        Err(e) => err(502, &format!("取二维码失败：{e}")),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WeixinScanReq {
+    #[serde(default)]
+    qrcode_id: String,
+}
+
+/// GET /monitor/integrations/weixin-scan?qrcodeId=X —— 轮询扫码结果。
+/// confirmed 时就地落库并叫醒长轮询循环。
+async fn weixin_scan(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<WeixinScanReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    if q.qrcode_id.trim().is_empty() {
+        return err(400, "缺少 qrcodeId");
+    }
+    match crate::weixin::scan_state(&q.qrcode_id).await {
+        Ok(crate::weixin::ScanState::Confirmed(bot)) => {
+            state.registry.write().await.set_weixin_bot(&user, bot);
+            state.weixin_reload.notify_one();
+            ok(json!({ "status": "confirmed" }))
+        }
+        Ok(crate::weixin::ScanState::Expired) => ok(json!({ "status": "expired" })),
+        Ok(crate::weixin::ScanState::Waiting) => ok(json!({ "status": "waiting" })),
+        Err(e) => err(502, &format!("查扫码状态失败：{e}")),
+    }
+}
+
+/// POST /monitor/integrations/weixin-unbind —— 解绑微信机器人。
+async fn weixin_unbind(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let removed = state.registry.write().await.clear_weixin_bot(&user);
+    state.weixin_reload.notify_one();
+    ok(json!({ "result": if removed { "已解绑" } else { "本来就没绑" } }))
 }
 
 #[derive(Deserialize)]
@@ -2817,6 +2887,10 @@ async fn report(
     if !events.is_empty() {
         let st = state.clone();
         let now_ms = crate::state::now_secs() * 1000;
+        // 微信是另一条独立通路（长轮询 + context_token），与钉钉互不影响，各推各的
+        let st_wx = state.clone();
+        let ev_wx = events.clone();
+        tokio::spawn(async move { crate::weixin::deliver(&st_wx, ev_wx).await });
         tokio::spawn(async move { crate::dingtalk::deliver(&st, events, now_ms).await });
     }
 

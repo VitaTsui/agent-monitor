@@ -8,6 +8,8 @@ mod configsync;
 mod crypto;
 mod dingtalk;
 mod dingtalk_stream;
+/// 微信（个人号）机器人：腾讯官方 iLink Bot API，扫码绑定、长轮询收发
+mod weixin;
 mod oauth;
 mod registry;
 mod history;
@@ -138,6 +140,8 @@ async fn run_hub(state: SharedState) -> Result<()> {
     tokio::spawn(state::tick_loop(state.clone()));
     // 钉钉 Stream 长连接管理器：为配了 AppKey+AppSecret 的用户维持收消息长连接
     tokio::spawn(dingtalk_stream::run(state.clone()));
+    // 微信（个人号）机器人长轮询：为已扫码绑定的用户收私聊消息
+    tokio::spawn(weixin::run(state.clone()));
     // 机器人「监控 N」推送循环：把被监控会话的新内容推到钉钉会话
     tokio::spawn(bot::monitor_loop(state.clone()));
 
