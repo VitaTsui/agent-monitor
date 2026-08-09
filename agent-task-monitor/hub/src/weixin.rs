@@ -143,8 +143,8 @@ pub struct Incoming {
     pub context_token: String,
     /// 随消息带来的图片（可多张）。内容是加密的，取回要走 [`fetch_image`]。
     pub images: Vec<ImageRef>,
-    /// 消息在服务端生成的时刻（毫秒）。**图那条通常晚于文字**（要先把图传上 CDN），
-    /// 「图文同发却把图落下」的根因就在这个差值上，排查时靠它看清先后。
+    /// 消息在服务端生成的时刻（毫秒）。图文同发时这个差值其实很小（实测 13ms），
+    /// 真正的先后差在投递上 —— 两者一起看才知道「慢」慢在哪一段。
     pub create_time_ms: u64,
 }
 
@@ -163,9 +163,15 @@ const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
 /// 收到文字后，等「一起发出的图片」跟上的窗口。
 ///
-/// 微信里图和文字是两条独立消息，且图那条**生成得更晚**（要先把图传上 CDN），
-/// 所以到达顺序常常是文字在前、图在后 —— 不等就会把图落下，只能等下一条任务才带走。
-/// 代价是纯文字指令也会晚这么久才执行；钉钉那边内容类消息本来就攒 3s，2s 在可接受的量级。
+/// 微信里图和文字是两条独立消息，到达顺序常常是文字在前、图在后 —— 不等就会把图
+/// 落下，只能等下一条任务才带走。
+///
+/// **线上实测的一次**：文字与图的 `create_time_ms` 只差 13ms，图却晚到了 357ms。
+/// 所以差距不在「生成」而在**投递**（两条落进了不同的长轮询批次）—— 别再按
+/// 「图要先传 CDN 所以生成更晚」去推断窗口该多大，那个说法被这组数据否掉了；
+/// 要调就照实测的投递延迟来。
+///
+/// 代价是纯文字指令也会晚这么久才执行；钉钉那边内容类消息本来就攒 3s，2s 同量级。
 /// 图一到就立刻往下走，不会白等满。
 const IMAGE_GRACE_MS: u64 = 2_000;
 
@@ -427,7 +433,7 @@ async fn supervise(state: crate::state::SharedState, user: String, token: String
                     },
                 };
                 let kind = if !m.images.is_empty() { "图片" } else { "文字" };
-                tracing::info!(
+                tracing::debug!(
                     "微信取到消息 类型={kind} 生成于={} user={u2}",
                     m.create_time_ms
                 );
@@ -436,9 +442,9 @@ async fn supervise(state: crate::state::SharedState, user: String, token: String
                     handle_message(&st, &u2, &t2, m).await;
                     continue;
                 }
-                // 纯文字：先等一小会儿。**图和文字是两条独立消息，而图那条生成得更晚**
-                //（要先把图传上 CDN），所以「同时发出」到达时往往是文字在前、图在后。
-                // 只按到达顺序处理救不了这种，必须给文字留个窗口等图跟上。
+                // 纯文字：先等一小会儿。图和文字是两条独立消息，「同时发出」到达时
+                // 往往是文字在前、图在后（实测差 357ms，落在不同的轮询批次里），
+                // 只按到达顺序处理救不了，必须给文字留个窗口等图跟上。
                 // 图一到就立刻往下走，不会白等满。
                 let began = tokio::time::Instant::now();
                 let deadline = began + std::time::Duration::from_millis(IMAGE_GRACE_MS);
@@ -448,7 +454,7 @@ async fn supervise(state: crate::state::SharedState, user: String, token: String
                             // 这行就是这个窗口存在的理由：文字先到、图后到，靠等把图接住了。
                             // 差值 = 图那条比文字晚生成多久（图要先传上 CDN）。
                             tracing::info!(
-                                "微信等图窗口：等了 {}ms 接到图片（图比文字晚生成 {}ms）user={u2}",
+                                "微信等图窗口：等了 {}ms 接到图片（两条消息生成时刻差 {}ms）user={u2}",
                                 began.elapsed().as_millis(),
                                 next.create_time_ms.saturating_sub(m.create_time_ms),
                             );
@@ -458,7 +464,7 @@ async fn supervise(state: crate::state::SharedState, user: String, token: String
                         // 窗口里来的又是文字：排到后面，等当前这条处理完再说
                         Ok(Some(next)) => queue.push_back(next),
                         _ => {
-                            tracing::info!(
+                            tracing::debug!(
                                 "微信等图窗口：等满 {}ms 没有图，直接执行 user={u2}",
                                 began.elapsed().as_millis()
                             );
