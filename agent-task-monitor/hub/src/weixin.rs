@@ -158,6 +158,14 @@ pub struct ImageRef {
 /// 连发几张大图就能把 hub 撑爆。
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
+/// 收到文字后，等「一起发出的图片」跟上的窗口。
+///
+/// 微信里图和文字是两条独立消息，且图那条**生成得更晚**（要先把图传上 CDN），
+/// 所以到达顺序常常是文字在前、图在后 —— 不等就会把图落下，只能等下一条任务才带走。
+/// 代价是纯文字指令也会晚这么久才执行；钉钉那边内容类消息本来就攒 3s，2s 在可接受的量级。
+/// 图一到就立刻往下走，不会白等满。
+const IMAGE_GRACE_MS: u64 = 2_000;
+
 fn unhex(s: &str) -> Option<Vec<u8>> {
     if s.len() % 2 != 0 {
         return None;
@@ -403,7 +411,37 @@ async fn supervise(state: crate::state::SharedState, user: String, token: String
     {
         let (st, u2, t2) = (state.clone(), user.clone(), token.clone());
         tokio::spawn(async move {
-            while let Some(m) = rx.recv().await {
+            let mut queue: std::collections::VecDeque<Incoming> = Default::default();
+            loop {
+                let m = match queue.pop_front() {
+                    Some(m) => m,
+                    None => match rx.recv().await {
+                        Some(m) => m,
+                        None => break, // 发端没了（会话过期/凭据变更），收工
+                    },
+                };
+                // 图片、以及不支持的类型：没什么可等的，立刻处理
+                if !m.images.is_empty() || m.text.trim().is_empty() {
+                    handle_message(&st, &u2, &t2, m).await;
+                    continue;
+                }
+                // 纯文字：先等一小会儿。**图和文字是两条独立消息，而图那条生成得更晚**
+                //（要先把图传上 CDN），所以「同时发出」到达时往往是文字在前、图在后。
+                // 只按到达顺序处理救不了这种，必须给文字留个窗口等图跟上。
+                // 图一到就立刻往下走，不会白等满。
+                let deadline =
+                    tokio::time::Instant::now() + std::time::Duration::from_millis(IMAGE_GRACE_MS);
+                loop {
+                    match tokio::time::timeout_at(deadline, rx.recv()).await {
+                        Ok(Some(next)) if !next.images.is_empty() => {
+                            handle_message(&st, &u2, &t2, next).await; // 先把图挂上
+                            break;
+                        }
+                        // 窗口里来的又是文字：排到后面，等当前这条处理完再说
+                        Ok(Some(next)) => queue.push_back(next),
+                        _ => break, // 等够了，或通道关了
+                    }
+                }
                 handle_message(&st, &u2, &t2, m).await;
             }
         });
