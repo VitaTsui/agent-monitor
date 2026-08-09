@@ -331,36 +331,28 @@ async fn handle_message(state: &crate::state::SharedState, user: &str, token: &s
     if reply.trim().is_empty() {
         return;
     }
-    if let Err(e) = send_text(token, &m.from_user_id, &m.context_token, &plain(&reply)).await {
+    if let Err(e) = send_text(token, &m.from_user_id, &m.context_token, &for_weixin(&reply)).await {
         tracing::warn!("微信回复失败 user={user}: {e}");
     }
 }
 
-/// markdown → 纯文本。iLink 只吃纯文本，`**粗体**` 这类标记原样发出去很碍眼。
-pub fn plain(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            // **x** / *x* / `x` / ~~x~~ 一律去掉标记本身，保留内容
-            '*' | '`' | '~' => {
-                while chars.peek() == Some(&c) {
-                    chars.next();
-                }
-            }
-            // 行首的 #/> 才是标题/引用标记，正文里的 # 保留
-            '#' | '>' if out.is_empty() || out.ends_with('\n') => {
-                while chars.peek() == Some(&c) {
-                    chars.next();
-                }
-                while chars.peek() == Some(&' ') {
-                    chars.next();
-                }
-            }
-            _ => out.push(c),
-        }
-    }
-    out
+/// 出站适配。**微信这头是按 markdown 渲染的**（实测粗体、有序列表都生效），
+/// 所以不拆标记 —— 早先按「只吃纯文本」拆掉标记是搞反了，层级全平、没法看。
+///
+/// 真正要处理的是换行：**单个 `\n` 会被当成软换行吃掉**，前后两行糊成一行
+///（会话列表里「共 N 个活跃会话」「—— 设备 ——」「〔终端·项目〕」黏成一坨就是它）。
+/// 实测行尾两空格、行尾反斜杠、`<br>` 三种硬换行写法**统统无效**，只有空行分段有用，
+/// 所以每行之间插一个空行。
+pub fn for_weixin(s: &str) -> String {
+    // 先走钉钉那套降级：删掉围栏行、保留代码内容。顺序不能反 —— 围栏还在的时候
+    // 按行插空行会把代码块拆散成一堆独立段落。
+    crate::mdfmt::downgrade_for_dingtalk(s)
+        .lines()
+        .map(str::trim_end) // 行尾两空格是给别处的硬换行，这里没用，清掉
+        // 空行不必留：每行都会自成一段，再留就是双倍空隙
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 // ───────────────────────────── 主动推送 ─────────────────────────────
@@ -407,7 +399,7 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<crate::dingt
         };
 
         let to = if bot.ilink_user_id.is_empty() { &bot.ilink_bot_id } else { &bot.ilink_user_id };
-        let chunks = crate::mdfmt::chunk_text(&plain(&text), MAX_LEN);
+        let chunks = crate::mdfmt::chunk_text(&for_weixin(&text), MAX_LEN);
         tracing::info!("微信推送（{}）：{} 片，收件人 {to}", ev.owner, chunks.len());
         for chunk in chunks {
             if let Err(e) = send_text(&bot.bot_token, to, &bot.context_token, &chunk).await {
@@ -446,12 +438,15 @@ mod tests {
     }
 
     #[test]
-    fn plain_strips_markdown_but_keeps_content() {
-        assert_eq!(plain("**已发出** `@1`"), "已发出 @1");
-        assert_eq!(plain("## 标题\n正文 #1 号"), "标题\n正文 #1 号");
-        assert_eq!(plain("> 引用\n普通"), "引用\n普通");
-        // 纯文本原样通过，别把正常内容啃掉
-        assert_eq!(plain("重启服务 2>&1"), "重启服务 2>&1");
+    fn for_weixin_keeps_markdown_and_breaks_lines() {
+        // markdown 要留着：微信这头是渲染的，拆了就没层级
+        assert_eq!(for_weixin("**已发出**"), "**已发出**");
+        // 单换行会被吃掉，必须扩成空行分段
+        assert_eq!(for_weixin("共 2 个会话：\n1. 甲\n2. 乙"), "共 2 个会话：\n\n1. 甲\n\n2. 乙");
+        // 已有的空行不叠加，行尾空格清掉
+        assert_eq!(for_weixin("标题\n\n\n正文  "), "标题\n\n正文");
+        // 围栏删掉、代码内容留着（与钉钉同一套降级）
+        assert_eq!(for_weixin("说明\n```rust\nlet x = 1;\n```"), "说明\n\nlet x = 1;");
     }
 
     #[test]
