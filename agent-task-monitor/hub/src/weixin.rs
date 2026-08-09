@@ -141,6 +141,90 @@ pub struct Incoming {
     pub text: String,
     pub from_user_id: String,
     pub context_token: String,
+    /// 随消息带来的图片（可多张）。内容是加密的，取回要走 [`fetch_image`]。
+    pub images: Vec<ImageRef>,
+}
+
+/// 一张待取的图片：CDN 直链 + 解密密钥。
+pub struct ImageRef {
+    pub url: String,
+    /// 32 位十六进制字符串，解码成 16 字节就是 AES-128 的密钥
+    pub aeskey: String,
+    /// 服务端声明的明文长度，用来核对解密结果
+    pub size: usize,
+}
+
+/// 单张图片上限。图片整份进内存（见 `BotPendingFile::bytes`），不设限的话
+/// 连发几张大图就能把 hub 撑爆。
+const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+}
+
+/// 取一张图片并解密。
+///
+/// **AES-128-ECB，密钥 = `aeskey` 十六进制解码后的 16 字节，PKCS#7 补齐** ——
+/// 这是拿真实图片试出来的：密文 53616 字节、声明明文 53605，差 11 正好是补齐位数；
+/// 解出来 PNG 从文件头到 IEND 走完 10 个 chunk 且长度与声明分毫不差。
+/// （别改成 CBC：零 IV 的 CBC 首块也能解出 PNG 文件头，看着像对的，其实后面全是花的。）
+pub async fn fetch_image(img: &ImageRef) -> Result<Vec<u8>, String> {
+    let resp = client()
+        .get(&img.url)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| format!("下载失败: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("下载失败: HTTP {}", resp.status()));
+    }
+    let data = resp.bytes().await.map_err(|e| format!("下载失败: {e}"))?.to_vec();
+    if data.len() > MAX_IMAGE_BYTES {
+        return Err(format!("图片太大（{} MB），暂不接收", data.len() / 1024 / 1024));
+    }
+
+    decrypt_image(data, &img.aeskey, img.size)
+}
+
+/// 解密 + 去补齐。与 [`fetch_image`] 分开是为了能脱网测 —— 这段是整条链路里最容易
+/// 写错又最难事后发现的：改错了 CBC/ECB，首块照样能解出正确的文件头，看着像对的。
+fn decrypt_image(mut data: Vec<u8>, aeskey: &str, size: usize) -> Result<Vec<u8>, String> {
+    use aes::cipher::{generic_array::GenericArray, BlockDecrypt, KeyInit};
+
+    let key = unhex(aeskey).filter(|k| k.len() == 16).ok_or("aeskey 不是 16 字节十六进制")?;
+    if data.is_empty() || data.len() % 16 != 0 {
+        return Err(format!("密文长度异常: {}", data.len()));
+    }
+    let cipher = aes::Aes128::new(GenericArray::from_slice(&key));
+    for block in data.chunks_mut(16) {
+        cipher.decrypt_block(GenericArray::from_mut_slice(block));
+    }
+    // 去 PKCS#7 补齐
+    let pad = *data.last().unwrap_or(&0) as usize;
+    if pad == 0 || pad > 16 || pad > data.len() {
+        return Err("解密结果补齐位异常（密钥不对？）".into());
+    }
+    data.truncate(data.len() - pad);
+    // 与服务端声明的长度对不上，说明解出来的不是原图，别往下传 ——
+    // 这一条正是「看着像对的」那类错误的兜底
+    if size > 0 && data.len() != size {
+        return Err(format!("解密后长度 {} 与声明 {} 不符", data.len(), size));
+    }
+    Ok(data)
+}
+
+/// 按魔数猜扩展名 —— 消息里不带文件名，落盘总得有个像样的名字
+pub(crate) fn image_ext(b: &[u8]) -> &'static str {
+    match b {
+        _ if b.starts_with(b"\x89PNG") => "png",
+        _ if b.starts_with(&[0xff, 0xd8, 0xff]) => "jpg",
+        _ if b.starts_with(b"GIF8") => "gif",
+        _ if b.starts_with(b"RIFF") => "webp",
+        _ => "bin",
+    }
 }
 
 /// 一轮长轮询。返回 (本轮消息, 新游标)。
@@ -171,26 +255,41 @@ pub async fn get_updates(token: &str, buf: &str) -> Result<(Vec<Incoming>, Strin
         if let Some(o) = m.as_object() {
             tracing::debug!("微信消息字段: {:?}", o.keys().collect::<Vec<_>>());
         }
-        // 文本散在 item_list 里（type=1 才是文本项），可能有多段，拼起来
-        let text: String = m
-            .get("item_list")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter(|i| i.get("type").and_then(Value::as_i64) == Some(1))
-                    .filter_map(|i| i.pointer("/text_item/text").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join("")
-            })
-            .unwrap_or_default();
-        if text.trim().is_empty() {
-            // 图片/语音等非文本消息还不支持。**但不能静默丢**：发的人只会看到石沉大海，
-            // 完全不知道是没收到、还是不支持（实际发生过）。这里带一个空 text 出去，
-            // 由 handle_message 回一句说明。
-            //
-            // item_list 的结构打到 debug 里（只打类型键，不打内容），
-            // 后面要做图片转发就靠它认字段。
+        // 内容散在 item_list 里：type=1 文本、type=2 图片，一条消息里可能都有
+        let mut text = String::new();
+        let mut images = Vec::new();
+        for it in m.get("item_list").and_then(Value::as_array).unwrap_or(&Vec::new()) {
+            match it.get("type").and_then(Value::as_i64) {
+                Some(1) => {
+                    if let Some(t) = it.pointer("/text_item/text").and_then(Value::as_str) {
+                        text.push_str(t);
+                    }
+                }
+                Some(2) => {
+                    let url = it
+                        .pointer("/image_item/media/full_url")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let aeskey =
+                        it.pointer("/image_item/aeskey").and_then(Value::as_str).unwrap_or_default();
+                    if !url.is_empty() && !aeskey.is_empty() {
+                        images.push(ImageRef {
+                            url: url.to_string(),
+                            aeskey: aeskey.to_string(),
+                            size: it
+                                .pointer("/image_item/hd_size")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0) as usize,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        if text.trim().is_empty() && images.is_empty() {
+            // 语音等还不支持的类型。**不能静默丢**：发的人只会看到石沉大海，
+            // 完全不知道是没收到、还是不支持（实际发生过）。带一个空消息出去，
+            // 由 handle_message 回一句说明。结构打进 debug 便于以后认字段。
             tracing::debug!(
                 "微信非文本消息 item_list: {}",
                 m.get("item_list").map(|v| v.to_string()).unwrap_or_default()
@@ -199,6 +298,7 @@ pub async fn get_updates(token: &str, buf: &str) -> Result<(Vec<Incoming>, Strin
                 text: String::new(),
                 from_user_id: from.to_string(),
                 context_token: ct.to_string(),
+                images: Vec::new(),
             });
             continue;
         }
@@ -206,6 +306,7 @@ pub async fn get_updates(token: &str, buf: &str) -> Result<(Vec<Incoming>, Strin
             text,
             from_user_id: from.to_string(),
             context_token: ct.to_string(),
+            images,
         });
     }
     Ok((out, next))
@@ -342,11 +443,31 @@ async fn supervise(state: crate::state::SharedState, user: String, token: String
 /// 微信这边推送另走缓存的 context_token，见 `deliver`。
 async fn handle_message(state: &crate::state::SharedState, user: &str, token: &str, m: Incoming) {
     state.registry.write().await.touch_weixin_context(user, &m.context_token);
-    // 非文本消息：明确回一句，别让人对着空气发呆
-    let reply = if m.text.trim().is_empty() {
-        "📎 微信这条通道目前只认文字，图片/语音还收不了 —— 内容烦请用文字发一遍。".to_string()
+
+    // 图片先落到「挂起待发」，再 dispatch —— 顺序不能反：同一条消息里图片配文字时
+    // （「@2 看看这张图」），文字那条命令要能把刚挂上的图一起带走。
+    let mut notes: Vec<String> = Vec::new();
+    for (i, img) in m.images.iter().enumerate() {
+        match fetch_image(img).await {
+            Ok(bytes) => {
+                let name = crate::bot::stash_weixin_image(state, user, bytes).await;
+                notes.push(format!("📎 已收到图片「{name}」"));
+            }
+            Err(e) => {
+                tracing::warn!("微信图片取回失败 user={user}: {e}");
+                notes.push(format!("⚠️ 第 {} 张图片取回失败：{e}", i + 1));
+            }
+        }
+    }
+
+    let reply = if !m.text.trim().is_empty() {
+        // 有文字就照常执行；图片已挂起，会被这条命令带上
+        let out = crate::bot::dispatch(state, user, &m.text, None).await;
+        if notes.is_empty() { out } else { format!("{}\n{out}", notes.join("\n")) }
+    } else if !notes.is_empty() {
+        format!("{}\n随下一条任务一起发出（如「@2 看看这张图」）。", notes.join("\n"))
     } else {
-        crate::bot::dispatch(state, user, &m.text, None).await
+        "📎 微信这条通道目前只认文字和图片，语音之类还收不了 —— 烦请用文字发一遍。".to_string()
     };
     if reply.trim().is_empty() {
         return;
@@ -485,6 +606,29 @@ mod tests {
         assert_eq!(for_weixin("标题\n\n\n正文  "), "标题\n\n正文");
         // 围栏删掉、代码内容留着（与钉钉同一套降级）
         assert_eq!(for_weixin("说明\n```rust\nlet x = 1;\n```"), "说明\n\nlet x = 1;");
+    }
+
+    #[test]
+    fn decrypt_image_roundtrip_and_rejects_wrong_key() {
+        use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
+        let aeskey = "255d38f3384640fbec2b9d9eb2daf064"; // 线上真实那张图的密钥格式
+        let key = unhex(aeskey).unwrap();
+        let plain = b"\x89PNG\r\n\x1a\n fake image body".to_vec();
+
+        // 按认定的方案加密回去：AES-128-ECB + PKCS#7
+        let pad = 16 - plain.len() % 16;
+        let mut ct = plain.clone();
+        ct.extend(std::iter::repeat(pad as u8).take(pad));
+        let cipher = aes::Aes128::new(GenericArray::from_slice(&key));
+        for b in ct.chunks_mut(16) {
+            cipher.encrypt_block(GenericArray::from_mut_slice(b));
+        }
+
+        assert_eq!(decrypt_image(ct.clone(), aeskey, plain.len()).unwrap(), plain);
+        // 声明长度对不上要拒——这是「解出来像图其实是花的」的兜底
+        assert!(decrypt_image(ct.clone(), aeskey, plain.len() + 1).is_err());
+        // 换个密钥必须失败，不能悄悄返回一堆乱码
+        assert!(decrypt_image(ct, "00112233445566778899aabbccddeeff", plain.len()).is_err());
     }
 
     #[test]

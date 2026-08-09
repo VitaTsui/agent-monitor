@@ -232,6 +232,7 @@ async fn connect_once(
                                 file_name: fname.clone(),
                                 app_user: user.to_string(),
                                 at: now,
+                                bytes: None, // 钉钉延后下载，见 attach_pending_file
                             });
                             tracing::info!("钉钉 Stream 暂存待发文件 account={acct} name={fname}");
                         }
@@ -382,7 +383,7 @@ fn extract_files(m: &Value, msgtype: &str) -> Vec<(String, String)> {
 }
 
 /// 文件名去重：已存在同名就在扩展名前加 -2/-3…，避免多张「图片.jpg」落盘时互相覆盖。
-fn unique_name(existing: &[crate::state::BotPendingFile], name: &str) -> String {
+pub(crate) fn unique_name(existing: &[crate::state::BotPendingFile], name: &str) -> String {
     let taken = |n: &str| existing.iter().any(|f| f.file_name == n);
     if !taken(name) {
         return name.to_string();

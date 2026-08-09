@@ -1036,15 +1036,21 @@ async fn attach_pending_file(
     pf: &crate::state::BotPendingFile,
 ) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
-    // 下载要用「收到该文件的那个应用」的凭据（多租户下 app_user 可能 != 归属账号）
-    let app = state
-        .registry
-        .read()
-        .await
-        .dingtalk_app_of(&pf.app_user)
-        .ok_or("未配置钉钉应用")?;
-    let now_ms = crate::state::now_secs() * 1000;
-    let bytes = crate::dingtalk::download_bot_file(&app, &pf.download_code, now_ms).await?;
+    // 微信那条路收消息时就把内容取好了（直链会过期），直接用；钉钉才需要现在去下载。
+    let bytes = match &pf.bytes {
+        Some(b) => b.clone(),
+        None => {
+            // 下载要用「收到该文件的那个应用」的凭据（多租户下 app_user 可能 != 归属账号）
+            let app = state
+                .registry
+                .read()
+                .await
+                .dingtalk_app_of(&pf.app_user)
+                .ok_or("未配置钉钉应用")?;
+            let now_ms = crate::state::now_secs() * 1000;
+            crate::dingtalk::download_bot_file(&app, &pf.download_code, now_ms).await?
+        }
+    };
     let task = state
         .tasks_for(username)
         .await
@@ -1087,6 +1093,30 @@ async fn attach_pending_file(
         .map(|r| format!("./{}", r.replace('\\', "/")))
         .unwrap_or(target);
     Ok(rel)
+}
+
+/// 微信图片入挂起队列。内容已在收消息时下载并解密好（微信直链会过期，见
+/// `BotPendingFile::bytes`），这里只负责起名和排队。返回落盘用的文件名。
+pub(crate) async fn stash_weixin_image(
+    state: &SharedState,
+    username: &str,
+    bytes: Vec<u8>,
+) -> String {
+    // 微信图片消息不带文件名，用时间戳凑一个；扩展名按魔数猜（见 weixin::image_ext）
+    let ext = crate::weixin::image_ext(&bytes);
+    let base = format!("微信图片-{}.{ext}", crate::state::now_secs());
+    let mut map = state.bot_pending_files.write().await;
+    let list = map.entry(username.to_string()).or_default();
+    let name = crate::dingtalk_stream::unique_name(list, &base);
+    list.push(crate::state::BotPendingFile {
+        download_code: String::new(),
+        file_name: name.clone(),
+        app_user: username.to_string(),
+        at: crate::state::now_secs(),
+        bytes: Some(bytes),
+    });
+    tracing::info!("微信暂存待发图片 account={username} name={name}");
+    name
 }
 
 /// 「文件」：列出当前挂起待发的文件（随下一条任务一起落到会话目录）。
