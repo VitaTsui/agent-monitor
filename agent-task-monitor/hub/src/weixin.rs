@@ -394,6 +394,21 @@ async fn supervise(state: crate::state::SharedState, user: String, token: String
     // 代价是 hub 停机期间发来的消息收不到。这是有意选的：宁可漏掉一条要你重发，
     // 也不能把半天前的旧指令翻出来执行。
     let mut priming = true;
+
+    // 收消息与处理消息分家：长轮询只管把消息塞进队列，处理由这个**串行**任务负责。
+    // 两个目的一次满足 —— ① 不阻塞长轮询（dispatch 里有等客户端取走输入的 5s 级等待，
+    // 顺着做会让那期间的消息全压在服务端）；② 消息严格按到达顺序处理，
+    // 「先发图、再发『看看这张图』」才能把图带上。
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Incoming>();
+    {
+        let (st, u2, t2) = (state.clone(), user.clone(), token.clone());
+        tokio::spawn(async move {
+            while let Some(m) = rx.recv().await {
+                handle_message(&st, &u2, &t2, m).await;
+            }
+        });
+    }
+
     loop {
         match get_updates(&token, &buf).await {
             Ok((msgs, next)) => {
@@ -411,10 +426,11 @@ async fn supervise(state: crate::state::SharedState, user: String, token: String
                     state.registry.write().await.set_weixin_expired(&user, false);
                 }
                 for m in msgs {
-                    // 另起任务：dispatch 里有等客户端取走输入的 5s 级等待，
-                    // 顺着做会把长轮询挂住，那期间的消息全压在服务端。
-                    let (st, u2, t2) = (state.clone(), user.clone(), token.clone());
-                    tokio::spawn(async move { handle_message(&st, &u2, &t2, m).await });
+                    // 交给串行处理器，**别在这里 spawn**：微信里「图 + 说明文字」是两条
+                    // 独立消息，各起一个任务就是在赛跑 —— 图那条要下载解密（几百毫秒），
+                    // 文字那条立刻 dispatch，任务发出去时图还没挂上，只能等下一条任务
+                    // 才被带走。实际踩到过。
+                    let _ = tx.send(m);
                 }
             }
             Err(e) if e.contains(&format!("errcode={ERR_SESSION_TIMEOUT}")) => {
