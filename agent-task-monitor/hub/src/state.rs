@@ -84,6 +84,10 @@ pub struct MachineEntry {
 ///（实测连挂 18 小时），三次足以与偶发区分，又不会让人白等太久。
 pub const WEIXIN_SEND_FAIL_LIMIT: u32 = 3;
 
+/// 一次性图片外链的有效期。钉钉服务器通常几秒内就来拉，2 分钟足够；
+/// 留久了等于把会话截图长期挂在一个免鉴权地址上。
+pub const PUB_IMAGE_TTL_SECS: u64 = 120;
+
 /// 现取结果在 hub 内存里的最长停留：交给网页即删，没人来领的这么久后清掉。
 /// 取 60s —— 网页那边是轮询取件，一两秒就该来领；留久了等于变相「落存储」。
 pub const FETCH_RESULT_TTL_SECS: u64 = 60;
@@ -302,6 +306,13 @@ pub struct AppState {
     /// 连续「绑定失效」型发送失败的次数（账号 → 次数）。攒够就判定要重扫，
     /// 见 WEIXIN_SEND_FAIL_LIMIT。发送成功即清零。
     pub weixin_send_fails: RwLock<HashMap<String, u32>>,
+    /// 一次性图片外链：token → (内容, MIME, 放入时刻)。
+    ///
+    /// **只为钉钉存在**：它的 `sampleImageMsg` 只认公网 URL —— 图片要由**钉钉的
+    /// 服务器**来拉，那台机器带不了我们的登录态，所以这个地址必然免鉴权。
+    /// 三重收窄：高熵随机 token（猜不出）、**取走即删**（一次性）、
+    /// 到期自动清（见 PUB_IMAGE_TTL_SECS）。全程只在内存，不落盘。
+    pub pub_images: RwLock<HashMap<String, (Vec<u8>, String, Instant)>>,
     pub started_at: chrono::DateTime<chrono::Local>,
     /// 会话表有未落盘变更（tick 循环定期 flush 到 sessions.json）
     pub sessions_dirty: std::sync::atomic::AtomicBool,
@@ -456,6 +467,7 @@ impl AppState {
             weixin_reload: std::sync::Arc::new(tokio::sync::Notify::new()),
             weixin_pending_pushes: RwLock::new(HashMap::new()),
             weixin_send_fails: RwLock::new(HashMap::new()),
+            pub_images: RwLock::new(HashMap::new()),
             dingtalk_binds: RwLock::new(HashMap::new()),
             dingtalk_bind_codes: RwLock::new(HashMap::new()),
             started_at: chrono::Local::now(),

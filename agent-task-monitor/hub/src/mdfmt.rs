@@ -64,6 +64,48 @@ pub fn derive_title(text: &str, fallback: &str, limit: usize) -> String {
 }
 
 /// `![alt](url)` → 整个丢掉
+/// 挑出正文里引用的**本地图片**路径（`![alt](rel/path.png)`，非 http/data 的那些），
+/// 顺带把这些标记从正文里换成 `[图: alt]`。
+///
+/// 各渠道只认得公网 URL 或自家上传的媒体，本地相对路径原样发过去就是一串没用的字面量。
+/// 所以正文里留个可读的占位，图另走各渠道自己的发图通路。
+pub fn take_local_images(text: &str) -> (String, Vec<(String, String)>) {
+    let b: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut found: Vec<(String, String)> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == '!' && i + 1 < b.len() && b[i + 1] == '[' {
+            if let Some(end) = find_link_end(&b, i + 1) {
+                let whole: String = b[i..=end].iter().collect();
+                if let Some((alt, src)) = split_image(&whole) {
+                    let local = !src.starts_with("http://")
+                        && !src.starts_with("https://")
+                        && !src.starts_with("data:");
+                    if local && !src.is_empty() {
+                        out.push_str(&format!("[图: {}]", if alt.is_empty() { &src } else { &alt }));
+                        found.push((alt, src));
+                        i = end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    (out, found)
+}
+
+/// 拆 `![alt](src)` —— 只在 take_local_images 里用，形态已由 find_link_end 保证
+fn split_image(whole: &str) -> Option<(String, String)> {
+    let rest = whole.strip_prefix("![")?;
+    let close = rest.find("](")?;
+    let alt = &rest[..close];
+    let src = rest[close + 2..].strip_suffix(')')?;
+    Some((alt.to_string(), src.trim().to_string()))
+}
+
 fn strip_images(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let b: Vec<char> = s.chars().collect();
@@ -161,6 +203,34 @@ pub fn chunk_text(text: &str, max_len: usize) -> Vec<String> {
         chunks.push(rest.iter().collect());
     }
     chunks
+}
+
+#[cfg(test)]
+mod img_tests {
+    use super::*;
+
+    #[test]
+    fn takes_local_images_and_leaves_urls() {
+        let (txt, imgs) = take_local_images(
+            "结果见 ![交互提示](qa/evidence/x.png) 和 ![线上](https://a.com/b.png)",
+        );
+        // 本地的换成可读占位并挑出来；公网 URL 各渠道本来就认，原样留着
+        assert_eq!(txt, "结果见 [图: 交互提示] 和 ![线上](https://a.com/b.png)");
+        assert_eq!(imgs, vec![("交互提示".to_string(), "qa/evidence/x.png".to_string())]);
+    }
+
+    #[test]
+    fn alt_falls_back_to_path() {
+        let (txt, imgs) = take_local_images("![](shot.png)");
+        assert_eq!(txt, "[图: shot.png]");
+        assert_eq!(imgs.len(), 1);
+    }
+
+    #[test]
+    fn plain_text_untouched() {
+        let src = "普通正文，含感叹号！和方括号[不是图]";
+        assert_eq!(take_local_images(src).0, src);
+    }
 }
 
 #[cfg(test)]

@@ -1490,7 +1490,7 @@ async fn push_oto_owner(state: &SharedState, owner: &str, text: &str) {
     if app.app_secret.is_empty() {
         return;
     }
-    let _ = crate::dingtalk::push_oto(&app, &staff_id, text, None, now_ms).await;
+    let _ = crate::dingtalk::push_oto(&app, &staff_id, text, None, now_ms, &[]).await;
 }
 
 /// 网页/客户端（非钉钉）下发任务后，把「排队中 / 执行中」状态主动推到钉钉（OTO 私聊）。

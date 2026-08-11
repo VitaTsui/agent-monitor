@@ -125,6 +125,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/tasks/:id/dirs", get(task_dirs))
         // 现取会话目录里的文件（网页显示 agent 输出引用的截图；hub 只中转不落盘）
         .route("/monitor/tasks/:id/file", get(task_file))
+        // 一次性图片外链（免鉴权，供钉钉服务器来拉；取走即删）
+        .route("/pub/img/:token", get(pub_image))
         .route("/monitor/tasks/:id/fsop", post(task_fsop))
         .route("/monitor/tasks/:id/fsop/:opid", get(task_fsop_result))
         .route("/monitor/machines", get(machines))
@@ -1284,6 +1286,102 @@ async fn task_dirs(
         }
         None => ok(json!({ "dirs": [], "files": [], "cwd": cwd, "pending": true })),
     }
+}
+
+/// 向会话所在机器现取一个文件，等它回报（内部用；网页那条走 task_file）。
+///
+/// 走的是与 `/dirs` 同款的请求-回报：排进队列，等客户端下一轮上报带回来。
+/// 客户端上报周期约 1.5s，等 8 秒足够；等不到就放弃 —— 推送不该为一张图卡住。
+pub(crate) async fn fetch_session_file(
+    state: &SharedState,
+    owner: &str,
+    task_id: &str,
+    rel: &str,
+) -> Option<(String, Vec<u8>)> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    if rel.is_empty() || rel.split('/').any(|s| s == "..") || rel.starts_with('/') {
+        return None;
+    }
+    let task = state.tasks_for(owner).await.into_iter().find(|t| t.id == task_id)?;
+    let cwd = task.process.as_ref().map(|p| p.cwd.clone()).unwrap_or_default();
+    if cwd.is_empty() {
+        return None;
+    }
+    let fetch_id = format!("{task_id}:{rel}");
+    {
+        let mut machines = state.machines.write().await;
+        let entry = machines.get_mut(&task.machine_id)?;
+        if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
+            return None;
+        }
+        if !entry.pending_file_fetch.iter().any(|f| f.fetch_id == fetch_id) {
+            entry.pending_file_fetch.push_back(am_core::model::FileFetch {
+                fetch_id: fetch_id.clone(),
+                cwd,
+                rel: rel.to_string(),
+            });
+        }
+    }
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let mut machines = state.machines.write().await;
+        let Some(entry) = machines.get_mut(&task.machine_id) else {
+            return None;
+        };
+        if let Some((r, _)) = entry.file_fetch_results.remove(&fetch_id) {
+            if !r.err.is_empty() {
+                tracing::debug!("现取文件失败 {rel}: {}", r.err);
+                return None;
+            }
+            let bytes = B64.decode(&r.content_b64).ok()?;
+            return Some((r.mime, bytes));
+        }
+    }
+    None
+}
+
+/// GET /pub/img/:token —— 一次性图片外链（**免鉴权**）。
+///
+/// 只为钉钉存在：它的 `sampleImageMsg` 只认公网 URL，图片由**钉钉的服务器**来拉，
+/// 那台机器带不了我们的登录态。所以不是「忘了加鉴权」，是这条通路必须如此。
+///
+/// 三重收窄：token 高熵随机、**取走即删**、到期自动清（PUB_IMAGE_TTL_SECS）。
+/// 内容全程只在内存，不落盘 —— 会话截图同样算会话内容。
+async fn pub_image(
+    State(state): State<SharedState>,
+    Path(token): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut map = state.pub_images.write().await;
+    // 顺手清过期的：这张表没有别的清理时机
+    map.retain(|_, (_, _, at)| at.elapsed().as_secs() < crate::state::PUB_IMAGE_TTL_SECS);
+    match map.remove(&token) {
+        Some((bytes, mime, _)) => (
+            [
+                (axum::http::header::CONTENT_TYPE, mime),
+                // 中间层别缓存：这是一次性地址，缓存住就等于延长了它的寿命
+                (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => (axum::http::StatusCode::NOT_FOUND, "已失效").into_response(),
+    }
+}
+
+/// 把一张图放进一次性外链，返回完整 URL。
+pub(crate) async fn stash_pub_image(
+    state: &SharedState,
+    bytes: Vec<u8>,
+    mime: &str,
+) -> String {
+    let token = crate::state::new_bind_code().repeat(2); // 高熵，猜不出
+    state
+        .pub_images
+        .write()
+        .await
+        .insert(token.clone(), (bytes, mime.to_string(), std::time::Instant::now()));
+    format!("{}/pub/img/{token}", public_base())
 }
 
 #[derive(serde::Deserialize)]

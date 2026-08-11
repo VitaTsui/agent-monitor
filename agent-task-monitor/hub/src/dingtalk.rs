@@ -154,13 +154,19 @@ pub async fn download_bot_file(
 }
 
 /// 上传一段文本为钉钉媒体文件，返回 media_id（用同一 access_token）。
-async fn upload_media(token: &str, filename: &str, content: &[u8]) -> Result<String, String> {
+async fn upload_media(
+    token: &str,
+    filename: &str,
+    content: &[u8],
+    kind: &str,
+    mime: &str,
+) -> Result<String, String> {
     let part = reqwest::multipart::Part::bytes(content.to_vec())
         .file_name(filename.to_string())
-        .mime_str("text/plain")
+        .mime_str(mime)
         .map_err(|e| e.to_string())?;
     let form = reqwest::multipart::Form::new().part("media", part);
-    let url = format!("https://oapi.dingtalk.com/media/upload?access_token={token}&type=file");
+    let url = format!("https://oapi.dingtalk.com/media/upload?access_token={token}&type={kind}");
     let resp = http_client()?
         .post(&url)
         .multipart(form)
@@ -274,6 +280,7 @@ pub async fn push_oto(
     text: &str,
     full: Option<&str>,
     now_ms: u64,
+    images: &[String],
 ) -> Result<(), String> {
     if staff_id.is_empty() {
         return Err("空 staffId".into());
@@ -295,9 +302,20 @@ pub async fn push_oto(
         )
         .await?;
     }
+    // 正文里引用的本地截图：正文已把标记换成 `[图: alt]`，图在这里作为真正的图片消息补上。
+    //
+    // **必须走 `photoURL` + 公网 URL**：实测 `mediaId` 会发出去但显示破损（钉钉接受了、
+    // 渲染不了），只有公网 URL 能内联显示。所以图片经 hub 的一次性外链给出去，
+    // 由钉钉服务器来拉一次（见 server::stash_pub_image）。
+    for url in images {
+        if let Err(e) = oto_send(app, staff_id, &token, "sampleImageMsg",
+                                 serde_json::json!({ "photoURL": url })).await {
+            tracing::warn!("钉钉 OTO 图片发送失败: {e}");
+        }
+    }
     // 内容太长被截断：把完整内容作为文件补发（失败只记日志，不影响正文已送达）
     if let Some(full) = full {
-        match upload_media(&token, "完整内容.txt", full.as_bytes()).await {
+        match upload_media(&token, "完整内容.txt", full.as_bytes(), "file", "text/plain").await {
             Ok(media_id) => {
                 let param = serde_json::json!({
                     "mediaId": media_id,
@@ -389,7 +407,22 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
             if app.app_secret.is_empty() {
                 continue;
             }
-            match push_oto(&app, &staff_id, &text, ev.full_content.as_deref(), now_ms).await {
+            // 正文里引用的本地截图：向会话所在机器现取，再挂成一次性外链交给钉钉去拉。
+            // 取不到就算了 —— 正文里已经有 `[图: xxx]` 占位，不该为一张图卡住整条推送。
+            let (text, refs) = crate::mdfmt::take_local_images(&text);
+            let mut images: Vec<String> = Vec::new();
+            if let Some(task_id) = ev.task_id.as_deref() {
+                for (_, rel) in &refs {
+                    if let Some((mime, bytes)) =
+                        crate::server::fetch_session_file(state, &ev.owner, task_id, rel).await
+                    {
+                        if mime.starts_with("image/") {
+                            images.push(crate::server::stash_pub_image(state, bytes, &mime).await);
+                        }
+                    }
+                }
+            }
+            match push_oto(&app, &staff_id, &text, ev.full_content.as_deref(), now_ms, &images).await {
                 Ok(_) => tracing::info!("钉钉已推送 kind={kind}（{}）", ev.owner),
                 Err(e) => tracing::warn!("钉钉推送失败 kind={kind}（{}）: {e}", ev.owner),
             }
