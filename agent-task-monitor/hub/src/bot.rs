@@ -938,8 +938,10 @@ async fn list_sessions(state: &SharedState, username: &str) -> String {
         // 子标题里已带终端·项目，行内只留状态 + 会话标题
         let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
         let title = one_line(&title, 24);
-        let mark = if sticky == Some(*no) { " ← 当前" } else { "" };
-        lines.push(format!("  {}. [{}] {}{}", no, status_zh(t.status), title, mark));
+        // 同排队列表：标记紧跟序号，不挂行尾。标题被 one_line 截到 24 字，长短仍不一，
+        // 行尾的「← 当前」位置飘忽、扫不出来；序号后的位置固定，emoji 自带颜色。
+        let mark = if sticky == Some(*no) { "👉 " } else { "" };
+        lines.push(format!("  {}. {}[{}] {}", no, mark, status_zh(t.status), title));
     }
     // 号位绑终端窗口、不随列表刷新重排，所以中间可能有空号（终端关掉了）——那是正常的
     lines.push("\n号位跟着终端窗口固定不变，可能不连号。".to_string());
