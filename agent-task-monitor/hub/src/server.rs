@@ -2870,6 +2870,18 @@ async fn report(
     // 代为扣留。（撤回按「终端队列是否已接收」判定，见前端。）
     let commands: Vec<ControlCmd> = entry.pending.drain(..).collect();
     let files: Vec<am_core::model::FileTransfer> = entry.pending_files.drain(..).collect();
+    // drain 即交付：响应一发出，队列这边就没有了，agent 没收到也无从重来。所以这一步必须
+    // 留痕 —— 出过「钉钉回执说已下发、终端毫无反应」而两头日志都空白的情况，当时无法判断
+    // 命令是压根没入队、还是下发了却没落地。有这行，配合 agent 侧的执行日志即可二分。
+    if !commands.is_empty() || !files.is_empty() {
+        tracing::info!(
+            "下发给设备 {}：命令 {} 条 {:?}，文件 {} 个",
+            payload.machine_id,
+            commands.len(),
+            commands.iter().map(|c| (c.action, c.task_id.as_str())).collect::<Vec<_>>(),
+            files.len()
+        );
+    }
     let dir_queries: Vec<am_core::model::DirQuery> = entry.pending_dir.drain(..).collect();
     let fs_ops: Vec<am_core::model::FsOp> = entry.pending_fsop.drain(..).collect();
     drop(machines);

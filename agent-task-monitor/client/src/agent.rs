@@ -339,18 +339,38 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                     state
                         .hub_trusted
                         .store(now_trusted, std::sync::atomic::Ordering::Relaxed);
-                    let commands: Vec<ControlCmd> = body
-                        .pointer("/data/commands")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
+                    // 解析失败必须出声。hub 那头是「drain 即交付」——响应发出时队列已经清空，
+                    // 这里再静默当成「没有命令」，那条命令就永久消失了：钉钉/网页显示「已下发」，
+                    // 终端什么也没收到，而两头都不会留下任何痕迹。宁可丢一批也要留下证据。
+                    let commands: Vec<ControlCmd> = match body.pointer("/data/commands") {
+                        Some(v) if !v.is_null() => serde_json::from_value(v.clone())
+                            .unwrap_or_else(|e| {
+                                crate::state::client_log(&format!(
+                                    "下发命令解析失败，本批 {} 条被丢弃：{e}；原文 {}",
+                                    v.as_array().map(|a| a.len()).unwrap_or(0),
+                                    v.to_string().chars().take(300).collect::<String>()
+                                ));
+                                Vec::new()
+                            }),
+                        _ => Vec::new(),
+                    };
                     for cmd in commands {
                         execute(&state, cmd, &known_pids, &ide_shell_of).await;
                     }
-                    // 待写入文件（hub 下发的文件传输）
-                    let files: Vec<am_core::model::FileTransfer> = body
-                        .pointer("/data/files")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
+                    // 待写入文件（hub 下发的文件传输）。同样不能静默吞——文件丢了，
+                    // 回填进任务的路径却还在，agent 只会报「文件不存在」。
+                    let files: Vec<am_core::model::FileTransfer> = match body.pointer("/data/files")
+                    {
+                        Some(v) if !v.is_null() => serde_json::from_value(v.clone())
+                            .unwrap_or_else(|e| {
+                                crate::state::client_log(&format!(
+                                    "下发文件解析失败，本批 {} 个被丢弃：{e}",
+                                    v.as_array().map(|a| a.len()).unwrap_or(0)
+                                ));
+                                Vec::new()
+                            }),
+                        _ => Vec::new(),
+                    };
                     for f in files {
                         write_transfer(&f, &session_dirs);
                     }
