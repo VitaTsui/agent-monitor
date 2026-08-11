@@ -314,6 +314,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             autostart_set,
             client_auth,
             local_machine_id,
+            read_session_image,
             clear_device_token,
             terminals_get,
             terminal_set_excluded,
@@ -955,6 +956,56 @@ fn client_auth(
 #[tauri::command]
 fn local_machine_id(ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>) -> String {
     ctx.state.config.machine_id.clone()
+}
+
+/// 单张图片上限。整份要经 base64 塞进 data URL 交给页面，太大既卡渲染又占内存。
+const MAX_LOCAL_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// 网页端 IPC：读会话目录里的一张图片，回 data URL。
+///
+/// agent 的输出常带 `![说明](qa/evidence/xxx.png)` 这种**本机相对路径** —— 那是跑
+/// agent 那台机器上的文件，网页拿它去拼站点地址只会 404。而在桌面客户端里，
+/// 这个路径本来就是有意义的：文件就在本机。于是这里把它读出来直接给页面。
+///
+/// **只允许会话项目目录内的文件**：canonicalize 后必须仍在 cwd 之下 —— 会话内容
+/// 可能来自别处（比如另一台机器同步过来的），不能让一段 `![](../../.ssh/id_rsa)`
+/// 就把目录外的东西读出去。判据与 agent 的 list_entries 同源。
+#[tauri::command]
+fn read_session_image(cwd: String, rel: String) -> Result<String, String> {
+    use std::path::Path;
+    if rel.split(['/', '\\']).any(|s| s == "..") {
+        return Err("非法路径".into());
+    }
+    let base = Path::new(&cwd).join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let (Ok(file), Ok(root)) = (base.canonicalize(), Path::new(&cwd).canonicalize()) else {
+        return Err("文件不存在".into());
+    };
+    if !file.starts_with(&root) {
+        return Err("越出会话目录".into());
+    }
+    let meta = std::fs::metadata(&file).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("不是文件".into());
+    }
+    if meta.len() > MAX_LOCAL_IMAGE_BYTES {
+        return Err(format!("图片过大（{} MB）", meta.len() / 1024 / 1024));
+    }
+    let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    Ok(format!("data:{};base64,{}", crate::desktop::image_mime(&bytes), B64.encode(&bytes)))
+}
+
+/// 按魔数判图片类型。**不看扩展名** —— 扩展名是内容里写的，改个名就能让页面
+/// 按别的类型解析；魔数是文件自己说的。认不出就不给（宁可不显示，也不猜）。
+pub(crate) fn image_mime(b: &[u8]) -> &'static str {
+    match b {
+        _ if b.starts_with(b"\x89PNG") => "image/png",
+        _ if b.starts_with(&[0xff, 0xd8, 0xff]) => "image/jpeg",
+        _ if b.starts_with(b"GIF8") => "image/gif",
+        _ if b.starts_with(b"RIFF") && b.len() > 11 && &b[8..12] == b"WEBP" => "image/webp",
+        _ if b.starts_with(b"<svg") || b.starts_with(b"<?xml") => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
 }
 
 /// 网页端 IPC：设备令牌被 hub 判为无效（换了服务器 / 设备被删 / 数据重建）时，

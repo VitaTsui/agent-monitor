@@ -223,6 +223,9 @@ pub struct ReportPayload {
     /// 上一轮 hub 请求的文件夹操作结果（回传）。旧客户端不带 → 空。
     #[serde(default)]
     pub fs_op_results: Vec<FsOpResult>,
+    /// 上一轮 hub 点名现取的文件内容（回传）。旧客户端不带 → 空。
+    #[serde(default)]
+    pub file_fetch_results: Vec<FileFetchResult>,
     /// 本机 agent 配置清单（只有哈希，没有内容）。旧客户端不带 → None，
     /// hub 据此判定「这台机器还不支持配置同步」，既不索要也不下发。
     #[serde(default)]
@@ -308,6 +311,36 @@ pub struct DirResult {
     /// 旧客户端不带该字段 → 反序列化为空。
     #[serde(default)]
     pub files: Vec<String>,
+}
+
+/// hub → agent：现取一个会话目录内的文件（网页要看 agent 输出里引用的截图）。
+///
+/// **只为中转，不为存储**：hub 拿到内容后只在内存里放很短一会儿、交给等着的那个
+/// 网页请求就丢掉 —— 会话内容不落我方存储是这个项目的既定原则，截图同样算会话内容。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileFetch {
+    /// 本次取件的标识，结果按它认领
+    pub fetch_id: String,
+    /// 会话项目目录（agent 本机路径，作为根，不允许越出）
+    pub cwd: String,
+    /// 相对根的子路径，分隔符统一 '/'
+    pub rel: String,
+}
+
+/// agent → hub：现取文件的结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileFetchResult {
+    pub fetch_id: String,
+    /// 失败原因（不存在/越界/过大）。非空即失败，此时 content_b64 为空。
+    #[serde(default)]
+    pub err: String,
+    /// 按魔数判定的 MIME（不看扩展名 —— 扩展名是内容里写的，改个名就能让页面按别的类型解析）
+    #[serde(default)]
+    pub mime: String,
+    #[serde(default)]
+    pub content_b64: String,
 }
 
 /// hub → agent：会话目录内的文件夹操作（上传选目录弹窗里新建/删除/重命名）

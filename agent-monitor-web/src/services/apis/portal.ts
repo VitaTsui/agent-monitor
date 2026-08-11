@@ -511,6 +511,19 @@ export const unbindWeixin = async () => {
   return await post<{ result: string }>("/monitor/integrations/weixin-unbind", {});
 };
 
+/**
+ * 现取会话目录里的一个文件（显示 agent 输出里引用的截图）。
+ *
+ * 异步：hub 向那台机器现要一次，所以第一次多半回 `pending`，隔一会儿再调即可。
+ * hub 只在内存中转、交件即删，不落盘。
+ */
+export const getTaskFile = async (id: string, rel: string) => {
+  return await get<{ pending: boolean; mime?: string; contentB64?: string }>(
+    `/monitor/tasks/${id}/file`,
+    { params: { rel } }
+  );
+};
+
 /** 仍在排队（未被客户端取走）的输入 */
 export const getQueuedInputs = async (id: string) => {
   return await get<ListRes<{ cmdId: string; text: string }>>(

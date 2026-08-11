@@ -123,6 +123,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/tasks/:id/queued", get(queued_inputs))
         .route("/monitor/tasks/:id/recall", post(recall_input))
         .route("/monitor/tasks/:id/dirs", get(task_dirs))
+        // 现取会话目录里的文件（网页显示 agent 输出引用的截图；hub 只中转不落盘）
+        .route("/monitor/tasks/:id/file", get(task_file))
         .route("/monitor/tasks/:id/fsop", post(task_fsop))
         .route("/monitor/tasks/:id/fsop/:opid", get(task_fsop_result))
         .route("/monitor/machines", get(machines))
@@ -1282,6 +1284,65 @@ async fn task_dirs(
         }
         None => ok(json!({ "dirs": [], "files": [], "cwd": cwd, "pending": true })),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct FileQuery {
+    #[serde(default)]
+    rel: String,
+}
+
+/// GET /monitor/tasks/:id/file?rel=… —— 现取会话目录里的一个文件（网页显示 agent
+/// 输出里引用的截图）。
+///
+/// **hub 只做中转**：向那台机器现要一次，拿到后交给这个请求就从内存里删掉 ——
+/// 会话内容不落我方存储是既定原则，截图同样算会话内容，所以既不写盘也不长留内存。
+///
+/// 与 /dirs 同款：第一次调用只是把请求排进去并回 `pending`，网页隔一会儿再来取。
+async fn task_file(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<FileQuery>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let rel = q.rel.trim().trim_matches('/').to_string();
+    if rel.is_empty() || rel.split('/').any(|seg| seg == "..") || rel.starts_with('/') {
+        return err(400, "非法路径");
+    }
+    // 归属校验走 tasks_for：只能取自己名下、已信任设备上的会话文件
+    let Some(task) = state.tasks_for(&user).await.into_iter().find(|t| t.id == id) else {
+        return err(404, "任务不存在");
+    };
+    let cwd = task.process.as_ref().map(|p| p.cwd.clone()).unwrap_or_default();
+    if cwd.is_empty() {
+        return err(400, "该会话没有工作目录信息");
+    }
+    // fetch_id 绑定会话与路径：同一张图重复请求复用同一个 id，不会把队列刷爆
+    let fetch_id = format!("{id}:{rel}");
+    let mut machines = state.machines.write().await;
+    let Some(entry) = machines.get_mut(&task.machine_id) else {
+        return err(404, "任务所属机器已离线");
+    };
+    if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
+        return err(500, "任务所属机器已离线");
+    }
+    if let Some((r, _)) = entry.file_fetch_results.remove(&fetch_id) {
+        if !r.err.is_empty() {
+            return err(404, &r.err);
+        }
+        return ok(json!({ "pending": false, "mime": r.mime, "contentB64": r.content_b64 }));
+    }
+    if !entry.pending_file_fetch.iter().any(|f| f.fetch_id == fetch_id) {
+        entry.pending_file_fetch.push_back(am_core::model::FileFetch {
+            fetch_id,
+            cwd,
+            rel,
+        });
+    }
+    ok(json!({ "pending": true }))
 }
 
 #[derive(serde::Deserialize)]
@@ -2453,6 +2514,8 @@ async fn report(
                 messages: HashMap::new(),
                 pending_dir: VecDeque::new(),
                 pending_fsop: VecDeque::new(),
+                pending_file_fetch: VecDeque::new(),
+                file_fetch_results: HashMap::new(),
                 fsop_results: HashMap::new(),
                 dir_cache: HashMap::new(),
                 notified_online: false,
@@ -2860,6 +2923,14 @@ async fn report(
     if entry.fsop_results.len() > 256 {
         entry.fsop_results.clear();
     }
+    // 现取文件的结果：存进内存等网页来领。**同时清掉过期的** —— 没人来领的不能
+    // 一直躺着，否则等于把会话内容留在了我方（见 FETCH_RESULT_TTL_SECS）。
+    for r in payload.file_fetch_results {
+        entry.file_fetch_results.insert(r.fetch_id.clone(), (r, std::time::Instant::now()));
+    }
+    entry
+        .file_fetch_results
+        .retain(|_, (_, at)| at.elapsed().as_secs() < crate::state::FETCH_RESULT_TTL_SECS);
     // 清掉已消失会话的缓存：这两张表按会话 ID 累积，不清理的话
     // hub 长期运行会随「历史会话总数」无限增长（而非「当前会话数」）。
     let alive: std::collections::HashSet<&str> =
@@ -2884,6 +2955,8 @@ async fn report(
     }
     let dir_queries: Vec<am_core::model::DirQuery> = entry.pending_dir.drain(..).collect();
     let fs_ops: Vec<am_core::model::FsOp> = entry.pending_fsop.drain(..).collect();
+    let file_fetches: Vec<am_core::model::FileFetch> =
+        entry.pending_file_fetch.drain(..).collect();
     drop(machines);
 
     // 配置同步：锁已释放再算 —— 里面要拿 registry 与 configs 两把锁，
@@ -2921,6 +2994,7 @@ async fn report(
         "files": files,
         "dirQueries": dir_queries,
         "fsOps": fs_ops,
+        "fileFetches": file_fetches,
         // 配置同步：向源机索要的路径 / 向镜像机下发的内容（两者互斥，见 sync_configs）
         "configPulls": config_pulls,
         "configPushes": config_pushes,

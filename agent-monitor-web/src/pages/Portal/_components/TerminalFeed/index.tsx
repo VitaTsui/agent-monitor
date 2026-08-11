@@ -1,7 +1,8 @@
 import React, { useState } from "react";
 
 import dayjs from "dayjs";
-import { Markdown } from "@hsu-react/ui";
+import SessionMarkdown from "../SessionMarkdown";
+import { SessionImageCtx } from "@/utils/sessionImages";
 
 import { PortalMessage, SelectPayload } from "@/services/apis/portal";
 import styles from "./index.module.scss";
@@ -12,6 +13,8 @@ interface TerminalFeedProps {
   running?: boolean;
   /** 终端卡标题：来源代理名（Claude Code / Codex / Gemini CLI …） */
   providerDsr?: string;
+  /** 会话上下文：内容里的本地图片路径靠它解析（见 utils/sessionImages） */
+  imageCtx?: SessionImageCtx;
   // 撤回不在这里：排队状态与撤回统一由输入框上方的排队条负责，
   // 对话流只呈现「我说了什么、它回了什么」。
 }
@@ -289,7 +292,7 @@ const USER_CLAMP_LINES = 12;
 const USER_CLAMP_CHARS = 600;
 
 const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
-  const { messages, running, providerDsr } = props;
+  const { messages, running, providerDsr, imageCtx } = props;
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   const turns = toTurns(messages);
@@ -305,7 +308,7 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
         <div key={key} className={styles.planCard}>
           <div className={styles.planHead}>方案</div>
           <div className={styles.planBody}>
-            <Markdown.Views>{m.content}</Markdown.Views>
+            <SessionMarkdown content={m.content} imageCtx={imageCtx} />
           </div>
         </div>
       );
@@ -356,7 +359,7 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
     return (
       <div key={key} className={styles.assistantLine}>
         <div className={styles.assistantText}>
-          <Markdown.Views>{m.content}</Markdown.Views>
+          <SessionMarkdown content={m.content} imageCtx={imageCtx} />
         </div>
       </div>
     );

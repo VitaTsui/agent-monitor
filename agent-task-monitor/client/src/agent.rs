@@ -89,6 +89,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     let mut trusted = false;
     let mut pending_dir_results: Vec<am_core::model::DirResult> = Vec::new();
     let mut pending_fs_op_results: Vec<am_core::model::FsOpResult> = Vec::new();
+    let mut pending_file_fetches: Vec<am_core::model::FileFetchResult> = Vec::new();
     // 配置同步：扫描器带哈希缓存；清单每 CONFIG_SCAN_INTERVAL_SECS 报一次（不是每轮），
     // hub 侧会把它缓存下来，pull/push 每轮都能基于缓存推进。
     let mut cfg_scanner = crate::configsync::ConfigScanner::new();
@@ -258,6 +259,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             tasks,
             dir_results: std::mem::take(&mut pending_dir_results),
             fs_op_results: std::mem::take(&mut pending_fs_op_results),
+            file_fetch_results: std::mem::take(&mut pending_file_fetches),
             // take：清单发出去就清空，下一轮不再重发。这一轮若上报失败，最多等
             // 一个扫描周期后重来——不值得为此在内存里长期挂一份待发清单。
             config_manifest: cfg_manifest.take(),
@@ -400,6 +402,14 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                             ok,
                             msg,
                         });
+                    }
+                    // 现取文件（网页要看 agent 输出里引用的截图）
+                    let fetches: Vec<am_core::model::FileFetch> = body
+                        .pointer("/data/fileFetches")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    for f in fetches {
+                        pending_file_fetches.push(read_session_file(&f));
                     }
                     // 配置同步：hub 点名索要的文件内容（下一轮随上报回传）
                     let cfg_pulls: Vec<String> = body
@@ -1014,6 +1024,66 @@ fn run_fs_op(op: &am_core::model::FsOp) -> (bool, String) {
 /// 列出 root/rel 下的子目录名（仅目录；防越出 root；隐藏目录排后；上限 300）
 /// 列出 root/rel 下的子目录与文件（各自排序，隐藏项靠后）。
 /// 越出根或读取失败时返回两个空表。
+/// 现取上限。整份要经 base64 塞进上报体，再由 hub 中转给网页，太大三头都难受。
+const MAX_FETCH_BYTES: u64 = 10 * 1024 * 1024;
+
+/// 读会话目录里的一个文件，回给 hub 中转（网页据此显示 agent 输出里引用的截图）。
+///
+/// **只允许会话目录内的文件**：canonicalize 后必须仍在 cwd 之下。会话内容里的路径
+/// 不可全信 —— 一句 `![](../../.ssh/id_rsa)` 就能把目录外的东西读走。判据与
+/// [`list_entries`] 同源。
+fn read_session_file(q: &am_core::model::FileFetch) -> am_core::model::FileFetchResult {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    use std::path::Path;
+    let fail = |e: &str| am_core::model::FileFetchResult {
+        fetch_id: q.fetch_id.clone(),
+        err: e.to_string(),
+        mime: String::new(),
+        content_b64: String::new(),
+    };
+    if q.rel.split(['/', '\\']).any(|s| s == "..") {
+        return fail("非法路径");
+    }
+    let base = Path::new(&q.cwd).join(q.rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let (Ok(file), Ok(root)) = (base.canonicalize(), Path::new(&q.cwd).canonicalize()) else {
+        return fail("文件不存在");
+    };
+    if !file.starts_with(&root) {
+        return fail("越出会话目录");
+    }
+    let Ok(meta) = std::fs::metadata(&file) else {
+        return fail("读不到文件");
+    };
+    if !meta.is_file() {
+        return fail("不是文件");
+    }
+    if meta.len() > MAX_FETCH_BYTES {
+        return fail(&format!("文件过大（{} MB）", meta.len() / 1024 / 1024));
+    }
+    match std::fs::read(&file) {
+        Ok(bytes) => am_core::model::FileFetchResult {
+            fetch_id: q.fetch_id.clone(),
+            err: String::new(),
+            mime: image_mime(&bytes).to_string(),
+            content_b64: B64.encode(&bytes),
+        },
+        Err(e) => fail(&e.to_string()),
+    }
+}
+
+/// 按魔数判图片类型。**不看扩展名** —— 扩展名是内容里写的，改个名就能让页面按别的
+/// 类型解析；魔数是文件自己说的。认不出就给 octet-stream（页面不会当图片渲染）。
+fn image_mime(b: &[u8]) -> &'static str {
+    match b {
+        _ if b.starts_with(b"\x89PNG") => "image/png",
+        _ if b.starts_with(&[0xff, 0xd8, 0xff]) => "image/jpeg",
+        _ if b.starts_with(b"GIF8") => "image/gif",
+        _ if b.starts_with(b"RIFF") && b.len() > 11 && &b[8..12] == b"WEBP" => "image/webp",
+        _ if b.starts_with(b"<svg") || b.starts_with(b"<?xml") => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
 fn list_entries(root: &str, rel: &str) -> (Vec<String>, Vec<String>) {
     use std::path::Path;
     let empty = || (Vec::new(), Vec::new());
@@ -1057,4 +1127,52 @@ fn list_entries(root: &str, rel: &str) -> (Vec<String>, Vec<String>) {
     order(&mut dirs);
     order(&mut files);
     (dirs, files)
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    use super::*;
+
+    fn fetch(cwd: &str, rel: &str) -> am_core::model::FileFetchResult {
+        read_session_file(&am_core::model::FileFetch {
+            fetch_id: "t".into(),
+            cwd: cwd.into(),
+            rel: rel.into(),
+        })
+    }
+
+    /// 会话内容里的路径**不可全信** —— agent 输出里一句 `![](../../.ssh/id_rsa)`
+    /// 就能把会话目录外的文件读走。这道边界必须守住。
+    #[test]
+    fn refuses_paths_outside_session_dir() {
+        let root = std::env::temp_dir().join(format!("am-fetch-{}", std::process::id()));
+        let inner = root.join("sub");
+        std::fs::create_dir_all(&inner).unwrap();
+        // 目录外的「机密」，以及目录内的正常图片
+        std::fs::write(root.parent().unwrap().join("am-outside-secret.txt"), b"secret").unwrap();
+        std::fs::write(inner.join("shot.png"), b"\x89PNG\r\n\x1a\n rest").unwrap();
+        let cwd = inner.to_string_lossy().to_string();
+
+        // 正常读：认出 PNG
+        let ok = fetch(&cwd, "shot.png");
+        assert!(ok.err.is_empty(), "同目录文件应能读到: {}", ok.err);
+        assert_eq!(ok.mime, "image/png");
+
+        // 越界：`..` 段直接拒
+        assert!(!fetch(&cwd, "../../am-outside-secret.txt").err.is_empty());
+        // 目录本身不是文件
+        assert!(!fetch(&cwd, ".").err.is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(root.parent().unwrap().join("am-outside-secret.txt"));
+    }
+
+    /// MIME 按魔数判，不按扩展名 —— 扩展名是内容里写的，改个名就能让页面按别的类型解析
+    #[test]
+    fn mime_from_magic_not_extension() {
+        assert_eq!(image_mime(b"\x89PNG\r\n\x1a\n"), "image/png");
+        assert_eq!(image_mime(&[0xff, 0xd8, 0xff, 0xe0]), "image/jpeg");
+        // 伪装成图片的文本：不认，页面据此不会当图片渲染
+        assert_eq!(image_mime(b"#!/bin/sh\nrm -rf /"), "application/octet-stream");
+    }
 }

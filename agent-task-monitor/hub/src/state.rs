@@ -39,6 +39,13 @@ pub struct MachineEntry {
     pub pending_dir: VecDeque<am_core::model::DirQuery>,
     /// 待下发的文件夹操作（新建/删除/重命名）
     pub pending_fsop: VecDeque<am_core::model::FsOp>,
+    /// 待下发的「现取文件」请求（网页要看 agent 输出里引用的截图）
+    pub pending_file_fetch: VecDeque<am_core::model::FileFetch>,
+    /// 现取结果：fetch_id → (结果, 到达时刻)。
+    ///
+    /// **只在内存里放一会儿**：交给等着的那个网页请求即删，没人来领的也会过期清掉
+    /// （见 FETCH_RESULT_TTL_SECS）。会话内容不落我方存储是既定原则，截图同样算会话内容。
+    pub file_fetch_results: HashMap<String, (am_core::model::FileFetchResult, Instant)>,
     /// 文件夹操作结果缓存：op_id → 结果（网页轮询后即读走）
     pub fsop_results: HashMap<String, am_core::model::FsOpResult>,
     /// 目录列举结果缓存：(task_id, rel) → 子目录名
@@ -70,6 +77,10 @@ pub struct MachineEntry {
     /// None = 该设备还没报过（旧客户端，或刚上线还没到第一次扫描）。
     pub config_manifest: Option<am_core::model::ConfigManifest>,
 }
+
+/// 现取结果在 hub 内存里的最长停留：交给网页即删，没人来领的这么久后清掉。
+/// 取 60s —— 网页那边是轮询取件，一两秒就该来领；留久了等于变相「落存储」。
+pub const FETCH_RESULT_TTL_SECS: u64 = 60;
 
 /// 机器离线判定阈值
 pub const OFFLINE_AFTER_SECS: u64 = 10;

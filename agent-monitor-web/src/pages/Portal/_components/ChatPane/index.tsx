@@ -106,6 +106,16 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task.queuedInputs]);
 
+  // 会话上下文：内容里的本地图片路径以会话 cwd 为根解析（见 utils/sessionImages）。
+  // 没有 cwd（历史会话、进程已退出）就不给 —— 那时路径无从解析，保持破图但不误导。
+  const imageCtx = React.useMemo(() => {
+    // PortalTask 的字段都是 Partial 的，三者齐全才谈得上解析
+    const cwd = task.process?.cwd ?? "";
+    return cwd && task.id && task.machineId
+      ? { taskId: task.id, machineId: task.machineId, cwd }
+      : undefined;
+  }, [task.id, task.machineId, task.process?.cwd]);
+
   const feedMessages = React.useMemo(
     () =>
       messages.filter(
@@ -520,6 +530,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 messages={feedMessages}
                 running={task.status === "running"}
                 providerDsr={task.providerDsr}
+                imageCtx={imageCtx}
               />
             </div>
           )}
