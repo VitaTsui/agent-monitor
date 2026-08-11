@@ -78,6 +78,12 @@ pub struct MachineEntry {
     pub config_manifest: Option<am_core::model::ConfigManifest>,
 }
 
+/// 连续多少次「绑定失效」型发送失败后判定需要重新扫码。
+///
+/// 不设成 1：偶发的一次不值得让用户去重扫。设成 3：这种失效一旦发生就是持续的
+///（实测连挂 18 小时），三次足以与偶发区分，又不会让人白等太久。
+pub const WEIXIN_SEND_FAIL_LIMIT: u32 = 3;
+
 /// 现取结果在 hub 内存里的最长停留：交给网页即删，没人来领的这么久后清掉。
 /// 取 60s —— 网页那边是轮询取件，一两秒就该来领；留久了等于变相「落存储」。
 pub const FETCH_RESULT_TTL_SECS: u64 = 60;
@@ -284,11 +290,18 @@ pub struct AppState {
     pub weixin_reload: std::sync::Arc<tokio::sync::Notify>,
     /// 微信推送失败后攒下的通知（账号 → 正文），等用户下次开口时补发。
     ///
-    /// 微信的 `context_token` 只能来自用户发来的消息，**且约 1.5 小时就失效**
-    ///（线上实测：14:12 最后一条消息，15:43 还能推、15:50 起一律 `-2 prepare failed`），
-    /// hub 自己续不了期（getconfig/sendtyping 都试过，见 weixin.rs）。
-    /// 所以过期后的推送不能直接丢 —— 丢了就是「任务完成了但你永远不知道」。
+    /// 发送失败有两种，别混为一谈（这一条是拿 18 小时的线上故障换来的）：
+    /// - **临时性**：网络抖动之类，下次就好；
+    /// - **绑定失效**：一律 `-2 prepare failed`，**不会自愈、也与 context_token 新旧无关**
+    ///   —— 实测拿刚收到的、几秒钟前的凭据发送照样失败，只有重新扫码才恢复。
+    ///   （曾误判成「context_token 约 1.5 小时过期」：那只解释了失败的起点，
+    ///   没解释「之后 18 小时、期间反复收到新消息也从未恢复」。取证不足。）
+    ///
+    /// 两种都不能直接丢消息 —— 丢了就是「任务完成了但你永远不知道」。
     pub weixin_pending_pushes: RwLock<HashMap<String, Vec<String>>>,
+    /// 连续「绑定失效」型发送失败的次数（账号 → 次数）。攒够就判定要重扫，
+    /// 见 WEIXIN_SEND_FAIL_LIMIT。发送成功即清零。
+    pub weixin_send_fails: RwLock<HashMap<String, u32>>,
     pub started_at: chrono::DateTime<chrono::Local>,
     /// 会话表有未落盘变更（tick 循环定期 flush 到 sessions.json）
     pub sessions_dirty: std::sync::atomic::AtomicBool,
@@ -442,6 +455,7 @@ impl AppState {
             dingtalk_reload: std::sync::Arc::new(tokio::sync::Notify::new()),
             weixin_reload: std::sync::Arc::new(tokio::sync::Notify::new()),
             weixin_pending_pushes: RwLock::new(HashMap::new()),
+            weixin_send_fails: RwLock::new(HashMap::new()),
             dingtalk_binds: RwLock::new(HashMap::new()),
             dingtalk_bind_codes: RwLock::new(HashMap::new()),
             started_at: chrono::Local::now(),

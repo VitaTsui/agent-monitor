@@ -3,9 +3,13 @@
 //! 与钉钉 Stream 同构：hub 主动连出去，**不需要公网回调**。区别在两点：
 //!
 //! ① **发消息必须带 `context_token`**，而它只来自用户发来的消息 —— 协议本身是
-//!    request-response 的，没有 open_id 之类可直接寻址的发送方式。实测这个 token
-//!    可长期复用（1.8 小时后仍能发出），所以把最近一次收到的存进注册表，
-//!    任务完成时就能主动推送。用户绑定后需要给 bot 发一句话来激活。
+//!    request-response 的，没有 open_id 之类可直接寻址的发送方式。它可以复用，
+//!    所以把最近一次收到的存进注册表，任务完成时就能主动推送；用户绑定后需要
+//!    给 bot 发一句话来激活。
+//!
+//!    **别把发送失败归咎于它「过期」** —— 曾据此下过「约 1.5 小时失效」的结论，
+//!    后被线上打脸：真实故障是绑定失效（`-2 prepare failed`），拿刚收到的凭据发
+//!    照样失败，连挂 18 小时不自愈，只有重新扫码才恢复。见 is_binding_dead。
 //! ② **收不到普通微信群的消息**（iLink bot 身份的限制），只服务私聊 —— 这与本项目
 //!    「私聊遥控」的用法一致。
 //!
@@ -607,8 +611,12 @@ async fn handle_message(state: &crate::state::SharedState, user: &str, token: &s
     if reply.trim().is_empty() {
         return;
     }
-    if let Err(e) = send_text(token, &m.from_user_id, &m.context_token, &for_weixin(&reply)).await {
-        tracing::warn!("微信回复失败 user={user}: {e}");
+    match send_text(token, &m.from_user_id, &m.context_token, &for_weixin(&reply)).await {
+        Ok(()) => note_send_ok(state, user).await,
+        Err(e) => {
+            tracing::warn!("微信回复失败 user={user}: {e}");
+            note_send_failure(state, user, &e).await;
+        }
     }
 }
 
@@ -650,6 +658,38 @@ pub fn for_weixin(s: &str) -> String {
 }
 
 // ───────────────────────────── 主动推送 ─────────────────────────────
+
+/// 「绑定失效」型失败：`-2 prepare failed`。
+///
+/// **不会自愈**，也与 `context_token` 新旧无关 —— 实测拿刚收到的、几秒钟前的凭据
+/// 发送照样失败，连挂 18 小时，期间反复收到新消息也没恢复，只有重新扫码才行。
+/// 所以它必须导向「提示重扫」，而不是当成普通失败一直攒。
+fn is_binding_dead(e: &str) -> bool {
+    e.contains("errcode=-2") || e.contains("prepare failed")
+}
+
+/// 记一次发送失败；连续攒够就判定要重扫（置位 + 停轮询 + 前端提示）。
+async fn note_send_failure(state: &crate::state::SharedState, user: &str, e: &str) {
+    if !is_binding_dead(e) {
+        return;
+    }
+    let n = {
+        let mut map = state.weixin_send_fails.write().await;
+        let c = map.entry(user.to_string()).or_insert(0);
+        *c += 1;
+        *c
+    };
+    if n >= crate::state::WEIXIN_SEND_FAIL_LIMIT {
+        tracing::warn!("微信连续 {n} 次发送失败，判定绑定已失效，需重新扫码 user={user}");
+        state.registry.write().await.set_weixin_expired(user, true);
+        state.weixin_reload.notify_one();
+    }
+}
+
+/// 发送成功：清掉失败计数
+async fn note_send_ok(state: &crate::state::SharedState, user: &str) {
+    state.weixin_send_fails.write().await.remove(user);
+}
 
 /// 推送失败时最多攒多少条。超了丢**最旧**的：真积压了几十条，新的那几条才是你想先看到的。
 const MAX_PENDING_PUSHES: usize = 20;
@@ -693,6 +733,7 @@ async fn flush_pending(
             if let Err(e) = send_text(token, to, ct, &chunk).await {
                 // 补发都失败就别硬撑了，重新攒回去等下一次
                 tracing::warn!("微信补发失败（{user}）: {e}");
+                note_send_failure(state, user, &e).await;
                 buffer_push(state, user, &body).await;
                 return;
             }
@@ -745,20 +786,26 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<crate::dingt
         let body = for_weixin(&text);
         let chunks = crate::mdfmt::chunk_text(&body, MAX_LEN);
         tracing::info!("微信推送（{}）：{} 片，收件人 {to}", ev.owner, chunks.len());
+        let mut all_ok = true;
         for chunk in chunks {
             if let Err(e) = send_text(&bot.bot_token, to, &bot.context_token, &chunk).await {
                 tracing::warn!("微信推送失败（{}）: {e}", ev.owner);
-                // token 废了就置位，长轮询循环也会随之停下，前端提示重新扫码
+                // 会话超时（-14）当场判死；绑定失效（-2）连续几次才判，见 note_send_failure
                 if e.contains(&format!("errcode={ERR_SESSION_TIMEOUT}")) {
                     state.registry.write().await.set_weixin_expired(&ev.owner, true);
                     state.weixin_reload.notify_one();
                 }
+                note_send_failure(state, &ev.owner, &e).await;
                 // **发不出去不等于可以丢**。context_token 约 1.5 小时就失效（`-2 prepare
                 // failed`），而它只能靠用户发消息来刷新 —— 直接丢就是「任务完成了但你
                 // 永远不知道」。攒下来，等用户下次开口时补发（见 flush_pending）。
                 buffer_push(state, &ev.owner, &body).await;
+                all_ok = false;
                 break; // 这条发不出去，剩下的分片也别试了
             }
+        }
+        if all_ok {
+            note_send_ok(state, &ev.owner).await;
         }
     }
 }
@@ -824,6 +871,17 @@ mod tests {
         assert!(decrypt_media(ct.clone(), aeskey, plain.len(), &"0".repeat(32)).is_err());
         // 换个密钥必须失败，不能悄悄返回一堆乱码
         assert!(decrypt_media(ct, "00112233445566778899aabbccddeeff", plain.len(), "").is_err());
+    }
+
+    #[test]
+    fn binding_dead_only_for_prepare_failed() {
+        // -2 是绑定失效：必须导向「提示重扫」，因为它不会自愈（线上连挂 18 小时）
+        assert!(is_binding_dead("errcode=-2 prepare failed"));
+        assert!(is_binding_dead("errcode=-2 "));
+        // 这些是别的毛病，不该把用户赶去重扫
+        assert!(!is_binding_dead("请求失败: connection reset"));
+        assert!(!is_binding_dead("errcode=-14 session timeout"));
+        assert!(!is_binding_dead("HTTP 502: bad gateway"));
     }
 
     #[test]
