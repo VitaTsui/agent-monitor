@@ -1029,11 +1029,82 @@ pub(crate) async fn read_queue(
 }
 
 /// 下载挂起的钉钉文件并下发到会话项目目录的 tmp/ 下，返回回填用的相对路径 `./tmp/<name>`。
+/// 撞名就在扩展名前挂序号：`a.png` → `a (1).png`。
+///
+/// **必须与客户端的 `unique_target`（client/src/agent.rs）同一套规则** —— 那边是落盘时的
+/// 兜底。两边一致时，这里算出的名字就是最终名，兜底不会被触发，拼进任务的路径才对得上。
+/// 扩展名按最后一个点切，`.gitignore` 这类整体当主名。
+fn unique_against(name: &str, taken: &[String]) -> String {
+    if !taken.iter().any(|t| t == name) {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    for i in 1..10_000 {
+        let cand = format!("{stem} ({i}){ext}");
+        if !taken.iter().any(|t| t == &cand) {
+            return cand;
+        }
+    }
+    name.to_string()
+}
+
+/// 问一次 agent：会话目录下 `rel` 里现在有哪些文件。拿不到就返回空，调用方退回原名。
+///
+/// 走网页目录浏览那套通道（pending_dir → agent 回报 → dir_cache），但这里要的是**新鲜**
+/// 结果：先把该目录的缓存清掉再下发查询，否则可能读到上一次的旧清单，算出来的名字照样撞。
+async fn dir_files_fresh(
+    state: &SharedState,
+    machine_id: &str,
+    task_id: &str,
+    cwd: &str,
+    rel: &str,
+) -> Vec<String> {
+    let key = (task_id.to_string(), rel.to_string());
+    {
+        let mut machines = state.machines.write().await;
+        let Some(entry) = machines.get_mut(machine_id) else {
+            return Vec::new();
+        };
+        entry.dir_cache.remove(&key);
+        if !entry.pending_dir.iter().any(|q| q.task_id == task_id && q.rel == rel) {
+            entry.pending_dir.push_back(am_core::model::DirQuery {
+                task_id: task_id.to_string(),
+                cwd: cwd.to_string(),
+                rel: rel.to_string(),
+            });
+        }
+    }
+    // agent 1.5s 轮询一次，给两轮多一点余量就够。等不到就算了 —— 顶多回填的名字对不上
+    // （客户端仍会兜底改名），不值得把用户的文件卡在这儿。
+    for _ in 0..12 {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let hit = state
+            .machines
+            .read()
+            .await
+            .get(machine_id)
+            .and_then(|e| e.dir_cache.get(&key).cloned());
+        if let Some((_, files)) = hit {
+            return files;
+        }
+    }
+    Vec::new()
+}
+
+/// 把一个待发文件下发到会话目录，返回拼进任务正文的路径。
+///
+/// `taken` 是本次下发的「已占用文件名」缓存：`None` 表示还没问过目标目录，本函数会问一次
+/// 并填上。同一批多个文件共用它，既省掉重复往返，也让它们彼此避让 —— 落盘是异步的，
+/// 第二个文件查目录时根本看不到第一个。
 async fn attach_pending_file(
     state: &SharedState,
     username: &str,
     task_id: &str,
     pf: &crate::state::BotPendingFile,
+    taken: &mut Option<Vec<String>>,
 ) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     // 微信那条路收消息时就把内容取好了（直链会过期），直接用；钉钉才需要现在去下载。
@@ -1075,6 +1146,33 @@ async fn attach_pending_file(
         .map(|n| n.to_string_lossy().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "file.bin".into());
+    // 撞名先在这里避开。客户端落盘时也会兜底改名，但那时改的名字传不回来 —— 拼进任务的
+    // 路径还是原名，指向目录里那个**旧文件**。比覆盖更隐蔽：agent 照着路径读到的是上一版
+    // 内容，却没有任何迹象表明它拿错了。（钉钉的图片一律叫「图片.jpg」，必然撞。）
+    //
+    // 只在目标目录位于会话目录内时问得到 —— DirQuery 以 cwd 为根，配置成绝对路径的接收
+    // 目录越出了它的范围，那种情况只能退回原名、由客户端兜底。
+    let dir_trimmed = dir.trim_end_matches(['/', '\\']).to_string();
+    let rel_dir = if dir_trimmed == cwd {
+        Some(String::new())
+    } else {
+        dir_trimmed
+            .strip_prefix(&format!("{cwd}{sep}"))
+            .map(|r| r.replace('\\', "/"))
+    };
+    let safe = match rel_dir {
+        Some(rd) => {
+            if taken.is_none() {
+                *taken =
+                    Some(dir_files_fresh(state, &task.machine_id, task_id, &cwd, &rd).await);
+            }
+            let names = taken.as_mut().expect("刚填过");
+            let picked = unique_against(&safe, names);
+            names.push(picked.clone());
+            picked
+        }
+        None => safe,
+    };
     let target = format!("{}{sep}{safe}", dir.trim_end_matches(['/', '\\']));
     let mut machines = state.machines.write().await;
     let entry = machines.get_mut(&task.machine_id).ok_or("会话所属设备已离线")?;
@@ -1276,11 +1374,13 @@ async fn send_input(
     // 超 20 分钟没跟任务的挂起文件视为过期，丢弃不附。
     let pending = state.bot_pending_files.write().await.remove(username).unwrap_or_default();
     let mut rels: Vec<String> = Vec::new();
+    // 目标目录的已用文件名，问一次即可；同批文件靠它彼此避让（见 attach_pending_file）
+    let mut taken: Option<Vec<String>> = None;
     for pf in &pending {
         if crate::state::now_secs().saturating_sub(pf.at) > 20 * 60 {
             continue;
         }
-        match attach_pending_file(state, username, &task_id, pf).await {
+        match attach_pending_file(state, username, &task_id, pf, &mut taken).await {
             Ok(rel) => rels.push(rel),
             Err(e) => return format!("附带文件下发失败：{e}"),
         }
@@ -1597,7 +1697,7 @@ mod tests {
         assert_eq!(one_line("abcdefgh", 3), "abc");
     }
 
-    use super::{is_immediate, parse_at_commands, split_cmd};
+    use super::{is_immediate, parse_at_commands, split_cmd, unique_against};
 
     #[test]
     fn split_command() {
@@ -1644,6 +1744,24 @@ mod tests {
         // 单发「@N」= 切到 N 号继续对话；多目标时没有「当前会话」可言，退回用法提示
         assert_eq!(c("@2"), Some(vec![("锁定".into(), "2".into())]));
         assert_eq!(c("@1 @2"), Some(vec![]));
+    }
+
+    /// 撞名避让必须与客户端 unique_target 用同一套规则：不一致的话，这里算出的名字客户端
+    /// 不认、落盘时它会自己再改一次，拼进任务的路径又对不上了（等于没修）。
+    #[test]
+    fn unique_against_matches_client_rule() {
+        let taken = vec!["a.png".to_string()];
+        assert_eq!(unique_against("a.png", &taken), "a (1).png");
+        assert_eq!(unique_against("b.png", &taken), "b.png", "不撞名就原样用");
+        // 连着撞就逐个后退（钉钉的图片一律叫「图片.jpg」，这是常态）
+        let taken2 = vec!["图片.jpg".to_string(), "图片 (1).jpg".to_string()];
+        assert_eq!(unique_against("图片.jpg", &taken2), "图片 (2).jpg");
+        // 多重扩展名按**最后一个**点切，同 Rust 的 file_stem/extension
+        let taken3 = vec!["a.tar.gz".to_string()];
+        assert_eq!(unique_against("a.tar.gz", &taken3), "a.tar (1).gz");
+        // 隐藏文件整体当主名：点在首位不是扩展名分隔符
+        let taken4 = vec![".gitignore".to_string()];
+        assert_eq!(unique_against(".gitignore", &taken4), ".gitignore (1)");
     }
 
     /// 钉钉合并窗口的豁免判断：指令必须单独成条立即执行，内容才攒着合并。
