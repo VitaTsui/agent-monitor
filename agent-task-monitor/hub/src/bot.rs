@@ -60,7 +60,7 @@ pub async fn dingtalk_message(
         }
     };
     // 同步回复：钉钉直接把响应体当作机器人回复消息（同 push_webhook，走 markdown）
-    Json(dingtalk_md_payload(&reply))
+    Json(dingtalk_text_payload(&reply))
 }
 
 // ---------- 指令调度（渠道无关，以账号身份执行） ----------
@@ -785,18 +785,20 @@ pub async fn monitor_loop(state: SharedState) {
     }
 }
 
-/// 钉钉消息体：一律 **markdown**，回执与回调回复共用。
+/// 钉钉消息体：回执与回调回复共用，**必须是 text**。
 ///
-/// 早先回执发的是 `msgtype: text`，于是列表、加粗、标记行全成了字面量 —— 「👉」这种
-/// 位置标记还好，`**粗体**` 直接露出星号，而排队列表里哪条是「本条」根本扫不出来。
-/// 主动推送（OTO 的 sampleMarkdown）本来就是 markdown，两条路统一后文案也不必各写一套。
+/// 别再改成 markdown。试过一次，「会话」列表当场散架：钉钉的 markdown 里**普通段落之间
+/// 的单个 `\n` 不换行**，于是「共 N 个活跃会话：」、`—— 设备名 ——` 分组行与列表项被并成
+/// 一段，序号跟着错乱、分组标题被吸进上一条里。
 ///
-/// 换行沿用单个 `\n`：钉钉的渲染器认它，OTO 那条路的排队列表一直这么拼、线上渲染正常。
-/// title 是钉钉 markdown 的必填项（会话列表里显示的摘要），从正文首行提炼。
-pub(crate) fn dingtalk_md_payload(content: &str) -> Value {
-    let md = crate::mdfmt::downgrade_for_dingtalk(content);
-    let title = crate::mdfmt::derive_title(&md, "终端任务监控", 24);
-    json!({ "msgtype": "markdown", "markdown": { "title": title, "text": md } })
+/// 当时的误判是拿 OTO 那条路的排队列表当证据 —— 那份内容**只有列表项**，列表项之间的换行
+/// 在 markdown 里本来就正确；回执这些文案却是混合的（标题行 + 分组行 + 列表 + 说明行），
+/// 且全靠 `\n` 分行、靠空格对齐，纯文本才排得住。
+///
+/// 主动推送（OTO 的 sampleMarkdown）是另一回事：那儿的正文是 agent 产出的 markdown，
+/// 本来就该渲染，两者不要混为一谈。
+pub(crate) fn dingtalk_text_payload(content: &str) -> Value {
+    json!({ "msgtype": "text", "text": { "content": content } })
 }
 
 /// 推到钉钉会话 webhook。返回 Ok(true)=成功、Ok(false)=钉钉判失败(errcode≠0)、Err=网络错。
@@ -804,7 +806,7 @@ async fn push_webhook(webhook: &str, content: &str) -> Result<bool, String> {
     let client = reqwest::Client::new();
     let resp = client
         .post(webhook)
-        .json(&dingtalk_md_payload(content))
+        .json(&dingtalk_text_payload(content))
         .send()
         .await
         .map_err(|e| e.to_string())?;
