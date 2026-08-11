@@ -298,7 +298,7 @@ async fn connect_once(
                         };
                         match cl
                             .post(&sw)
-                            .json(&json!({ "msgtype": "text", "text": { "content": reply } }))
+                            .json(&crate::bot::dingtalk_md_payload(&reply))
                             .send()
                             .await
                         {

@@ -59,8 +59,8 @@ pub async fn dingtalk_message(
             Err(guide) => guide,
         }
     };
-    // 同步回复：钉钉直接把响应体当作机器人回复消息
-    Json(json!({ "msgtype": "text", "text": { "content": reply } }))
+    // 同步回复：钉钉直接把响应体当作机器人回复消息（同 push_webhook，走 markdown）
+    Json(dingtalk_md_payload(&reply))
 }
 
 // ---------- 指令调度（渠道无关，以账号身份执行） ----------
@@ -785,12 +785,26 @@ pub async fn monitor_loop(state: SharedState) {
     }
 }
 
+/// 钉钉消息体：一律 **markdown**，回执与回调回复共用。
+///
+/// 早先回执发的是 `msgtype: text`，于是列表、加粗、标记行全成了字面量 —— 「👉」这种
+/// 位置标记还好，`**粗体**` 直接露出星号，而排队列表里哪条是「本条」根本扫不出来。
+/// 主动推送（OTO 的 sampleMarkdown）本来就是 markdown，两条路统一后文案也不必各写一套。
+///
+/// 换行沿用单个 `\n`：钉钉的渲染器认它，OTO 那条路的排队列表一直这么拼、线上渲染正常。
+/// title 是钉钉 markdown 的必填项（会话列表里显示的摘要），从正文首行提炼。
+pub(crate) fn dingtalk_md_payload(content: &str) -> Value {
+    let md = crate::mdfmt::downgrade_for_dingtalk(content);
+    let title = crate::mdfmt::derive_title(&md, "终端任务监控", 24);
+    json!({ "msgtype": "markdown", "markdown": { "title": title, "text": md } })
+}
+
 /// 推到钉钉会话 webhook。返回 Ok(true)=成功、Ok(false)=钉钉判失败(errcode≠0)、Err=网络错。
 async fn push_webhook(webhook: &str, content: &str) -> Result<bool, String> {
     let client = reqwest::Client::new();
     let resp = client
         .post(webhook)
-        .json(&json!({ "msgtype": "text", "text": { "content": content } }))
+        .json(&dingtalk_md_payload(content))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1450,8 +1464,10 @@ async fn confirm_and_watch(
         Some(list) => {
             let mut lines = vec![format!("⏳ 已排队（会话 {idx}），暂未执行。当前排队：")];
             for (n, t) in list.iter().enumerate() {
-                let mark = if norm(t) == tn { " ← 本条" } else { "" };
-                lines.push(format!("{}. {}{}", n + 1, t, mark));
+                // 标记放在**序号之后、内容之前**：行尾的「← 本条」会随中文行长短飘忽，
+                // 扫一眼根本对不齐；紧跟序号的位置是固定的，emoji 又自带颜色，一眼就找得到。
+                let mark = if norm(t) == tn { "👉 " } else { "" };
+                lines.push(format!("{}. {}{}", n + 1, mark, t));
             }
             lines.push("被终端接收执行后会再通知你。发「排队 N」可随时查看。".to_string());
             let _ = push_webhook(&webhook, &lines.join("\n")).await;
@@ -1514,8 +1530,9 @@ pub(crate) async fn notify_web_dispatch(
             let mut lines =
                 vec![format!("**⏳ 任务已排队**（网页下发 · 会话 {no}）\n\n{snippet}\n\n当前排队：")];
             for (n, t) in list.iter().enumerate() {
-                let mark = if norm(t) == tn { " ← 本条" } else { "" };
-                lines.push(format!("{}. {}{}", n + 1, t, mark));
+                // 同 confirm_and_watch：标记紧跟序号，别挂在行尾（见那处注释）
+                let mark = if norm(t) == tn { "👉 " } else { "" };
+                lines.push(format!("{}. {}{}", n + 1, mark, t));
             }
             push_oto_owner(&state, &owner, &lines.join("\n")).await;
             // 盯到它被纳入执行
