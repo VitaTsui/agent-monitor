@@ -358,12 +358,16 @@ impl SessionScanner {
                 summary.prompt = hp.clone();
             }
         }
-        // 会话标题 = 头部首个用户提示词（原始任务）；缺失时回退当前提示词
-        summary.title = head
-            .prompt
-            .clone()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| summary.prompt.clone());
+        // 会话标题 = 头部首个用户提示词（原始任务）；缺失时回退当前提示词。
+        // 开头的路径只留文件名（见 shorten_leading_paths）——标题在列表里只显示头 20 来字，
+        // 目录前缀会把额度吃光。
+        summary.title = shorten_leading_paths(
+            &head
+                .prompt
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| summary.prompt.clone()),
+        );
         // 会话开始时间以头部第一条为准
         if head.started_at.is_some() {
             summary.started_at = head.started_at.clone();
@@ -1156,6 +1160,35 @@ fn iso_to_ms(ts: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(ts)
         .ok()
         .map(|dt| dt.timestamp_millis().max(0) as u64)
+}
+
+/// 标题开头那串路径只留文件名：`./tmp/图片.jpg 根据图片改` → `图片.jpg 根据图片改`。
+///
+/// 从网页/钉钉发任务时习惯「先甩路径、再说需求」，而列表里的标题只显示头 20 来字，额度
+/// 全被 `./tmp/…` 这样的目录前缀吃掉 —— 几条并排全是同一个开头，看不出谁是谁，甚至一个
+/// 需求字都露不出来。
+///
+/// 只去目录、留文件名，不整段丢弃：「说的是哪个文件」本身也是信息，剥光了标题反而更难认。
+/// 也只处理**开头连续**的路径 token；正文中间提到的路径原样保留，那儿多半是有意引用。
+fn shorten_leading_paths(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s.trim_start();
+    while let Some(tok) = rest.split_whitespace().next() {
+        // 判据从严：必须带路径分隔符。裸文件名（a.md）本来就短，不动它
+        if !tok.contains('/') && !tok.contains('\\') {
+            break;
+        }
+        let base = tok.rsplit(['/', '\\']).next().unwrap_or(tok);
+        // 以分隔符结尾（`./tmp/`）时 basename 为空：留着原样，免得整段消失
+        if base.is_empty() {
+            break;
+        }
+        out.push_str(base);
+        out.push(' ');
+        rest = rest[tok.len()..].trim_start();
+    }
+    out.push_str(rest);
+    out.trim().to_string()
 }
 
 /// 从 user 条目 content 中提取真实提示词（过滤命令包装与 tool_result）
@@ -2946,6 +2979,29 @@ mod codex_tests {
             !tasks.iter().any(|t| t.id.starts_with("proc-")),
             "占位任务统一 pid- 前缀（attach_machine 只给 pid- 加机器前缀）"
         );
+    }
+
+    /// 标题开头的路径只留文件名 —— 列表里只看得到头 20 来字，目录前缀会把额度吃光。
+    /// 用例取自真实的会话列表（几条并排全是 `./tmp/…`，一个需求字都露不出来）。
+    #[test]
+    fn title_keeps_filename_drops_leading_dirs() {
+        use super::shorten_leading_paths as f;
+        // 典型：先甩路径、再说需求 —— 省下的字数正好留给需求
+        assert_eq!(f("./tmp/图片.jpg 根据图片里的需求进行修改"), "图片.jpg 根据图片里的需求进行修改");
+        // 多个文件连着甩，也一并缩短
+        assert_eq!(f("./tmp/a.md ./tmp/b.md 对比这两个"), "a.md b.md 对比这两个");
+        // 整条消息就是一个路径：留下文件名，别剥成空
+        assert_eq!(f("./tmp/监控IP分页-用户类型多选-前端交接"), "监控IP分页-用户类型多选-前端交接");
+        // Windows 分隔符同样处理
+        assert_eq!(f("tmp\\图片.jpg 改一下"), "图片.jpg 改一下");
+        // 正文中间的路径是有意引用，原样保留
+        assert_eq!(f("看看 src/main.rs 里的实现"), "看看 src/main.rs 里的实现");
+        // 裸文件名本来就短，不动
+        assert_eq!(f("a.md 这个文件"), "a.md 这个文件");
+        // 普通话原样
+        assert_eq!(f("提交修改"), "提交修改");
+        // 以分隔符结尾时 basename 为空，保持原样而不是把整段吞掉
+        assert_eq!(f("./tmp/ 看看这个目录"), "./tmp/ 看看这个目录");
     }
 
     /// cwd 取不到目录名时，标题只显示 provider，不留悬空的「 · 」
