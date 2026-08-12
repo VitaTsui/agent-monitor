@@ -767,12 +767,9 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<crate::dingt
             tracing::info!("微信推送跳过（{}）：登录态失效，待重新扫码", ev.owner);
             continue;
         }
-        if bot.context_token.is_empty() {
-            tracing::info!("微信推送跳过（{}）：还没收到过消息，拿不到 context_token", ev.owner);
-            continue;
-        }
-
-        // `{NO}` → 「#N 」视觉标签，`{N}` → 纯数字（用在「发 N」这类指令语法里）
+        // `{NO}` → 「#N 」视觉标签，`{N}` → 纯数字（用在「发 N」这类指令语法里）。
+        // **在判断能不能发之前就算好**：发不出去的那条也要按同样的样子攒起来，
+        // 否则补发时里面还挂着 `{NO}` 占位。
         let no = match &ev.task_id {
             Some(id) => crate::bot::session_number(state, &ev.owner, id).await,
             None => None,
@@ -781,9 +778,18 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<crate::dingt
             Some(n) => ev.text.replace("{NO}", &format!("#{n} ")).replace("{N}", &n.to_string()),
             None => ev.text.replace("{NO}", "").replace("{N}", "N"),
         };
+        let body = for_weixin(&text);
+
+        if bot.context_token.is_empty() {
+            // **攒起来，别丢**。「还没有凭据」与「发送失败」在结果上没区别 —— 都是
+            // 现在发不出去、以后能发。此前这里直接 continue，线上因此静静丢了 29 条：
+            // 用户重新绑定后一直没给 bot 发过消息，15 小时的通知全没了。
+            tracing::info!("微信推送暂存（{}）：还没收到过消息，拿不到 context_token", ev.owner);
+            buffer_push(state, &ev.owner, &body).await;
+            continue;
+        }
 
         let to = if bot.ilink_user_id.is_empty() { &bot.ilink_bot_id } else { &bot.ilink_user_id };
-        let body = for_weixin(&text);
         let chunks = crate::mdfmt::chunk_text(&body, MAX_LEN);
         tracing::info!("微信推送（{}）：{} 片，收件人 {to}", ev.owner, chunks.len());
         let mut all_ok = true;
@@ -796,9 +802,8 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<crate::dingt
                     state.weixin_reload.notify_one();
                 }
                 note_send_failure(state, &ev.owner, &e).await;
-                // **发不出去不等于可以丢**。context_token 约 1.5 小时就失效（`-2 prepare
-                // failed`），而它只能靠用户发消息来刷新 —— 直接丢就是「任务完成了但你
-                // 永远不知道」。攒下来，等用户下次开口时补发（见 flush_pending）。
+                // **发不出去不等于可以丢** —— 丢了就是「任务完成了但你永远不知道」。
+                // 攒下来，等用户下次开口时补发（见 flush_pending）。
                 buffer_push(state, &ev.owner, &body).await;
                 all_ok = false;
                 break; // 这条发不出去，剩下的分片也别试了
