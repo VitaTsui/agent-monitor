@@ -306,6 +306,13 @@ pub struct AppState {
     /// 连续「绑定失效」型发送失败的次数（账号 → 次数）。攒够就判定要重扫，
     /// 见 WEIXIN_SEND_FAIL_LIMIT。发送成功即清零。
     pub weixin_send_fails: RwLock<HashMap<String, u32>>,
+    /// 已确认过的扫码：qrcode_id → 确认时刻。
+    ///
+    /// **防重复绑定**：网页每 2s 轮询一次扫码状态，确认那一刻往往有好几个请求在途；
+    /// 每个都去问一次微信的 `get_qrcode_status`，而微信每被问一次「已确认」
+    /// 就给用户发一条欢迎消息 —— 用户那边就是「绑定成功」弹了好几条。
+    /// 记下来，后续轮询直接回 confirmed，不再打扰上游。
+    pub weixin_scan_done: RwLock<HashMap<String, Instant>>,
     /// 一次性图片外链：token → (内容, MIME, 放入时刻)。
     ///
     /// **只为钉钉存在**：它的 `sampleImageMsg` 只认公网 URL —— 图片要由**钉钉的
@@ -467,6 +474,7 @@ impl AppState {
             weixin_reload: std::sync::Arc::new(tokio::sync::Notify::new()),
             weixin_pending_pushes: RwLock::new(HashMap::new()),
             weixin_send_fails: RwLock::new(HashMap::new()),
+            weixin_scan_done: RwLock::new(HashMap::new()),
             pub_images: RwLock::new(HashMap::new()),
             dingtalk_binds: RwLock::new(HashMap::new()),
             dingtalk_bind_codes: RwLock::new(HashMap::new()),

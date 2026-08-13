@@ -1855,9 +1855,23 @@ async fn weixin_scan(
     if q.qrcode_id.trim().is_empty() {
         return err(400, "缺少 qrcodeId");
     }
+    // 已经确认过的码：直接回，**不再问上游** —— 每问一次「已确认」，微信就给用户
+    // 再发一条欢迎消息，而确认那一刻网页往往有好几个轮询请求在途。
+    {
+        let mut done = state.weixin_scan_done.write().await;
+        done.retain(|_, at| at.elapsed().as_secs() < 300);
+        if done.contains_key(q.qrcode_id.trim()) {
+            return ok(json!({ "status": "confirmed" }));
+        }
+    }
     match crate::weixin::scan_state(&q.qrcode_id).await {
         Ok(crate::weixin::ScanState::Confirmed(bot)) => {
             state.registry.write().await.set_weixin_bot(&user, bot);
+            state
+                .weixin_scan_done
+                .write()
+                .await
+                .insert(q.qrcode_id.trim().to_string(), std::time::Instant::now());
             state.weixin_reload.notify_one();
             ok(json!({ "status": "confirmed" }))
         }

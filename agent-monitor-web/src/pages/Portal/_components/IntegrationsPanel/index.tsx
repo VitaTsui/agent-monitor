@@ -254,18 +254,26 @@ const IntegrationsPanel: React.FC = () => {
   // 免得面板一直开着无人理会、后台空转。
   useEffect(() => {
     if (!wxQr) return;
-    const timer = window.setInterval(() => {
+    // **串行轮询**，不用 setInterval：确认那一刻若有多个请求在途，每个都会去问一次
+    // 微信的扫码状态，而微信每被问一次「已确认」就给用户再发一条欢迎消息 ——
+    // 用户那边就是「绑定成功」弹好几条。上一次回来了才排下一次。
+    let stopped = false;
+    let timer = 0;
+    const poll = () => {
       getWeixinScan(wxQr.qrcodeId)
         .then((res) => {
+          if (stopped) return;
           const st = res.data?.status;
           if (st === "confirmed") {
-            window.clearInterval(timer);
+            stopped = true;
             wxRefreshed.current = 0;
             setWxQr(null);
             setWx({ bound: true, linked: false, expired: false, pending: 0 });
             message.success("微信已绑定，去微信里给它发句话就能用了");
-          } else if (st === "expired") {
-            window.clearInterval(timer);
+            return;
+          }
+          if (st === "expired") {
+            stopped = true;
             if (wxRefreshed.current < 5) {
               wxRefreshed.current += 1;
               loadWxQr();
@@ -273,11 +281,19 @@ const IntegrationsPanel: React.FC = () => {
               setWxQr(null);
               setWxErr("二维码多次过期，点「重试」再来");
             }
+            return;
           }
+          timer = window.setTimeout(poll, 2000);
         })
-        .catch(() => void 0);
-    }, 2000);
-    return () => window.clearInterval(timer);
+        .catch(() => {
+          if (!stopped) timer = window.setTimeout(poll, 2000);
+        });
+    };
+    poll();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
   }, [wxQr, loadWxQr]);
 
   // 绑上了但还没收到过消息时，等的就是用户去微信发第一句话 —— 轮询到「已连通」
