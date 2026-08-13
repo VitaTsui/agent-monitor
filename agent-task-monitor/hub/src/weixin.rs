@@ -763,10 +763,6 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<crate::dingt
             tracing::debug!("微信推送跳过（{}）：该账号没绑微信", ev.owner);
             continue;
         };
-        if bot.session_expired || bot.bot_token.is_empty() {
-            tracing::info!("微信推送跳过（{}）：登录态失效，待重新扫码", ev.owner);
-            continue;
-        }
         // `{NO}` → 「#N 」视觉标签，`{N}` → 纯数字（用在「发 N」这类指令语法里）。
         // **在判断能不能发之前就算好**：发不出去的那条也要按同样的样子攒起来，
         // 否则补发时里面还挂着 `{NO}` 占位。
@@ -780,10 +776,16 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<crate::dingt
         };
         let body = for_weixin(&text);
 
+        // 「发不出去」有三种：登录态失效、还没拿到凭据、发送报错。
+        // **三种都要攒，一种都不能丢** —— 它们在结果上没有区别，都是现在发不出去、
+        // 以后能发。这个洞补过两次：先漏了「没凭据」，线上静静丢了 29 条；
+        // 再漏了「失效」，又丢 12 条。往下加分支时先想清楚它属不属于这三种。
+        if bot.session_expired || bot.bot_token.is_empty() {
+            tracing::info!("微信推送暂存（{}）：登录态失效，待重新扫码", ev.owner);
+            buffer_push(state, &ev.owner, &body).await;
+            continue;
+        }
         if bot.context_token.is_empty() {
-            // **攒起来，别丢**。「还没有凭据」与「发送失败」在结果上没区别 —— 都是
-            // 现在发不出去、以后能发。此前这里直接 continue，线上因此静静丢了 29 条：
-            // 用户重新绑定后一直没给 bot 发过消息，15 小时的通知全没了。
             tracing::info!("微信推送暂存（{}）：还没收到过消息，拿不到 context_token", ev.owner);
             buffer_push(state, &ev.owner, &body).await;
             continue;
