@@ -725,64 +725,25 @@ async fn flush_pending(
     };
     let n = pending.len();
     tracing::info!("微信补发积压通知（{user}）：{n} 条");
-    let body = digest_pending(&pending);
-    for chunk in crate::mdfmt::chunk_text(&body, MAX_LEN) {
-        if let Err(e) = send_text(token, to, ct, &chunk).await {
-            // 补发都失败就别硬撑了，整批重新攒回去等下一次
-            tracing::warn!("微信补发失败（{user}）: {e}");
-            note_send_failure(state, user, &e).await;
-            for b in pending {
-                buffer_push(state, user, &b).await;
+    // **逐条发，不合并**。曾把它们并成一条（怕刷屏），但补发的每条都是独立的一次
+    // 「任务完成 / 需要你决定」，并在一起反而难认；聊天记录里也该和当时正常推送时
+    // 长得一样。刷屏问题另有其因（是网页的 toast 弹了 N 次，见 IntegrationsPanel）。
+    let head = format!("📮 补发 {n} 条你不在时错过的提醒（微信的推送凭据会失效，只能等你开口才补上）");
+    let mut all = vec![head];
+    all.extend(pending);
+    for body in all {
+        for chunk in crate::mdfmt::chunk_text(&body, MAX_LEN) {
+            if let Err(e) = send_text(token, to, ct, &chunk).await {
+                // 补发都失败就别硬撑了，这条重新攒回去等下一次
+                tracing::warn!("微信补发失败（{user}）: {e}");
+                note_send_failure(state, user, &e).await;
+                buffer_push(state, user, &body).await;
+                return;
             }
-            return;
         }
     }
 }
 
-/// 补发内容的总长预算。超出的部分压成一行摘要 —— 补发本就是「你不在时错过的」，
-/// 越早的越只需要知道发生过，最新几条才要看细节。
-const DIGEST_BUDGET: usize = 3_000;
-
-/// 把积压的若干条合成**一条**。
-///
-/// 此前是一条一条发：攒了多少条就弹多少条、每条还可能分片，一绑定就是刷屏
-///（用户原话「弹一堆 message」）。现在合并，并按预算取舍：**从最新往回**保留全文，
-/// 装不下的压成一行，最后仍按时间正序排出来。
-fn digest_pending(pending: &[String]) -> String {
-    let head = format!(
-        "📮 补发 {} 条你不在时错过的提醒（微信的推送凭据会失效，只能等你开口才补上）",
-        pending.len()
-    );
-    let mut budget = DIGEST_BUDGET;
-    let mut parts: Vec<String> = Vec::with_capacity(pending.len());
-    // 从最新往回填：预算花在最值得看的那几条上
-    for body in pending.iter().rev() {
-        let full = body.chars().count();
-        if full <= budget {
-            budget -= full;
-            parts.push(body.clone());
-        } else {
-            parts.push(format!("· {}", one_line_digest(body)));
-        }
-    }
-    parts.reverse();
-    let mut out = head;
-    for p in parts {
-        out.push_str("\n\n———\n\n");
-        out.push_str(&p);
-    }
-    out
-}
-
-/// 一条通知压成一行：取前两个非空行拼起来（首行是事件类型，次行多半带会话号与项目），
-/// 截断到 60 字 —— 够认出「哪个会话发生了什么」，不占地方。
-fn one_line_digest(body: &str) -> String {
-    let mut it = body.lines().map(str::trim).filter(|l| !l.is_empty());
-    let a = it.next().unwrap_or_default();
-    let b = it.next().unwrap_or_default();
-    let joined = if b.is_empty() { a.to_string() } else { format!("{a} · {b}") };
-    joined.chars().take(60).collect()
-}
 
 /// 单条消息长度上限。协议文档没写死，取个保守值，超了按 `chunk_text` 分片逐条发
 /// —— 微信这边没有「附件兜底」，砍掉就是真看不到了。
@@ -921,25 +882,6 @@ mod tests {
         assert!(decrypt_media(ct.clone(), aeskey, plain.len(), &"0".repeat(32)).is_err());
         // 换个密钥必须失败，不能悄悄返回一堆乱码
         assert!(decrypt_media(ct, "00112233445566778899aabbccddeeff", plain.len(), "").is_err());
-    }
-
-    #[test]
-    fn digest_merges_and_trims_oldest_first() {
-        // 短的几条：全部保留全文，合成一条发出（此前是一条一条发，一绑定就刷屏）
-        let short = vec!["🔔 甲\n会话 #1".to_string(), "✅ 乙\n会话 #2".to_string()];
-        let d = digest_pending(&short);
-        assert!(d.starts_with("📮 补发 2 条"));
-        assert!(d.contains("🔔 甲") && d.contains("✅ 乙"));
-
-        // 超预算：**最新的**保留全文，早的压成一行，且顺序仍是时间正序
-        let big = "x".repeat(2_500);
-        let many = vec![format!("🔔 最早\n详情{big}"), format!("✅ 最新\n详情{big}")];
-        let d = digest_pending(&many);
-        let old_at = d.find("最早").unwrap();
-        let new_at = d.find("最新").unwrap();
-        assert!(old_at < new_at, "排出来要按时间正序");
-        assert!(d.contains("· 🔔 最早 · 详情"), "早的应压成一行摘要");
-        assert!(d.contains(&big), "最新那条应保留全文");
     }
 
     #[test]
