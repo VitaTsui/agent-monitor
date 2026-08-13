@@ -14,6 +14,10 @@
 //! 另外提供按长度切分：钉钉单条 markdown 上限约 4000 字符，此前各处是硬截断到 1500/1800，
 //! 既浪费额度又会把话切断在半句。切分优先落在换行、其次空格，避免拦腰截断。
 //!
+//! 切分还必须**认得表格**：markdown 表格是「表头 + 分隔行 + 数据行」的整体，一旦从中间切开，
+//! 后半片只剩数据行，各家渲染器都不再当表格看，用户收到的就是一大坨 `| a | b |` 字面量
+//! （线上实拍过）。所以按行切、表头与分隔行绑在一起，被迫切开表格时在下一片开头补回表头。
+//!
 //! 设计参考 jingxin-agent `core/channels/markdown.py`（同一套降级判据）。
 //! 全部是无状态纯文本变换，且**幂等**：降级过的文本再跑一遍不变。
 
@@ -174,35 +178,113 @@ fn strip_list_prefix(s: &str) -> String {
     t.to_string()
 }
 
-/// 按单条上限切分长文本，尽量断在换行、其次空格，避免拦腰截断。
+/// 按单条上限切分长文本：按行装片，断点自然落在换行处；一行本身超长时才在空格处
+/// 硬切。表格不会被切成「没有表头的半张」—— 见 `table_units`。
 /// `max_len == 0` 视为不限长。
 pub fn chunk_text(text: &str, max_len: usize) -> Vec<String> {
     if max_len == 0 || text.chars().count() <= max_len {
         return if text.is_empty() { vec![] } else { vec![text.to_string()] };
     }
-    let mut chunks = Vec::new();
-    let mut rest: Vec<char> = text.chars().collect();
-    while rest.len() > max_len {
-        let window = &rest[..max_len];
-        // 断点至少要落在后 40% 区域，否则宁可硬切 —— 断得太靠前会切出一堆碎片
-        let floor = max_len * 6 / 10;
-        let cut = window
-            .iter()
-            .rposition(|&c| c == '\n')
-            .filter(|&p| p >= floor)
-            .or_else(|| window.iter().rposition(|&c| c == ' ').filter(|&p| p >= floor))
-            .unwrap_or(max_len);
-        let piece: String = rest[..cut].iter().collect();
-        chunks.push(piece.trim_end().to_string());
-        rest = rest[cut..].to_vec();
-        while matches!(rest.first(), Some(&c) if c == '\n' || c == ' ') {
-            rest.remove(0);
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur: Vec<String> = Vec::new();
+    let mut cur_len = 0usize; // cur.join("\n") 的字符数
+
+    for unit in table_units(text) {
+        let mut text = unit.text;
+        loop {
+            let len = text.chars().count();
+            let joined = if cur.is_empty() { len } else { cur_len + 1 + len };
+            if joined <= max_len {
+                break;
+            }
+            if !cur.is_empty() {
+                // 收掉当前片，开新片；若切在表格中间，新片开头补回表头 + 分隔行，
+                // 否则后半张表在钉钉/微信那边只会渲染成一堆竖线。
+                flush(&mut chunks, &mut cur, &mut cur_len);
+                if let Some(head) = &unit.head {
+                    let head_len = head.chars().count();
+                    if head_len + 1 + len <= max_len {
+                        cur.push(head.clone());
+                        cur_len = head_len;
+                    }
+                }
+                continue;
+            }
+            // 空片都装不下 → 这一行自己就超长，硬切（尽量断在空格）
+            let (piece, rest) = hard_split(&text, max_len);
+            if !piece.is_empty() {
+                chunks.push(piece);
+            }
+            text = rest;
+        }
+        if !cur.is_empty() {
+            cur_len += 1;
+        }
+        cur_len += text.chars().count();
+        cur.push(text);
+    }
+    flush(&mut chunks, &mut cur, &mut cur_len);
+    chunks
+}
+
+fn flush(chunks: &mut Vec<String>, cur: &mut Vec<String>, cur_len: &mut usize) {
+    let piece = std::mem::take(cur).join("\n").trim_end().to_string();
+    *cur_len = 0;
+    if !piece.is_empty() {
+        chunks.push(piece);
+    }
+}
+
+/// 把一行超长文本切成 (前 max_len 内的一片, 余下)。断点优先落在后 40% 区域的空格。
+fn hard_split(text: &str, max_len: usize) -> (String, String) {
+    let b: Vec<char> = text.chars().collect();
+    let floor = max_len * 6 / 10;
+    // 断得太靠前会切出一堆碎片，所以够不着 floor 就宁可硬切
+    let cut = b[..max_len].iter().rposition(|&c| c == ' ').filter(|&p| p >= floor).unwrap_or(max_len);
+    let piece: String = b[..cut].iter().collect();
+    let rest: String = b[cut..].iter().collect();
+    (piece.trim_end().to_string(), rest.trim_start_matches(' ').to_string())
+}
+
+/// 切分的最小单位：一行普通文本，或**绑在一起的表头 + 分隔行**。
+struct Unit {
+    text: String,
+    /// 本单位是表格数据行时，所属表格的「表头\n分隔行」—— 被切到新片时补在开头
+    head: Option<String>,
+}
+
+/// 把文本拆成切分单位：识别 `表头 / |---| / 数据行…` 结构，让表头与分隔行不可分割，
+/// 并给每个数据行记下自己的表头。不合法的表格（缺分隔行）按普通行处理 —— 反正也渲染不出来。
+fn table_units(text: &str) -> Vec<Unit> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out: Vec<Unit> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        if is_table_row(lines[i]) && i + 1 < lines.len() && is_separator_row(lines[i + 1]) {
+            let head = format!("{}\n{}", lines[i], lines[i + 1]);
+            out.push(Unit { text: head.clone(), head: None });
+            i += 2;
+            while i < lines.len() && is_table_row(lines[i]) {
+                out.push(Unit { text: lines[i].to_string(), head: Some(head.clone()) });
+                i += 1;
+            }
+        } else {
+            out.push(Unit { text: lines[i].to_string(), head: None });
+            i += 1;
         }
     }
-    if !rest.is_empty() {
-        chunks.push(rest.iter().collect());
-    }
-    chunks
+    out
+}
+
+fn is_table_row(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|') && t.chars().count() > 1
+}
+
+/// `| --- | :--: |` 这类分隔行
+fn is_separator_row(line: &str) -> bool {
+    let t = line.trim();
+    is_table_row(t) && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) && t.contains('-')
 }
 
 #[cfg(test)]
@@ -324,5 +406,56 @@ mod tests {
         let out = chunk_text(&text, 100);
         assert_eq!(out.len(), 2);
         assert_eq!(out.concat().chars().count(), 150);
+    }
+
+    fn long_table(rows: usize) -> String {
+        let mut s = String::from("| 子模块 | 接口方法 |\n| --- | --- |\n");
+        for i in 0..rows {
+            s.push_str(&format!("| 模块{i} | postSomethingRatherLong{i} |\n"));
+        }
+        s.trim_end().to_string()
+    }
+
+    /// 病灶复现：表格被切成两片时，后一片必须自带表头 + 分隔行，否则渲染成一堆竖线
+    #[test]
+    fn chunk_repeats_table_header() {
+        let out = chunk_text(&long_table(40), 400);
+        assert!(out.len() >= 2, "这张表应该切成多片：{}", out.len());
+        for (i, c) in out.iter().enumerate() {
+            assert!(c.starts_with("| 子模块 | 接口方法 |\n| --- | --- |"), "第 {i} 片缺表头：{c}");
+            assert!(c.chars().count() <= 400, "第 {i} 片超长：{}", c.chars().count());
+        }
+        // 数据行一行不丢、也不重复
+        let rows: usize = out.iter().map(|c| c.matches("| 模块").count()).sum();
+        assert_eq!(rows, 40, "数据行数对不上：{rows}");
+    }
+
+    /// 表头与分隔行绑在一起：不能一片以表头结尾、下一片以 `| --- |` 开头
+    #[test]
+    fn chunk_never_splits_header_from_separator() {
+        // 让上文长度正好逼近上限，把断点顶到表头附近
+        let text = format!("{}\n{}", "垫".repeat(180), long_table(6));
+        for c in chunk_text(&text, 200) {
+            assert!(!c.trim_start().starts_with("| ---"), "分隔行被切成了片首：{c}");
+            let last = c.lines().last().unwrap_or("");
+            assert!(!last.starts_with("| 子模块"), "表头被留在了片尾：{c}");
+        }
+    }
+
+    /// 表格外的正文不受影响，也不会平白多出表头
+    #[test]
+    fn chunk_plain_text_gets_no_header() {
+        let text = format!("{}\n{}", "甲".repeat(80), "乙".repeat(80));
+        let out = chunk_text(&text, 100);
+        assert_eq!(out, vec!["甲".repeat(80), "乙".repeat(80)]);
+    }
+
+    /// 缺分隔行的「伪表格」按普通行处理，不补表头
+    #[test]
+    fn chunk_ignores_malformed_table() {
+        let text = format!("| 只有表头 | 没有分隔 |\n{}", "| a | b |\n".repeat(30).trim_end());
+        let out = chunk_text(&text, 120);
+        assert!(out.len() > 1);
+        assert!(!out[1].starts_with("| 只有表头"), "伪表格不该补表头：{}", out[1]);
     }
 }
