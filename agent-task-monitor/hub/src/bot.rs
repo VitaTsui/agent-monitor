@@ -1047,21 +1047,20 @@ pub(crate) async fn read_queue(
 }
 
 /// 下载挂起的钉钉文件并下发到会话项目目录的 tmp/ 下，返回回填用的相对路径 `./tmp/<name>`。
-/// 撞名就在扩展名前挂序号：`a.png` → `a (1).png`。
+/// 撞名就在扩展名前挂序号：`a.png` → `a-2.png`。
 ///
-/// **必须与客户端的 `unique_target`（client/src/agent.rs）同一套规则** —— 那边是落盘时的
-/// 兜底。两边一致时，这里算出的名字就是最终名，兜底不会被触发，拼进任务的路径才对得上。
+/// 序号**不用**资源管理器那种 `a (1).png` 风格：这个名字要拼进任务正文，多个文件用空格
+/// 隔开，名字里再带空格，agent 就分不清路径到哪儿结束了（会话标题的路径缩短也会被拆坏）。
+/// 客户端落盘时的兜底 `unique_target` 仍是括号风格，但只要这里算出的名字不撞，那边就不会
+/// 触发 —— 而它一旦触发，改后的名字传不回来，拼进任务的路径就指向了旧文件。
 /// 扩展名按最后一个点切，`.gitignore` 这类整体当主名。
 fn unique_against(name: &str, taken: &[String]) -> String {
     if !taken.iter().any(|t| t == name) {
         return name.to_string();
     }
-    let (stem, ext) = match name.rfind('.') {
-        Some(i) if i > 0 => (&name[..i], &name[i..]),
-        _ => (name, ""),
-    };
-    for i in 1..10_000 {
-        let cand = format!("{stem} ({i}){ext}");
+    let (stem, ext) = split_ext(name);
+    for i in 2..10_000 {
+        let cand = format!("{stem}-{i}{ext}");
         if !taken.iter().any(|t| t == &cand) {
             return cand;
         }
@@ -1069,22 +1068,53 @@ fn unique_against(name: &str, taken: &[String]) -> String {
     name.to_string()
 }
 
-/// 问一次 agent：会话目录下 `rel` 里现在有哪些文件。拿不到就返回空，调用方退回原名。
+/// 按**最后一个**点切出 (主名, 含点的扩展名)；点在首位不算扩展名（`.gitignore`）
+fn split_ext(name: &str) -> (&str, &str) {
+    match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    }
+}
+
+/// 问不到目录清单时的保底名：主名后缀一个秒级时间戳。
+///
+/// 名字长一点无所谓，**指向错的文件才是灾难** —— 钉钉的图片一律叫「图片.jpg / 图片N.jpg」，
+/// 目录里几乎必有同名旧图；此时若原样下发，客户端落盘会自己改名（`图片1 (4).jpg`），而拼进
+/// 任务的路径仍是 `./tmp/图片1.jpg`，agent 照着读到的是**上一次那张图**，且毫无迹象。
+fn stamped_name(name: &str) -> String {
+    let (stem, ext) = split_ext(name);
+    format!("{stem}-{}{ext}", crate::state::now_secs())
+}
+
+/// 目标目录里已被占用的文件名。
+enum Taken {
+    /// agent 回报了清单，可据此精确避让
+    Known(Vec<String>),
+    /// 问不到（agent 没回报 / 目录在会话目录之外）：只能靠时间戳保底，
+    /// 里面记的是本批已发的名字，供同批文件彼此避让
+    Unknown(Vec<String>),
+}
+
+/// 问一次 agent：会话目录下 `rel` 里现在有哪些文件。
 ///
 /// 走网页目录浏览那套通道（pending_dir → agent 回报 → dir_cache），但这里要的是**新鲜**
 /// 结果：先把该目录的缓存清掉再下发查询，否则可能读到上一次的旧清单，算出来的名字照样撞。
+///
+/// 返回 `None` 表示**没问到**（设备离线或没在窗口内回报），与「问到了、目录是空的」
+/// 是两回事：前者对目录一无所知，绝不能当成「不撞名」。
 async fn dir_files_fresh(
     state: &SharedState,
     machine_id: &str,
     task_id: &str,
     cwd: &str,
     rel: &str,
-) -> Vec<String> {
+) -> Option<Vec<String>> {
     let key = (task_id.to_string(), rel.to_string());
     {
         let mut machines = state.machines.write().await;
         let Some(entry) = machines.get_mut(machine_id) else {
-            return Vec::new();
+            tracing::warn!("查目录清单：设备 {machine_id} 不在线，落盘名改用时间戳兜底");
+            return None;
         };
         entry.dir_cache.remove(&key);
         if !entry.pending_dir.iter().any(|q| q.task_id == task_id && q.rel == rel) {
@@ -1095,9 +1125,10 @@ async fn dir_files_fresh(
             });
         }
     }
-    // agent 1.5s 轮询一次，给两轮多一点余量就够。等不到就算了 —— 顶多回填的名字对不上
-    // （客户端仍会兜底改名），不值得把用户的文件卡在这儿。
-    for _ in 0..12 {
+    // 一次往返要两轮上报：这轮取走查询、下轮才带回结果，agent 又是 1.5s 一轮，
+    // 所以至少 3s。原来只等 4.8s，扫描一慢就超时（超时后名字必然对不上，正是本函数
+    // 要避免的），给到 8s 更稳；等不到也不再干等，走时间戳兜底。
+    for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         let hit = state
             .machines
@@ -1106,23 +1137,25 @@ async fn dir_files_fresh(
             .get(machine_id)
             .and_then(|e| e.dir_cache.get(&key).cloned());
         if let Some((_, files)) = hit {
-            return files;
+            tracing::debug!("查目录清单：{rel} 下 {} 个文件", files.len());
+            return Some(files);
         }
     }
-    Vec::new()
+    tracing::warn!("查目录清单超时（设备 {machine_id}，目录 {rel}），落盘名改用时间戳兜底");
+    None
 }
 
 /// 把一个待发文件下发到会话目录，返回拼进任务正文的路径。
 ///
 /// `taken` 是本次下发的「已占用文件名」缓存：`None` 表示还没问过目标目录，本函数会问一次
-/// 并填上。同一批多个文件共用它，既省掉重复往返，也让它们彼此避让 —— 落盘是异步的，
-/// 第二个文件查目录时根本看不到第一个。
+/// 并填上（问不到就记成 [`Taken::Unknown`]，不会一个文件重问一次）。同一批多个文件共用它，
+/// 既省掉重复往返，也让它们彼此避让 —— 落盘是异步的，第二个文件查目录时根本看不到第一个。
 async fn attach_pending_file(
     state: &SharedState,
     username: &str,
     task_id: &str,
     pf: &crate::state::BotPendingFile,
-    taken: &mut Option<Vec<String>>,
+    taken: &mut Option<Taken>,
 ) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     // 微信那条路收消息时就把内容取好了（直链会过期），直接用；钉钉才需要现在去下载。
@@ -1164,12 +1197,13 @@ async fn attach_pending_file(
         .map(|n| n.to_string_lossy().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "file.bin".into());
-    // 撞名先在这里避开。客户端落盘时也会兜底改名，但那时改的名字传不回来 —— 拼进任务的
+    // 撞名必须在这里避开。客户端落盘时也会兜底改名，但那时改的名字传不回来 —— 拼进任务的
     // 路径还是原名，指向目录里那个**旧文件**。比覆盖更隐蔽：agent 照着路径读到的是上一版
     // 内容，却没有任何迹象表明它拿错了。（钉钉的图片一律叫「图片.jpg」，必然撞。）
     //
     // 只在目标目录位于会话目录内时问得到 —— DirQuery 以 cwd 为根，配置成绝对路径的接收
-    // 目录越出了它的范围，那种情况只能退回原名、由客户端兜底。
+    // 目录越出了它的范围。问不到（越界 / 设备没在窗口内回报）就一律走时间戳保底名，
+    // **不能退回原名**：原名正是上面那个「读到旧图」的坑。
     let dir_trimmed = dir.trim_end_matches(['/', '\\']).to_string();
     let rel_dir = if dir_trimmed == cwd {
         Some(String::new())
@@ -1178,18 +1212,30 @@ async fn attach_pending_file(
             .strip_prefix(&format!("{cwd}{sep}"))
             .map(|r| r.replace('\\', "/"))
     };
-    let safe = match rel_dir {
-        Some(rd) => {
-            if taken.is_none() {
-                *taken =
-                    Some(dir_files_fresh(state, &task.machine_id, task_id, &cwd, &rd).await);
+    if taken.is_none() {
+        *taken = Some(match &rel_dir {
+            Some(rd) => match dir_files_fresh(state, &task.machine_id, task_id, &cwd, rd).await {
+                Some(files) => Taken::Known(files),
+                None => Taken::Unknown(Vec::new()),
+            },
+            None => {
+                tracing::warn!("接收目录 {dir} 在会话目录之外，问不到已有文件，落盘名改用时间戳兜底");
+                Taken::Unknown(Vec::new())
             }
-            let names = taken.as_mut().expect("刚填过");
+        });
+    }
+    let safe = match taken.as_mut().expect("刚填过") {
+        Taken::Known(names) => {
             let picked = unique_against(&safe, names);
             names.push(picked.clone());
             picked
         }
-        None => safe,
+        // 时间戳保底名彼此也可能撞（同一批里两张都叫「图片.jpg」），照样过一遍避让
+        Taken::Unknown(used) => {
+            let picked = unique_against(&stamped_name(&safe), used);
+            used.push(picked.clone());
+            picked
+        }
     };
     let target = format!("{}{sep}{safe}", dir.trim_end_matches(['/', '\\']));
     let mut machines = state.machines.write().await;
@@ -1393,7 +1439,7 @@ async fn send_input(
     let pending = state.bot_pending_files.write().await.remove(username).unwrap_or_default();
     let mut rels: Vec<String> = Vec::new();
     // 目标目录的已用文件名，问一次即可；同批文件靠它彼此避让（见 attach_pending_file）
-    let mut taken: Option<Vec<String>> = None;
+    let mut taken: Option<Taken> = None;
     for pf in &pending {
         if crate::state::now_secs().saturating_sub(pf.at) > 20 * 60 {
             continue;
@@ -1718,7 +1764,7 @@ mod tests {
         assert_eq!(one_line("abcdefgh", 3), "abc");
     }
 
-    use super::{is_immediate, parse_at_commands, split_cmd, unique_against};
+    use super::{is_immediate, parse_at_commands, split_cmd, split_ext, stamped_name, unique_against};
 
     #[test]
     fn split_command() {
@@ -1770,19 +1816,40 @@ mod tests {
     /// 撞名避让必须与客户端 unique_target 用同一套规则：不一致的话，这里算出的名字客户端
     /// 不认、落盘时它会自己再改一次，拼进任务的路径又对不上了（等于没修）。
     #[test]
-    fn unique_against_matches_client_rule() {
+    fn unique_against_avoids_spaces() {
         let taken = vec!["a.png".to_string()];
-        assert_eq!(unique_against("a.png", &taken), "a (1).png");
+        assert_eq!(unique_against("a.png", &taken), "a-2.png");
         assert_eq!(unique_against("b.png", &taken), "b.png", "不撞名就原样用");
         // 连着撞就逐个后退（钉钉的图片一律叫「图片.jpg」，这是常态）
-        let taken2 = vec!["图片.jpg".to_string(), "图片 (1).jpg".to_string()];
-        assert_eq!(unique_against("图片.jpg", &taken2), "图片 (2).jpg");
+        let taken2 = vec!["图片.jpg".to_string(), "图片-2.jpg".to_string()];
+        assert_eq!(unique_against("图片.jpg", &taken2), "图片-3.jpg");
+        // 客户端兜底改出来的括号名也在目录里，一样要避开
+        let taken3 = vec!["图片1.jpg".to_string(), "图片1 (1).jpg".to_string()];
+        assert_eq!(unique_against("图片1.jpg", &taken3), "图片1-2.jpg");
         // 多重扩展名按**最后一个**点切，同 Rust 的 file_stem/extension
-        let taken3 = vec!["a.tar.gz".to_string()];
-        assert_eq!(unique_against("a.tar.gz", &taken3), "a.tar (1).gz");
+        let taken4 = vec!["a.tar.gz".to_string()];
+        assert_eq!(unique_against("a.tar.gz", &taken4), "a.tar-2.gz");
         // 隐藏文件整体当主名：点在首位不是扩展名分隔符
-        let taken4 = vec![".gitignore".to_string()];
-        assert_eq!(unique_against(".gitignore", &taken4), ".gitignore (1)");
+        let taken5 = vec![".gitignore".to_string()];
+        assert_eq!(unique_against(".gitignore", &taken5), ".gitignore-2");
+        // 名字里不能出现空格 —— 拼进任务正文后 agent 靠空格分路径
+        assert!(!unique_against("图片.jpg", &taken2).contains(' '));
+    }
+
+    /// 问不到目录清单时的保底名：必须变过名，且扩展名留在末尾（agent 要按扩展名认图）
+    #[test]
+    fn stamped_name_is_unique_and_keeps_ext() {
+        let a = stamped_name("图片1.jpg");
+        assert!(a.starts_with("图片1-") && a.ends_with(".jpg"), "保底名形态不对：{a}");
+        assert_ne!(a, "图片1.jpg", "保底名必须与原名不同，否则照样指向旧文件");
+        assert_eq!(split_ext(&stamped_name("a.tar.gz")).1, ".gz");
+        // 没有扩展名的照样能加
+        assert!(stamped_name("Makefile").starts_with("Makefile-"));
+        // 同一批里两个同名文件：保底名一样，再靠 unique_against 岔开
+        let used = vec![a.clone()];
+        assert_eq!(unique_against(&a, &used), format!("{}-2.jpg", &a[..a.len() - 4]));
+        // 保底名同样不能带空格
+        assert!(!a.contains(' '));
     }
 
     /// 钉钉合并窗口的豁免判断：指令必须单独成条立即执行，内容才攒着合并。
