@@ -341,9 +341,16 @@ const Portal: React.FC = observer(() => {
   );
 
   return (
-    // Portal 路由挂在全局 Theme 之外，自带品牌主色；
+    // Portal 路由挂在全局 Theme 之外，所以这里自己给一份主题；
     // ConfigProvider 走 React context，portal 出去的弹窗一样生效。
-    <ConfigProvider theme={{ token: { colorPrimary: "#0F9BAD" } }}>
+    //
+    // 主色与 styles/tokens.scss 的 --primary 保持一致（shadcn 默认的单色墨黑）。
+    // 必须是字面量：antd 要由它派生 10 级色板，给 var() 算不出来。
+    // colorLink 单独给：antd 的链接色不跟随 colorPrimary，不设的话「修改」「重置密码」
+    // 这类 link 按钮会留在默认蓝上，整站只剩它们是彩色。
+    <ConfigProvider
+      theme={{ token: { colorPrimary: "#18181b", colorLink: "#18181b" } }}
+    >
     <div className={styles.Portal}>
       {/* 移动端顶部栏（仅窄屏显示） */}
       <div className={styles.mobileBar}>

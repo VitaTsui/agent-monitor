@@ -9,7 +9,13 @@
 // 一处改动两边同步，也不会出现「组件库是冷灰、页面是别的灰」这种半吊子状态。
 //
 // 本项目此前把这一层盖成了一套青灰（#243d42 / #7c9096 / #9aa7ad …），那是 shadcn 之外
-// 的第三套色，去掉。品牌身份改由 --primary 单独承担，不再渗进中性色里。
+// 的第三套色，去掉。
+//
+// 主色也完整照搬 shadcn 默认：单色墨黑（浅色 zinc-900 / 暗色 zinc-50），不引入色相。
+// 于是整站只剩两类颜色 —— 中性灰阶，加上语义色（destructive / success / warning）。
+// 唯一的例外是终端面板那组 --term-*，见下面的说明。
+//
+// 产品原来的品牌青（#0f9bad）不再出现在 UI 里，只留在 logo 等图形资产内。
 //
 // ## 命名为什么用 shadcn 的原名
 //
@@ -26,15 +32,16 @@
   --popover: var(--vita-surface);
   --popover-foreground: var(--vita-foreground);
 
-  // ---- 品牌色 ----
-  // 产品身份保留原来的青色。shadcn 默认的 primary 是近黑的单色，那是给通用模板用的；
-  // 这个产品有自己的品牌色，套上去反而丢身份。ramp 按明度分三档，供悬浮/按下/淡染用。
-  --primary: #0f9bad;
-  --primary-hover: #0c7f8f;
-  --primary-active: #0a6b79;
-  --primary-foreground: #ffffff;
-  --primary-subtle: #e6f1f3; // 淡染底：选中行、标签、提示条
-  --primary-subtle-foreground: #0a6b79;
+  // ---- 主色：完整照搬 shadcn 默认（单色墨黑，不是品牌青）----
+  // shadcn 默认主题的 primary 就是中性阶的最深一档（zinc-900），配近白的前景。
+  // 它不引入新色相——强调靠明度对比而不是彩度，所以整站只有中性灰 + 语义色两类颜色。
+  // ramp 沿 zinc 阶往下走，悬浮/按下各深一档。
+  --primary: #18181b; // zinc-900
+  --primary-hover: #27272a; // zinc-800
+  --primary-active: #3f3f46; // zinc-700
+  --primary-foreground: #fafafa; // zinc-50
+  --primary-subtle: #f4f4f5; // 淡染底（zinc-100）：选中行、标签、提示条
+  --primary-subtle-foreground: #18181b;
 
   // ---- 次级 / 弱化 ----
   --secondary: var(--vita-muted);
@@ -99,13 +106,13 @@
 html[data-theme="dark"],
 html[data-prefers-color="dark"],
 html[data-prefers-color-scheme="dark"] {
-  // 品牌色在深底上要提亮，否则 #0f9bad 压在 #09090b 上对比度不足
-  --primary: #3cc4d6;
-  --primary-hover: #5fd3e2;
-  --primary-active: #0f9bad;
-  --primary-foreground: #09090b;
-  --primary-subtle: rgba(60, 196, 214, 0.16);
-  --primary-subtle-foreground: #7fdcea;
+  // shadcn 暗色主题把 primary 翻到中性阶的最浅一档，前景反过来取最深
+  --primary: #fafafa; // zinc-50
+  --primary-hover: #e4e4e7; // zinc-200
+  --primary-active: #d4d4d8; // zinc-300
+  --primary-foreground: #18181b; // zinc-900
+  --primary-subtle: #27272a; // zinc-800
+  --primary-subtle-foreground: #fafafa;
 
   --destructive: #f87171;
   --destructive-foreground: #18181b;

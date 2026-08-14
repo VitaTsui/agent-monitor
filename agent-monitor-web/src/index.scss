@@ -156,6 +156,21 @@ ol {
   top: calc(env(safe-area-inset-top) + 40px) !important;
 }
 
+// 底部同理，而且比顶部更需要让位：antd 默认贴到 bottom:24px，那里恰好压着
+// Portal 的输入区（Composer 在常规流里贴着内容区底部）与移动端的 home 指示条，
+// 「新版本可用」这类 placement:bottomRight 的通知会被挡住、点不到「立即更新」。
+//
+// 让位量 = home 指示条安全区 + 输入区高度。后者由 Composer 自己量完写进
+// --composer-height（它高度会随输入行数变化，写死会在多行时又被压住）；
+// 没有输入区的页面取 0，退化成「安全区 + 24px」的常规位置。
+.ant-notification.ant-notification-bottom,
+.ant-notification.ant-notification-bottomLeft,
+.ant-notification.ant-notification-bottomRight {
+  bottom: calc(
+    env(safe-area-inset-bottom) + var(--composer-height, 0px) + 24px
+  ) !important;
+}
+
 // iOS Safari 点击可聚焦元素(输入框/按钮)时会闪一层半透明黑色高亮(tap highlight)，
 // 表现为「点输入框闪一下深色背景」。全局关掉，交互反馈用各自的 :active/:focus。
 * {

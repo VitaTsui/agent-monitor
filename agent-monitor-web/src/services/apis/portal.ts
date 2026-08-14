@@ -408,17 +408,6 @@ export interface IntegrationsInfo {
     available: boolean;
     boundIds: DingtalkBoundId[];
   };
-  /** 微信（个人号）机器人：扫码即绑，无需 key/secret */
-  weixin?: {
-    bound: boolean;
-    boundAt: number;
-    /** 已收到过消息 = 拿到 context_token = 能主动推送 */
-    linked: boolean;
-    /** 会话过期，需要重新扫码 */
-    expired: boolean;
-    /** 推送凭据过期期间攒下、等你在微信里开口才能补发的通知数 */
-    pendingPushes: number;
-  };
   /** 机器人文件接收目录（所有渠道通用）：按「设备 → 项目」层级列出 */
   recvDirDevices?: {
     machineId: string;
@@ -489,26 +478,6 @@ export const claimDingtalkBind = async (token: string) => {
     "/monitor/integrations/dingtalk-bind",
     { token },
   );
-};
-
-/** 取一张微信登录二维码；link 由前端画成二维码，约 2 分钟过期 */
-export const getWeixinQr = async () => {
-  return await get<{ qrcodeId: string; link: string }>(
-    "/monitor/integrations/weixin-qr",
-  );
-};
-
-/** 轮询扫码结果；confirmed 时后端已落库并起了长轮询 */
-export const getWeixinScan = async (qrcodeId: string) => {
-  return await get<{ status: "waiting" | "confirmed" | "expired" }>(
-    "/monitor/integrations/weixin-scan",
-    { params: { qrcodeId } },
-  );
-};
-
-/** 解绑微信机器人 */
-export const unbindWeixin = async () => {
-  return await post<{ result: string }>("/monitor/integrations/weixin-unbind", {});
 };
 
 /**

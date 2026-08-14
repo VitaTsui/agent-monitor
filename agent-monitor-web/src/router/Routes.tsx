@@ -14,8 +14,8 @@ import { get, post, del, put } from "@/services/Axios";
 import HsuLayout from "@hsu-react/ui/es/layout";
 
 /**
- * 品牌主色。与 styles/tokens.scss 里的 --primary 同一取值：浅色 #0f9bad，
- * 暗色提亮到 #3cc4d6（#0f9bad 压在 #09090b 上对比度不足）。
+ * 主色。与 styles/tokens.scss 里的 --primary 同一取值：完整照搬 shadcn 默认主题——
+ * 浅色取中性阶最深的 zinc-900，暗色翻到最浅的 zinc-50。
  *
  * 必须是**字面量**，不能填 var(--primary)：antd 要由它派生一整条 10 级色板，
  * 拿到 var() 会直接算不出来。两处取值重复是有意的，改动时一起改。
@@ -23,7 +23,7 @@ import HsuLayout from "@hsu-react/ui/es/layout";
  * 这一层原本由本项目的 layout/Theme 承担（写死 #13C2C2）；布局收进组件库后没人接手，
  * 主色会静默回落成 antd 默认的蓝，所以在这里显式传给 ConfigProvider。
  */
-const primaryColorOf = (isDark: boolean) => (isDark ? "#3cc4d6" : "#0f9bad");
+const primaryColorOf = (isDark: boolean) => (isDark ? "#fafafa" : "#18181b");
 
 const Routes: React.FC = observer(() => {
   const { router, permissions } = RouterStore;
@@ -75,6 +75,10 @@ const Routes: React.FC = observer(() => {
       permissions={permissions}
       request={{ get, post, del, put }}
       primaryColor={primaryColorOf(headerTheme !== "light")}
+      // antd 的链接色不跟随 colorPrimary。主色换成单色墨黑后，若不一并设置，
+      // 表格里的「修改」「重置密码」这类 link 按钮会留在默认蓝上，
+      // 整站只剩它们是彩色。
+      theme={{ token: { colorLink: primaryColorOf(headerTheme !== "light") } }}
     >
       <ReloadContent.Provider value={value}>
         <NavTabBarContent.Provider value={dropTabValue}>

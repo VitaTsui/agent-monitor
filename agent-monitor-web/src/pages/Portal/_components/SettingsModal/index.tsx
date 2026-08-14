@@ -323,9 +323,9 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
     color: string;
     badge?: number;
   }[] = [
-    { key: "account", label: "账户", icon: <UserOutlined />, color: "#0f9bad" },
+    { key: "account", label: "账户", icon: <UserOutlined />, color: "var(--primary)" },
     { key: "devices", label: "设备管理", icon: <LaptopOutlined />, color: "#3a8cff", badge: pendingCount },
-    { key: "configs", label: "配置同步", icon: <CloudSyncOutlined />, color: "#0f9bad" },
+    { key: "configs", label: "配置同步", icon: <CloudSyncOutlined />, color: "var(--primary)" },
     { key: "bots", label: "机器人管理", icon: <RobotOutlined />, color: "#21b34a" },
     { key: "security", label: "安全防护", icon: <SafetyOutlined />, color: "#f2933c" },
     { key: "about", label: "关于", icon: <InfoCircleOutlined />, color: "#8a94a6" },
@@ -607,7 +607,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                                   ),
                                 )}
                                 size="small"
-                                strokeColor="#0f9bad"
+                                strokeColor="var(--primary)"
                               />
                               <span className={styles.updateProgressText}>
                                 {(clientVer.progress.received / 1024 / 1024).toFixed(1)} /{" "}

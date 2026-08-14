@@ -7,7 +7,6 @@ import {
   DingtalkOutlined,
   FolderOutlined,
   RightOutlined,
-  WechatOutlined,
 } from "@ant-design/icons";
 
 import { Button, Copy, Input, Modal } from "@hsu-react/ui";
@@ -23,9 +22,6 @@ import {
   getDingtalkIds,
   unbindDingtalkId,
   claimDingtalkBind,
-  getWeixinQr,
-  getWeixinScan,
-  unbindWeixin,
 } from "@/services/apis/portal";
 import styles from "./index.module.scss";
 
@@ -54,13 +50,6 @@ const IntegrationsPanel: React.FC = () => {
   const [qr, setQr] = useState<{ url: string; command: string } | null>(null);
   const [qrLoading, setQrLoading] = useState(false);
   const [qrErr, setQrErr] = useState("");
-
-  // 微信（个人号）机器人：扫码即绑，没有 key/secret 可填
-  const [wx, setWx] = useState({ bound: false, linked: false, expired: false, pending: 0 });
-  const [wxQr, setWxQr] = useState<{ qrcodeId: string; link: string } | null>(null);
-  const [wxLoading, setWxLoading] = useState(false);
-  const [wxErr, setWxErr] = useState("");
-  const wxRefreshed = React.useRef(0);
 
   // 机器人文件接收目录（通用）：按设备分组的项目
   type RecvProj = { cwd: string; name: string; dir: string; taskId?: string | null };
@@ -168,12 +157,6 @@ const IntegrationsPanel: React.FC = () => {
         setLinked(!!d.dingtalk?.linked);
         setGlobalAvailable(!!d.globalBot?.available);
         setBoundIds(d.globalBot?.boundIds ?? []);
-        setWx({
-          bound: !!d.weixin?.bound,
-          linked: !!d.weixin?.linked,
-          expired: !!d.weixin?.expired,
-          pending: d.weixin?.pendingPushes ?? 0,
-        });
       })
       .catch(() => void 0);
   }, []);
@@ -195,9 +178,12 @@ const IntegrationsPanel: React.FC = () => {
       .finally(() => setQrLoading(false));
   }, []);
   useEffect(() => {
-    // 没配自己的机器人、且管理员开了公共机器人时，绑定才有意义
-    if (globalAvailable && !hasSecret && !qr && !qrLoading) loadQr();
-  }, [globalAvailable, hasSecret, qr, qrLoading, loadQr]);
+    // 有机器人可用（自己的或公共的）且还没绑过，才需要码。
+    // 以前只在「没配自己机器人」时取码 —— 那是隐式认人时代的遗留：
+    // 配了自己机器人的人不需要绑。现在绑定是推送的前提，两种都要取。
+    const hasBot = hasSecret || globalAvailable;
+    if (hasBot && boundIds.length === 0 && !qr && !qrLoading) loadQr();
+  }, [globalAvailable, hasSecret, boundIds.length, qr, qrLoading, loadQr]);
 
   // 扫码是在**手机上**完成的，这一端只能靠轮询知道绑上了没有。
   // 只在二维码挂着、且还没绑过时轮询，绑上即停。
@@ -233,95 +219,6 @@ const IntegrationsPanel: React.FC = () => {
       })
       .catch(() => message.error("绑定失败，请检查网络"));
   }, []);
-
-  const loadWxQr = useCallback(() => {
-    setWxLoading(true);
-    setWxErr("");
-    getWeixinQr()
-      .then((res) => {
-        if (res.code !== 0 || !res.data) {
-          setWxQr(null);
-          setWxErr(res.msg ?? "取二维码失败");
-          return;
-        }
-        setWxQr(res.data);
-      })
-      .catch(() => setWxErr("取二维码失败，请检查网络"))
-      .finally(() => setWxLoading(false));
-  }, []);
-
-  // 扫码在**手机上**完成，这端只能轮询。微信的码约 2 分钟就过期，过期自动换一张
-  //（不自动换的话，人去拿手机的功夫回来就是一张废码）；连换 5 张还没扫就停下，
-  // 免得面板一直开着无人理会、后台空转。
-  useEffect(() => {
-    if (!wxQr) return;
-    // **串行轮询**，不用 setInterval：确认那一刻若有多个请求在途，每个都会去问一次
-    // 微信的扫码状态，而微信每被问一次「已确认」就给用户再发一条欢迎消息 ——
-    // 用户那边就是「绑定成功」弹好几条。上一次回来了才排下一次。
-    let stopped = false;
-    let timer = 0;
-    const poll = () => {
-      getWeixinScan(wxQr.qrcodeId)
-        .then((res) => {
-          if (stopped) return;
-          const st = res.data?.status;
-          if (st === "confirmed") {
-            stopped = true;
-            wxRefreshed.current = 0;
-            setWxQr(null);
-            setWx({ bound: true, linked: false, expired: false, pending: 0 });
-            message.success("微信已绑定，去微信里给它发句话就能用了");
-            return;
-          }
-          if (st === "expired") {
-            stopped = true;
-            if (wxRefreshed.current < 5) {
-              wxRefreshed.current += 1;
-              loadWxQr();
-            } else {
-              setWxQr(null);
-              setWxErr("二维码多次过期，点「重试」再来");
-            }
-            return;
-          }
-          timer = window.setTimeout(poll, 2000);
-        })
-        .catch(() => {
-          if (!stopped) timer = window.setTimeout(poll, 2000);
-        });
-    };
-    poll();
-    return () => {
-      stopped = true;
-      window.clearTimeout(timer);
-    };
-  }, [wxQr, loadWxQr]);
-
-  // 绑上了但还没收到过消息时，等的就是用户去微信发第一句话 —— 轮询到「已连通」
-  // 就停，省得他发完还得手动刷新页面才看到状态变化。
-  useEffect(() => {
-    if (!wx.bound || wx.linked || wx.expired) return;
-    const timer = window.setInterval(load, 5000);
-    return () => window.clearInterval(timer);
-  }, [wx.bound, wx.linked, wx.expired, load]);
-
-  const doUnbindWx = () => {
-    AntdModal.confirm({
-      title: "解绑微信",
-      content: "解绑后不再收到微信推送，也不能在微信里控制会话。",
-      okText: "解绑",
-      cancelText: "取消",
-      onOk: () =>
-        unbindWeixin()
-          .then((res) => {
-            if (res.code !== 0) return message.error(res.msg ?? "解绑失败");
-            message.success("已解绑");
-            setWx({ bound: false, linked: false, expired: false, pending: 0 });
-            setWxQr(null);
-          })
-          .catch(() => message.error("解绑失败，请检查网络")),
-    });
-  };
 
   const doUnbind = (staffId: string, nick: string) => {
     AntdModal.confirm({
@@ -399,9 +296,9 @@ const IntegrationsPanel: React.FC = () => {
             <span
               className={`${styles.botState} ${linked ? styles.botOk : ""}`}
               // 配好了但还没人跟它说过话时，hub 不知道该把推送发给谁
-              title={linked ? "已连通，推送会私聊发给你" : "还没收到过你的消息"}
+              title={linked ? "已扫码绑定，推送会私聊发给你" : "还差扫码绑定这一步"}
             >
-              {linked ? "已连通" : "待发首条消息"}
+              {linked ? "已连通" : "待扫码绑定"}
             </span>
           ) : null}
         </div>
@@ -442,14 +339,15 @@ const IntegrationsPanel: React.FC = () => {
           </div>
           <div className={styles.botHint}>
             在钉钉开放平台建一个「企业内部应用 · 机器人」，开启 Stream
-            模式，把 ClientID / ClientSecret 填到这里。保存后去钉钉给机器人发句话，
-            它就知道该把消息推给谁了。
+            模式，把 ClientID / ClientSecret 填到这里。保存后**还要在下面扫码绑定**
+            你的钉钉号，机器人才知道该把消息推给谁 —— 收件人由你本人授权确认，
+            而不是谁跟它说过话就推给谁。
           </div>
         </div>
       </div>
 
-      {/* 公共机器人：不想自己建应用就绑个钉钉号，扫码即可 */}
-      {globalAvailable ? (
+      {/* 扫码绑定钉钉号：**推送的前提**。自己的机器人与公共机器人都走这一步 */}
+      {hasSecret || globalAvailable ? (
         <div className={styles.boundCard}>
           <div className={styles.boundTitle}>
             <DingtalkOutlined className={styles.boundTitleIcon} />
@@ -459,12 +357,7 @@ const IntegrationsPanel: React.FC = () => {
             </span>
           </div>
 
-          {hasSecret ? (
-            <div className={styles.botHint}>
-              你已配了自己的机器人，推送走它就够了，无需再绑钉钉号。
-            </div>
-          ) : (
-            <div className={styles.qrRow}>
+          <div className={styles.qrRow}>
               <div className={styles.qrBox}>
                 {qrLoading ? (
                   <Spin />
@@ -482,8 +375,10 @@ const IntegrationsPanel: React.FC = () => {
               <div className={styles.qrSide}>
                 <div className={styles.qrTitle}>用钉钉扫一扫</div>
                 <div className={styles.qrSub}>
-                  扫码授权后，这个钉钉号就绑到当前账号：会话提醒私聊推给你，
-                  也能直接在钉钉里控制会话。手机、电脑可各绑一个。
+                  {hasSecret
+                    ? "用你自己的机器人扫码授权，绑定后才会开始推送。"
+                    : "扫码授权后，这个钉钉号就绑到当前账号。"}
+                  会话提醒私聊推给你，也能直接在钉钉里控制会话。手机、电脑可各绑一个。
                 </div>
                 {qr ? (
                   <div className={styles.qrAlt}>
@@ -493,8 +388,7 @@ const IntegrationsPanel: React.FC = () => {
                   </div>
                 ) : null}
               </div>
-            </div>
-          )}
+          </div>
 
           {boundIds.length ? (
             <div className={styles.idList}>
@@ -514,79 +408,6 @@ const IntegrationsPanel: React.FC = () => {
           ) : null}
         </div>
       ) : null}
-
-      {/* 微信（个人号）：扫码即绑，不需要建应用、也没有 key/secret */}
-      <div className={styles.groupTitle}>微信</div>
-      <div className={styles.boundCard}>
-        <div className={styles.boundTitle}>
-          <WechatOutlined className={styles.boundTitleIcon} />
-          微信机器人
-          {wx.bound ? (
-            <span
-              className={`${styles.botState} ${wx.linked && !wx.expired ? styles.botOk : ""}`}
-              title={
-                wx.expired
-                  ? "登录态已失效，需要重新扫码"
-                  : wx.pending
-                    ? "推送凭据已过期，通知攒着等你在微信里说句话就补发"
-                    : wx.linked
-                      ? "已连通，推送会私聊发给你"
-                      : "还没收到过你的消息，暂时推不了"
-              }
-            >
-              {wx.expired
-                ? "需重新扫码"
-                : wx.pending
-                  ? `${wx.pending} 条待补发`
-                  : wx.linked
-                    ? "已连通"
-                    : "待发首条消息"}
-            </span>
-          ) : null}
-        </div>
-
-        {wx.bound && !wx.expired ? (
-          <>
-            <div className={styles.botHint}>
-              {wx.pending
-                ? `微信的推送凭据约 1.5 小时就失效，且只能靠你发消息来刷新（这是微信侧的限制，服务端无法自行续期）。这期间攒下了 ${wx.pending} 条提醒 —— 去微信里说句话，它们会立刻补发给你。`
-                : wx.linked
-                  ? "已经能用了：会话提醒私聊推给你，直接在微信里回消息即可控制会话。久未说话时推送凭据会失效，期间的提醒会攒着，等你下次开口一并补发。"
-                  : "还差一步：去微信里给这个机器人发句话（比如「会话」），它才知道该把推送发给谁。"}
-            </div>
-            <div className={styles.botActions}>
-              <Button onClick={doUnbindWx}>解绑</Button>
-            </div>
-          </>
-        ) : (
-          <div className={styles.qrRow}>
-            <div className={styles.qrBox}>
-              {wxLoading ? (
-                <Spin />
-              ) : wxQr ? (
-                <QRCode value={wxQr.link} size={148} bordered={false} />
-              ) : (
-                <div className={styles.qrErr}>
-                  {wxErr || (wx.expired ? "登录态已失效" : "点右侧按钮取二维码")}
-                  <Button size="small" onClick={loadWxQr}>
-                    {wxErr ? "重试" : "取二维码"}
-                  </Button>
-                </div>
-              )}
-            </div>
-            <div className={styles.qrSide}>
-              <div className={styles.qrTitle}>用微信扫一扫</div>
-              <div className={styles.qrSub}>
-                {wx.expired
-                  ? "微信这边的登录态过期了（重扫即可恢复，之前的配置都还在）。"
-                  : "扫码授权后即绑到当前账号，不用建应用、也不用填任何密钥。"}
-                绑定后记得在微信里给它发句话 —— 微信协议要求先收到你的消息，
-                才能反过来主动推送。
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
 
       {/* 接收目录配置弹窗：设备 → 项目 层级列全 */}
       <Modal

@@ -1,5 +1,9 @@
 .Version {
-  padding: 16px 20px;
+  // 不要在这里再写完整内边距：这个类挂在组件库的 Panel.Default 上，而 Panel 自己已经有
+  // padding: 10px。原来写 `16px 20px` 是把两层叠起来，实际左右 30px、上下 26px ——
+  // 内容比同项目其他后管页窄一圈，表格和分隔线也跟着内缩。
+  // 只补到目标值所差的那部分：左右 10 → 20，上下维持 Panel 的 10。
+  padding: 0 10px;
 
   .section {
     margin-bottom: 28px;
