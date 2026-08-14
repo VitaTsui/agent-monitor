@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 
-import { Segmented, Tag, Tooltip, message } from "antd";
+import { Segmented, Tag, Tooltip } from "antd";
+import { message } from "@hsu-react/ui";
 import { CheckOutlined, CopyOutlined } from "@ant-design/icons";
 
 import { Button, Input, Modal } from "@hsu-react/ui";

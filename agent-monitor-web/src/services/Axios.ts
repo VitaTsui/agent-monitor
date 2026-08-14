@@ -8,7 +8,7 @@ import axios, {
 import { Typeof } from "hsu-utils";
 import { debounce } from "lodash";
 import { getAccessToken, getAdminToken, removeAdminToken } from "@/utils/auth";
-import { notification } from "antd";
+import { notification } from "@hsu-react/ui";
 import wsCache from "@/utils/wsCache";
 import { getFileNameFromHeader } from "hsu-utils/lib/DownloadFile";
 
@@ -140,7 +140,7 @@ const reLogin = debounce(() => {
       }
     }
     notification.error({
-      message: "登录已过期，请重新登录",
+      title: "登录已过期，请重新登录",
       duration: 0.5,
       onClose: () => {
         safeRedirect("/login");
@@ -153,7 +153,7 @@ const reLogin = debounce(() => {
 
 const errMsg = debounce((status: number, url: string, errorText: string) => {
   notification.error({
-    message: `请求错误 ${status}：${window.decodeURIComponent(url)}`,
+    title: `请求错误 ${status}：${window.decodeURIComponent(url)}`,
     description: errorText,
   });
 });
@@ -317,7 +317,7 @@ const onAdminTokenInvalid = debounce(() => {
   if (getAdminToken()) {
     removeAdminToken();
     notification.error({
-      message: "后管访问令牌已失效，请重新解锁",
+      title: "后管访问令牌已失效，请重新解锁",
       duration: 0.8,
       onClose: () => window.location.reload(),
     });

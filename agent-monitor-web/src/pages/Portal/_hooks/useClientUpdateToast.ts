@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-import { notification } from "antd";
+import { notification } from "@hsu-react/ui";
 
 import { Button } from "@hsu-react/ui";
 import React from "react";
@@ -50,7 +50,7 @@ export function useClientUpdateToast() {
           toastedVersion = s.latest;
           notification.open({
             key,
-            message: `新版本 v${s.latest} 可用`,
+            title: `新版本 v${s.latest} 可用`,
             description: `当前版本 v${s.current}，更新将自动完成并重启客户端。`,
             placement: "bottomRight",
             duration: 0,

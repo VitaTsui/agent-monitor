@@ -17,7 +17,7 @@ import {
 } from "@/services/apis/portal";
 
 import { makeAutoObservable } from "mobx";
-import { message as antdMessage } from "antd";
+import { message as antdMessage } from "@hsu-react/ui";
 import { getAccessToken } from "@/utils/auth";
 
 /** 拆分视图最多同时打开的会话数 */

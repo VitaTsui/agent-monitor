@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 
-import { Popconfirm, Tag, message } from "antd";
+import { Popconfirm, Tag } from "antd";
+import { message } from "@hsu-react/ui";
 import { PlusOutlined } from "@ant-design/icons";
 
 import {

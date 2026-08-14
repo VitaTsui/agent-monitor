@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useState } from "react";
 
 // Modal.confirm 这类命令式弹窗 hsu-ui 未提供，按约定用 antd 兜底（组件式仍用 hsu-ui 的 Modal）
-import { message, Modal as AntdModal, QRCode, Spin } from "antd";
+import { Modal as AntdModal, QRCode, Spin } from "antd";
+import { message } from "@hsu-react/ui";
 import {
   DingtalkOutlined,
   FolderOutlined,

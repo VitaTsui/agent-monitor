@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 
-import { message } from "antd";
+import { message } from "@hsu-react/ui";
 import { observer } from "mobx-react-lite";
 
 import { Button, Input, Modal, Select } from "@hsu-react/ui";

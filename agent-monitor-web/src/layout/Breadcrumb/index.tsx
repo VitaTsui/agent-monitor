@@ -12,7 +12,7 @@ import { formatBreadcrumbMenu } from "./_utils/formatMenu";
 import { useBreadcrumbPath } from "./_hooks/useBreadcrumbPath";
 import BreadcrumbItemIcon from "./_components/BreadcrumbItemIcon";
 
-export interface BreadcrumbType extends ItemType {
+export interface BreadcrumbType extends Omit<ItemType, "children"> {
   children?: BreadcrumbType[];
   icon?: ReactNode;
   parent?: RouteType;
@@ -90,7 +90,11 @@ const Breadcrumb: React.FC<BreadcrumbProps> = (props) => {
   return (
     <AntBreadcrumb
       className={classNames(styles.Breadcrumb, className)}
-      items={formattedItems}
+      // BreadcrumbType 比 antd 的 ItemType 多带了 parent / route / children 这些自有字段，
+      // 供格式化与点击逻辑使用；渲染时 antd 只读它认识的那几个，多出来的会被忽略。
+      // v6 的 ItemType 带了 `data-${string}` 索引签名，children 的元素类型也收窄成
+      // Omit<BreadcrumbItemType,"children">，直接传会不兼容，所以断言回去。
+      items={formattedItems as ItemType[]}
     />
   );
 };

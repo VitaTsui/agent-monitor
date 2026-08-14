@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { observer } from "mobx-react-lite";
 import { PlusOutlined } from "@ant-design/icons";
-import { Tag, message } from "antd";
+import { Tag } from "antd";
+import { message } from "@hsu-react/ui";
 
 import {
   ChakraButtonProps,

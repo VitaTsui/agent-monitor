@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 
 import { Button, Input, Modal, Switch } from "@hsu-react/ui";
-import { Badge, Empty, Modal as AntModal, Popconfirm, Progress, Tag, message } from "antd";
+import { Badge, Empty, Modal as AntModal, Popconfirm, Progress, Tag } from "antd";
+import { message } from "@hsu-react/ui";
 import {
   CloseOutlined,
   CloudSyncOutlined,

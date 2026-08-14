@@ -3,7 +3,7 @@ import { PwdChangeData, editPwdChange } from "@/services/apis/pwdchange";
 import FormModalStore from "@/stores/basisStoreClass/FormModalStore";
 import { ResType } from "@/services/Axios";
 import { makeObservable } from "mobx";
-import { notification } from "antd";
+import { notification } from "@hsu-react/ui";
 
 class PwdChangeFormStore extends FormModalStore<PwdChangeData> {
   constructor() {
@@ -28,7 +28,7 @@ class PwdChangeFormStore extends FormModalStore<PwdChangeData> {
           fn?.(res);
 
           notification.success({
-            message: "修改成功，请重新登录",
+            title: "修改成功，请重新登录",
           });
         } else {
           this._message(res);
@@ -37,7 +37,7 @@ class PwdChangeFormStore extends FormModalStore<PwdChangeData> {
       // 不接住的话网络异常会让弹窗静默卡住：既不报错也不关闭
       .catch(() => {
         notification.error({
-          message: "修改密码失败，请检查网络后重试",
+          title: "修改密码失败，请检查网络后重试",
         });
       });
   };

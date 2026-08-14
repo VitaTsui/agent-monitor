@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useState } from "react";
 
 // message / Empty / Tag / Badge / Popconfirm 属 hsu-ui 未覆盖的能力，按约定用 antd 兜底
-import { Badge, Empty, Popconfirm, Spin, Tag, message } from "antd";
+import { Badge, Empty, Popconfirm, Spin, Tag } from "antd";
+import { message } from "@hsu-react/ui";
 import { CloudSyncOutlined } from "@ant-design/icons";
 
 import { Button } from "@hsu-react/ui";

@@ -9,7 +9,7 @@ import Query, {
 import FormModalStore from "./FormModalStore";
 import { ListRes } from "@/services/ResType";
 import { ResType } from "@/services/Axios";
-import { message, notification } from "antd";
+import { message, notification } from "@hsu-react/ui";
 import wsCache, { CACHE_KEY } from "@/utils/wsCache";
 import { Equal } from "hsu-utils";
 
@@ -293,14 +293,14 @@ export default class ListPanelStore<
     if (res?.code === 0) {
       if (typeof res?.data === "string") {
         notification.success({
-          message: res.data,
+          title: res.data,
         });
       } else {
         message.success(res?.msg ?? "成功");
       }
     } else {
       notification.error({
-        message: res?.msg ?? "失败",
+        title: res?.msg ?? "失败",
       });
     }
   };

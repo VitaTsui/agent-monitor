@@ -7,7 +7,7 @@ import { useApkUpdateCheck } from "./_hooks/useApkUpdateCheck";
 import { useClientUpdateToast } from "./_hooks/useClientUpdateToast";
 import { usePaneGrid } from "./_hooks/usePaneGrid";
 import { claimPairDevice, getMe } from "@/services/apis/portal";
-import { message as antdMessage } from "antd";
+import { message as antdMessage } from "@hsu-react/ui";
 import {
   CodeOutlined,
   ControlOutlined,

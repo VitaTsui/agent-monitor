@@ -23,31 +23,13 @@ import Routes from "./router/Routes";
 
 import { SingleRouter } from "@hsu-react/single-router";
 
-import { ChakraProvider, createSystem, defaultConfig } from "@chakra-ui/react";
-import createCache from "@emotion/cache";
-import { CacheProvider } from "@emotion/react";
-
-const cache = createCache({
-  key: "css",
-  prepend: true,
-});
-
-const system = createSystem(defaultConfig, {
-  disableLayers: true,
-  preflight: false,
-});
-
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <BrowserRouter>
     <SingleRouter showPath={false}>
-      <CacheProvider value={cache}>
-        <ChakraProvider value={system}>
-          <Internationalization>
-            <ClientTitleBar />
-            <Routes />
-          </Internationalization>
-        </ChakraProvider>
-      </CacheProvider>
+      <Internationalization>
+        <ClientTitleBar />
+        <Routes />
+      </Internationalization>
     </SingleRouter>
   </BrowserRouter>,
 );

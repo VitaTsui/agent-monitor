@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import { Chat, Input, Modal } from "@hsu-react/ui";
-import { message } from "antd";
+import { message } from "@hsu-react/ui";
 import { reaction } from "mobx";
 import {
   DeleteOutlined,

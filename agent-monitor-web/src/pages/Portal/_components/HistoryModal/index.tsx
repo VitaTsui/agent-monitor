@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import { Markdown, Modal } from "@hsu-react/ui";
-import { Empty, Segmented, Spin, message } from "antd";
+import { Empty, Segmented, Spin } from "antd";
+import { message } from "@hsu-react/ui";
 
 import {
   SessionHistoryItem,
