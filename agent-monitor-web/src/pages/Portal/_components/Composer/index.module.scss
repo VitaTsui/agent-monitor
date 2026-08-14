@@ -389,7 +389,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 // 翻目录也憋屈）。className=dirModal 落在 .ant-modal 上，故用 :global 打到内层结构。
 @media (max-width: 760px) {
   .dirModal {
-    :global(.ant-modal-content) {
+    :global(.ant-modal-container) {
       height: 92dvh;
     }
 

@@ -68,7 +68,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     }
   }
 
-  :global(.ant-modal-content) {
+  :global(.ant-modal-container) {
     padding: 0;
     overflow: hidden;
     border-radius: var(--radius-lg);
@@ -197,7 +197,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
   @media (max-width: 760px) {
     // 固定全屏：不同分栏内容高度不同会让抽屉式 sheet「高高低低变来变去」，
     // 这里锁死为整屏高度，切换分栏时高度不再跳动，也不再露出顶部背景间隙。
-    :global(.ant-modal-content) {
+    :global(.ant-modal-container) {
       height: 100dvh !important;
       max-height: 100dvh !important;
       min-height: 100dvh !important;

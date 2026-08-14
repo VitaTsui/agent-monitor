@@ -181,7 +181,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 // 720px 的弹窗在手机上会溢出，改为全屏 —— 且「人不在电脑前翻记录」正是这块的核心场景，
 // 值得占满整屏而不是挤在一个小卡片里。
 @media (max-width: 760px) {
-  :global(.ant-modal-content) {
+  :global(.ant-modal-container) {
     height: 100dvh !important;
     max-height: 100dvh !important;
     border-radius: 0 !important;
