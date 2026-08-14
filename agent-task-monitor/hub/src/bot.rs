@@ -1688,6 +1688,18 @@ async fn list_queued(state: &SharedState, username: &str, arg: &str) -> String {
 
 /// 给会话排一条命令。`source` 标记下发来源（dingtalk / web / mcp），只用于历史记录的展示，
 /// 让你回看时知道「这条是我在手机上发的还是在网页发的」。
+/// 这条下发是不是「选择卡的作答」—— 会话此刻正等着选（`pending_select` 有货）时，
+/// 任何输入都会被终端的选项界面吃掉，那就是作答，而不是一条新任务。
+///
+/// 关系重大：客户端拿这个标志决定**要不要补提交回车**（见 client 里 `from_select`）。
+/// 单选按一个序号即落定并翻到下一题，多补的回车会落在下一题上、把它按默认高亮项答掉。
+/// 线上现场：三题的卡片只回了第 1 题的「1」，第 2、3 题被替人选了默认项，最后反倒没提交。
+/// 此前这里恒为 false —— 注释还写着「钉钉侧没有选择卡的作答入口」，可推送文案分明就是
+/// 「回复『发 N 序号』作答」，MCP 也有 answer_select，两条入口都汇到这个函数。
+fn answering_select(action: ControlAction, pending_select: Option<&serde_json::Value>) -> bool {
+    matches!(action, ControlAction::Input) && pending_select.is_some_and(|v| !v.is_null())
+}
+
 pub(crate) async fn queue_command(
     state: &SharedState,
     username: &str,
@@ -1716,8 +1728,8 @@ pub(crate) async fn queue_command(
         action,
         text: text.clone(),
         id: Some(uuid::Uuid::new_v4().to_string()),
-        // 钉钉侧没有选择卡的作答入口（「⌨️ 需要你选择」只是通知），一律按普通下发处理
-        from_select: false,
+        // 会话正卡在选择卡上 ⇒ 这条输入就是作答，客户端据此**不补提交回车**
+        from_select: answering_select(action, task.pending_select.as_ref()),
     });
     drop(machines); // 记历史要拿别的锁，先放掉
 
@@ -1764,7 +1776,25 @@ mod tests {
         assert_eq!(one_line("abcdefgh", 3), "abc");
     }
 
-    use super::{is_immediate, parse_at_commands, split_cmd, split_ext, stamped_name, unique_against};
+    use super::{
+        answering_select, is_immediate, parse_at_commands, split_cmd, split_ext, stamped_name,
+        unique_against,
+    };
+
+    /// 判错的代价是「替人把后面几道题答了」：正等着选时的输入一律算作答，
+    /// 没在等选（含 hook 写回的 null）的照常按新任务下发。
+    #[test]
+    fn select_answer_is_recognized() {
+        use am_core::model::ControlAction as A;
+        let card = serde_json::json!({ "questions": [{ "question": "去掉哪个?" }] });
+        assert!(answering_select(A::Input, Some(&card)));
+        // 作答完 hook 会把 pending_select 整份写成 null —— 那时的输入是新任务，要补回车
+        assert!(!answering_select(A::Input, Some(&serde_json::Value::Null)));
+        assert!(!answering_select(A::Input, None));
+        // 控制类命令与作答无关（按键注入自带语义，别被这个标志带偏）
+        assert!(!answering_select(A::TermKey, Some(&card)));
+        assert!(!answering_select(A::Interrupt, Some(&card)));
+    }
 
     #[test]
     fn split_command() {
