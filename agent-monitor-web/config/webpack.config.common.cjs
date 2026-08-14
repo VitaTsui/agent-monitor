@@ -1,4 +1,9 @@
 const path = require("path");
+// node_modules 一律排除、但放行组件库自带的 scss 与图片。判定由组件库导出——
+// 手写正则在 pnpm 的嵌套路径下会失效（详见 @hsu-react/ui 的 guide）
+const {
+  excludeNodeModulesExceptHsuUi,
+} = require("@hsu-react/ui/lib/build/webpack");
 const MiniCssExtractPlugin = require("mini-css-extract-plugin");
 const HtmlWebpackPlugin = require("html-webpack-plugin");
 
@@ -7,19 +12,6 @@ const envConfig = require("dotenv").config({ path: envPath }).parsed;
 
 const PASS_CLS = JSON.parse(envConfig.PASS_CLS);
 
-/**
- * node_modules 一律排除，但放行 @hsu-react/ui —— 它的 es 产物里带着未编译的 .module.scss
- * 和图片资源，要由本项目的 loader 处理。
- *
- * 用函数而不是 `/node_modules\/(?!@hsu-react\/ui\/)/`：那个正则只看**第一个** node_modules
- * 后面跟着什么，而 pnpm 的真实路径是
- * `node_modules/.pnpm/@hsu-react+ui@<版本>/node_modules/@hsu-react/ui/...`，
- * 跟着的是 `.pnpm/`，否定前瞻立刻失败，库里的 scss / 图片会被全部排除，
- * 报「no loaders are configured to process this file」。
- * 按「整条路径里有没有 @hsu-react/ui」判断，扁平（yarn/npm）与嵌套（pnpm）都成立。
- */
-const excludeNodeModulesExceptHsuUi = (p) =>
-  /node_modules/.test(p) && !/@hsu-react[\\/]ui[\\/]/.test(p);
 
 const config = {
   entry: {
