@@ -23,4 +23,17 @@ python3 assets/brand/build-icons.py
 | iOS | `mobile-app/ios/.../AppIcon-512@2x.png`（1024×1024，**不含 alpha**，App Store 要求） |
 | Android | 五档 mipmap 的 ic_launcher / _round / _foreground，以及 `drawable-v24/ic_launcher_foreground.xml` |
 
+## macOS 的图标必须留白
+
+`.icns` 里的图形只占画布 **80%**（1024 画布里 824），四周透明——这是 Apple 的规范，
+`build-icons.py` 里由 `with_macos_padding()` 处理，**只对 .icns 生效**。
+
+原因：macOS 的程序坞/访达不会替你缩放图标，系统自带应用的图形本身就带这圈留白；
+满幅的图标放进去会比邻居明显大一圈。iOS / Android / web 相反——系统自己做圆角裁切
+与缩放，满幅才对，加了留白反而显小。
+
+这个坑踩过两次：仓库里曾有过一条 `session/mac-icon-padding` 分支，但只改了打包产物、
+没回写到源文件，于是下一次从源重新生成时留白又没了。所以**别在打包产物上改图标**，
+一律改 `icon.svg` 后重跑脚本。
+
 改 favicon 后记得把 `public/index.html` 里的 `?v=N` 加一，否则老访客的标签图标不会刷新。

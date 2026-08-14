@@ -64,6 +64,22 @@ def render(size: int) -> "Image.Image":
     return im.resize((size, size), Image.LANCZOS)
 
 
+def with_macos_padding(img: "Image.Image") -> "Image.Image":
+    """按 Apple 规范给 macOS 图标加留白：图形占画布 80%，四周透明。
+
+    macOS 的程序坞/访达**不会**替你缩放图标——系统自带应用的图形本身就只占画布约 80%
+    （1024 画布里 824），四周是透明边。满幅的图标放进去会比邻居明显大一圈。
+    iOS / Android / web 相反：系统自己做圆角裁切与缩放，满幅才对。所以只有 .icns 走这条。
+    """
+    w = img.width
+    inner = round(w * 0.8)
+    canvas = Image.new("RGBA", (w, w), (0, 0, 0, 0))
+    small = img.resize((inner, inner), Image.LANCZOS)
+    off = (w - inner) // 2
+    canvas.paste(small, (off, off), small)
+    return canvas
+
+
 def save(img: "Image.Image", path: str) -> None:
     full = os.path.join(ROOT, path)
     os.makedirs(os.path.dirname(full), exist_ok=True)
@@ -96,7 +112,7 @@ with tempfile.TemporaryDirectory() as tmp:
     for size, name in [(16, "16x16"), (32, "16x16@2x"), (32, "32x32"), (64, "32x32@2x"),
                        (128, "128x128"), (256, "128x128@2x"), (256, "256x256"),
                        (512, "256x256@2x"), (512, "512x512"), (1024, "512x512@2x")]:
-        render(size).save(os.path.join(iconset, f"icon_{name}.png"))
+        with_macos_padding(render(size)).save(os.path.join(iconset, f"icon_{name}.png"))
     icns = os.path.join(ROOT, "agent-task-monitor/client/icons/icon.icns")
     subprocess.run(["iconutil", "-c", "icns", iconset, "-o", icns], check=True)
     print("  agent-task-monitor/client/icons/icon.icns")
