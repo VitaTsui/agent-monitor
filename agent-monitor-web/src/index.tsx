@@ -13,6 +13,9 @@ installSheetSwipe();
 import "./index.scss";
 // hsu-ui 全局样式（antd 观感覆盖），项目特有增量在本地 styles/antd-overload.scss
 import "@hsu-react/ui/es/styles/antd-overload.scss";
+// 设计令牌（shadcn 语义层）必须排在组件库样式之后：它有几支是指向 --vita-* 的，
+// 而 --vita-* 由组件库的 tokens.scss 定义，先引会取不到值
+import "./styles/tokens.scss";
 import "./styles/antd-overload.scss";
 
 import { BrowserRouter } from "react-router-dom";

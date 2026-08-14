@@ -1,3 +1,12 @@
+// 应用外壳的布局。
+//
+// 顶栏（`.header` / `.title` / `.user` / `.userPopover` 这一整套）与页签栏的样式**已经跟着
+// 组件库走了** —— 它们随 `@hsu-react/ui/es/layout` 的 Header 一起发布，且收成了 CSS Module，
+// 不该也不能在这里用裸类名重写一份：这边的 `.header` 是全局类名，和库里的哈希类名各画各的，
+// 改这边不生效、改库那边这边又盖回去。原来那 200 多行因此全部删掉。
+//
+// 留在这里的只有真正属于「应用外壳」的部分：整页的纵向排布、侧栏与内容区。
+// 颜色一律走 styles/tokens.scss 的 shadcn 语义层，不再写字面量。
 #App {
   display: flex;
   flex-direction: column;
@@ -5,170 +14,14 @@
   width: 100%;
   height: 100%;
 
-  .header {
-    position: relative;
-    z-index: 11;
-
-    display: flex;
-    align-items: center;
-
-    width: 100%;
-    height: 50px;
-    line-height: 50px;
-    padding: 0px;
-    overflow: hidden;
-
-    // CF 风格：以细描边替代投影（随外观切换）
-    border-bottom: 1px solid var(--cf-border);
-    box-shadow: none;
-
-    // 深色/主题色导航：白字 + 适配深底的描边
-    &.dark,
-    &.theme {
-      color: #fff;
-
-      border-bottom-color: rgb(255 255 255 / 10%);
-
-      .collapsed {
-        color: #fff;
-      }
-
-      .breadcrumb {
-        color: #fff;
-      }
-    }
-
-    // 仅深色导航用中性黑渐变
-    &.dark {
-      background: linear-gradient(
-        90deg,
-        var(--nav-dark-top) 0%,
-        var(--nav-dark-bottom) 100%
-      );
-    }
-
-    &.jg-user {
-      .title {
-        color: #fff;
-      }
-    }
-
-    &-left {
-      display: flex;
-      align-items: center;
-
-      flex: 1;
-      min-width: 0px;
-
-      .title {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-
-        width: 230px;
-        min-width: 230px;
-        height: 100%;
-        padding: 0px 20px;
-
-        font-size: 20px;
-        font-weight: bold;
-        white-space: nowrap;
-        word-break: keep-all;
-
-        overflow: hidden;
-
-        transition:
-          width 0.2s,
-          min-width 0.2s;
-
-        &.titleCollapsed {
-          width: 80px;
-          min-width: 80px;
-          padding: 0px 10px;
-        }
-
-        &.titleTop {
-          width: max-content;
-          min-width: max-content;
-        }
-      }
-
-      .collapsed {
-        width: max-content !important;
-        height: 100% !important;
-        padding: 0px 10px;
-      }
-
-      .breadcrumb {
-        padding: 0px 10px;
-      }
-    }
-
-    &-right {
-      display: flex;
-      align-items: center;
-      justify-content: flex-end;
-      column-gap: 12px;
-
-      min-width: max-content;
-      height: 100%;
-
-      font-size: 16px;
-
-      .app-version {
-        height: 100%;
-        padding: 0 10px;
-        margin: 0;
-
-        color: #ffffffa8;
-        font-size: 14px;
-
-        cursor: pointer;
-
-        transition:
-          background-color 0.3s,
-          color 0.3s;
-
-        &:hover {
-          background-color: #0000001a;
-          color: #ffffff;
-        }
-      }
-
-      .user {
-        width: max-content;
-        min-width: max-content;
-        height: 36px;
-        padding: 0 12px;
-        margin-right: 8px;
-
-        white-space: nowrap;
-        word-break: keep-all;
-        color: #ffffffd9;
-
-        border-radius: 8px;
-        cursor: pointer;
-
-        transition:
-          background-color 0.3s,
-          color 0.3s;
-
-        &:hover {
-          background-color: #ffffff26;
-          color: #ffffff;
-        }
-      }
-    }
-  }
-
   .body {
     flex: 1;
     width: 100%;
     min-height: 0px;
 
     .ant-layout-sider {
-      // CF 风格：细描边分隔，不用投影
-      border-right: 1px solid var(--cf-border);
+      // 细描边分隔，不用投影——投影会在浅底上糊出一条脏边
+      border-right: 1px solid var(--border);
       box-shadow: none;
     }
 
@@ -180,8 +33,7 @@
       min-width: 0px;
       height: 100%;
 
-      // CF 风格：冷调浅灰画布，衬托描边白卡片（随外观切换）
-      background: var(--cf-canvas);
+      background: var(--background);
 
       .content-body {
         flex: 1;
@@ -191,91 +43,14 @@
     }
   }
 
-  // 深色导航：侧边中性黑渐变
+  // 暗色导航：侧栏用中性黑渐变，与顶栏同一套变量（由组件库的 Header 定义）
   &.dark .body .ant-layout-sider {
     background: linear-gradient(
       180deg,
-      var(--nav-dark-top) 0%,
-      var(--nav-dark-bottom) 100%
+      var(--nav-dark-top, #1f1f1f) 0%,
+      var(--nav-dark-bottom, #141414) 100%
     );
 
-    border-right-color: rgb(255 255 255 / 8%);
+    border-right-color: var(--border-weak);
   }
-
-  // 亮色导航：白底深字
-  &.light {
-    .header .title {
-      color: rgb(0 0 0 / 88%);
-    }
-
-    .header-right {
-      .app-version {
-        color: rgb(0 0 0 / 45%);
-
-        &:hover {
-          background-color: rgb(0 0 0 / 4%);
-          color: rgb(0 0 0 / 88%);
-        }
-      }
-
-      .user {
-        color: rgb(0 0 0 / 75%);
-
-        &:hover {
-          background-color: rgb(0 0 0 / 6%);
-          color: rgb(0 0 0 / 88%);
-        }
-      }
-    }
-  }
-}
-
-.userPopover {
-  .ant-popover-content {
-    .ant-popover-inner {
-      padding: 8px;
-
-      .ant-btn {
-        &:hover {
-          color: var(--primary-color) !important;
-          background-color: transparent !important;
-        }
-      }
-    }
-  }
-
-  .userMenuPanel {
-    min-width: 230px;
-
-    .settingRow {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      column-gap: 12px;
-
-      padding: 6px 8px;
-
-      .settingLabel {
-        color: var(--cf-text-2);
-        font-size: 13px;
-        white-space: nowrap;
-      }
-    }
-
-    .settingDivider {
-      height: 1px;
-      margin: 6px 0;
-
-      background: var(--cf-border);
-    }
-
-    .menu .ant-btn {
-      justify-content: flex-start;
-    }
-  }
-}
-
-.menu {
-  display: flex;
-  flex-direction: column;
 }
