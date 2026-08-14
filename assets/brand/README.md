@@ -25,8 +25,12 @@ python3 assets/brand/build-icons.py
 
 ## macOS 的图标必须留白
 
-`.icns` 里的图形只占画布 **80%**（1024 画布里 824），四周透明——这是 Apple 的规范，
-`build-icons.py` 里由 `with_macos_padding()` 处理，**只对 .icns 生效**。
+`.icns` 里的图形只占画布 **82%**，四周透明——`build-icons.py` 里由 `with_macos_padding()`
+处理，**只对 .icns 生效**。
+
+82% 是量出来的，不是抄文档：Apple 文档写的是 80%（1024 画布里 824），按它做出来在程序坞里
+偏小；量本机 Notes / Mail / Safari / Music 四个系统应用的 icns，不透明区占比**全部是 82.0%**。
+以系统应用为准。
 
 原因：macOS 的程序坞/访达不会替你缩放图标，系统自带应用的图形本身就带这圈留白；
 满幅的图标放进去会比邻居明显大一圈。iOS / Android / web 相反——系统自己做圆角裁切

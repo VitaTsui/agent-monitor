@@ -65,14 +65,17 @@ def render(size: int) -> "Image.Image":
 
 
 def with_macos_padding(img: "Image.Image") -> "Image.Image":
-    """按 Apple 规范给 macOS 图标加留白：图形占画布 80%，四周透明。
+    """按 Apple 规范给 macOS 图标加留白：图形占画布 82%，四周透明。
 
-    macOS 的程序坞/访达**不会**替你缩放图标——系统自带应用的图形本身就只占画布约 80%
-    （1024 画布里 824），四周是透明边。满幅的图标放进去会比邻居明显大一圈。
-    iOS / Android / web 相反：系统自己做圆角裁切与缩放，满幅才对。所以只有 .icns 走这条。
+    macOS 的程序坞/访达**不会**替你缩放图标——系统自带应用的图形本身就带这圈留白，
+    满幅的图标放进去会比邻居明显大一圈。iOS / Android / web 相反：系统自己做圆角裁切
+    与缩放，满幅才对。所以只有 .icns 走这条。
+
+    82% 不是拍的：量了本机 Notes / Mail / Safari / Music 四个系统应用的 icns，
+    不透明区占比全部是 82.0%。先按 Apple 文档写的 80%（1024 里 824）做，实际偏小一点。
     """
     w = img.width
-    inner = round(w * 0.8)
+    inner = round(w * 0.82)
     canvas = Image.new("RGBA", (w, w), (0, 0, 0, 0))
     small = img.resize((inner, inner), Image.LANCZOS)
     off = (w - inner) // 2

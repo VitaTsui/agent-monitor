@@ -156,24 +156,17 @@ ol {
   top: calc(env(safe-area-inset-top) + 40px) !important;
 }
 
-// 底部同理，而且比顶部更需要让位：antd 默认贴到 bottom:24px，那里恰好压着
-// Portal 的输入区（Composer 在常规流里贴着内容区底部）与移动端的 home 指示条，
-// 「新版本可用」这类 placement:bottomRight 的通知会被挡住、点不到「立即更新」。
+// 底部通知：只让开移动端的 home 指示条，别的不用躲。
 //
-// 让位量 = home 指示条安全区 + 输入区高度。后者由 Composer 自己量完写进
-// --composer-height（它高度会随输入行数变化，写死会在多行时又被压住）；
-// 没有输入区的页面取 0，退化成「安全区 + 24px」的常规位置。
+// 曾经在这里额外加过一整个输入区的高度（--composer-height），起因是「更新提醒被挡住」
+// —— 但那是误判：真相是 antd 对所有 placement 都设了 top（实测 50px），只覆盖 bottom
+// 而不解开 top，两端同时钉死，容器被拉成整屏高，通知贴着容器底排、直接掉出视口。
+// top: auto 修好之后，那层让位就成了纯粹的抬高，通知浮在半空。
 .ant-notification.ant-notification-bottom,
 .ant-notification.ant-notification-bottomLeft,
 .ant-notification.ant-notification-bottomRight {
-  // top 必须一起解掉。antd 对所有 placement 都设了 top（实测 50px），底部靠 bottom:auto
-  // 区分；只覆盖 bottom 而不动 top，两端就同时钉死——容器被拉成整屏高（实测 720px，
-  // 盒底 770），通知贴着容器底部排，直接掉出视口 26px。
-  // 这正是「更新提醒被挡住」的真相：不是被别的元素盖住，是被挤到屏幕外面了。
   top: auto !important;
-  bottom: calc(
-    env(safe-area-inset-bottom) + var(--composer-height, 0px) + 24px
-  ) !important;
+  bottom: calc(env(safe-area-inset-bottom) + 24px) !important;
 }
 
 // iOS Safari 点击可聚焦元素(输入框/按钮)时会闪一层半透明黑色高亮(tap highlight)，

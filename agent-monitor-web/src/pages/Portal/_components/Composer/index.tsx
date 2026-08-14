@@ -113,31 +113,6 @@ const Composer: React.FC<ComposerProps> = (props) => {
     ta.focus();
   };
 
-  // 把输入区自身高度写进 --composer-height，供底部弹出的通知让位
-  //（antd 的 placement:bottomRight 默认贴 bottom:24px，正好压在输入区上，
-  // 「新版本可用」那条会被挡住、点不到「立即更新」）。
-  // 高度随输入行数变化，所以用 ResizeObserver 跟着更新，而不是量一次写死。
-  useEffect(() => {
-    const el = rootRef.current;
-    if (!el) return;
-
-    const write = () => {
-      document.documentElement.style.setProperty(
-        "--composer-height",
-        `${Math.round(el.getBoundingClientRect().height)}px`,
-      );
-    };
-
-    write();
-    const ro = new ResizeObserver(write);
-    ro.observe(el);
-
-    return () => {
-      ro.disconnect();
-      // 卸载时清掉：换到没有输入区的页面后，通知不该还留着这段让位
-      document.documentElement.style.removeProperty("--composer-height");
-    };
-  }, []);
 
   // 撤回后把原文回填进本会话的对话框（PortalStore.composerRefill 命中自己的 taskId
   // 才消费），方便改完再发。Composer 非 observer，用 reaction 订阅这一个字段即可。

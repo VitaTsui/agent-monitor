@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import { Markdown, Modal } from "@hsu-react/ui";
-import { Empty, Segmented, Spin } from "antd";
+import { Empty, Spin } from "antd";
 import { message } from "@hsu-react/ui";
 
 import {
@@ -13,7 +13,7 @@ import styles from "./index.module.scss";
 interface HistoryModalProps {
   open: boolean;
   onClose: () => void;
-  /** 当前所在会话；默认只看它的往来，可切到「全部会话」 */
+  /** 当前所在会话。历史只看这一个会话的往来 —— 混着别的终端读不出上下文 */
   taskId?: string;
 }
 
@@ -51,26 +51,18 @@ const SOURCE_LABEL: Record<string, string> = {
 const HistoryModal: React.FC<HistoryModalProps> = ({ open, onClose, taskId }) => {
   const [list, setList] = useState<SessionHistoryItem[]>([]);
   const [loading, setLoading] = useState(false);
-  // 只看当前会话 / 看全部。默认前者 —— 在某个会话里点历史，想看的是这个会话的往来
-  const [onlyCurrent, setOnlyCurrent] = useState(true);
   // 直接持有滚动容器：用 scrollIntoView 会把整个弹窗往上顶，改成设容器的 scrollTop
   const streamRef = useRef<HTMLDivElement>(null);
 
-  // 每次打开都重置回「只看当前」，否则上次切到「全部」会粘住、下次打开还是全部
-  useEffect(() => {
-    if (open) setOnlyCurrent(true);
-  }, [open]);
-
   // taskId 进依赖：切换会话后再打开要拿新会话的记录，而不是上一个会话的
   useEffect(() => {
-    if (!open) return;
-    const session = onlyCurrent ? taskId : undefined;
+    if (!open || !taskId) return;
     setLoading(true);
-    getSessionHistory(200, session)
+    getSessionHistory(200, taskId)
       .then((res) => setList(res?.data?.list ?? []))
       .catch(() => message.error("获取历史失败"))
       .finally(() => setLoading(false));
-  }, [open, taskId, onlyCurrent]);
+  }, [open, taskId]);
 
   // 数据到位后滚到底 —— 聊天记录最该先看到的是最新那条。
   // 放在下一帧：此刻 markdown 尚未完成布局，立即设 scrollTop 会按旧高度算而滚不到底。
@@ -100,21 +92,7 @@ const HistoryModal: React.FC<HistoryModalProps> = ({ open, onClose, taskId }) =>
       centered
     >
       <div className={styles.hint}>
-        <span>
-          经钉钉 / 网页 / MCP 下发的任务与其结果。终端关掉、机器关机后仍可在此回看。
-        </span>
-        {/* 没有 taskId（会话已结束等）时只能看全部，不给切换免得点了没反应 */}
-        {taskId && (
-          <Segmented
-            size="small"
-            value={onlyCurrent ? "current" : "all"}
-            onChange={(v) => setOnlyCurrent(v === "current")}
-            options={[
-              { label: "当前会话", value: "current" },
-              { label: "全部会话", value: "all" },
-            ]}
-          />
-        )}
+        经钉钉 / 网页 / MCP 下发的任务与其结果。终端关掉、机器关机后仍可在此回看。
       </div>
       {/* Spin 不能包住滚动容器：它会额外套一层 div，把 max-height 挡在外面导致滚不动 */}
       {loading && (
@@ -123,35 +101,16 @@ const HistoryModal: React.FC<HistoryModalProps> = ({ open, onClose, taskId }) =>
         </div>
       )}
       {!loading && list.length === 0 && (
-        <Empty
-          description={
-            onlyCurrent && taskId
-              ? "这个会话还没有远程往来记录"
-              : "还没有远程往来记录"
-          }
-        />
+        <Empty description={taskId ? "这个会话还没有远程往来记录" : "无法确定当前会话"} />
       )}
       {!loading && list.length > 0 && (
         <div className={styles.stream} ref={streamRef}>
-          {list.map((it, idx) => {
-            // 换会话时插分隔条：多个终端的往来混在一起时，得知道这段是谁的
-            const prev = idx > 0 ? list[idx - 1] : null;
-            const newSession = !prev || prev.sessionId !== it.sessionId;
+          {list.map((it) => {
+            // 不再插会话分隔条：只看当前会话，每条都属于同一个终端，
+            // 反复标注项目/标题/主机名是噪音
             const isUser = it.role === "user";
             return (
               <React.Fragment key={it.id}>
-                {newSession && (
-                  <div className={styles.divider}>
-                    {it.slot != null && (
-                      <span className={styles.slot}>{it.slot}</span>
-                    )}
-                    <span className={styles.dividerText}>
-                      {it.project}
-                      {it.title ? ` · ${it.title}` : ""}
-                    </span>
-                    <span className={styles.dividerMeta}>{it.hostname}</span>
-                  </div>
-                )}
                 <div className={isUser ? styles.rowUser : styles.rowAgent}>
                   <div
                     className={isUser ? styles.bubbleUser : styles.bubbleAgent}
