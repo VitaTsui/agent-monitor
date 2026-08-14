@@ -1,5 +1,5 @@
-$cream: var(--primary-subtle);
-$oat: var(--primary-subtle);
+$cream: var(--background); // 页面底
+$oat: var(--card); // 面板/侧栏面
 $text: var(--foreground);
 $muted: var(--muted-foreground);
 $accent: var(--primary);
@@ -134,7 +134,9 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 
       .userBubble {
         align-self: flex-end;
-        background: var(--primary-subtle);
+        // 与 TerminalFeed 里真实气泡同一配方：从底色往文字色压一档。
+        // 用 --primary-subtle 会在换主色时跟着变浅到看不见
+        background: color-mix(in srgb, var(--foreground) 8%, transparent);
         border-radius: 12px 12px 4px 12px;
         padding: 7px 11px;
         font-size: var(--text-xs);
@@ -170,8 +172,8 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
           line-height: 1.5;
         }
         .aLine, .tLine { display: flex; gap: 7px; }
-        .aLine { color: var(--primary-subtle); .aDot { color: var(--success); } }
-        .tLine { color: var(--primary-subtle); .tDot { color: var(--term-accent); } }
+        .aLine { color: var(--term-text); .aDot { color: var(--success); } }
+        .tLine { color: var(--term-text); .tDot { color: var(--term-accent); } }
         .rLine { color: var(--muted-foreground); padding-left: 14px; }
         .working {
           display: flex; align-items: center; gap: 6px; color: var(--term-accent);

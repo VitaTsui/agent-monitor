@@ -178,7 +178,7 @@
     margin: 0;
     border: 1px solid color-mix(in srgb, var(--primary) 20%, transparent);
     border-radius: var(--radius-lg);
-    background: linear-gradient(180deg, var(--primary-subtle) 0%, var(--primary-subtle) 100%);
+    background: var(--muted);
 
     .urlLabel {
       flex: none;

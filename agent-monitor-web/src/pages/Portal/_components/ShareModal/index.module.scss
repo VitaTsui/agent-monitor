@@ -14,7 +14,7 @@
     padding: 16px;
     border: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
     border-radius: var(--radius-lg);
-    background: var(--primary-subtle);
+    background: var(--muted);
   }
 
   // 连接码 / 密码：整行卡片，值居中大字，右侧复制图标
@@ -25,7 +25,7 @@
     padding: 12px 16px;
     border: 1px solid color-mix(in srgb, var(--primary) 18%, transparent);
     border-radius: var(--radius-lg);
-    background: linear-gradient(180deg, var(--primary-subtle) 0%, var(--primary-subtle) 100%);
+    background: var(--muted);
     margin-bottom: 10px;
 
     .codeLabel {

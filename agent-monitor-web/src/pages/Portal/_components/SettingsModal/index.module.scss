@@ -1,4 +1,4 @@
-$oat: var(--primary-subtle);
+$oat: var(--card); // 面板面，不是品牌淡染
 $border: color-mix(in srgb, var(--foreground) 9%, transparent);
 $text: var(--foreground);
 $muted: var(--muted-foreground);
@@ -22,7 +22,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     padding: 14px 16px;
     border: 1px solid color-mix(in srgb, var(--primary) 22%, transparent);
     border-radius: var(--radius-lg);
-    background: linear-gradient(180deg, var(--primary-subtle) 0%, var(--primary-subtle) 100%);
+    background: var(--muted);
     cursor: pointer;
     transition: all 0.18s;
 

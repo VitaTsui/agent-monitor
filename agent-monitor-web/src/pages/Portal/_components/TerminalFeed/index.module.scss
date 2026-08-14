@@ -2,7 +2,10 @@
 // 值一律指向 token —— 终端那几支是**不跟随主题**的独立语义（见 tokens.scss 的说明）。
 $text: var(--foreground);
 $muted: var(--muted-foreground);
-$user-bubble: var(--primary-subtle);
+// 用户气泡：语义是「谁说的话」，不是品牌淡染。原先映射到 --primary-subtle 是错的——
+// 主色一换（青 → shadcn 单色墨黑），它跟着变成 zinc-100 #f4f4f5，压在 #fafafa 的对话流
+// 底上只差 6/255，气泡等于消失。改成从对话流底往文字色压一档，任何配色下都有稳定落差。
+$user-bubble: color-mix(in srgb, var(--foreground) 8%, transparent);
 $term-bg: var(--term-bg);
 $term-text: var(--term-text);
 $term-dim: var(--term-dim);
@@ -208,7 +211,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           background: none;
           padding: 0;
           font-size: 12.5px;
-          color: var(--primary-subtle);
+          color: var(--term-text);
         }
       }
 
@@ -226,7 +229,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           display: block;
           padding: 10px 12px;
           overflow-x: auto;
-          color: var(--primary-subtle);
+          color: var(--term-text);
         }
 
         // 顶栏(.nav #212121)里的复制按钮(hsu-ui Copy)默认取浅色主题变量(深灰)，
@@ -600,7 +603,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           }
 
           .selectOptDesc {
-            color: color-mix(in srgb, var(--primary-subtle) 60%, transparent);
+            color: color-mix(in srgb, var(--term-text) 60%, transparent);
             font-size: 11.5px;
             margin-top: 1px;
           }
@@ -629,7 +632,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
             outline: none;
 
             &::placeholder {
-              color: color-mix(in srgb, var(--primary-subtle) 40%, transparent);
+              color: color-mix(in srgb, var(--term-text) 40%, transparent);
             }
 
             &:focus {
@@ -706,7 +709,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
     .selectHint {
       padding: 4px 10px 8px;
-      color: color-mix(in srgb, var(--primary-subtle) 50%, transparent);
+      color: color-mix(in srgb, var(--term-text) 50%, transparent);
       font-size: var(--text-xs);
 
       // 提示语按端择一（「回车」在手机虚拟键盘上不存在）

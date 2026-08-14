@@ -521,7 +521,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     align-items: center;
     justify-content: center;
     border-radius: var(--radius-lg);
-    background: color-mix(in srgb, var(--primary-subtle) 92%, transparent);
+    background: color-mix(in srgb, var(--muted) 92%, transparent);
     border: 2px dashed color-mix(in srgb, var(--primary) 60%, transparent);
     color: var(--primary-active);
     font-size: var(--text-md);
