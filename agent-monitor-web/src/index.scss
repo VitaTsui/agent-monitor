@@ -22,18 +22,18 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(90, 90, 90, 0.7);
+  background: color-mix(in srgb, var(--foreground) 70%, transparent);
   border: 3px solid transparent;
   border-radius: 8px;
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(64, 64, 64, 0.85);
+  background: color-mix(in srgb, var(--foreground) 85%, transparent);
   border: 3px solid transparent;
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:active {
-  background: rgba(90, 90, 90, 0.9);
+  background: color-mix(in srgb, var(--foreground) 90%, transparent);
   border: 3px solid transparent;
   background-clip: padding-box;
 }
@@ -55,7 +55,7 @@
   border-radius: 8px;
 }
 ::-webkit-scrollbar-button:single-button:hover {
-  background-color: rgba(0, 0, 0, 0.1);
+  background-color: color-mix(in srgb, var(--foreground) 10%, transparent);
 }
 ::-webkit-scrollbar-button:single-button:vertical:decrement {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 7.5 L6 4 L9 7.5' fill='none' stroke='%23606060' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
@@ -81,7 +81,7 @@ body,
   // 布局严丝跟随（100dvh 在部分 iOS 版本不随原生 resize 收缩，会留空隙）
   height: 100%;
   // 底色兜底：键盘 resize 缩放时若透明会透出 WKWebView 黑色默认背景
-  background: #f4fafb;
+  background: var(--primary-subtle);
   overflow: hidden;
   // 关掉 iOS 自动放大文字：选中会话用 ScrollText 渲染成宽滚动块时，iOS 会判定为
   // 「宽文本」把字号自动放大，导致「选中的终端字变大」。固定 100% 即禁用该行为。
@@ -125,7 +125,7 @@ canvas {
 hr {
   border: none;
 
-  background: rgba(230, 235, 233, 1);
+  background: var(--muted);
 }
 
 ul,

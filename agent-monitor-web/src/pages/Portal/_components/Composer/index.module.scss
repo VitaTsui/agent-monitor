@@ -1,6 +1,6 @@
-$text: #243d42;
-$muted: #7c9096;
-$accent: #0f9bad;
+$text: var(--foreground);
+$muted: var(--muted-foreground);
+$accent: var(--primary);
 $mono: "SF Mono", Menlo, Consolas, monospace;
 
 .Composer {
@@ -17,9 +17,9 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     .cmdChip {
       font-family: $mono;
       font-size: 11.5px;
-      color: rgba(36, 61, 66, 0.65);
-      background: rgba(36, 61, 66, 0.05);
-      border: 1px solid rgba(36, 61, 66, 0.08);
+      color: color-mix(in srgb, var(--foreground) 65%, transparent);
+      background: color-mix(in srgb, var(--foreground) 5%, transparent);
+      border: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
       border-radius: 999px;
       padding: 2px 10px;
       cursor: pointer;
@@ -28,8 +28,8 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 
       &:hover {
         color: $accent;
-        border-color: rgba(15, 155, 173, 0.35);
-        background: rgba(15, 155, 173, 0.06);
+        border-color: color-mix(in srgb, var(--primary) 35%, transparent);
+        background: color-mix(in srgb, var(--primary) 6%, transparent);
       }
     }
 
@@ -50,13 +50,13 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   .chatInput {
     > div {
       border-radius: 16px !important;
-      border: 1px solid rgba(36, 61, 66, 0.15) !important;
+      border: 1px solid color-mix(in srgb, var(--foreground) 15%, transparent) !important;
       box-shadow: none !important;
-      background: #fff;
+      background: var(--card);
       transition: border-color 0.15s;
 
       &:focus-within {
-        border-color: rgba(15, 155, 173, 0.5) !important;
+        border-color: color-mix(in srgb, var(--primary) 50%, transparent) !important;
       }
     }
 
@@ -66,7 +66,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
       color: $text;
 
       &::placeholder {
-        color: rgba(36, 61, 66, 0.35);
+        color: color-mix(in srgb, var(--foreground) 35%, transparent);
       }
     }
 
@@ -76,14 +76,14 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
       border-radius: 10px;
 
       &:hover:not(:disabled) {
-        background: #0c7f8f !important;
-        border-color: #0c7f8f !important;
+        background: var(--primary-hover) !important;
+        border-color: var(--primary-hover) !important;
       }
 
       &:disabled {
-        background: rgba(36, 61, 66, 0.12) !important;
+        background: color-mix(in srgb, var(--foreground) 12%, transparent) !important;
         border-color: transparent !important;
-        color: rgba(36, 61, 66, 0.3) !important;
+        color: color-mix(in srgb, var(--foreground) 30%, transparent) !important;
       }
     }
   }
@@ -92,7 +92,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 // 危险输入多重确认弹窗
 .dangerModal {
   .dangerTitle {
-    color: #c0392b;
+    color: var(--destructive);
 
     :global(.anticon) {
       margin-right: 6px;
@@ -112,12 +112,12 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 
       li {
         font-size: 12px;
-        color: rgba(36, 61, 66, 0.75);
+        color: color-mix(in srgb, var(--foreground) 75%, transparent);
         line-height: 1.9;
 
         code {
-          background: rgba(192, 57, 43, 0.08);
-          color: #c0392b;
+          background: color-mix(in srgb, var(--destructive) 8%, transparent);
+          color: var(--destructive);
           border-radius: 4px;
           padding: 1px 6px;
           margin-right: 8px;
@@ -128,7 +128,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     }
 
     .dangerDraft {
-      background: rgba(36, 61, 66, 0.05);
+      background: color-mix(in srgb, var(--foreground) 5%, transparent);
       border-radius: 8px;
       padding: 8px 10px;
       font-family: $mono;
@@ -205,7 +205,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 
   .uploadFile {
     font-size: 13px;
-    color: #4a5f64;
+    color: var(--muted-foreground);
     word-break: break-all;
   }
 
@@ -224,7 +224,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     gap: 8px;
     padding: 3px 6px;
     border-radius: 4px;
-    background: rgba(0, 0, 0, 0.03);
+    background: color-mix(in srgb, var(--foreground) 3%, transparent);
 
     .uploadItemName {
       flex: 1;
@@ -237,20 +237,20 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     .uploadItemDel {
       flex: none;
       cursor: pointer;
-      color: #98a2b3;
+      color: var(--subtle-foreground);
       font-size: 15px;
       line-height: 1;
       padding: 0 2px;
 
       &:hover {
-        color: #d92d20;
+        color: var(--destructive);
       }
     }
   }
 
   .uploadLabel {
     font-size: 12.5px;
-    color: #7c9096;
+    color: var(--muted-foreground);
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -260,12 +260,12 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
       display: inline-flex;
       align-items: center;
       gap: 4px;
-      color: #0f9bad;
+      color: var(--primary);
       cursor: pointer;
       font-weight: 500;
 
       &:hover {
-        color: #0a6b79;
+        color: var(--primary-active);
       }
     }
   }
@@ -275,9 +275,9 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 .uploadForm {
   .dirCrumb {
     font-size: 12px;
-    color: #0a6b79;
-    background: #f2fbfc;
-    border: 1px solid rgba(15, 155, 173, 0.18);
+    color: var(--primary-active);
+    background: var(--primary-subtle);
+    border: 1px solid color-mix(in srgb, var(--primary) 18%, transparent);
     border-radius: 8px;
     padding: 7px 10px;
     word-break: break-all;
@@ -288,7 +288,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   .dirTree {
     height: 260px;
     overflow-y: auto;
-    border: 1px solid rgba(36, 61, 66, 0.1);
+    border: 1px solid color-mix(in srgb, var(--foreground) 10%, transparent);
     border-radius: 10px;
     padding: 4px;
 
@@ -299,11 +299,11 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
       padding: 9px 10px;
       border-radius: 8px;
       font-size: 13.5px;
-      color: #243d42;
+      color: var(--foreground);
       cursor: pointer;
 
       &:hover {
-        background: rgba(15, 155, 173, 0.08);
+        background: color-mix(in srgb, var(--primary) 8%, transparent);
 
         .dirItemOps {
           opacity: 1;
@@ -312,7 +312,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 
       // 已勾选的文件：多选是「攒完再插入」，没有选中态就记不住自己点过哪些
       &.dirItemPicked {
-        background: rgba(15, 155, 173, 0.14);
+        background: color-mix(in srgb, var(--primary) 14%, transparent);
         font-weight: 500;
       }
 
@@ -338,12 +338,12 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
         padding: 2px 8px;
         border-radius: 999px;
         font-size: 11.5px;
-        color: #0f9bad;
-        background: rgba(15, 155, 173, 0.1);
+        color: var(--primary);
+        background: color-mix(in srgb, var(--primary) 10%, transparent);
         white-space: nowrap;
 
         &:hover {
-          background: rgba(15, 155, 173, 0.2);
+          background: color-mix(in srgb, var(--primary) 20%, transparent);
         }
       }
 
@@ -353,7 +353,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
         gap: 12px;
         opacity: 0;
         transition: opacity 0.12s;
-        color: #7c9096;
+        color: var(--muted-foreground);
 
         // 触屏无 hover：常驻显示
         @media (hover: none) {
@@ -361,10 +361,10 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
         }
 
         :global(.anticon):hover {
-          color: #0f9bad;
+          color: var(--primary);
         }
         :global(.anticon):last-child:hover {
-          color: #e0564e;
+          color: var(--destructive);
         }
       }
     }
@@ -372,14 +372,14 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     .dirEmpty {
       padding: 14px 10px;
       font-size: 12.5px;
-      color: #9aa8ac;
+      color: var(--subtle-foreground);
       text-align: center;
     }
   }
 
   .uploadHint {
     font-size: 12.5px;
-    color: #4a5f64;
+    color: var(--muted-foreground);
     word-break: break-all;
   }
 }
@@ -453,10 +453,10 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     bottom: calc(100% + 6px);
     max-height: 260px;
     overflow-y: auto;
-    background: #fff;
-    border: 1px solid rgba(36, 61, 66, 0.12);
+    background: var(--card);
+    border: 1px solid color-mix(in srgb, var(--foreground) 12%, transparent);
     border-radius: 12px;
-    box-shadow: 0 8px 28px rgba(36, 61, 66, 0.16);
+    box-shadow: 0 8px 28px color-mix(in srgb, var(--foreground) 16%, transparent);
     padding: 6px;
     z-index: 20;
     -webkit-overflow-scrolling: touch;
@@ -472,16 +472,16 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
       &:hover,
       // 方向键高亮项：和 hover 同一视觉
       &.slashActiveItem {
-        background: rgba(15, 155, 173, 0.12);
+        background: color-mix(in srgb, var(--primary) 12%, transparent);
       }
 
       // 自定义命令「直接发送」项：底部描边区隔于列表命令
       &.slashCustom {
-        border-bottom: 1px solid rgba(36, 61, 66, 0.08);
+        border-bottom: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
         margin-bottom: 2px;
 
         .slashName {
-          color: #0f9bad;
+          color: var(--primary);
         }
       }
 
@@ -489,7 +489,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
         flex: none;
         font-family: $mono;
         font-size: 13.5px;
-        color: #0a6b79;
+        color: var(--primary-active);
         font-weight: 600;
       }
 
@@ -499,7 +499,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
         text-overflow: ellipsis;
         white-space: nowrap;
         font-size: 12px;
-        color: #7c9096;
+        color: var(--muted-foreground);
       }
     }
   }
@@ -508,7 +508,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 // 拖拽文件到输入区：高亮边框 + 覆盖提示
 .Composer.dragOver {
   .chatInput {
-    outline: 2px dashed rgba(15, 155, 173, 0.6);
+    outline: 2px dashed color-mix(in srgb, var(--primary) 60%, transparent);
     outline-offset: -2px;
     border-radius: 12px;
   }
@@ -521,9 +521,9 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     align-items: center;
     justify-content: center;
     border-radius: 12px;
-    background: rgba(242, 251, 252, 0.92);
-    border: 2px dashed rgba(15, 155, 173, 0.6);
-    color: #0a6b79;
+    background: color-mix(in srgb, var(--primary-subtle) 92%, transparent);
+    border: 2px dashed color-mix(in srgb, var(--primary) 60%, transparent);
+    color: var(--primary-active);
     font-size: 14px;
     font-weight: 600;
     pointer-events: none;

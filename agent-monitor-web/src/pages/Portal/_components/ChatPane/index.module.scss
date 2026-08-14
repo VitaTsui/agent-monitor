@@ -1,8 +1,8 @@
-$cream: #f4fafb;
-$border: rgba(36, 61, 66, 0.09);
-$text: #243d42;
-$muted: #7c9096;
-$accent: #0f9bad;
+$cream: var(--primary-subtle);
+$border: color-mix(in srgb, var(--foreground) 9%, transparent);
+$text: var(--foreground);
+$muted: var(--muted-foreground);
+$accent: var(--primary);
 
 .ChatPane {
   display: flex;
@@ -42,7 +42,7 @@ $accent: #0f9bad;
     gap: 10px;
     padding: 10px 18px;
     border-bottom: 1px solid $border;
-    background: rgba(244, 250, 251, 0.9);
+    background: color-mix(in srgb, var(--primary-subtle) 90%, transparent);
     backdrop-filter: blur(6px);
 
     .headInfo {
@@ -60,7 +60,7 @@ $accent: #0f9bad;
         line-height: 18px;
         white-space: nowrap;
         background: $accent;
-        color: #fff;
+        color: var(--primary-foreground);
       }
 
       .statusChip {
@@ -70,26 +70,26 @@ $accent: #0f9bad;
         font-size: 11px;
         font-weight: 500;
         line-height: 18px;
-        background: rgba(36, 61, 66, 0.07);
+        background: color-mix(in srgb, var(--foreground) 7%, transparent);
         color: $muted;
 
         &.running {
-          background: rgba(56, 178, 106, 0.14);
-          color: #22794a;
+          background: color-mix(in srgb, var(--success) 14%, transparent);
+          color: var(--success);
         }
 
         &.idle {
-          background: rgba(242, 178, 52, 0.16);
-          color: #9a6d0b;
+          background: color-mix(in srgb, var(--warning) 16%, transparent);
+          color: var(--warning);
         }
 
         &.paused {
-          background: rgba(245, 108, 108, 0.14);
-          color: #c0392b;
+          background: color-mix(in srgb, var(--destructive) 14%, transparent);
+          color: var(--destructive);
         }
 
         &.finished {
-          background: rgba(36, 61, 66, 0.07);
+          background: color-mix(in srgb, var(--foreground) 7%, transparent);
           color: $muted;
         }
       }
@@ -100,7 +100,7 @@ $accent: #0f9bad;
         flex: none;
         padding: 0 7px;
         border-radius: 6px;
-        background: rgba(15, 155, 173, 0.12);
+        background: color-mix(in srgb, var(--primary) 12%, transparent);
         color: $accent;
         font-family: "SF Mono", Menlo, Consolas, monospace;
         font-size: 11.5px;
@@ -139,8 +139,8 @@ $accent: #0f9bad;
           border-radius: 999px;
           font-size: 11px;
           line-height: 18px;
-          background: rgba(15, 155, 173, 0.08);
-          color: #0a6b79;
+          background: color-mix(in srgb, var(--primary) 8%, transparent);
+          color: var(--primary-active);
           font-family: "SF Mono", Menlo, Consolas, monospace;
         }
 
@@ -149,8 +149,8 @@ $accent: #0f9bad;
           border-radius: 999px;
           font-size: 11px;
           line-height: 18px;
-          background: rgba(36, 61, 66, 0.06);
-          color: #3a5560;
+          background: color-mix(in srgb, var(--foreground) 6%, transparent);
+          color: var(--foreground);
           font-weight: 500;
         }
       }
@@ -195,7 +195,7 @@ $accent: #0f9bad;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    color: rgba(36, 61, 66, 0.35);
+    color: color-mix(in srgb, var(--foreground) 35%, transparent);
     gap: 6px;
     font-size: 12px;
 
@@ -223,13 +223,13 @@ $accent: #0f9bad;
         align-items: center;
         gap: 6px;
         font-size: 12px;
-        color: #b7791f;
+        color: var(--warning);
 
         .queuedDot {
           width: 6px;
           height: 6px;
           border-radius: 50%;
-          background: #d9a441;
+          background: var(--warning);
           animation: queuedPulse 1.4s ease-in-out infinite;
         }
       }
@@ -241,7 +241,7 @@ $accent: #0f9bad;
 
       .recallAll {
         font-size: 12px;
-        color: #0f9bad;
+        color: var(--primary);
         cursor: pointer;
 
         &:hover {
@@ -264,10 +264,10 @@ $accent: #0f9bad;
       gap: 8px;
       padding: 6px 10px;
       border-radius: 8px;
-      background: rgba(217, 164, 65, 0.1);
-      border: 1px solid rgba(217, 164, 65, 0.28);
+      background: color-mix(in srgb, var(--term-amber) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--term-amber) 28%, transparent);
       font-size: 12.5px;
-      color: #6b5628;
+      color: var(--warning);
 
       .queuedItemText {
         flex: 1;
@@ -280,7 +280,7 @@ $accent: #0f9bad;
       .queuedTag {
         flex: none;
         font-size: 11px;
-        color: #9a854a;
+        color: var(--warning);
         opacity: 0.85;
       }
 
@@ -288,18 +288,18 @@ $accent: #0f9bad;
       .queuedItemRecall {
         flex: none;
         font-size: 11.5px;
-        color: #0f9bad;
+        color: var(--primary);
         cursor: pointer;
         padding: 2px 6px;
         border-radius: 6px;
         user-select: none;
 
         &:hover {
-          background: rgba(15, 155, 173, 0.12);
+          background: color-mix(in srgb, var(--primary) 12%, transparent);
         }
 
         &:focus-visible {
-          outline: 2px solid #0f9bad;
+          outline: 2px solid var(--primary);
           outline-offset: 1px;
         }
       }
@@ -309,7 +309,7 @@ $accent: #0f9bad;
   .queuedHint {
     padding: 4px 2px 2px;
     font-size: 11px;
-    color: #9a854a;
+    color: var(--warning);
     opacity: 0.85;
   }
 
@@ -329,14 +329,14 @@ $accent: #0f9bad;
     margin-bottom: 8px;
     padding: 7px 12px;
     border-radius: 10px;
-    background: rgba(245, 108, 108, 0.1);
-    border: 1px solid rgba(245, 108, 108, 0.28);
+    background: color-mix(in srgb, var(--destructive) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--destructive) 28%, transparent);
 
     .pausedText {
       flex: 1;
       min-width: 0;
       font-size: 12.5px;
-      color: #b93b32;
+      color: var(--destructive);
     }
   }
 
@@ -347,7 +347,7 @@ $accent: #0f9bad;
     margin-bottom: 8px;
     // 卡片本身的配色是按终端深色底设计的（文字/描述都是浅色），
     // 直接放到这块浅色区就是浅底浅字，得把底色一起带过来。
-    background: #102a30;
+    background: var(--foreground);
     border-radius: 10px;
     padding: 8px;
     // 出现时轻推一下，让人注意到「多了个要办的事」

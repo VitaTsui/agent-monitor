@@ -623,7 +623,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
             padding: 4px 8px;
             border-radius: 5px;
             border: 1px solid color-mix(in srgb, var(--term-fg) 12%, transparent);
-            background: rgba(0, 0, 0, 0.22);
+            background: color-mix(in srgb, var(--foreground) 22%, transparent);
             color: $term-text;
             font-size: 12.5px;
             outline: none;

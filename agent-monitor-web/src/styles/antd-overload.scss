@@ -35,7 +35,7 @@
 
   // 遮罩：压暗 + 轻微模糊（原生 sheet 质感）
   .ant-modal-root .ant-modal-mask {
-    background: rgba(20, 30, 33, 0.42);
+    background: color-mix(in srgb, var(--foreground) 42%, transparent);
     backdrop-filter: blur(3px);
     -webkit-backdrop-filter: blur(3px);
   }
@@ -92,7 +92,7 @@
       width: 38px;
       height: 4.5px;
       border-radius: 3px;
-      background: rgba(36, 61, 66, 0.18);
+      background: color-mix(in srgb, var(--foreground) 18%, transparent);
       margin: 2px auto 10px;
     }
   }

@@ -1,8 +1,8 @@
-$text: #243d42;
-$muted: #7c9096;
-$border: rgba(36, 61, 66, 0.09);
-$accent: #0f9bad;
-$hover: rgba(36, 61, 66, 0.06);
+$text: var(--foreground);
+$muted: var(--muted-foreground);
+$border: color-mix(in srgb, var(--foreground) 9%, transparent);
+$accent: var(--primary);
+$hover: color-mix(in srgb, var(--foreground) 6%, transparent);
 $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
 // 悬浮在本格右侧的状态浮层：任务清单与后台任务两块独立堆叠、各自可收起。
@@ -42,10 +42,10 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 %floating {
-  background: rgba(255, 255, 255, 0.96);
+  background: color-mix(in srgb, var(--term-fg) 96%, transparent);
   backdrop-filter: blur(6px);
   border: 1px solid $border;
-  box-shadow: 0 4px 20px rgba(36, 61, 66, 0.12);
+  box-shadow: 0 4px 20px color-mix(in srgb, var(--foreground) 12%, transparent);
 }
 
 .dock {
@@ -137,7 +137,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     width: 13px;
     height: 13px;
     border-radius: 3px;
-    border: 1.5px solid rgba(36, 61, 66, 0.35);
+    border: 1.5px solid color-mix(in srgb, var(--foreground) 35%, transparent);
     box-sizing: border-box;
   }
 
@@ -164,7 +164,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
   // 未完成（含会话已停的原进行中项）：空框、中性文字
   &.pending .todoBox {
-    border-color: rgba(36, 61, 66, 0.35);
+    border-color: color-mix(in srgb, var(--foreground) 35%, transparent);
   }
 }
 

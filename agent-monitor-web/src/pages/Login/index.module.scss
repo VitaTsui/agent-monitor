@@ -1,8 +1,8 @@
-$cream: #f4fafb;
-$text: #243d42;
-$muted: #7c9096;
-$accent: #0f9bad;
-$border: rgba(36, 61, 66, 0.12);
+$cream: var(--primary-subtle);
+$text: var(--foreground);
+$muted: var(--muted-foreground);
+$accent: var(--primary);
+$border: color-mix(in srgb, var(--foreground) 12%, transparent);
 
 .login {
   min-height: 100vh;
@@ -11,8 +11,8 @@ $border: rgba(36, 61, 66, 0.12);
   justify-content: center;
   padding: 24px;
   background:
-    radial-gradient(1200px 600px at 15% -10%, rgba(15, 155, 173, 0.1), transparent 60%),
-    radial-gradient(900px 500px at 110% 110%, rgba(15, 155, 173, 0.08), transparent 55%),
+    radial-gradient(1200px 600px at 15% -10%, color-mix(in srgb, var(--primary) 10%, transparent), transparent 60%),
+    radial-gradient(900px 500px at 110% 110%, color-mix(in srgb, var(--primary) 8%, transparent), transparent 55%),
     $cream;
 }
 
@@ -20,10 +20,10 @@ $border: rgba(36, 61, 66, 0.12);
 .card {
   width: 100%;
   max-width: 400px;
-  background: #fff;
-  border: 1px solid rgba(36, 61, 66, 0.08);
+  background: var(--card);
+  border: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
   border-radius: 20px;
-  box-shadow: 0 24px 60px -24px rgba(36, 61, 66, 0.28);
+  box-shadow: 0 24px 60px -24px color-mix(in srgb, var(--foreground) 28%, transparent);
   padding: 36px 34px 30px;
 }
 
@@ -36,14 +36,14 @@ $border: rgba(36, 61, 66, 0.12);
     height: 56px;
     margin: 0 auto 14px;
     border-radius: 16px;
-    background: linear-gradient(135deg, $accent, #3cc4d6);
-    color: #fff;
+    background: linear-gradient(135deg, $accent, var(--term-accent));
+    color: var(--primary-foreground);
     font-size: 26px;
     font-weight: 700;
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 8px 20px -8px rgba(15, 155, 173, 0.6);
+    box-shadow: 0 8px 20px -8px color-mix(in srgb, var(--primary) 60%, transparent);
   }
 
   .brandName {
@@ -87,7 +87,7 @@ $border: rgba(36, 61, 66, 0.12);
       :global(.ant-input-prefix) {
         padding-right: 8px;
         font-size: 16px;
-        color: rgba(36, 61, 66, 0.4);
+        color: color-mix(in srgb, var(--foreground) 40%, transparent);
       }
     }
   }
@@ -108,14 +108,14 @@ $border: rgba(36, 61, 66, 0.12);
   letter-spacing: 2px;
   border: none;
   border-radius: 12px;
-  background: linear-gradient(135deg, $accent 0%, #0c7f8f 100%);
-  box-shadow: 0 10px 22px -10px rgba(15, 155, 173, 0.7);
+  background: linear-gradient(135deg, $accent 0%, var(--primary-hover) 100%);
+  box-shadow: 0 10px 22px -10px color-mix(in srgb, var(--primary) 70%, transparent);
 
   &:hover,
   &:focus,
   &:active {
-    background: linear-gradient(135deg, $accent 0%, #0c7f8f 100%) !important;
-    color: #fff !important;
+    background: linear-gradient(135deg, $accent 0%, var(--primary-hover) 100%) !important;
+    color: var(--primary-foreground) !important;
     opacity: 0.95;
   }
 }
@@ -145,7 +145,7 @@ $border: rgba(36, 61, 66, 0.12);
     gap: 8px;
     font-size: 14px;
     color: $text;
-    background: #fff;
+    background: var(--card);
     border: 1px solid $border;
     border-radius: 12px;
     box-shadow: none;
@@ -155,14 +155,14 @@ $border: rgba(36, 61, 66, 0.12);
     }
 
     &:hover:not(:disabled) {
-      border-color: rgba(15, 155, 173, 0.5) !important;
-      background: rgba(15, 155, 173, 0.04) !important;
+      border-color: color-mix(in srgb, var(--primary) 50%, transparent) !important;
+      background: color-mix(in srgb, var(--primary) 4%, transparent) !important;
       color: $text !important;
     }
 
     &:disabled {
-      color: rgba(36, 61, 66, 0.35);
-      background: #fff;
+      color: color-mix(in srgb, var(--foreground) 35%, transparent);
+      background: var(--card);
       border-color: $border;
     }
   }

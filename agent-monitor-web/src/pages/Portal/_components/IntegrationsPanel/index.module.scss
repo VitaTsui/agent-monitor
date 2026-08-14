@@ -5,19 +5,19 @@
     align-items: center;
     gap: 12px;
     padding: 14px 16px;
-    border: 1px solid rgba(36, 61, 66, 0.1);
+    border: 1px solid color-mix(in srgb, var(--foreground) 10%, transparent);
     border-radius: 14px;
     margin-bottom: 12px;
-    background: #fff;
+    background: var(--card);
     cursor: pointer;
     transition: box-shadow 0.18s, border-color 0.18s;
 
     &:hover {
-      border-color: rgba(15, 155, 173, 0.32);
-      box-shadow: 0 4px 16px rgba(36, 61, 66, 0.06);
+      border-color: color-mix(in srgb, var(--primary) 32%, transparent);
+      box-shadow: 0 4px 16px color-mix(in srgb, var(--foreground) 6%, transparent);
 
       .arrow {
-        color: #0f9bad;
+        color: var(--primary);
         transform: translateX(2px);
       }
     }
@@ -31,7 +31,7 @@
       align-items: center;
       justify-content: center;
       font-size: 21px;
-      color: #fff;
+      color: var(--primary-foreground);
 
       &.ding {
         background: linear-gradient(135deg, #3a8cff 0%, #1677ff 100%);
@@ -48,7 +48,7 @@
         gap: 8px;
         font-size: 14.5px;
         font-weight: 600;
-        color: #243d42;
+        color: var(--foreground);
 
         .typeTag {
           padding: 0 7px;
@@ -58,12 +58,12 @@
           line-height: 17px;
 
           &.push {
-            color: #9a6d0b;
-            background: rgba(242, 178, 52, 0.16);
+            color: var(--warning);
+            background: color-mix(in srgb, var(--warning) 16%, transparent);
           }
           &.two {
-            color: #0a6b79;
-            background: rgba(15, 155, 173, 0.14);
+            color: var(--primary-active);
+            background: color-mix(in srgb, var(--primary) 14%, transparent);
           }
         }
       }
@@ -71,7 +71,7 @@
       .headSub {
         margin-top: 2px;
         font-size: 12px;
-        color: #7c9096;
+        color: var(--muted-foreground);
       }
     }
 
@@ -80,19 +80,19 @@
       padding: 2px 10px;
       border-radius: 999px;
       font-size: 11px;
-      color: #9aa8ac;
-      background: rgba(36, 61, 66, 0.06);
+      color: var(--subtle-foreground);
+      background: color-mix(in srgb, var(--foreground) 6%, transparent);
 
       &.on {
-        color: #22794a;
-        background: rgba(56, 178, 106, 0.14);
+        color: var(--success);
+        background: color-mix(in srgb, var(--success) 14%, transparent);
       }
     }
 
     .arrow {
       flex: none;
       font-size: 13px;
-      color: #b9c4c7;
+      color: var(--border);
       transition: color 0.18s, transform 0.18s;
     }
   }
@@ -109,7 +109,7 @@
 
   .desc {
     font-size: 12.5px;
-    color: #7c9096;
+    color: var(--muted-foreground);
     line-height: 1.75;
     margin: 0;
   }
@@ -124,7 +124,7 @@
     .label {
       font-size: 13px;
       font-weight: 500;
-      color: #4a5f64;
+      color: var(--muted-foreground);
     }
 
     :global(.hsu-input),
@@ -144,7 +144,7 @@
       align-items: center;
       gap: 7px;
       padding: 7px 14px 7px 9px;
-      border: 1px solid rgba(36, 61, 66, 0.1);
+      border: 1px solid color-mix(in srgb, var(--foreground) 10%, transparent);
       border-radius: 999px;
       font-size: 13px;
       white-space: nowrap;
@@ -152,7 +152,7 @@
       user-select: none;
 
       &:hover {
-        border-color: rgba(15, 155, 173, 0.3);
+        border-color: color-mix(in srgb, var(--primary) 30%, transparent);
       }
     }
   }
@@ -176,14 +176,14 @@
     gap: 10px;
     padding: 12px 14px;
     margin: 0;
-    border: 1px solid rgba(15, 155, 173, 0.2);
+    border: 1px solid color-mix(in srgb, var(--primary) 20%, transparent);
     border-radius: 12px;
-    background: linear-gradient(180deg, #f2fbfc 0%, #eaf7f9 100%);
+    background: linear-gradient(180deg, var(--primary-subtle) 0%, var(--primary-subtle) 100%);
 
     .urlLabel {
       flex: none;
       font-size: 12px;
-      color: #7c9096;
+      color: var(--muted-foreground);
     }
 
     .urlValue {
@@ -191,7 +191,7 @@
       min-width: 0;
       font-size: 12px;
       font-family: "SF Mono", Menlo, Consolas, monospace;
-      color: #0a6b79;
+      color: var(--primary-active);
       word-break: break-all;
     }
 
@@ -203,11 +203,11 @@
       width: 28px;
       height: 28px;
       border-radius: 8px;
-      color: #0f9bad;
+      color: var(--primary);
       cursor: pointer;
 
       &:hover {
-        background: rgba(15, 155, 173, 0.12);
+        background: color-mix(in srgb, var(--primary) 12%, transparent);
       }
     }
   }
@@ -219,7 +219,7 @@
 .groupTitle {
   font-size: 12px;
   font-weight: 600;
-  color: #7c9096;
+  color: var(--muted-foreground);
   letter-spacing: 0.5px;
   margin: 16px 2px 8px;
 
@@ -230,18 +230,18 @@
 
 // 文件接收目录卡片图标
 .icon.folder {
-  background: linear-gradient(135deg, #0f9bad, #12b3a6);
+  background: linear-gradient(135deg, var(--primary), var(--term-accent));
 }
 
 // 接收目录弹窗
 .recvModalHint {
   font-size: 12px;
-  color: #7c9096;
+  color: var(--muted-foreground);
   line-height: 1.6;
   margin-bottom: 14px;
 
   code {
-    background: rgba(36, 61, 66, 0.07);
+    background: color-mix(in srgb, var(--foreground) 7%, transparent);
     border-radius: 4px;
     padding: 0 4px;
   }
@@ -249,14 +249,14 @@
 
 .recvEmpty {
   font-size: 13px;
-  color: #9aa7ad;
+  color: var(--subtle-foreground);
   text-align: center;
   padding: 18px 0;
 }
 
 // 已绑定的钉钉
 .boundCard {
-  border: 1px solid rgba(15, 155, 173, 0.14);
+  border: 1px solid color-mix(in srgb, var(--primary) 14%, transparent);
   border-radius: 12px;
   padding: 14px 16px;
   margin-bottom: 10px;
@@ -269,7 +269,7 @@
     font-weight: 600;
 
     .boundTitleIcon {
-      color: #0f9bad;
+      color: var(--primary);
     }
   }
 
@@ -280,12 +280,12 @@
     font-weight: 500;
     padding: 1px 8px;
     border-radius: 999px;
-    background: rgba(242, 178, 52, 0.16);
-    color: #9a6d0b;
+    background: color-mix(in srgb, var(--warning) 16%, transparent);
+    color: var(--warning);
 
     &.botOk {
-      background: rgba(56, 178, 106, 0.14);
-      color: #22794a;
+      background: color-mix(in srgb, var(--success) 14%, transparent);
+      color: var(--success);
     }
   }
 
@@ -306,7 +306,7 @@
     margin-top: 12px;
     font-size: 12px;
     line-height: 1.7;
-    color: #9aa7ad;
+    color: var(--subtle-foreground);
   }
 
   // 扫码绑定：左二维码 + 右说明
@@ -324,9 +324,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    border: 1px solid rgba(15, 155, 173, 0.16);
+    border: 1px solid color-mix(in srgb, var(--primary) 16%, transparent);
     border-radius: 10px;
-    background: #fff;
+    background: var(--card);
 
     .qrErr {
       display: flex;
@@ -336,7 +336,7 @@
       padding: 0 12px;
       font-size: 12px;
       line-height: 1.6;
-      color: #9aa7ad;
+      color: var(--subtle-foreground);
       text-align: center;
     }
   }
@@ -348,29 +348,29 @@
     .qrTitle {
       font-size: 13px;
       font-weight: 600;
-      color: #243d42;
+      color: var(--foreground);
     }
 
     .qrSub {
       margin-top: 6px;
       font-size: 12px;
       line-height: 1.7;
-      color: #9aa7ad;
+      color: var(--subtle-foreground);
     }
 
     .qrAlt {
       margin-top: 10px;
       font-size: 12px;
       line-height: 1.8;
-      color: #9aa7ad;
+      color: var(--subtle-foreground);
 
       .qrCmd {
         display: inline-block;
         margin-left: 2px;
         padding: 1px 8px;
         border-radius: 6px;
-        background: rgba(15, 155, 173, 0.08);
-        color: #0f7c8a;
+        background: color-mix(in srgb, var(--primary) 8%, transparent);
+        color: var(--primary-hover);
         font-size: 12px;
         cursor: pointer;
       }
@@ -380,7 +380,7 @@
   // 已绑定的钉钉号
   .idList {
     margin-top: 14px;
-    border-top: 1px solid rgba(36, 61, 66, 0.08);
+    border-top: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
 
     .idRow {
       display: flex;
@@ -389,11 +389,11 @@
       padding: 10px 0;
 
       & + .idRow {
-        border-top: 1px solid rgba(36, 61, 66, 0.06);
+        border-top: 1px solid color-mix(in srgb, var(--foreground) 6%, transparent);
       }
 
       .idIcon {
-        color: #0f9bad;
+        color: var(--primary);
         font-size: 16px;
       }
 
@@ -403,7 +403,7 @@
 
         .idNick {
           font-size: 13px;
-          color: #243d42;
+          color: var(--foreground);
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
@@ -411,7 +411,7 @@
 
         .idStaff {
           font-size: 11.5px;
-          color: #9aa7ad;
+          color: var(--subtle-foreground);
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
@@ -427,9 +427,9 @@
   .recvDevName {
     font-size: 12px;
     font-weight: 600;
-    color: #243d42;
+    color: var(--foreground);
     padding: 4px 0;
-    border-bottom: 1px solid rgba(36, 61, 66, 0.08);
+    border-bottom: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
     margin-bottom: 6px;
   }
 
@@ -447,7 +447,7 @@
       .recvProjTitle {
         font-size: 13.5px;
         font-weight: 600;
-        color: #243d42;
+        color: var(--foreground);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -456,7 +456,7 @@
       .recvProjPath {
         margin-top: 1px;
         font-size: 11px;
-        color: #9aa7ad;
+        color: var(--subtle-foreground);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -487,12 +487,12 @@
   gap: 2px;
   font-size: 12.5px;
   padding: 6px 8px;
-  background: rgba(36, 61, 66, 0.04);
+  background: color-mix(in srgb, var(--foreground) 4%, transparent);
   border-radius: 8px;
   margin-bottom: 10px;
 
   .pickCrumb {
-    color: #0f9bad;
+    color: var(--primary);
     cursor: pointer;
 
     &:hover {
@@ -501,7 +501,7 @@
   }
 
   .pickSep {
-    color: #b3bec2;
+    color: var(--subtle-foreground);
     margin: 0 2px;
   }
 }
@@ -513,7 +513,7 @@
   .pickLoading,
   .pickEmpty {
     font-size: 13px;
-    color: #9aa7ad;
+    color: var(--subtle-foreground);
     text-align: center;
     padding: 24px 0;
   }
@@ -527,22 +527,22 @@
     cursor: pointer;
 
     &:hover {
-      background: rgba(15, 155, 173, 0.08);
+      background: color-mix(in srgb, var(--primary) 8%, transparent);
     }
 
     .pickIcon {
-      color: #f0b429;
+      color: var(--warning);
     }
 
     .pickItemName {
       flex: 1;
       min-width: 0;
       font-size: 13.5px;
-      color: #243d42;
+      color: var(--foreground);
     }
 
     .pickArrow {
-      color: #c2c8cf;
+      color: var(--border);
       font-size: 12px;
     }
   }

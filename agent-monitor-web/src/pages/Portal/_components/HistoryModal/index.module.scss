@@ -1,7 +1,7 @@
 // 配色与 Composer 保持一致（同一屏内的组件，色板不该各写各的）
-$text: #243d42;
-$muted: #7c9096;
-$accent: #0f9bad;
+$text: var(--foreground);
+$muted: var(--muted-foreground);
+$accent: var(--primary);
 $mono: "SF Mono", Menlo, Consolas, monospace;
 
 .hint {
@@ -11,7 +11,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   font-size: 12px;
   color: $muted;
   padding-bottom: 10px;
-  border-bottom: 1px solid rgba(36, 61, 66, 0.08);
+  border-bottom: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
 
   // 说明文字可压缩，切换按钮不许被挤变形
   > span {
@@ -42,7 +42,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   gap: 8px;
   margin: 14px 0 8px;
   padding-bottom: 5px;
-  border-bottom: 1px dashed rgba(36, 61, 66, 0.12);
+  border-bottom: 1px dashed color-mix(in srgb, var(--foreground) 12%, transparent);
 
   &:first-child {
     margin-top: 0;
@@ -56,7 +56,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   height: 20px;
   padding: 0 6px;
   border-radius: 6px;
-  background: rgba(15, 155, 173, 0.12);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
   color: $accent;
   font-family: $mono;
   font-size: 12px;
@@ -100,7 +100,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   max-width: 78%;
   padding: 6px 12px;
   border-radius: 12px 12px 2px 12px;
-  background: rgba(15, 155, 173, 0.1);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
   color: $text;
   font-size: 13px;
   // 正文交给 Markdown.Views 渲染，这里只管容器：长串（URL/路径）要能断行
@@ -143,7 +143,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
       overflow-x: auto;
       padding: 8px 10px;
       border-radius: 6px;
-      background: rgba(36, 61, 66, 0.06);
+      background: color-mix(in srgb, var(--foreground) 6%, transparent);
       font-size: 12px;
       line-height: 1.55;
     }
@@ -166,8 +166,8 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 .bubbleAgent {
   @extend .bubbleUser;
   border-radius: 12px 12px 12px 2px;
-  background: rgba(36, 61, 66, 0.05);
-  color: rgba(36, 61, 66, 0.85);
+  background: color-mix(in srgb, var(--foreground) 5%, transparent);
+  color: color-mix(in srgb, var(--foreground) 85%, transparent);
 }
 
 .time {
