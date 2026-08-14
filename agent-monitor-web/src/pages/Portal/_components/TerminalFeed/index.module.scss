@@ -1,11 +1,13 @@
-$text: #243d42;
-$muted: #7c9096;
-$user-bubble: #e2eff1;
-$term-bg: #102a30;
-$term-text: #ddedef;
-$term-dim: #84979c;
-$term-accent: #3cc4d6;
-$term-green: #67a579;
+// 颜色全部走 styles/tokens.scss 的令牌。这里保留 scss 变量名只是为了不改下面几百处用法，
+// 值一律指向 token —— 终端那几支是**不跟随主题**的独立语义（见 tokens.scss 的说明）。
+$text: var(--foreground);
+$muted: var(--muted-foreground);
+$user-bubble: var(--primary-subtle);
+$term-bg: var(--term-bg);
+$term-text: var(--term-text);
+$term-dim: var(--term-dim);
+$term-accent: var(--term-accent);
+$term-green: var(--term-green);
 $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
 .TerminalFeed {
@@ -44,7 +46,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
         margin-top: 4px;
         font-size: 12px;
         font-weight: 500;
-        color: #0a6b79;
+        color: var(--primary-active);
         cursor: pointer;
         user-select: none;
 
@@ -56,7 +58,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
     .userTime {
       font-size: 10px;
-      color: rgba(36, 61, 66, 0.35);
+      color: color-mix(in srgb, var(--foreground) 35%, transparent);
       padding-right: 4px;
     }
   }
@@ -73,8 +75,8 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       align-items: center;
       gap: 8px;
       padding: 8px 12px;
-      background: rgba(255, 255, 255, 0.04);
-      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      background: color-mix(in srgb, var(--term-fg) 4%, transparent);
+      border-bottom: 1px solid color-mix(in srgb, var(--term-fg) 6%, transparent);
 
       .termDots {
         display: flex;
@@ -84,16 +86,16 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           width: 9px;
           height: 9px;
           border-radius: 50%;
-          background: rgba(255, 255, 255, 0.18);
+          background: color-mix(in srgb, var(--term-fg) 18%, transparent);
 
           &:nth-child(1) {
-            background: #f56c6c;
+            background: var(--destructive);
           }
           &:nth-child(2) {
-            background: #f2b234;
+            background: var(--warning);
           }
           &:nth-child(3) {
-            background: #38b26a;
+            background: var(--success);
           }
         }
       }
@@ -107,7 +109,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
       .termTime {
         font-size: 10px;
-        color: rgba(255, 255, 255, 0.25);
+        color: color-mix(in srgb, var(--term-fg) 25%, transparent);
       }
     }
 
@@ -183,19 +185,19 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
       // 行内 code：略亮的底 + 高对比青色，看得清又不刺眼
       code {
-        background: rgba(255, 255, 255, 0.14);
+        background: color-mix(in srgb, var(--term-fg) 14%, transparent);
         border-radius: 4px;
         padding: 1px 5px;
         font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
         font-size: 12.5px;
-        color: #a5f3fc;
+        color: color-mix(in srgb, var(--term-accent) 55%, #ffffff);
       }
 
       // 无语言标记的代码块：ReactMarkdown 只输出 <pre><code>，这里自绘深底盒子——
       // 明显更暗的实底 + 描边，与深色卡片拉开层次；文字提亮到接近纯白，长行横向滚动不撑破布局
       pre {
-        background: #10201f;
-        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: var(--term-bg);
+        border: 1px solid color-mix(in srgb, var(--term-fg) 14%, transparent);
         border-radius: 8px;
         padding: 10px 12px;
         overflow-x: auto;
@@ -206,7 +208,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           background: none;
           padding: 0;
           font-size: 12.5px;
-          color: #e6f0ef;
+          color: var(--primary-subtle);
         }
       }
 
@@ -224,26 +226,26 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           display: block;
           padding: 10px 12px;
           overflow-x: auto;
-          color: #e6f0ef;
+          color: var(--primary-subtle);
         }
 
         // 顶栏(.nav #212121)里的复制按钮(hsu-ui Copy)默认取浅色主题变量(深灰)，
         // 落在深色顶栏上几乎看不见 → 就近把顶栏内的文字/图标主题变量提亮
         > div > div:first-child {
-          --cf-text-2: #cfeaed;
-          --cf-text: #ffffff;
-          --cf-row-hover: rgba(255, 255, 255, 0.12);
+          --vita-muted-foreground: var(--term-text);
+          --vita-foreground: var(--term-fg);
+          --cf-row-hover: color-mix(in srgb, var(--term-fg) 12%, transparent);
         }
       }
 
       a {
-        color: #7fd8e3;
+        color: color-mix(in srgb, var(--term-accent) 75%, #ffffff);
       }
 
       blockquote {
-        border-left: 3px solid rgba(255, 255, 255, 0.25);
+        border-left: 3px solid color-mix(in srgb, var(--term-fg) 25%, transparent);
         padding-left: 10px;
-        color: rgba(255, 255, 255, 0.75);
+        color: color-mix(in srgb, var(--term-fg) 75%, transparent);
       }
 
       table {
@@ -251,14 +253,14 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
         th,
         td {
-          border: 1px solid rgba(255, 255, 255, 0.18);
+          border: 1px solid color-mix(in srgb, var(--term-fg) 18%, transparent);
           padding: 3px 8px;
         }
       }
 
       hr {
         border: none;
-        border-top: 1px solid rgba(255, 255, 255, 0.18);
+        border-top: 1px solid color-mix(in srgb, var(--term-fg) 18%, transparent);
         margin: 8px 0;
       }
     }
@@ -266,14 +268,14 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
   // plan 模式的待批准方案：终端里独立成框，比工具流水更显眼
   .planCard {
-    border: 1px solid rgba(60, 196, 214, 0.35);
+    border: 1px solid color-mix(in srgb, var(--term-accent) 35%, transparent);
     border-radius: 8px;
     margin: 2px 0 6px;
     overflow: hidden;
 
     .planHead {
       padding: 5px 10px;
-      background: rgba(60, 196, 214, 0.12);
+      background: color-mix(in srgb, var(--term-accent) 12%, transparent);
       color: $term-accent;
       font-size: 12px;
       font-weight: 600;
@@ -328,7 +330,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     padding-left: 14px;
 
     .resultElbow {
-      color: rgba(255, 255, 255, 0.22);
+      color: color-mix(in srgb, var(--term-fg) 22%, transparent);
       flex: none;
     }
 
@@ -373,7 +375,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: #38b26a;
+      background: var(--success);
       animation: working-pulse 1.1s ease-in-out infinite;
     }
 
@@ -421,7 +423,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   // 排队中的气泡：虚线边 + 弱化底色，与已接收消息区分
   .userBubble.queued {
     opacity: 0.85;
-    border: 1px dashed rgba(15, 155, 173, 0.45);
+    border: 1px dashed color-mix(in srgb, var(--primary) 45%, transparent);
   }
 
   .queuedRow {
@@ -436,20 +438,20 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       align-items: center;
       gap: 5px;
       font-size: 11px;
-      color: #8a9ba0;
+      color: var(--term-dim);
 
       .queuedDot {
         width: 6px;
         height: 6px;
         border-radius: 50%;
-        background: #f2b234;
+        background: var(--warning);
         animation: queuedPulse 1.2s ease-in-out infinite;
       }
     }
 
     .recallBtn {
       font-size: 11px;
-      color: #0f9bad;
+      color: var(--primary);
       cursor: pointer;
 
       &:hover {
@@ -477,12 +479,12 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       align-items: center;
       gap: 6px;
       font-size: 12px;
-      color: rgba(255, 255, 255, 0.55);
+      color: color-mix(in srgb, var(--term-fg) 55%, transparent);
       cursor: pointer;
       user-select: none;
 
       &:hover {
-        color: rgba(255, 255, 255, 0.85);
+        color: color-mix(in srgb, var(--term-fg) 85%, transparent);
       }
 
       .toolGroupArrow {
@@ -501,7 +503,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
   // 交互式选择卡片（AskUserQuestion 同步）：琥珀色调，暗示「等待输入」
   .selectCard {
-    border: 1px solid rgba(217, 164, 65, 0.45);
+    border: 1px solid color-mix(in srgb, var(--term-amber) 45%, transparent);
     border-radius: 8px;
     margin: 2px 0 6px;
     overflow: hidden;
@@ -511,8 +513,8 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       align-items: center;
       gap: 8px;
       padding: 5px 10px;
-      background: rgba(217, 164, 65, 0.16);
-      color: #f0c674;
+      background: color-mix(in srgb, var(--term-amber) 16%, transparent);
+      color: var(--term-amber);
       font-size: 12px;
       font-weight: 600;
 
@@ -546,8 +548,8 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
         gap: 8px;
         padding: 6px 8px;
         border-radius: 6px;
-        background: rgba(255, 255, 255, 0.04);
-        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: color-mix(in srgb, var(--term-fg) 4%, transparent);
+        border: 1px solid color-mix(in srgb, var(--term-fg) 8%, transparent);
 
         &.clickable {
           cursor: pointer;
@@ -556,13 +558,13 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           // 触屏没有 hover，靠按下瞬间的高亮告诉用户「点到了」——
           // 手机上点完到终端回消息之间有一两秒空窗，没这个反馈就会以为没点上而重复点。
           &:active {
-            background: rgba(217, 164, 65, 0.28);
+            background: color-mix(in srgb, var(--term-amber) 28%, transparent);
           }
 
           @media (hover: hover) {
             &:hover {
-              background: rgba(217, 164, 65, 0.16);
-              border-color: rgba(217, 164, 65, 0.5);
+              background: color-mix(in srgb, var(--term-amber) 16%, transparent);
+              border-color: color-mix(in srgb, var(--term-amber) 50%, transparent);
             }
           }
         }
@@ -570,8 +572,8 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
         // 多选已勾选：边框与底色都点亮，序号位换成 ✓（见 SelectCard）。
         // 多选是「攒够了再提交」，没有选中态就完全不知道自己勾了什么。
         &.selectOptPicked {
-          background: rgba(217, 164, 65, 0.2);
-          border-color: rgba(217, 164, 65, 0.62);
+          background: color-mix(in srgb, var(--term-amber) 20%, transparent);
+          border-color: color-mix(in srgb, var(--term-amber) 62%, transparent);
         }
 
         .selectOptIdx {
@@ -579,8 +581,8 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           width: 18px;
           height: 18px;
           border-radius: 5px;
-          background: rgba(217, 164, 65, 0.22);
-          color: #f0c674;
+          background: color-mix(in srgb, var(--term-amber) 22%, transparent);
+          color: var(--term-amber);
           font-size: 11px;
           display: flex;
           align-items: center;
@@ -598,7 +600,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           }
 
           .selectOptDesc {
-            color: rgba(230, 240, 239, 0.6);
+            color: color-mix(in srgb, var(--primary-subtle) 60%, transparent);
             font-size: 11.5px;
             margin-top: 1px;
           }
@@ -620,18 +622,18 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
             min-width: 0;
             padding: 4px 8px;
             border-radius: 5px;
-            border: 1px solid rgba(255, 255, 255, 0.12);
+            border: 1px solid color-mix(in srgb, var(--term-fg) 12%, transparent);
             background: rgba(0, 0, 0, 0.22);
             color: $term-text;
             font-size: 12.5px;
             outline: none;
 
             &::placeholder {
-              color: rgba(230, 240, 239, 0.4);
+              color: color-mix(in srgb, var(--primary-subtle) 40%, transparent);
             }
 
             &:focus {
-              border-color: rgba(217, 164, 65, 0.5);
+              border-color: color-mix(in srgb, var(--term-amber) 50%, transparent);
             }
 
             &:disabled {
@@ -644,14 +646,14 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
             padding: 3px 10px;
             border-radius: 5px;
             font-size: 12px;
-            background: rgba(217, 164, 65, 0.22);
-            color: #f0c674;
+            background: color-mix(in srgb, var(--term-amber) 22%, transparent);
+            color: var(--term-amber);
 
             &.clickable {
               cursor: pointer;
 
               &:hover {
-                background: rgba(217, 164, 65, 0.36);
+                background: color-mix(in srgb, var(--term-amber) 36%, transparent);
               }
             }
 
@@ -677,21 +679,21 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
         border-radius: 6px;
         text-align: center;
         font-size: 12px;
-        background: rgba(217, 164, 65, 0.22);
-        color: #f0c674;
-        border: 1px solid rgba(217, 164, 65, 0.42);
+        background: color-mix(in srgb, var(--term-amber) 22%, transparent);
+        color: var(--term-amber);
+        border: 1px solid color-mix(in srgb, var(--term-amber) 42%, transparent);
 
         &.clickable {
           cursor: pointer;
 
           @media (hover: hover) {
             &:hover {
-              background: rgba(217, 164, 65, 0.36);
+              background: color-mix(in srgb, var(--term-amber) 36%, transparent);
             }
           }
 
           &:active {
-            background: rgba(217, 164, 65, 0.44);
+            background: color-mix(in srgb, var(--term-amber) 44%, transparent);
           }
         }
 
@@ -704,7 +706,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
     .selectHint {
       padding: 4px 10px 8px;
-      color: rgba(230, 240, 239, 0.5);
+      color: color-mix(in srgb, var(--primary-subtle) 50%, transparent);
       font-size: 11px;
 
       // 提示语按端择一（「回车」在手机虚拟键盘上不存在）
