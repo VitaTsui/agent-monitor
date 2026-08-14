@@ -11,9 +11,23 @@ import { NavTabBarTitleContent } from "@hsu-react/ui/es/layout";
 import { getAccessToken } from "@/utils/auth";
 import { ConfigProvider as HsuConfigProvider } from "@hsu-react/ui";
 import { get, post, del, put } from "@/services/Axios";
+import HsuLayout from "@hsu-react/ui/es/layout";
+
+/**
+ * 品牌主色。与 styles/tokens.scss 里的 --primary 同一取值：浅色 #0f9bad，
+ * 暗色提亮到 #3cc4d6（#0f9bad 压在 #09090b 上对比度不足）。
+ *
+ * 必须是**字面量**，不能填 var(--primary)：antd 要由它派生一整条 10 级色板，
+ * 拿到 var() 会直接算不出来。两处取值重复是有意的，改动时一起改。
+ *
+ * 这一层原本由本项目的 layout/Theme 承担（写死 #13C2C2）；布局收进组件库后没人接手，
+ * 主色会静默回落成 antd 默认的蓝，所以在这里显式传给 ConfigProvider。
+ */
+const primaryColorOf = (isDark: boolean) => (isDark ? "#3cc4d6" : "#0f9bad");
 
 const Routes: React.FC = observer(() => {
   const { router, permissions } = RouterStore;
+  const { headerTheme } = HsuLayout.ThemeStore;
   const [id, setId] = useState<string>("");
   const [dropKey, setDropKey] = useState<string>("");
   const [tabTitles, setTabTitles] = useState<Record<string, React.ReactNode>>(
@@ -57,7 +71,11 @@ const Routes: React.FC = observer(() => {
 
   return (
     // 注入 @hsu-react/ui 的权限与请求实现，供库内组件（Button hasPermi、ImportForm 等）使用
-    <HsuConfigProvider permissions={permissions} request={{ get, post, del, put }}>
+    <HsuConfigProvider
+      permissions={permissions}
+      request={{ get, post, del, put }}
+      primaryColor={primaryColorOf(headerTheme !== "light")}
+    >
       <ReloadContent.Provider value={value}>
         <NavTabBarContent.Provider value={dropTabValue}>
           <NavTabBarTitleContent.Provider value={tabTitleValue}>
