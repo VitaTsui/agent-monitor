@@ -1,6 +1,8 @@
-// Claude 网页版配色（浅色）
-$cream: var(--primary-subtle); // 主内容背景
-$oat: var(--primary-subtle); // 侧栏背景
+// 页面的两层面。原值是 #f4fafb / #e6f1f3 —— 带一点品牌色倾向的米白，但语义上是
+// **画布与侧栏面**，不是品牌淡染。第一版迁移时错映射成了 --primary-subtle，
+// 浅色下看着差不多，暗色下那支是半透明青，整页糊成一片。
+$cream: var(--background); // 主内容背景
+$oat: var(--card); // 侧栏背景
 $border: color-mix(in srgb, var(--foreground) 9%, transparent);
 $text: var(--foreground);
 $muted: var(--muted-foreground);

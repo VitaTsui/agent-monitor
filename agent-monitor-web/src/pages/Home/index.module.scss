@@ -1,5 +1,5 @@
-$cream: var(--primary-subtle);
-$oat: var(--primary-subtle);
+$cream: var(--background); // 页面底
+$oat: var(--card); // 卡片/区块面
 $text: var(--foreground);
 $muted: var(--muted-foreground);
 $accent: var(--primary);
@@ -26,7 +26,7 @@ $border: color-mix(in srgb, var(--foreground) 10%, transparent);
 // 导航
 .nav {
   position: sticky; top: 0; z-index: 20;
-  background: color-mix(in srgb, var(--primary-subtle) 85%, transparent);
+  background: color-mix(in srgb, var(--background) 85%, transparent);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid $border;
 

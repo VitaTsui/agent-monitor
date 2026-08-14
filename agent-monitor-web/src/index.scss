@@ -81,7 +81,7 @@ body,
   // 布局严丝跟随（100dvh 在部分 iOS 版本不随原生 resize 收缩，会留空隙）
   height: 100%;
   // 底色兜底：键盘 resize 缩放时若透明会透出 WKWebView 黑色默认背景
-  background: var(--primary-subtle);
+  background: var(--background);
   overflow: hidden;
   // 关掉 iOS 自动放大文字：选中会话用 ScrollText 渲染成宽滚动块时，iOS 会判定为
   // 「宽文本」把字号自动放大，导致「选中的终端字变大」。固定 100% 即禁用该行为。
