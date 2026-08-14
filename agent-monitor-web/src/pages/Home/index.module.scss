@@ -18,7 +18,8 @@ $border: color-mix(in srgb, var(--foreground) 10%, transparent);
 .logo {
   width: 30px; height: 30px; min-width: 30px;
   border-radius: var(--radius);
-  background: linear-gradient(135deg, $accent, var(--term-accent));
+  // 与应用图标同色：单色墨黑，不用渐变（shadcn 默认主题不用渐变）
+    background: var(--primary);
   color: var(--primary-foreground); font-weight: 700; font-size: var(--text-md);
   display: flex; align-items: center; justify-content: center;
 }
