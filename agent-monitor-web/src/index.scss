@@ -166,6 +166,11 @@ ol {
 .ant-notification.ant-notification-bottom,
 .ant-notification.ant-notification-bottomLeft,
 .ant-notification.ant-notification-bottomRight {
+  // top 必须一起解掉。antd 对所有 placement 都设了 top（实测 50px），底部靠 bottom:auto
+  // 区分；只覆盖 bottom 而不动 top，两端就同时钉死——容器被拉成整屏高（实测 720px，
+  // 盒底 770），通知贴着容器底部排，直接掉出视口 26px。
+  // 这正是「更新提醒被挡住」的真相：不是被别的元素盖住，是被挤到屏幕外面了。
+  top: auto !important;
   bottom: calc(
     env(safe-area-inset-bottom) + var(--composer-height, 0px) + 24px
   ) !important;
