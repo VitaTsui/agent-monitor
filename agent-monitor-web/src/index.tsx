@@ -16,7 +16,8 @@ import "@hsu-react/ui/es/styles/antd-overload.scss";
 import "./styles/antd-overload.scss";
 
 import { BrowserRouter } from "react-router-dom";
-import Internationalization from "./layout/I18n";
+// I18n 也收进了组件库（内置中英两套，并把 antd 的 locale 一并接上）
+import HsuLayout from "@hsu-react/ui/es/layout";
 import ClientTitleBar from "./layout/ClientTitleBar";
 import ReactDOM from "react-dom/client";
 import Routes from "./router/Routes";
@@ -26,10 +27,10 @@ import { SingleRouter } from "@hsu-react/single-router";
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <BrowserRouter>
     <SingleRouter showPath={false}>
-      <Internationalization>
+      <HsuLayout.I18n>
         <ClientTitleBar />
         <Routes />
-      </Internationalization>
+      </HsuLayout.I18n>
     </SingleRouter>
   </BrowserRouter>,
 );

@@ -14,10 +14,9 @@ import KeepAlive from "react-activation";
 import { useLocation, useNavigate } from "react-router";
 import { array_is_includes } from "hsu-utils";
 import { getAccessToken } from "@/utils/auth";
-import { ReloadContent } from "@/hooks/useReload";
-import useReload from "@/hooks/useReload";
+import { ReloadContent, useReload } from "@hsu-react/ui/es/layout";
 import useDocTitle from "@/router/_hooks/useDocTitle";
-import usePermissions from "@/hooks/usePermissions";
+import { usePermissions } from "@hsu-react/ui";
 
 const RouterContainer: React.FC<RouteType> = (props) => {
   const { meta = {}, element, path = "", children, index } = props;
