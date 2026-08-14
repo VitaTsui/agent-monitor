@@ -18,7 +18,7 @@
       width: 52px;
       height: 52px;
       margin: 0 auto 16px;
-      border-radius: 16px;
+      border-radius: var(--radius-lg);
       background: color-mix(in srgb, var(--primary) 10%, transparent);
       color: var(--primary);
       font-size: 24px;
@@ -35,7 +35,7 @@
     }
 
     .desc {
-      font-size: 12px;
+      font-size: var(--text-sm);
       color: var(--muted-foreground);
       line-height: 1.7;
       margin-bottom: 20px;

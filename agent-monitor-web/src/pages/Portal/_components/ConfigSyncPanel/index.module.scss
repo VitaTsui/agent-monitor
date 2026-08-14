@@ -17,7 +17,7 @@ $accent: var(--primary);
     gap: 12px;
     padding: 14px 16px;
     border: 1px solid $border;
-    border-radius: 14px;
+    border-radius: var(--radius-lg);
     margin-bottom: 12px;
     background: var(--card);
 
@@ -60,7 +60,7 @@ $accent: var(--primary);
     gap: 10px;
     padding: 10px 12px;
     border: 1px solid $border;
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
     margin-bottom: 8px;
 
     .devInfo {
@@ -70,7 +70,7 @@ $accent: var(--primary);
         display: flex;
         align-items: center;
         gap: 6px;
-        font-size: 13px;
+        font-size: var(--text-base);
         font-weight: 600;
         color: $text;
         flex-wrap: wrap;
@@ -78,7 +78,7 @@ $accent: var(--primary);
 
       .devMeta {
         margin-top: 4px;
-        font-size: 11px;
+        font-size: var(--text-xs);
         color: $muted;
       }
     }
@@ -92,9 +92,9 @@ $accent: var(--primary);
       .actBtn,
       .sourceBtn {
         height: 28px;
-        border-radius: 999px;
+        border-radius: var(--radius-full);
         padding-inline: 14px;
-        font-size: 12px;
+        font-size: var(--text-sm);
       }
 
       .sourceBtn {
@@ -113,7 +113,7 @@ $accent: var(--primary);
   .note {
     margin-top: 14px;
     padding: 12px 14px;
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
     background: color-mix(in srgb, var(--primary) 5%, transparent);
     border: 1px solid color-mix(in srgb, var(--primary) 14%, transparent);
 
@@ -131,9 +131,9 @@ $accent: var(--primary);
 
       code {
         padding: 1px 5px;
-        border-radius: 5px;
+        border-radius: var(--radius-sm);
         background: color-mix(in srgb, var(--foreground) 6%, transparent);
-        font-size: 11px;
+        font-size: var(--text-xs);
         color: $text;
       }
 
@@ -160,7 +160,7 @@ $accent: var(--primary);
           height: 28px !important;
           min-height: 28px !important;
           padding-inline: 12px !important;
-          font-size: 12px !important;
+          font-size: var(--text-sm) !important;
         }
       }
     }

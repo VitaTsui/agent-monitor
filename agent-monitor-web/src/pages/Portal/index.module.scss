@@ -56,17 +56,17 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
           width: 28px;
           height: 28px;
           min-width: 28px;
-          border-radius: 8px;
+          border-radius: var(--radius);
           background: $accent;
           color: var(--primary-foreground);
-          font-size: 15px;
+          font-size: var(--text-md);
           display: flex;
           align-items: center;
           justify-content: center;
         }
 
         .brandName {
-          font-size: 14px;
+          font-size: var(--text-md);
           font-weight: 600;
           white-space: nowrap;
           overflow: hidden;
@@ -75,11 +75,11 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
       }
 
       .foldBtn {
-        font-size: 14px;
+        font-size: var(--text-md);
         color: $muted;
         cursor: pointer;
         padding: 4px;
-        border-radius: 6px;
+        border-radius: var(--radius-sm);
 
         &:hover {
           background: $hover;
@@ -95,10 +95,10 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
       .search {
         height: 32px;
         padding: 2px 10px;
-        font-size: 13px;
+        font-size: var(--text-base);
         background: color-mix(in srgb, var(--foreground) 5%, transparent);
         border: 1px solid transparent;
-        border-radius: 10px;
+        border-radius: var(--radius);
         box-shadow: none;
         transition: background 0.15s, border-color 0.15s;
 
@@ -113,7 +113,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
 
         :global(input.ant-input) {
           background: transparent;
-          font-size: 13px;
+          font-size: var(--text-base);
 
           &::placeholder {
             color: color-mix(in srgb, var(--foreground) 35%, transparent);
@@ -134,7 +134,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
     }
 
     .sectionLabel {
-      font-size: 11px;
+      font-size: var(--text-xs);
       font-weight: 600;
       color: $muted;
       padding: 18px 8px 6px;
@@ -149,7 +149,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
       gap: 2px;
 
       .noDevice {
-        font-size: 12px;
+        font-size: var(--text-sm);
         color: $muted;
         padding: 8px;
         text-align: center;
@@ -160,9 +160,9 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
         align-items: center;
         gap: 8px;
         padding: 7px 10px;
-        border-radius: 8px;
+        border-radius: var(--radius);
         cursor: pointer;
-        font-size: 13px;
+        font-size: var(--text-base);
         color: $text;
 
         &:hover {
@@ -187,8 +187,8 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
           display: inline-block;
           margin-left: 6px;
           padding: 0 5px;
-          border-radius: 6px;
-          font-size: 10px;
+          border-radius: var(--radius-sm);
+          font-size: var(--text-xs);
           line-height: 16px;
           color: var(--primary-foreground);
           background: $accent;
@@ -197,7 +197,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
 
         .deviceTabStat {
           flex: none;
-          font-size: 11px;
+          font-size: var(--text-xs);
           color: $muted;
           white-space: nowrap;
         }
@@ -224,7 +224,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
         align-items: center;
         gap: 6px;
         padding: 6px 8px;
-        font-size: 11px;
+        font-size: var(--text-xs);
         color: $muted;
         user-select: none;
 
@@ -241,7 +241,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
       align-items: center;
       gap: 8px;
       padding: 7px 10px;
-      border-radius: 8px;
+      border-radius: var(--radius);
       cursor: pointer;
       // 触摸屏不套 :hover —— 否则移动端首触只落 hover 态、需再点一次才触发 onClick
       // （经典 sticky-hover），表现为「点两次才打开会话」。仅指针设备保留悬停反馈。
@@ -284,7 +284,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
         min-width: 18px;
         height: 18px;
         padding: 0 5px;
-        border-radius: 5px;
+        border-radius: var(--radius-sm);
         background: color-mix(in srgb, var(--primary) 12%, transparent);
         color: $accent;
         font-family: "SF Mono", Menlo, Consolas, monospace;
@@ -307,7 +307,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
         .sessName {
           flex: 1;
           min-width: 0;
-          font-size: 13px;
+          font-size: var(--text-base);
           color: $text;
           overflow: hidden;
           text-overflow: ellipsis;
@@ -318,8 +318,8 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
         .sessStatus {
           flex: none;
           padding: 0 7px;
-          border-radius: 999px;
-          font-size: 10px;
+          border-radius: var(--radius-full);
+          font-size: var(--text-xs);
           line-height: 17px;
           background: color-mix(in srgb, var(--foreground) 7%, transparent);
           color: $muted;
@@ -363,8 +363,8 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
         justify-content: center;
         width: 22px;
         height: 22px;
-        border-radius: 6px;
-        font-size: 12px;
+        border-radius: var(--radius-sm);
+        font-size: var(--text-sm);
         color: var(--muted-foreground);
         // 必须不透明：按钮悬浮在状态徽标之上，半透明底会让下层文字
         // 透出来叠在图标上。取「行悬停底色叠在侧栏底色上」的实色近似值
@@ -382,7 +382,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
       padding: 40px 16px;
       text-align: center;
       color: $muted;
-      font-size: 12px;
+      font-size: var(--text-sm);
       line-height: 1.7;
     }
 
@@ -393,7 +393,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
       gap: 10px;
       margin: 8px;
       padding: 8px 10px;
-      border-radius: 10px;
+      border-radius: var(--radius);
       cursor: pointer;
       border-top: none;
 
@@ -408,7 +408,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
         border-radius: 50%;
         background: $accent;
         color: var(--primary-foreground);
-        font-size: 13px;
+        font-size: var(--text-base);
         font-weight: 600;
         display: flex;
         align-items: center;
@@ -420,7 +420,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
         min-width: 0;
 
         .userName {
-          font-size: 13px;
+          font-size: var(--text-base);
           font-weight: 500;
           overflow: hidden;
           text-overflow: ellipsis;
@@ -428,13 +428,13 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
         }
 
         .userPlan {
-          font-size: 11px;
+          font-size: var(--text-xs);
           color: $muted;
         }
       }
 
       .userChevron {
-        font-size: 10px;
+        font-size: var(--text-xs);
         color: $muted;
       }
     }
@@ -495,7 +495,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
     flex: none;
     height: 248px;
     overflow: hidden;
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
     background: var(--card);
     border: 1px solid color-mix(in srgb, var(--foreground) 7%, transparent);
     // 静止只给一层极淡的投影：一列卡片各自重投影会显脏，浮起来的事交给 hover
@@ -580,7 +580,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
       .greetLogo {
         width: 40px;
         height: 40px;
-        border-radius: 12px;
+        border-radius: var(--radius-lg);
         background: $accent;
         color: var(--primary-foreground);
         font-size: 20px;
@@ -591,12 +591,12 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
     }
 
     .greetSub {
-      font-size: 14px;
+      font-size: var(--text-md);
       color: $muted;
     }
 
     .hint {
-      font-size: 12px;
+      font-size: var(--text-sm);
       color: color-mix(in srgb, var(--foreground) 40%, transparent);
     }
   }
@@ -612,7 +612,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
 
   .userMenuEmail {
     padding: 8px 10px 6px;
-    font-size: 12px;
+    font-size: var(--text-sm);
     line-height: 1.2;
     color: $muted;
     overflow: hidden;
@@ -625,7 +625,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
     align-items: center;
     gap: 9px;
     padding: 7px 10px;
-    border-radius: 8px;
+    border-radius: var(--radius);
 
     .userMenuAvatar {
       width: 28px;
@@ -634,7 +634,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
       border-radius: 50%;
       background: $accent;
       color: var(--primary-foreground);
-      font-size: 13px;
+      font-size: var(--text-base);
       font-weight: 600;
       display: flex;
       align-items: center;
@@ -644,7 +644,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
     .userMenuName {
       flex: 1;
       min-width: 0;
-      font-size: 14px;
+      font-size: var(--text-md);
       line-height: 1.35;
       font-weight: 500;
       color: $text;
@@ -665,14 +665,14 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
     align-items: center;
     gap: 10px;
     padding: 8px 10px;
-    border-radius: 8px;
+    border-radius: var(--radius);
     cursor: pointer;
-    font-size: 14px;
+    font-size: var(--text-md);
     line-height: 1.35;
     color: $text;
 
     :global(.anticon) {
-      font-size: 16px;
+      font-size: var(--text-lg);
       color: $muted;
     }
 
@@ -695,7 +695,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
 .userMenuOverlay {
   :global(.ant-popover-inner) {
     padding: 4px;
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
     border: 1px solid $border;
     box-shadow: 0 4px 24px color-mix(in srgb, var(--foreground) 12%, transparent);
   }
@@ -754,7 +754,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
         width: 40px;
         height: 40px;
         margin-left: -8px;
-        border-radius: 10px;
+        border-radius: var(--radius);
 
         &:active {
           background: color-mix(in srgb, var(--foreground) 8%, transparent);
@@ -772,7 +772,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
         height: 40px;
         font-size: 22px;
         color: var(--primary);
-        border-radius: 10px;
+        border-radius: var(--radius);
         cursor: pointer;
 
         &:active {
@@ -791,7 +791,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
         height: 40px;
         font-size: 19px;
         color: var(--destructive);
-        border-radius: 10px;
+        border-radius: var(--radius);
         cursor: pointer;
 
         &:active {
@@ -954,7 +954,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
   .deviceTab:focus-visible {
     outline: 2px solid $accent;
     outline-offset: 2px;
-    border-radius: 8px;
+    border-radius: var(--radius);
   }
 }
 
@@ -964,7 +964,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
 .mobileActsPop {
   :global(.ant-popover-inner) {
     padding: 4px;
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
   }
 }
 
@@ -978,7 +978,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
     align-items: center;
     gap: 9px;
     padding: 9px 11px;
-    border-radius: 10px;
+    border-radius: var(--radius);
     font-size: 14.5px;
     color: var(--foreground);
     cursor: pointer;
@@ -988,7 +988,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
     }
 
     :global(.anticon) {
-      font-size: 16px;
+      font-size: var(--text-lg);
       color: var(--muted-foreground);
     }
 

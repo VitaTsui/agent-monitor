@@ -21,7 +21,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     margin-top: 18px;
     padding: 14px 16px;
     border: 1px solid color-mix(in srgb, var(--primary) 22%, transparent);
-    border-radius: 14px;
+    border-radius: var(--radius-lg);
     background: linear-gradient(180deg, var(--primary-subtle) 0%, var(--primary-subtle) 100%);
     cursor: pointer;
     transition: all 0.18s;
@@ -35,11 +35,11 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       flex: none;
       width: 38px;
       height: 38px;
-      border-radius: 10px;
+      border-radius: var(--radius);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 17px;
+      font-size: var(--text-lg);
       color: var(--primary-foreground);
       background: $accent;
     }
@@ -49,21 +49,21 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       min-width: 0;
 
       .connectEntryTitle {
-        font-size: 14px;
+        font-size: var(--text-md);
         font-weight: 600;
         color: $text;
       }
 
       .connectEntryDesc {
         margin-top: 2px;
-        font-size: 12px;
+        font-size: var(--text-sm);
         color: $muted;
       }
     }
 
     .connectEntryArrow {
       flex: none;
-      font-size: 13px;
+      font-size: var(--text-base);
       color: $muted;
     }
   }
@@ -71,7 +71,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
   :global(.ant-modal-content) {
     padding: 0;
     overflow: hidden;
-    border-radius: 16px;
+    border-radius: var(--radius-lg);
   }
 
   // antd 给 .ant-modal-body 留了默认的左右内边距，会在弹窗最外侧留出两道空隙，
@@ -113,10 +113,10 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;
-    border-radius: 8px;
+    border-radius: var(--radius);
     cursor: pointer;
     color: $muted;
-    font-size: 14px;
+    font-size: var(--text-md);
 
     &:hover {
       background: $hover;
@@ -135,7 +135,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     padding: 18px 8px;
 
     .navTitle {
-      font-size: 15px;
+      font-size: var(--text-md);
       font-weight: 600;
       color: $text;
       padding: 4px 10px 14px;
@@ -146,14 +146,14 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       align-items: center;
       gap: 10px;
       padding: 8px 10px;
-      border-radius: 8px;
+      border-radius: var(--radius);
       cursor: pointer;
-      font-size: 14px;
+      font-size: var(--text-md);
       color: $text;
       margin-bottom: 2px;
 
       :global(.anticon) {
-        font-size: 16px;
+        font-size: var(--text-lg);
         color: $muted;
       }
 
@@ -273,7 +273,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       border-radius: 50%;
       background: var(--card);
       color: $text;
-      font-size: 15px;
+      font-size: var(--text-md);
       box-shadow: 0 1px 4px color-mix(in srgb, var(--foreground) 16%, transparent);
       z-index: 3;
 
@@ -305,7 +305,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
         padding: 12px 14px;
         margin-bottom: 18px;
         background: var(--card);
-        border-radius: 14px;
+        border-radius: var(--radius-lg);
         cursor: pointer;
 
         .identityAvatar {
@@ -315,7 +315,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
           border-radius: 50%;
           background: $accent;
           color: var(--primary-foreground);
-          font-size: 15px;
+          font-size: var(--text-md);
           font-weight: 600;
           display: flex;
           align-items: center;
@@ -325,7 +325,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
         .identityName {
           flex: 1;
           min-width: 0;
-          font-size: 16px;
+          font-size: var(--text-lg);
           font-weight: 600;
           color: $text;
           overflow: hidden;
@@ -336,7 +336,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
         .identityArrow {
           flex: none;
           color: var(--border);
-          font-size: 15px;
+          font-size: var(--text-md);
         }
 
         &:active {
@@ -347,7 +347,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       // 整组做成一张白色圆角卡
       .navList {
         background: var(--card);
-        border-radius: 14px;
+        border-radius: var(--radius-lg);
         overflow: hidden;
       }
 
@@ -400,7 +400,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
           flex: none;
           margin-left: auto;
           color: var(--border);
-          font-size: 17px;
+          font-size: var(--text-lg);
         }
 
         // 一级抽屉式列表无持久选中态：进二级返回后不该有项还高亮
@@ -455,7 +455,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
           height: 28px !important;
           min-height: 28px !important;
           padding-inline: 12px !important;
-          font-size: 12px !important;
+          font-size: var(--text-sm) !important;
           border-radius: 999px !important;
         }
 
@@ -463,7 +463,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
           height: 28px !important;
           min-height: 28px !important;
           padding-inline: 8px !important;
-          font-size: 12px !important;
+          font-size: var(--text-sm) !important;
         }
       }
     }
@@ -496,7 +496,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     margin-bottom: 22px;
     padding: 16px 18px;
     border: 1px solid $border;
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
 
     .avatar {
       width: 48px;
@@ -513,7 +513,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     }
 
     .accName {
-      font-size: 15px;
+      font-size: var(--text-md);
       font-weight: 600;
       color: $text;
     }
@@ -527,10 +527,10 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
 
   // 设备管理
   .hint {
-    font-size: 12px;
+    font-size: var(--text-sm);
     color: color-mix(in srgb, var(--foreground) 60%, transparent);
     background: color-mix(in srgb, var(--primary) 6%, transparent);
-    border-radius: 10px;
+    border-radius: var(--radius);
     padding: 10px 12px;
     line-height: 1.6;
     margin-bottom: 16px;
@@ -539,7 +539,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       background: color-mix(in srgb, var(--foreground) 7%, transparent);
       border-radius: 4px;
       padding: 0 4px;
-      font-size: 11px;
+      font-size: var(--text-xs);
     }
   }
 
@@ -547,7 +547,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     margin-bottom: 18px;
 
     .sectionTitle {
-      font-size: 13px;
+      font-size: var(--text-base);
       font-weight: 600;
       color: color-mix(in srgb, var(--foreground) 60%, transparent);
       margin-bottom: 8px;
@@ -561,7 +561,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     gap: 10px;
     padding: 10px 12px;
     border: 1px solid $border;
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
     margin-bottom: 8px;
 
     .devInfo {
@@ -571,7 +571,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
         display: flex;
         align-items: center;
         gap: 6px;
-        font-size: 13px;
+        font-size: var(--text-base);
         font-weight: 600;
         color: $text;
         flex-wrap: wrap;
@@ -579,7 +579,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
 
       .devMeta {
         margin-top: 4px;
-        font-size: 11px;
+        font-size: var(--text-xs);
         color: $muted;
       }
     }
@@ -597,9 +597,9 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       .shareBtn,
       .trustBtn {
         height: 28px;
-        border-radius: 999px;
+        border-radius: var(--radius-full);
         padding-inline: 14px;
-        font-size: 12px;
+        font-size: var(--text-sm);
         transition: all 0.18s;
       }
 
@@ -660,7 +660,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
 
     .updateProgressText {
       flex: none;
-      font-size: 11px;
+      font-size: var(--text-xs);
       color: $muted;
       white-space: nowrap;
     }
@@ -669,9 +669,9 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
   // 检查更新：主题色胶囊描边，悬停填充
   .checkUpdateBtn {
     height: 26px;
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     padding-inline: 14px;
-    font-size: 12px;
+    font-size: var(--text-sm);
     color: $accent;
     border-color: color-mix(in srgb, var(--primary) 45%, transparent);
     background: transparent;
@@ -688,9 +688,9 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
   // 强制白字（含内层 span），避免组件库主题把文字色设成主题色而与底色重合。
   .updateNowBtn {
     height: 26px;
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     padding-inline: 14px;
-    font-size: 12px;
+    font-size: var(--text-sm);
     background: $accent !important;
     border-color: $accent !important;
 
@@ -714,7 +714,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       display: flex;
       align-items: center;
       gap: 6px;
-      font-size: 13px;
+      font-size: var(--text-base);
       font-weight: 600;
       color: $text;
       margin-bottom: 8px;
@@ -735,7 +735,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       gap: 12px;
       padding: 9px 12px;
       border: 1px solid $border;
-      border-radius: 10px;
+      border-radius: var(--radius);
       margin-bottom: 6px;
       transition: border-color 0.15s, background 0.15s;
 
@@ -745,7 +745,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       }
 
       .termScopeName {
-        font-size: 13px;
+        font-size: var(--text-base);
         color: $text;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -756,15 +756,15 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     .termScopeEmpty {
       padding: 14px 12px;
       border: 1px dashed $border;
-      border-radius: 10px;
-      font-size: 12px;
+      border-radius: var(--radius);
+      font-size: var(--text-sm);
       color: $muted;
       text-align: center;
     }
 
     .termScopeHint {
       margin-top: 2px;
-      font-size: 11px;
+      font-size: var(--text-xs);
       color: $muted;
     }
   }
@@ -777,7 +777,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     .aboutLogo {
       width: 60px;
       height: 60px;
-      border-radius: 16px;
+      border-radius: var(--radius-lg);
       background: $accent;
       color: var(--primary-foreground);
       font-size: 28px;
@@ -789,14 +789,14 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     }
 
     .aboutName {
-      font-size: 17px;
+      font-size: var(--text-lg);
       font-weight: 600;
       color: $text;
       margin-bottom: 8px;
     }
 
     .aboutDesc {
-      font-size: 13px;
+      font-size: var(--text-base);
       color: $muted;
       line-height: 1.7;
       max-width: 380px;
@@ -812,14 +812,14 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     margin-bottom: 12px;
 
     .quotaLabel {
-      font-size: 13px;
+      font-size: var(--text-base);
       color: color-mix(in srgb, var(--foreground) 70%, transparent);
       min-width: 110px;
     }
   }
 
   .quotaUsed {
-    font-size: 12px;
+    font-size: var(--text-sm);
     color: $muted;
   }
 
@@ -843,7 +843,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     margin-bottom: 18px;
 
     .guardLabel {
-      font-size: 13px;
+      font-size: var(--text-base);
       color: color-mix(in srgb, var(--foreground) 75%, transparent);
     }
   }
@@ -855,7 +855,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
 
     .patternTag {
       font-family: "SF Mono", Menlo, Consolas, monospace;
-      font-size: 11px;
+      font-size: var(--text-xs);
       margin: 0;
     }
   }
@@ -884,7 +884,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
   // hsu-ui TextArea 包裹层的深色边框调淡
   :global([class*="textarea--"]) {
     border-color: color-mix(in srgb, var(--foreground) 18%, transparent) !important;
-    border-radius: 10px;
+    border-radius: var(--radius);
 
     &:focus-within {
       border-color: color-mix(in srgb, var(--primary) 50%, transparent) !important;

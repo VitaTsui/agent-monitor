@@ -24,7 +24,7 @@
 ::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--foreground) 70%, transparent);
   border: 3px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--radius);
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
@@ -52,7 +52,7 @@
   background-repeat: no-repeat;
   background-position: center;
   background-size: 12px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius);
 }
 ::-webkit-scrollbar-button:single-button:hover {
   background-color: color-mix(in srgb, var(--foreground) 10%, transparent);

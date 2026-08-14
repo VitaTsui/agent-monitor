@@ -46,7 +46,7 @@
     margin-bottom: 14px;
 
     .ant-modal-title {
-      font-size: 17px;
+      font-size: var(--text-lg);
       font-weight: 600;
     }
   }
@@ -61,8 +61,8 @@
   .ant-modal-root .ant-modal .ant-btn {
     min-height: 42px;
     padding-inline: 18px;
-    border-radius: 12px;
-    font-size: 15px;
+    border-radius: var(--radius-lg);
+    font-size: var(--text-md);
   }
 
   .ant-modal-root .ant-modal .ant-input,
@@ -70,7 +70,7 @@
   .ant-modal-root .ant-modal input[type="password"],
   .ant-modal-root .ant-modal .hsu-input input {
     min-height: 42px;
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
     font-size: 15.5px;
   }
 

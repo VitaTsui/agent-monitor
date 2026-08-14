@@ -1,6 +1,6 @@
 .ShareModal {
   .hint {
-    font-size: 12px;
+    font-size: var(--text-sm);
     color: var(--muted-foreground);
     line-height: 1.7;
     margin-bottom: 16px;
@@ -13,7 +13,7 @@
   .genCard {
     padding: 16px;
     border: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
-    border-radius: 14px;
+    border-radius: var(--radius-lg);
     background: var(--primary-subtle);
   }
 
@@ -24,13 +24,13 @@
     gap: 12px;
     padding: 12px 16px;
     border: 1px solid color-mix(in srgb, var(--primary) 18%, transparent);
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
     background: linear-gradient(180deg, var(--primary-subtle) 0%, var(--primary-subtle) 100%);
     margin-bottom: 10px;
 
     .codeLabel {
       flex: none;
-      font-size: 12px;
+      font-size: var(--text-sm);
       color: var(--muted-foreground);
     }
 
@@ -45,7 +45,7 @@
 
     .codeMuted {
       flex: 1;
-      font-size: 12px;
+      font-size: var(--text-sm);
       color: var(--subtle-foreground);
     }
 
@@ -56,7 +56,7 @@
       justify-content: center;
       width: 30px;
       height: 30px;
-      border-radius: 8px;
+      border-radius: var(--radius);
       color: var(--primary);
       cursor: pointer;
       transition: background 0.15s;
@@ -78,9 +78,9 @@
     .regenBtn,
     .stopBtn {
       height: 30px;
-      border-radius: 999px;
+      border-radius: var(--radius-full);
       padding-inline: 16px;
-      font-size: 13px;
+      font-size: var(--text-base);
       transition: all 0.18s;
     }
 
@@ -111,7 +111,7 @@
 
   .tempHint {
     margin-top: 12px;
-    font-size: 12px;
+    font-size: var(--text-sm);
     color: var(--muted-foreground);
     line-height: 1.6;
   }
@@ -122,7 +122,7 @@
     border-top: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
 
     .guestsTitle {
-      font-size: 13px;
+      font-size: var(--text-base);
       font-weight: 600;
       margin-bottom: 8px;
     }
@@ -133,9 +133,9 @@
       justify-content: space-between;
       padding: 7px 12px;
       border: 1px solid color-mix(in srgb, var(--foreground) 9%, transparent);
-      border-radius: 10px;
+      border-radius: var(--radius);
       margin-bottom: 6px;
-      font-size: 13px;
+      font-size: var(--text-base);
 
       .kickBtn {
         color: var(--muted-foreground);

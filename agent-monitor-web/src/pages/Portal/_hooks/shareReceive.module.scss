@@ -6,7 +6,7 @@
   padding: 4px 0 2px;
 
   .fileName {
-    font-size: 13px;
+    font-size: var(--text-base);
     color: var(--muted-foreground);
     word-break: break-all;
   }

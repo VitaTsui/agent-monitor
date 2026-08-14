@@ -10,9 +10,9 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   display: flex;
   height: 420px;
   background: $cream;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: $text;
   user-select: none;
 
@@ -34,28 +34,28 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
       .logo {
         width: 22px;
         height: 22px;
-        border-radius: 6px;
+        border-radius: var(--radius-sm);
         background: $accent;
         color: var(--primary-foreground);
-        font-size: 12px;
+        font-size: var(--text-sm);
         display: flex;
         align-items: center;
         justify-content: center;
       }
-      .name { font-weight: 600; font-size: 12px; }
+      .name { font-weight: 600; font-size: var(--text-sm); }
     }
 
     .search {
       background: color-mix(in srgb, var(--foreground) 5%, transparent);
-      border-radius: 8px;
+      border-radius: var(--radius);
       padding: 6px 9px;
       color: color-mix(in srgb, var(--foreground) 40%, transparent);
-      font-size: 11px;
+      font-size: var(--text-xs);
       margin-bottom: 10px;
     }
 
     .label {
-      font-size: 10px;
+      font-size: var(--text-xs);
       font-weight: 600;
       color: $muted;
       padding: 8px 4px 4px;
@@ -67,10 +67,10 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
       gap: 2px;
       padding: 6px 8px;
       border-radius: 7px;
-      font-size: 11px;
+      font-size: var(--text-xs);
 
       &.active { background: color-mix(in srgb, var(--foreground) 8%, transparent); }
-      .stat { font-size: 10px; color: $muted; }
+      .stat { font-size: var(--text-xs); color: $muted; }
     }
 
     .sess {
@@ -87,11 +87,11 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
         &.idle { background: var(--warning); }
       }
       .sessName {
-        font-size: 11px;
+        font-size: var(--text-xs);
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         max-width: 130px;
       }
-      .sessSub { font-size: 10px; color: $muted; }
+      .sessSub { font-size: var(--text-xs); color: $muted; }
     }
 
     .user {
@@ -104,10 +104,10 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
         width: 24px; height: 24px; border-radius: 50%;
         background: $accent; color: var(--primary-foreground);
         display: flex; align-items: center; justify-content: center;
-        font-size: 11px;
+        font-size: var(--text-xs);
       }
-      .uname { font-size: 11px; font-weight: 500; }
-      .uplan { font-size: 10px; color: $muted; }
+      .uname { font-size: var(--text-xs); font-weight: 500; }
+      .uplan { font-size: var(--text-xs); color: $muted; }
     }
   }
 
@@ -120,8 +120,8 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     .header {
       padding: 10px 14px;
       border-bottom: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
-      .htitle { font-size: 12px; font-weight: 600; }
-      .hmeta { font-size: 10px; color: $muted; margin-top: 2px; }
+      .htitle { font-size: var(--text-sm); font-weight: 600; }
+      .hmeta { font-size: var(--text-xs); color: $muted; margin-top: 2px; }
     }
 
     .chat {
@@ -137,13 +137,13 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
         background: var(--primary-subtle);
         border-radius: 12px 12px 4px 12px;
         padding: 7px 11px;
-        font-size: 11px;
+        font-size: var(--text-xs);
         max-width: 80%;
       }
 
       .terminal {
         background: $term-bg;
-        border-radius: 10px;
+        border-radius: var(--radius);
         overflow: hidden;
 
         .termHead {
@@ -158,7 +158,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
             &:nth-child(2){ background:var(--warning); }
             &:nth-child(3){ background:var(--success); }
           }
-          span { font-family: $mono; font-size: 10px; color: var(--muted-foreground); margin-left: 4px; }
+          span { font-family: $mono; font-size: var(--text-xs); color: var(--muted-foreground); margin-left: 4px; }
         }
         .termBody {
           padding: 10px 12px;
@@ -166,7 +166,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
           flex-direction: column;
           gap: 6px;
           font-family: $mono;
-          font-size: 11px;
+          font-size: var(--text-xs);
           line-height: 1.5;
         }
         .aLine, .tLine { display: flex; gap: 7px; }
@@ -183,10 +183,10 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
     .composer {
       margin: 0 14px 14px;
       border: 1px solid color-mix(in srgb, var(--foreground) 15%, transparent);
-      border-radius: 12px;
+      border-radius: var(--radius-lg);
       padding: 9px 12px;
       color: color-mix(in srgb, var(--foreground) 35%, transparent);
-      font-size: 11px;
+      font-size: var(--text-xs);
     }
   }
 }

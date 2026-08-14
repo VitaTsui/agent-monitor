@@ -8,7 +8,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   display: flex;
   align-items: center;
   gap: 12px;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: $muted;
   padding-bottom: 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
@@ -55,11 +55,11 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   min-width: 20px;
   height: 20px;
   padding: 0 6px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--primary) 12%, transparent);
   color: $accent;
   font-family: $mono;
-  font-size: 12px;
+  font-size: var(--text-sm);
   line-height: 20px;
   text-align: center;
 }
@@ -102,7 +102,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   border-radius: 12px 12px 2px 12px;
   background: color-mix(in srgb, var(--primary) 10%, transparent);
   color: $text;
-  font-size: 13px;
+  font-size: var(--text-base);
   // 正文交给 Markdown.Views 渲染，这里只管容器：长串（URL/路径）要能断行
   word-break: break-word;
   overflow-wrap: anywhere;
@@ -142,20 +142,20 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
       max-width: 100%;
       overflow-x: auto;
       padding: 8px 10px;
-      border-radius: 6px;
+      border-radius: var(--radius-sm);
       background: color-mix(in srgb, var(--foreground) 6%, transparent);
-      font-size: 12px;
+      font-size: var(--text-sm);
       line-height: 1.55;
     }
     code {
       font-family: $mono;
-      font-size: 12px;
+      font-size: var(--text-sm);
     }
     table {
       display: block;
       max-width: 100%;
       overflow-x: auto;
-      font-size: 12px;
+      font-size: var(--text-sm);
     }
     img {
       max-width: 100%;
@@ -172,7 +172,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 
 .time {
   margin-top: 3px;
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: $muted;
   font-family: $mono;
 }
@@ -206,6 +206,6 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   // 手机屏窄，气泡放宽些才不至于一行没几个字
   .bubbleUser {
     max-width: 88%;
-    font-size: 14px; // 移动端正文小于 14px 会偏吃力
+    font-size: var(--text-md); // 移动端正文小于 14px 会偏吃力
   }
 }

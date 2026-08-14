@@ -54,8 +54,8 @@ $accent: var(--primary);
       .pendingChip {
         flex: none;
         padding: 0 8px;
-        border-radius: 999px;
-        font-size: 11px;
+        border-radius: var(--radius-full);
+        font-size: var(--text-xs);
         font-weight: 600;
         line-height: 18px;
         white-space: nowrap;
@@ -66,8 +66,8 @@ $accent: var(--primary);
       .statusChip {
         flex: none;
         padding: 0 8px;
-        border-radius: 999px;
-        font-size: 11px;
+        border-radius: var(--radius-full);
+        font-size: var(--text-xs);
         font-weight: 500;
         line-height: 18px;
         background: color-mix(in srgb, var(--foreground) 7%, transparent);
@@ -99,7 +99,7 @@ $accent: var(--primary);
       .slotChip {
         flex: none;
         padding: 0 7px;
-        border-radius: 6px;
+        border-radius: var(--radius-sm);
         background: color-mix(in srgb, var(--primary) 12%, transparent);
         color: $accent;
         font-family: "SF Mono", Menlo, Consolas, monospace;
@@ -114,7 +114,7 @@ $accent: var(--primary);
         align-items: center;
         gap: 8px;
         min-width: 0;
-        font-size: 14px;
+        font-size: var(--text-md);
         font-weight: 600;
         color: $text;
 
@@ -127,7 +127,7 @@ $accent: var(--primary);
 
       .headMeta {
         margin-top: 2px;
-        font-size: 11px;
+        font-size: var(--text-xs);
         color: $muted;
         display: flex;
         gap: 10px;
@@ -136,8 +136,8 @@ $accent: var(--primary);
 
         .tokenChip {
           padding: 0 8px;
-          border-radius: 999px;
-          font-size: 11px;
+          border-radius: var(--radius-full);
+          font-size: var(--text-xs);
           line-height: 18px;
           background: color-mix(in srgb, var(--primary) 8%, transparent);
           color: var(--primary-active);
@@ -146,8 +146,8 @@ $accent: var(--primary);
 
         .deviceChip {
           padding: 0 8px;
-          border-radius: 999px;
-          font-size: 11px;
+          border-radius: var(--radius-full);
+          font-size: var(--text-xs);
           line-height: 18px;
           background: color-mix(in srgb, var(--foreground) 6%, transparent);
           color: var(--foreground);
@@ -197,7 +197,7 @@ $accent: var(--primary);
     justify-content: center;
     color: color-mix(in srgb, var(--foreground) 35%, transparent);
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--text-sm);
 
     .big {
       font-size: 30px;
@@ -222,7 +222,7 @@ $accent: var(--primary);
         display: flex;
         align-items: center;
         gap: 6px;
-        font-size: 12px;
+        font-size: var(--text-sm);
         color: var(--warning);
 
         .queuedDot {
@@ -240,7 +240,7 @@ $accent: var(--primary);
       }
 
       .recallAll {
-        font-size: 12px;
+        font-size: var(--text-sm);
         color: var(--primary);
         cursor: pointer;
 
@@ -263,7 +263,7 @@ $accent: var(--primary);
       align-items: center;
       gap: 8px;
       padding: 6px 10px;
-      border-radius: 8px;
+      border-radius: var(--radius);
       background: color-mix(in srgb, var(--term-amber) 10%, transparent);
       border: 1px solid color-mix(in srgb, var(--term-amber) 28%, transparent);
       font-size: 12.5px;
@@ -279,7 +279,7 @@ $accent: var(--primary);
 
       .queuedTag {
         flex: none;
-        font-size: 11px;
+        font-size: var(--text-xs);
         color: var(--warning);
         opacity: 0.85;
       }
@@ -291,7 +291,7 @@ $accent: var(--primary);
         color: var(--primary);
         cursor: pointer;
         padding: 2px 6px;
-        border-radius: 6px;
+        border-radius: var(--radius-sm);
         user-select: none;
 
         &:hover {
@@ -308,7 +308,7 @@ $accent: var(--primary);
 
   .queuedHint {
     padding: 4px 2px 2px;
-    font-size: 11px;
+    font-size: var(--text-xs);
     color: var(--warning);
     opacity: 0.85;
   }
@@ -328,7 +328,7 @@ $accent: var(--primary);
     gap: 10px;
     margin-bottom: 8px;
     padding: 7px 12px;
-    border-radius: 10px;
+    border-radius: var(--radius);
     background: color-mix(in srgb, var(--destructive) 10%, transparent);
     border: 1px solid color-mix(in srgb, var(--destructive) 28%, transparent);
 
@@ -348,7 +348,7 @@ $accent: var(--primary);
     // 卡片本身的配色是按终端深色底设计的（文字/描述都是浅色），
     // 直接放到这块浅色区就是浅底浅字，得把底色一起带过来。
     background: var(--foreground);
-    border-radius: 10px;
+    border-radius: var(--radius);
     padding: 8px;
     // 出现时轻推一下，让人注意到「多了个要办的事」
     animation: pendingIn 0.18s ease-out;

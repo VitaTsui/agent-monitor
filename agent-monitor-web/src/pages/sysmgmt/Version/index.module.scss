@@ -5,7 +5,7 @@
     margin-bottom: 28px;
 
     .sectionTitle {
-      font-size: 15px;
+      font-size: var(--text-md);
       font-weight: 600;
       margin-bottom: 12px;
     }
@@ -22,7 +22,7 @@
     }
 
     .hint {
-      font-size: 12px;
+      font-size: var(--text-sm);
       color: color-mix(in srgb, var(--foreground) 45%, transparent);
       margin-bottom: 12px;
     }
@@ -34,7 +34,7 @@
       flex-wrap: wrap;
 
       .minLabel {
-        font-size: 13px;
+        font-size: var(--text-base);
       }
 
       .minInput {
@@ -51,7 +51,7 @@
     margin-bottom: 14px;
 
     .formLabel {
-      font-size: 13px;
+      font-size: var(--text-base);
       margin-bottom: 6px;
     }
   }

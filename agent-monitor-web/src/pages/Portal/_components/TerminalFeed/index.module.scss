@@ -34,7 +34,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       color: $text;
       border-radius: 16px 16px 4px 16px;
       padding: 10px 14px;
-      font-size: 14px;
+      font-size: var(--text-md);
       line-height: 1.65;
       white-space: pre-wrap;
       word-break: break-word;
@@ -44,7 +44,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       .userExpandBtn {
         display: block;
         margin-top: 4px;
-        font-size: 12px;
+        font-size: var(--text-sm);
         font-weight: 500;
         color: var(--primary-active);
         cursor: pointer;
@@ -57,7 +57,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     }
 
     .userTime {
-      font-size: 10px;
+      font-size: var(--text-xs);
       color: color-mix(in srgb, var(--foreground) 35%, transparent);
       padding-right: 4px;
     }
@@ -66,7 +66,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   // 助手回合（Claude Code 终端式深色卡片）
   .terminal {
     background: $term-bg;
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
     overflow: hidden;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 
@@ -103,12 +103,12 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       .termTitle {
         flex: 1;
         font-family: $mono;
-        font-size: 11px;
+        font-size: var(--text-xs);
         color: $term-dim;
       }
 
       .termTime {
-        font-size: 10px;
+        font-size: var(--text-xs);
         color: color-mix(in srgb, var(--term-fg) 25%, transparent);
       }
     }
@@ -173,7 +173,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       h2,
       h3,
       h4 {
-        font-size: 13px;
+        font-size: var(--text-base);
         font-weight: 700;
       }
 
@@ -198,7 +198,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       pre {
         background: var(--term-bg);
         border: 1px solid color-mix(in srgb, var(--term-fg) 14%, transparent);
-        border-radius: 8px;
+        border-radius: var(--radius);
         padding: 10px 12px;
         overflow-x: auto;
         font-size: 12.5px;
@@ -269,7 +269,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   // plan 模式的待批准方案：终端里独立成框，比工具流水更显眼
   .planCard {
     border: 1px solid color-mix(in srgb, var(--term-accent) 35%, transparent);
-    border-radius: 8px;
+    border-radius: var(--radius);
     margin: 2px 0 6px;
     overflow: hidden;
 
@@ -277,7 +277,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       padding: 5px 10px;
       background: color-mix(in srgb, var(--term-accent) 12%, transparent);
       color: $term-accent;
-      font-size: 12px;
+      font-size: var(--text-sm);
       font-weight: 600;
     }
 
@@ -341,7 +341,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       .resultText {
         margin: 0;
         font-family: $mono;
-        font-size: 12px;
+        font-size: var(--text-sm);
         color: $term-dim;
         white-space: pre-wrap;
         word-break: break-word;
@@ -351,7 +351,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       .expandBtn {
         display: inline-block;
         margin-top: 2px;
-        font-size: 11px;
+        font-size: var(--text-xs);
         color: $term-accent;
         cursor: pointer;
         user-select: none;
@@ -437,7 +437,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       display: inline-flex;
       align-items: center;
       gap: 5px;
-      font-size: 11px;
+      font-size: var(--text-xs);
       color: var(--term-dim);
 
       .queuedDot {
@@ -450,7 +450,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     }
 
     .recallBtn {
-      font-size: 11px;
+      font-size: var(--text-xs);
       color: var(--primary);
       cursor: pointer;
 
@@ -478,7 +478,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      font-size: 12px;
+      font-size: var(--text-sm);
       color: color-mix(in srgb, var(--term-fg) 55%, transparent);
       cursor: pointer;
       user-select: none;
@@ -488,7 +488,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       }
 
       .toolGroupArrow {
-        font-size: 14px;
+        font-size: var(--text-md);
       }
     }
 
@@ -504,7 +504,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   // 交互式选择卡片（AskUserQuestion 同步）：琥珀色调，暗示「等待输入」
   .selectCard {
     border: 1px solid color-mix(in srgb, var(--term-amber) 45%, transparent);
-    border-radius: 8px;
+    border-radius: var(--radius);
     margin: 2px 0 6px;
     overflow: hidden;
 
@@ -515,7 +515,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       padding: 5px 10px;
       background: color-mix(in srgb, var(--term-amber) 16%, transparent);
       color: var(--term-amber);
-      font-size: 12px;
+      font-size: var(--text-sm);
       font-weight: 600;
 
       // 多题时的进度：答完一题卡片内容整个换掉，没有它会以为是出岔子了
@@ -547,7 +547,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
         align-items: flex-start;
         gap: 8px;
         padding: 6px 8px;
-        border-radius: 6px;
+        border-radius: var(--radius-sm);
         background: color-mix(in srgb, var(--term-fg) 4%, transparent);
         border: 1px solid color-mix(in srgb, var(--term-fg) 8%, transparent);
 
@@ -580,10 +580,10 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           flex: none;
           width: 18px;
           height: 18px;
-          border-radius: 5px;
+          border-radius: var(--radius-sm);
           background: color-mix(in srgb, var(--term-amber) 22%, transparent);
           color: var(--term-amber);
-          font-size: 11px;
+          font-size: var(--text-xs);
           display: flex;
           align-items: center;
           justify-content: center;
@@ -621,7 +621,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
             flex: 1;
             min-width: 0;
             padding: 4px 8px;
-            border-radius: 5px;
+            border-radius: var(--radius-sm);
             border: 1px solid color-mix(in srgb, var(--term-fg) 12%, transparent);
             background: color-mix(in srgb, var(--foreground) 22%, transparent);
             color: $term-text;
@@ -644,8 +644,8 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           .selectCustomSend {
             flex: none;
             padding: 3px 10px;
-            border-radius: 5px;
-            font-size: 12px;
+            border-radius: var(--radius-sm);
+            font-size: var(--text-sm);
             background: color-mix(in srgb, var(--term-amber) 22%, transparent);
             color: var(--term-amber);
 
@@ -676,9 +676,9 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       .selectSubmit {
         margin-top: 2px;
         padding: 7px 8px;
-        border-radius: 6px;
+        border-radius: var(--radius-sm);
         text-align: center;
-        font-size: 12px;
+        font-size: var(--text-sm);
         background: color-mix(in srgb, var(--term-amber) 22%, transparent);
         color: var(--term-amber);
         border: 1px solid color-mix(in srgb, var(--term-amber) 42%, transparent);
@@ -707,7 +707,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     .selectHint {
       padding: 4px 10px 8px;
       color: color-mix(in srgb, var(--primary-subtle) 50%, transparent);
-      font-size: 11px;
+      font-size: var(--text-xs);
 
       // 提示语按端择一（「回车」在手机虚拟键盘上不存在）
       .hintMobile {
@@ -728,12 +728,12 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       .selectOptIdx {
         width: 22px;
         height: 22px;
-        font-size: 12px;
+        font-size: var(--text-sm);
       }
 
       .selectOptBody {
         .selectOptLabel {
-          font-size: 14px;
+          font-size: var(--text-md);
           line-height: 1.4;
         }
 
@@ -747,18 +747,18 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
         .selectCustomInput {
           padding: 7px 9px;
           // 小于 16px 时 iOS 聚焦会自动放大整页，回不去
-          font-size: 16px;
+          font-size: var(--text-lg);
         }
 
         .selectCustomSend {
           padding: 7px 12px;
-          font-size: 13px;
+          font-size: var(--text-base);
         }
       }
     }
 
     .selectHint {
-      font-size: 12px;
+      font-size: var(--text-sm);
       line-height: 1.5;
 
       .hintDesktop {
