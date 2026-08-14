@@ -1,12 +1,12 @@
 // Claude 网页版配色（浅色）
-$cream: #f4fafb; // 主内容背景
-$oat: #e6f1f3; // 侧栏背景
-$border: rgba(36, 61, 66, 0.09);
-$text: #243d42;
-$muted: #7c9096;
-$accent: #0f9bad; // Claude 珊瑚色
-$hover: rgba(36, 61, 66, 0.06);
-$active-bg: rgba(36, 61, 66, 0.09);
+$cream: var(--primary-subtle); // 主内容背景
+$oat: var(--primary-subtle); // 侧栏背景
+$border: color-mix(in srgb, var(--foreground) 9%, transparent);
+$text: var(--foreground);
+$muted: var(--muted-foreground);
+$accent: var(--primary); // Claude 珊瑚色
+$hover: color-mix(in srgb, var(--foreground) 6%, transparent);
+$active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
 
 .Portal {
   height: 100%;
@@ -58,7 +58,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
           min-width: 28px;
           border-radius: 8px;
           background: $accent;
-          color: #fff;
+          color: var(--primary-foreground);
           font-size: 15px;
           display: flex;
           align-items: center;
@@ -96,19 +96,19 @@ $active-bg: rgba(36, 61, 66, 0.09);
         height: 32px;
         padding: 2px 10px;
         font-size: 13px;
-        background: rgba(36, 61, 66, 0.05);
+        background: color-mix(in srgb, var(--foreground) 5%, transparent);
         border: 1px solid transparent;
         border-radius: 10px;
         box-shadow: none;
         transition: background 0.15s, border-color 0.15s;
 
         &:hover {
-          background: rgba(36, 61, 66, 0.08);
+          background: color-mix(in srgb, var(--foreground) 8%, transparent);
         }
 
         &:focus-within {
-          background: #fff;
-          border-color: rgba(15, 155, 173, 0.4);
+          background: var(--card);
+          border-color: color-mix(in srgb, var(--primary) 40%, transparent);
         }
 
         :global(input.ant-input) {
@@ -116,12 +116,12 @@ $active-bg: rgba(36, 61, 66, 0.09);
           font-size: 13px;
 
           &::placeholder {
-            color: rgba(36, 61, 66, 0.35);
+            color: color-mix(in srgb, var(--foreground) 35%, transparent);
           }
         }
 
         .searchIcon {
-          color: rgba(36, 61, 66, 0.35);
+          color: color-mix(in srgb, var(--foreground) 35%, transparent);
           margin-right: 2px;
         }
       }
@@ -190,7 +190,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
           border-radius: 6px;
           font-size: 10px;
           line-height: 16px;
-          color: #fff;
+          color: var(--primary-foreground);
           background: $accent;
           vertical-align: 1px;
         }
@@ -206,8 +206,8 @@ $active-bg: rgba(36, 61, 66, 0.09);
           width: 7px;
           height: 7px;
           border-radius: 50%;
-          background: #38b26a;
-          box-shadow: 0 0 0 3px rgba(56, 178, 106, 0.16);
+          background: var(--success);
+          box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 16%, transparent);
         }
       }
     }
@@ -229,7 +229,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
         user-select: none;
 
         .termCount {
-          color: rgba(36, 61, 66, 0.35);
+          color: color-mix(in srgb, var(--foreground) 35%, transparent);
         }
       }
     }
@@ -260,20 +260,20 @@ $active-bg: rgba(36, 61, 66, 0.09);
         height: 7px;
         min-width: 7px;
         border-radius: 50%;
-        background: #bbb;
+        background: var(--subtle-foreground);
 
         &.running {
-          background: #38b26a;
-          box-shadow: 0 0 0 3px rgba(56, 178, 106, 0.16);
+          background: var(--success);
+          box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 16%, transparent);
         }
         &.idle {
-          background: #f2b234;
+          background: var(--warning);
         }
         &.paused {
-          background: #f56c6c;
+          background: var(--destructive);
         }
         &.finished {
-          background: #bbb;
+          background: var(--subtle-foreground);
         }
       }
 
@@ -285,7 +285,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
         height: 18px;
         padding: 0 5px;
         border-radius: 5px;
-        background: rgba(15, 155, 173, 0.12);
+        background: color-mix(in srgb, var(--primary) 12%, transparent);
         color: $accent;
         font-family: "SF Mono", Menlo, Consolas, monospace;
         font-size: 11.5px;
@@ -321,26 +321,26 @@ $active-bg: rgba(36, 61, 66, 0.09);
           border-radius: 999px;
           font-size: 10px;
           line-height: 17px;
-          background: rgba(36, 61, 66, 0.07);
+          background: color-mix(in srgb, var(--foreground) 7%, transparent);
           color: $muted;
 
           &.running {
-            background: rgba(56, 178, 106, 0.14);
-            color: #22794a;
+            background: color-mix(in srgb, var(--success) 14%, transparent);
+            color: var(--success);
           }
 
           &.idle {
-            background: rgba(242, 178, 52, 0.16);
-            color: #9a6d0b;
+            background: color-mix(in srgb, var(--warning) 16%, transparent);
+            color: var(--warning);
           }
 
           &.paused {
-            background: rgba(245, 108, 108, 0.14);
-            color: #c0392b;
+            background: color-mix(in srgb, var(--destructive) 14%, transparent);
+            color: var(--destructive);
           }
 
           &.finished {
-            background: rgba(36, 61, 66, 0.07);
+            background: color-mix(in srgb, var(--foreground) 7%, transparent);
             color: $muted;
           }
         }
@@ -365,15 +365,15 @@ $active-bg: rgba(36, 61, 66, 0.09);
         height: 22px;
         border-radius: 6px;
         font-size: 12px;
-        color: #536b71;
+        color: var(--muted-foreground);
         // 必须不透明：按钮悬浮在状态徽标之上，半透明底会让下层文字
         // 透出来叠在图标上。取「行悬停底色叠在侧栏底色上」的实色近似值
-        background: #dbe7ea;
-        box-shadow: 0 1px 3px rgba(36, 61, 66, 0.15);
+        background: var(--primary-subtle);
+        box-shadow: 0 1px 3px color-mix(in srgb, var(--foreground) 15%, transparent);
 
         &:hover {
           color: $accent;
-          background: #c9e6ea;
+          background: var(--primary-subtle);
         }
       }
     }
@@ -407,7 +407,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
         min-width: 30px;
         border-radius: 50%;
         background: $accent;
-        color: #fff;
+        color: var(--primary-foreground);
         font-size: 13px;
         font-weight: 600;
         display: flex;
@@ -496,10 +496,10 @@ $active-bg: rgba(36, 61, 66, 0.09);
     height: 248px;
     overflow: hidden;
     border-radius: 12px;
-    background: #fff;
-    border: 1px solid rgba(36, 61, 66, 0.07);
+    background: var(--card);
+    border: 1px solid color-mix(in srgb, var(--foreground) 7%, transparent);
     // 静止只给一层极淡的投影：一列卡片各自重投影会显脏，浮起来的事交给 hover
-    box-shadow: 0 1px 2px rgba(36, 61, 66, 0.04);
+    box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 4%, transparent);
     transition: box-shadow 0.15s ease, transform 0.15s ease,
       border-color 0.15s ease;
 
@@ -507,8 +507,8 @@ $active-bg: rgba(36, 61, 66, 0.09);
       &:hover {
         // 上浮 + 加深投影：卡片整体可点，位移比换色更能说明「点我换到主区」
         transform: translateY(-2px);
-        border-color: rgba(15, 155, 173, 0.3);
-        box-shadow: 0 6px 16px rgba(36, 61, 66, 0.1);
+        border-color: color-mix(in srgb, var(--primary) 30%, transparent);
+        box-shadow: 0 6px 16px color-mix(in srgb, var(--foreground) 10%, transparent);
       }
     }
 
@@ -521,12 +521,12 @@ $active-bg: rgba(36, 61, 66, 0.09);
   // 那个类属于 ChatPane 模块，CSS Modules 会把两边 hash 成不同名字，
   // 选择器永远匹配不上，且编译不报错、静默失效。
   .focusCardAlert {
-    border-color: rgba(15, 155, 173, 0.6);
-    box-shadow: 0 0 0 3px rgba(15, 155, 173, 0.12);
+    border-color: color-mix(in srgb, var(--primary) 60%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 12%, transparent);
 
     @media (hover: hover) {
       &:hover {
-        border-color: rgba(15, 155, 173, 0.75);
+        border-color: color-mix(in srgb, var(--primary) 75%, transparent);
       }
     }
   }
@@ -582,7 +582,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
         height: 40px;
         border-radius: 12px;
         background: $accent;
-        color: #fff;
+        color: var(--primary-foreground);
         font-size: 20px;
         display: flex;
         align-items: center;
@@ -597,7 +597,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
 
     .hint {
       font-size: 12px;
-      color: rgba(36, 61, 66, 0.4);
+      color: color-mix(in srgb, var(--foreground) 40%, transparent);
     }
   }
 }
@@ -633,7 +633,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
       min-width: 28px;
       border-radius: 50%;
       background: $accent;
-      color: #fff;
+      color: var(--primary-foreground);
       font-size: 13px;
       font-weight: 600;
       display: flex;
@@ -697,7 +697,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
     padding: 4px;
     border-radius: 12px;
     border: 1px solid $border;
-    box-shadow: 0 4px 24px rgba(36, 61, 66, 0.12);
+    box-shadow: 0 4px 24px color-mix(in srgb, var(--foreground) 12%, transparent);
   }
 }
 
@@ -738,15 +738,15 @@ $active-bg: rgba(36, 61, 66, 0.09);
       min-height: calc(48px + env(safe-area-inset-top));
       padding: env(safe-area-inset-top) calc(12px + env(safe-area-inset-right)) 0
         calc(12px + env(safe-area-inset-left));
-      background: rgba(244, 250, 251, 0.82);
+      background: color-mix(in srgb, var(--primary-subtle) 82%, transparent);
       backdrop-filter: saturate(180%) blur(20px);
       -webkit-backdrop-filter: saturate(180%) blur(20px);
-      border-bottom: 0.5px solid rgba(36, 61, 66, 0.16);
+      border-bottom: 0.5px solid color-mix(in srgb, var(--foreground) 16%, transparent);
       z-index: 5;
 
       .mobileMenuBtn {
         font-size: 21px;
-        color: #0f9bad;
+        color: var(--primary);
         cursor: pointer;
         display: flex;
         align-items: center;
@@ -757,7 +757,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
         border-radius: 10px;
 
         &:active {
-          background: rgba(36, 61, 66, 0.08);
+          background: color-mix(in srgb, var(--foreground) 8%, transparent);
         }
       }
 
@@ -771,12 +771,12 @@ $active-bg: rgba(36, 61, 66, 0.09);
         width: 40px;
         height: 40px;
         font-size: 22px;
-        color: #0f9bad;
+        color: var(--primary);
         border-radius: 10px;
         cursor: pointer;
 
         &:active {
-          background: rgba(36, 61, 66, 0.08);
+          background: color-mix(in srgb, var(--foreground) 8%, transparent);
         }
       }
 
@@ -790,12 +790,12 @@ $active-bg: rgba(36, 61, 66, 0.09);
         width: 40px;
         height: 40px;
         font-size: 19px;
-        color: #d4380d;
+        color: var(--destructive);
         border-radius: 10px;
         cursor: pointer;
 
         &:active {
-          background: rgba(212, 56, 13, 0.1);
+          background: color-mix(in srgb, var(--destructive) 10%, transparent);
         }
 
         // 它已经把右侧空间占住了，后面的 ⋯ 不该再推一次
@@ -827,17 +827,17 @@ $active-bg: rgba(36, 61, 66, 0.09);
           border-radius: 50%;
           margin-right: 7px;
           vertical-align: middle;
-          background: #b9c4c7;
+          background: var(--border);
 
           &.running {
-            background: #22b06a;
+            background: var(--success);
             animation: mobilePulse 1.4s ease-in-out infinite;
           }
           &.idle {
-            background: #f2b234;
+            background: var(--warning);
           }
           &.paused {
-            background: #8a9ba0;
+            background: var(--subtle-foreground);
           }
         }
       }
@@ -930,7 +930,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
       height: 46px;
       min-width: 46px;
       font-size: 18px;
-      box-shadow: 0 4px 14px rgba(15, 155, 173, 0.35);
+      box-shadow: 0 4px 14px color-mix(in srgb, var(--primary) 35%, transparent);
     }
 
     .userText,
@@ -980,23 +980,23 @@ $active-bg: rgba(36, 61, 66, 0.09);
     padding: 9px 11px;
     border-radius: 10px;
     font-size: 14.5px;
-    color: #243d42;
+    color: var(--foreground);
     cursor: pointer;
 
     &:active {
-      background: rgba(36, 61, 66, 0.07);
+      background: color-mix(in srgb, var(--foreground) 7%, transparent);
     }
 
     :global(.anticon) {
       font-size: 16px;
-      color: #7c9096;
+      color: var(--muted-foreground);
     }
 
     &.danger {
-      color: #d4380d;
+      color: var(--destructive);
 
       :global(.anticon) {
-        color: #d4380d;
+        color: var(--destructive);
       }
     }
 
@@ -1004,12 +1004,12 @@ $active-bg: rgba(36, 61, 66, 0.09);
     .actWhy {
       margin-left: auto;
       font-size: 11.5px;
-      color: rgba(36, 61, 66, 0.3);
+      color: color-mix(in srgb, var(--foreground) 30%, transparent);
     }
 
     // 不可用（如空闲时的「中断」）：连按下反馈也去掉，免得看着像点了没生效
     &.disabled {
-      color: rgba(36, 61, 66, 0.32);
+      color: color-mix(in srgb, var(--foreground) 32%, transparent);
       cursor: default;
 
       &:active {
@@ -1017,7 +1017,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
       }
 
       :global(.anticon) {
-        color: rgba(36, 61, 66, 0.28);
+        color: color-mix(in srgb, var(--foreground) 28%, transparent);
       }
     }
   }
