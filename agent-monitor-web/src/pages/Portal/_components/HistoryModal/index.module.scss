@@ -5,9 +5,6 @@ $accent: var(--primary);
 $mono: "SF Mono", Menlo, Consolas, monospace;
 
 .hint {
-  display: flex;
-  align-items: center;
-  gap: 12px;
   font-size: var(--text-sm);
   color: $muted;
   padding-bottom: 10px;
@@ -36,49 +33,10 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 }
 
 // 换会话的分隔条：多个终端的往来混在一起时，得看得出这段是谁的
-.divider {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 14px 0 8px;
-  padding-bottom: 5px;
-  border-bottom: 1px dashed color-mix(in srgb, var(--foreground) 12%, transparent);
-
-  &:first-child {
-    margin-top: 0;
-  }
-}
 
 // 号位徽标：与钉钉「@N」同一个编号
-.slot {
-  flex: none;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 6px;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--primary) 12%, transparent);
-  color: $accent;
-  font-family: $mono;
-  font-size: var(--text-sm);
-  line-height: 20px;
-  text-align: center;
-}
 
-.dividerText {
-  flex: 1;
-  min-width: 0;
-  font-size: 12.5px;
-  color: $text;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
-.dividerMeta {
-  flex: none;
-  font-size: 11.5px;
-  color: $muted;
-}
 
 // 我发的靠右
 .rowUser {
