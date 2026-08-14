@@ -163,10 +163,6 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/integrations/dingtalk-bind", post(dingtalk_bind))
         .route("/monitor/integrations/dingtalk-ids", get(dingtalk_ids_get))
         .route("/monitor/integrations/dingtalk-unbind", post(dingtalk_unbind))
-        // 微信（个人号）：扫码绑定 / 轮询扫码结果 / 解绑
-        .route("/monitor/integrations/weixin-qr", get(weixin_qr))
-        .route("/monitor/integrations/weixin-scan", get(weixin_scan))
-        .route("/monitor/integrations/weixin-unbind", post(weixin_unbind))
         // 回调（每用户 channel 路由）
         .route("/monitor/int/dingtalk/:channel", post(crate::bot::dingtalk_message))
         // ---- 设备配对（注册+安装即可用，无需管理员发令牌）----
@@ -1786,15 +1782,12 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
     let app = reg.dingtalk_app_of(&user);
     // 管理员配了全局机器人 → 没自己配机器人的用户也能用（绑钉钉号即可）
     let has_global = reg.global_dingtalk_app().is_some_and(|a| !a.app_key.is_empty());
-    let wx = reg.weixin_bot_of(&user);
     let bound: Vec<Value> = reg
         .dingtalk_ids_of(&user)
         .into_iter()
         .map(|(staff_id, nick)| json!({ "staffId": staff_id, "nick": nick }))
         .collect();
     drop(reg);
-    let pending_pushes =
-        state.weixin_pending_pushes.read().await.get(&user).map(|v| v.len()).unwrap_or(0);
     ok(json!({
         "recvDirDevices": recv_dir_devices,
         // 自己的机器人（优先生效）。密钥不回显，只回「配没配」+ 通没通。
@@ -1802,93 +1795,14 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
         "dingtalk": {
             "appKey": if is_super { String::new() } else { app.as_ref().map(|a| a.app_key.clone()).unwrap_or_default() },
             "hasSecret": !is_super && app.as_ref().is_some_and(|a| !a.app_secret.is_empty()),
-            // 已捕获到聊天对象 = 机器人已经能主动给你推消息了
-            "linked": !is_super && app.as_ref().is_some_and(|a| !a.staff_id.is_empty()),
+            // **已扫码绑定钉钉号 = 能推送**。以前这里看的是「有没有捕获到聊天对象」，
+            // 那是隐式的：任何人给机器人发句话都可能把自己变成收件人。现在以显式绑定为准。
+            "linked": !bound.is_empty(),
         },
-        // 没配自己的机器人时可用的公共通道：绑定钉钉号即可
+        // 扫码绑定的钉钉号（自己的机器人与公共机器人共用这张表）。
+        // available：自己没配机器人时，管理员的公共机器人是否可用。
         "globalBot": { "available": has_global, "boundIds": bound },
-        // 微信（个人号）：扫码即绑，不需要任何 key/secret
-        "weixin": {
-            "bound": wx.is_some(),
-            "boundAt": wx.as_ref().map(|b| b.bound_at).unwrap_or(0),
-            // 收到过消息 = 拿到了 context_token = 能主动给你推
-            "linked": wx.as_ref().is_some_and(|b| !b.context_token.is_empty()),
-            "expired": wx.as_ref().is_some_and(|b| b.session_expired),
-            // 推送凭据过期期间攒下、等你开口才能补发的通知数。>0 时界面别再说「已连通」。
-            "pendingPushes": pending_pushes,
-        },
     }))
-}
-
-// ---------- 微信（个人号）机器人：扫码绑定 ----------
-
-/// GET /monitor/integrations/weixin-qr —— 取一张登录二维码。
-/// 返回待编码的链接，二维码由网页自己画（省得后端引图形库）。码约 2 分钟过期，
-/// 过期就再调一次换一张。
-async fn weixin_qr(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
-    if auth_user(&state, &headers).await.is_none() {
-        return err(401, "未登录");
-    }
-    match crate::weixin::fetch_qrcode().await {
-        Ok(q) => ok(json!({ "qrcodeId": q.id, "link": q.link })),
-        Err(e) => err(502, &format!("取二维码失败：{e}")),
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WeixinScanReq {
-    #[serde(default)]
-    qrcode_id: String,
-}
-
-/// GET /monitor/integrations/weixin-scan?qrcodeId=X —— 轮询扫码结果。
-/// confirmed 时就地落库并叫醒长轮询循环。
-async fn weixin_scan(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-    Query(q): Query<WeixinScanReq>,
-) -> Json<Value> {
-    let Some(user) = auth_user(&state, &headers).await else {
-        return err(401, "未登录");
-    };
-    if q.qrcode_id.trim().is_empty() {
-        return err(400, "缺少 qrcodeId");
-    }
-    // 已经确认过的码：直接回，**不再问上游** —— 每问一次「已确认」，微信就给用户
-    // 再发一条欢迎消息，而确认那一刻网页往往有好几个轮询请求在途。
-    {
-        let mut done = state.weixin_scan_done.write().await;
-        done.retain(|_, at| at.elapsed().as_secs() < 300);
-        if done.contains_key(q.qrcode_id.trim()) {
-            return ok(json!({ "status": "confirmed" }));
-        }
-    }
-    match crate::weixin::scan_state(&q.qrcode_id).await {
-        Ok(crate::weixin::ScanState::Confirmed(bot)) => {
-            state.registry.write().await.set_weixin_bot(&user, bot);
-            state
-                .weixin_scan_done
-                .write()
-                .await
-                .insert(q.qrcode_id.trim().to_string(), std::time::Instant::now());
-            state.weixin_reload.notify_one();
-            ok(json!({ "status": "confirmed" }))
-        }
-        Ok(crate::weixin::ScanState::Expired) => ok(json!({ "status": "expired" })),
-        Ok(crate::weixin::ScanState::Waiting) => ok(json!({ "status": "waiting" })),
-        Err(e) => err(502, &format!("查扫码状态失败：{e}")),
-    }
-}
-
-/// POST /monitor/integrations/weixin-unbind —— 解绑微信机器人。
-async fn weixin_unbind(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
-    let Some(user) = auth_user(&state, &headers).await else {
-        return err(401, "未登录");
-    };
-    let removed = state.registry.write().await.clear_weixin_bot(&user);
-    state.weixin_reload.notify_one();
-    ok(json!({ "result": if removed { "已解绑" } else { "本来就没绑" } }))
 }
 
 #[derive(Deserialize)]
@@ -1982,12 +1896,10 @@ async fn dingtalk_qr(State(state): State<SharedState>, headers: HeaderMap) -> Js
     let Some(user) = auth_user(&state, &headers).await else {
         return err(401, "未登录");
     };
-    let Some(app) = state.registry.read().await.global_dingtalk_app() else {
-        return err(400, "管理员还没配公共机器人，暂不能扫码绑定");
+    // 自己配了应用就用自己的；都没有才说不能扫码
+    let Some(app) = state.registry.read().await.dingtalk_bind_app(&user) else {
+        return err(400, "请先配置自己的钉钉机器人（或等管理员配好公共机器人）再扫码绑定");
     };
-    if app.app_key.is_empty() {
-        return err(400, "管理员还没配公共机器人，暂不能扫码绑定");
-    }
     let now = crate::state::now_secs();
     let mut map = state.dingtalk_bind_codes.write().await;
     map.retain(|_, e| now.saturating_sub(e.at) < crate::bot::BIND_TOKEN_TTL_SECS);
@@ -2057,8 +1969,9 @@ async fn dingtalk_scan_cb(
     if now.saturating_sub(p.at) >= crate::bot::BIND_TOKEN_TTL_SECS {
         return page(false, "二维码已过期");
     }
-    let Some(app) = state.registry.read().await.global_dingtalk_app() else {
-        return page(false, "公共机器人未配置");
+    // 必须与取码时用的是同一个应用：授权码只能由签发它的那个应用来兑换
+    let Some(app) = state.registry.read().await.dingtalk_bind_app(&p.user) else {
+        return page(false, "机器人未配置");
     };
     let now_ms = now * 1000;
     match crate::dingtalk::resolve_scan_user(&app.app_key, &app.app_secret, &q.code, now_ms).await {
@@ -3088,10 +3001,6 @@ async fn report(
     if !events.is_empty() {
         let st = state.clone();
         let now_ms = crate::state::now_secs() * 1000;
-        // 微信是另一条独立通路（长轮询 + context_token），与钉钉互不影响，各推各的
-        let st_wx = state.clone();
-        let ev_wx = events.clone();
-        tokio::spawn(async move { crate::weixin::deliver(&st_wx, ev_wx).await });
         tokio::spawn(async move { crate::dingtalk::deliver(&st, events, now_ms).await });
     }
 

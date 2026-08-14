@@ -66,7 +66,7 @@ pub async fn dingtalk_message(
 // ---------- 指令调度（渠道无关，以账号身份执行） ----------
 
 /// 指令分发，返回给用户的文字回复。username 已由回调 URL 的 channel 确定。
-/// 回复上下文：钉钉会话 webhook + 失效时间，供「监控」注册持续推送用（企业微信暂无）
+/// 回复上下文：钉钉会话 webhook + 失效时间，供「监控」注册持续推送用
 pub(crate) struct ReplyCtx {
     pub webhook: String,
     pub expiry_ms: u64,
@@ -858,7 +858,7 @@ pub(crate) async fn session_number(
 }
 
 /// 单行化 + 截断。**会话标题来自用户的首条提示词，很可能是多行的**，直接嵌进
-/// 一行文案会把那行撕成两段：漏出去的第二段在微信那种「单换行被当软换行」的渲染里
+/// 一行文案会把那行撕成两段：漏出去的第二段在「单换行被当软换行」的渲染里
 /// 还会黏到下一行标题上 —— 实际见过「二级弹 —— 📱 MacBook Pro ——」这种。
 ///
 /// 先压平再截断，顺序不能反：否则 24 字的额度会被换行和多余空白吃掉，
@@ -1158,7 +1158,7 @@ async fn attach_pending_file(
     taken: &mut Option<Taken>,
 ) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
-    // 微信那条路收消息时就把内容取好了（直链会过期），直接用；钉钉才需要现在去下载。
+    // 已经取好内容的直接用（bytes 非空）；钉钉那条才需要现在去下载。
     let bytes = match &pf.bytes {
         Some(b) => b.clone(),
         None => {
@@ -1255,40 +1255,6 @@ async fn attach_pending_file(
         .map(|r| format!("./{}", r.replace('\\', "/")))
         .unwrap_or(target);
     Ok(rel)
-}
-
-/// 微信附件入挂起队列。内容已在收消息时下载并解密好（微信直链会过期，见
-/// `BotPendingFile::bytes`），这里只负责起名和排队。返回落盘用的文件名。
-///
-/// `origin` 是消息里带的原文件名：**文件有，图片没有** —— 图片只好按魔数猜扩展名
-/// 另起一个。传进来的名字只取 basename，防路径穿越。
-pub(crate) async fn stash_weixin_file(
-    state: &SharedState,
-    username: &str,
-    bytes: Vec<u8>,
-    origin: &str,
-) -> String {
-    let base = match std::path::Path::new(origin.trim())
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        Some(n) => n,
-        // 图片没有原名，按魔数猜扩展名 + 时间戳凑一个
-        None => format!("微信图片-{}.{}", crate::state::now_secs(), crate::weixin::image_ext(&bytes)),
-    };
-    let mut map = state.bot_pending_files.write().await;
-    let list = map.entry(username.to_string()).or_default();
-    let name = crate::dingtalk_stream::unique_name(list, &base);
-    list.push(crate::state::BotPendingFile {
-        download_code: String::new(),
-        file_name: name.clone(),
-        app_user: username.to_string(),
-        at: crate::state::now_secs(),
-        bytes: Some(bytes),
-    });
-    tracing::info!("微信暂存待发附件 account={username} name={name}");
-    name
 }
 
 /// 「文件」：列出当前挂起待发的文件（随下一条任务一起落到会话目录）。

@@ -199,7 +199,7 @@ pub fn chunk_text(text: &str, max_len: usize) -> Vec<String> {
             }
             if !cur.is_empty() {
                 // 收掉当前片，开新片；若切在表格中间，新片开头补回表头 + 分隔行，
-                // 否则后半张表在钉钉/微信那边只会渲染成一堆竖线。
+                // 否则后半张表在钉钉那边只会渲染成一堆竖线。
                 flush(&mut chunks, &mut cur, &mut cur_len);
                 if let Some(head) = &unit.head {
                     let head_len = head.chars().count();

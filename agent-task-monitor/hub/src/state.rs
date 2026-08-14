@@ -78,12 +78,6 @@ pub struct MachineEntry {
     pub config_manifest: Option<am_core::model::ConfigManifest>,
 }
 
-/// 连续多少次「绑定失效」型发送失败后判定需要重新扫码。
-///
-/// 不设成 1：偶发的一次不值得让用户去重扫。设成 3：这种失效一旦发生就是持续的
-///（实测连挂 18 小时），三次足以与偶发区分，又不会让人白等太久。
-pub const WEIXIN_SEND_FAIL_LIMIT: u32 = 3;
-
 /// 一次性图片外链的有效期。钉钉服务器通常几秒内就来拉，2 分钟足够；
 /// 留久了等于把会话截图长期挂在一个免鉴权地址上。
 pub const PUB_IMAGE_TTL_SECS: u64 = 120;
@@ -290,29 +284,6 @@ pub struct AppState {
     /// 没有它就要等下一轮 30s 轮询 —— 用户刚保存完就会去钉钉发消息试，
     /// 半分钟没反应只会以为自己配错了。
     pub dingtalk_reload: std::sync::Arc<tokio::sync::Notify>,
-    /// 同上，微信机器人扫码绑定/解绑后叫醒长轮询循环
-    pub weixin_reload: std::sync::Arc<tokio::sync::Notify>,
-    /// 微信推送失败后攒下的通知（账号 → 正文），等用户下次开口时补发。
-    ///
-    /// 发送失败有两种，别混为一谈（这一条是拿 18 小时的线上故障换来的）：
-    /// - **临时性**：网络抖动之类，下次就好；
-    /// - **绑定失效**：一律 `-2 prepare failed`，**不会自愈、也与 context_token 新旧无关**
-    ///   —— 实测拿刚收到的、几秒钟前的凭据发送照样失败，只有重新扫码才恢复。
-    ///   （曾误判成「context_token 约 1.5 小时过期」：那只解释了失败的起点，
-    ///   没解释「之后 18 小时、期间反复收到新消息也从未恢复」。取证不足。）
-    ///
-    /// 两种都不能直接丢消息 —— 丢了就是「任务完成了但你永远不知道」。
-    pub weixin_pending_pushes: RwLock<HashMap<String, Vec<String>>>,
-    /// 连续「绑定失效」型发送失败的次数（账号 → 次数）。攒够就判定要重扫，
-    /// 见 WEIXIN_SEND_FAIL_LIMIT。发送成功即清零。
-    pub weixin_send_fails: RwLock<HashMap<String, u32>>,
-    /// 已确认过的扫码：qrcode_id → 确认时刻。
-    ///
-    /// **防重复绑定**：网页每 2s 轮询一次扫码状态，确认那一刻往往有好几个请求在途；
-    /// 每个都去问一次微信的 `get_qrcode_status`，而微信每被问一次「已确认」
-    /// 就给用户发一条欢迎消息 —— 用户那边就是「绑定成功」弹了好几条。
-    /// 记下来，后续轮询直接回 confirmed，不再打扰上游。
-    pub weixin_scan_done: RwLock<HashMap<String, Instant>>,
     /// 一次性图片外链：token → (内容, MIME, 放入时刻)。
     ///
     /// **只为钉钉存在**：它的 `sampleImageMsg` 只认公网 URL —— 图片要由**钉钉的
@@ -427,12 +398,8 @@ pub struct BotPendingFile {
     pub app_user: String,
     /// 收到时刻（秒），用于过期清理
     pub at: u64,
-    /// 微信：收到时就已下载并解密好的内容。
-    ///
-    /// 不像钉钉那样延后取，是因为微信的下载直链带一次性参数、会过期，且解密要用
-    /// 随消息一起来的 aeskey —— 等到下发任务时再去取很可能已经拿不到了，
-    /// 而那时报错，人早就忘了自己发过图。收到即取，失败当场就能告诉他。
-    /// None = 走 `download_code` 那条（钉钉）。
+    /// 收到时就已取好的内容（有些来源的下载链接是一次性的，等到下发时再取多半已失效）。
+    /// None = 走 `download_code` 那条（钉钉，延后下载）。
     pub bytes: Option<Vec<u8>>,
 }
 
@@ -471,10 +438,6 @@ impl AppState {
             login_throttle: RwLock::new(LoginThrottle::default()),
             tx,
             dingtalk_reload: std::sync::Arc::new(tokio::sync::Notify::new()),
-            weixin_reload: std::sync::Arc::new(tokio::sync::Notify::new()),
-            weixin_pending_pushes: RwLock::new(HashMap::new()),
-            weixin_send_fails: RwLock::new(HashMap::new()),
-            weixin_scan_done: RwLock::new(HashMap::new()),
             pub_images: RwLock::new(HashMap::new()),
             dingtalk_binds: RwLock::new(HashMap::new()),
             dingtalk_bind_codes: RwLock::new(HashMap::new()),
