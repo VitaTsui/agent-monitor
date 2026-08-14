@@ -427,7 +427,8 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
     // 「终端此刻正等你选」：由 PreToolUse hook 在 AskUserQuestion 执行前落下，
     // 下面读 hook 记录时顺带收上来（session_id → AskUserQuestion 的 input JSON），
     // 扫描完再回填到对应会话上报出去。
-    // 值 = (AskUserQuestion 的 input, hook 落盘时刻)：后者用来判断这份待选是否已经过期
+    // 值 = (AskUserQuestion 的 input, hook 落盘时刻 epoch 毫秒)：后者用来判断这份待选
+    // 是否已经被答掉（与 jsonl 里那次调用的 tool_result 时间比，见下面回填处）
     let mut pending_selects: std::collections::HashMap<String, (serde_json::Value, u64)> =
         std::collections::HashMap::new();
     let pinned = {
@@ -505,7 +506,7 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                 continue;
             };
             if let Some(sel) = r.pending_select {
-                pending_selects.insert(r.session_id.clone(), (sel, r.at));
+                pending_selects.insert(r.session_id.clone(), (sel, r.at_ms));
             }
             if acc.insert(r.claude_pid, (r.session_id, start)).is_none() {
                 added += 1;
@@ -629,8 +630,23 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
     // 回填「正等你选」：hook 是按 session_id 报的，这里对上号挂到会话上。
     // 没对上（会话已被 /clear 换掉等）就丢弃 —— 一张挂错会话的选项卡比没有更糟。
     if !pending_selects.is_empty() {
+        // 会话 id → 那次选择卡的了结时刻（见下面的 answered 判据）
+        let answered_at: std::collections::HashMap<&str, u64> = sessions
+            .iter()
+            .filter_map(|s| s.select_answered_ms.map(|ms| (s.session_id.as_str(), ms)))
+            .collect();
         for t in &mut tasks {
-            if let Some((sel, _at)) = pending_selects.remove(&t.id) {
+            if let Some((sel, at_ms)) = pending_selects.remove(&t.id) {
+                // 已经答完的卡片必须撤下。清除本该由 PostToolUse(AskUserQuestion) hook 完成，
+                // 但那条 hook 缺席的情形不少（客户端旧版没写这条配置、hook 拿不到 CLAUDE_PID、
+                // 用户按 Esc 打断），一缺席卡片就在网页/钉钉上永远挂着 —— 终端早就选完了。
+                //
+                // 判据取自 jsonl：那次 AskUserQuestion 的 **tool_result 落盘时间**晚于本条
+                // hook 记录，就说明这张卡已经被了结（作答或中断）。它按 tool_use_id 对上号，
+                // 与下面说的 mtime 启发式是两回事。
+                if answered_at.get(t.id.as_str()).is_some_and(|&ms| ms >= at_ms) {
+                    continue;
+                }
                 // 这里**不要**再拿「jsonl 的 mtime 比 hook 晚多少」判过期。
                 //
                 // 曾经加过那道校验（想兜住「答完的卡不消失」），判据是「会话在 hook 之后

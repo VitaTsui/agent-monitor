@@ -35,12 +35,13 @@ pub fn hooks_dir(data_dir: &Path) -> PathBuf {
 pub struct HookReport {
     pub claude_pid: u32,
     pub session_id: String,
-    /// 这条记录的落盘时刻（epoch 秒）。
+    /// 这条记录的落盘时刻（epoch 毫秒）。
     ///
-    /// 用来判断 `pending_select` 是否**已经过期**：它是「上一次 hook 触发那一刻」的快照，
-    /// 若会话在那之后又有写入（人已作答、claude 接着往下跑），这份待选就该作废。
-    /// 没有这道校验时，一张答完的选项卡会在远端一直挂着不消失。
-    pub at: u64,
+    /// 用来判断 `pending_select` 是否**已经作答**：拿它跟 jsonl 里那次 AskUserQuestion 的
+    /// tool_result 时间戳比，结果更晚就说明卡片已被了结（见 client::state 的回填处）。
+    /// 毫秒精度是必须的 —— 秒精度会在「同一秒内答完上一张、又弹出新一张」上判错。
+    /// （TTL 用的秒级 `at` 在 [`read_reports`] 内部消化，不必带出来。）
+    pub at_ms: u64,
     /// 终端**此刻正等着你选**：AskUserQuestion 的整份 input（questions/options）。
     ///
     /// 从 jsonl 里读到的 select 消息是「事后」的 —— 那条记录要等这一轮落盘才看得见，
@@ -53,6 +54,13 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 
@@ -110,6 +118,7 @@ pub fn run_hook_cli(data_dir: &Path) {
         "session_id": session_id,
         "cwd": cwd,
         "at": now_secs(),
+        "at_ms": now_ms(),
         "pending_select": pending_select,
     });
     let Ok(txt) = serde_json::to_string(&rec) else { return };
@@ -177,7 +186,8 @@ pub fn read_reports(data_dir: &Path, max_age_secs: u64) -> Vec<HookReport> {
         out.push(HookReport {
             claude_pid: pid as u32,
             session_id: sid.to_string(),
-            at,
+            // 旧客户端写的记录没有 at_ms，退回秒精度（比不上就当没答，卡片多留一轮）
+            at_ms: v.get("at_ms").and_then(|x| x.as_u64()).unwrap_or(at.saturating_mul(1000)),
             pending_select: v.get("pending_select").filter(|x| !x.is_null()).cloned(),
         });
     }

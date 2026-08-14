@@ -45,6 +45,15 @@ pub struct SessionSummary {
     /// 来自会话 jsonl 的 queue-operation 记录：enqueue 入列、remove 出列（被接受或取消），
     /// 末态仍在列的即当前排队项。前端把它们挂在内容区底部显示。
     pub queued_inputs: Vec<String>,
+    /// 尾窗里**最后一次 AskUserQuestion 被了结**的时刻（epoch 毫秒）：作答落下 tool_result，
+    /// 或这一轮被 Esc 中断。没见过就是 None。
+    ///
+    /// 「终端正等你选」平时由 PostToolUse hook 清除，但那条 hook 缺席的情形不少
+    /// （客户端旧版没写这条配置、hook 拿不到 CLAUDE_PID、用户按 Esc 直接打断），
+    /// 一缺席卡片就在远端永远挂着。jsonl 里的 tool_result 是**精确**信号：它带着
+    /// 对应 tool_use 的 id，不是「文件又写过 ⇒ 大概答完了」那种会误伤的启发式
+    /// （见 client::state 回填处的说明）。
+    pub select_answered_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -309,6 +318,8 @@ impl SessionScanner {
             line_count: 0,
             used_tokens_5h: 0,
             queued_inputs: Vec::new(),
+            // codex 没有 AskUserQuestion 这套选择卡，也就无所谓了结
+            select_answered_ms: None,
         };
         self.cache.insert(
             path.to_path_buf(),
@@ -959,6 +970,9 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
     let mut git_branch: Option<String> = None;
     let mut used_tokens_5h: u64 = 0;
     let window_start_ms = now_ms().saturating_sub(5 * 3600 * 1000);
+    // 「正等你选」的了结信号：尚无结果的 AskUserQuestion 的 tool_use id + 它被了结的时刻
+    let mut open_ask: Option<String> = None;
+    let mut select_answered_ms: Option<u64> = None;
 
     for line in tail.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
@@ -1000,6 +1014,15 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                     .is_some_and(|s| s.contains("<command-name>/clear</command-name>"))
                 {
                     saw_clear = true;
+                }
+                // 选择卡的了结：作答会落下带 tool_use_id 的 tool_result；按 Esc 打断则
+                // 只有中断标记、永远等不到结果 —— 两者都意味着这张卡不该再挂在远端。
+                if let Some(id) = &open_ask {
+                    if content_answers(content, id) || is_interrupt_marker(content) {
+                        select_answered_ms =
+                            v.get("timestamp").and_then(Value::as_str).and_then(iso_to_ms);
+                        open_ask = None;
+                    }
                 }
                 if is_interrupt_marker(content) {
                     // 在终端里按 Esc 中断 → 这一轮就此打住，回到等待输入。
@@ -1081,6 +1104,14 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                         match item.get("type").and_then(Value::as_str) {
                             Some("tool_use") => {
                                 if let Some(n) = item.get("name").and_then(Value::as_str) {
+                                    // 新一张选择卡：在见到它的结果之前，之前那次的了结时刻作废
+                                    if n == "AskUserQuestion" {
+                                        open_ask = item
+                                            .get("id")
+                                            .and_then(Value::as_str)
+                                            .map(|s| s.to_string());
+                                        select_answered_ms = None;
+                                    }
                                     tool_names.push(n.to_string());
                                 }
                             }
@@ -1126,6 +1157,16 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         line_count: 0,
         used_tokens_5h,
         queued_inputs,
+        select_answered_ms,
+    })
+}
+
+/// 这条 user 记录里是否含**指定** tool_use 的结果（即那次工具调用已了结）
+fn content_answers(content: Option<&Value>, tool_use_id: &str) -> bool {
+    let Some(Value::Array(items)) = content else { return false };
+    items.iter().any(|it| {
+        it.get("type").and_then(Value::as_str) == Some("tool_result")
+            && it.get("tool_use_id").and_then(Value::as_str) == Some(tool_use_id)
     })
 }
 
@@ -2373,6 +2414,75 @@ mod brief_tests {
     }
 }
 
+/// 「正等你选」的了结信号：远端的选项卡靠它撤下（PostToolUse hook 缺席时的唯一依据）
+#[cfg(test)]
+mod select_close_tests {
+    use super::*;
+
+    fn ask(id: &str, ts: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"{ts}","message":{{"role":"assistant","content":[
+               {{"type":"tool_use","id":"{id}","name":"AskUserQuestion",
+                 "input":{{"questions":[{{"question":"选哪个?"}}]}}}}]}}}}"#
+        )
+        .replace('\n', "")
+    }
+
+    fn answer(id: &str, ts: &str) -> String {
+        format!(
+            r#"{{"type":"user","timestamp":"{ts}","message":{{"role":"user","content":[
+               {{"type":"tool_result","tool_use_id":"{id}","content":"选了 A"}}]}}}}"#
+        )
+        .replace('\n', "")
+    }
+
+    fn parse(lines: &[String]) -> Option<u64> {
+        let tail = lines.join("\n");
+        parse_tail("s1", std::path::Path::new("/proj/-proj/s1.jsonl"), &tail)
+            .expect("应能解析")
+            .select_answered_ms
+    }
+
+    /// 答完 → 记下 tool_result 的时刻，客户端据此撤卡
+    #[test]
+    fn answered_records_result_time() {
+        let t = parse(&[ask("toolu_1", "2026-08-14T08:00:00.000Z"), answer("toolu_1", "2026-08-14T08:01:00.000Z")]);
+        assert_eq!(t, iso_to_ms("2026-08-14T08:01:00.000Z"));
+    }
+
+    /// 还没答 → None。**这条最要紧**：判错就是把一张正等着人回答的卡片提前撤掉。
+    #[test]
+    fn unanswered_stays_open() {
+        assert_eq!(parse(&[ask("toolu_1", "2026-08-14T08:00:00.000Z")]), None);
+    }
+
+    /// 等待期间 claude 并行跑的别的工具，其结果不能算作这张卡的答案
+    #[test]
+    fn other_tool_result_does_not_close_it() {
+        let other = answer("toolu_OTHER", "2026-08-14T08:00:30.000Z");
+        assert_eq!(parse(&[ask("toolu_1", "2026-08-14T08:00:00.000Z"), other]), None);
+    }
+
+    /// 按 Esc 打断：永远等不到 tool_result，同样要撤卡
+    #[test]
+    fn interrupt_closes_it() {
+        let esc = r#"{"type":"user","timestamp":"2026-08-14T08:02:00.000Z","message":{"role":"user","content":"[Request interrupted by user]"}}"#;
+        let t = parse(&[ask("toolu_1", "2026-08-14T08:00:00.000Z"), esc.to_string()]);
+        assert_eq!(t, iso_to_ms("2026-08-14T08:02:00.000Z"));
+    }
+
+    /// 答完又弹一张新的：了结时刻要清掉，否则新卡一出生就被判成「早答过了」
+    #[test]
+    fn new_card_resets() {
+        let t = parse(&[
+            ask("toolu_1", "2026-08-14T08:00:00.000Z"),
+            answer("toolu_1", "2026-08-14T08:01:00.000Z"),
+            ask("toolu_2", "2026-08-14T08:02:00.000Z"),
+        ]);
+        assert_eq!(t, None, "新卡未答，不该带着上一张的了结时刻");
+    }
+}
+
 #[cfg(test)]
 mod pairing_tests {
     use super::*;
@@ -2397,6 +2507,7 @@ mod pairing_tests {
             line_count: 1,
             used_tokens_5h: 0,
             queued_inputs: Vec::new(),
+            select_answered_ms: None,
         }
     }
 
@@ -2939,6 +3050,7 @@ mod codex_tests {
             line_count: 1,
             used_tokens_5h: 0,
             queued_inputs: Vec::new(),
+            select_answered_ms: None,
         };
         let proc = |agent: &str, pid: u32, key: &str| ProcessInfo {
             pid,
