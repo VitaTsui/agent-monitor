@@ -398,6 +398,43 @@ pub(crate) fn agent_reports_file_path(ver: &str) -> bool {
     }
 }
 
+/// 会话此刻是否「正等你选」。
+///
+/// **优先信 hook 自报的 `pending_select`，扫消息只作兜底** —— 两者的时序差就是钉钉那条
+/// 「⌨️ 需要你选择」的成败：`pending_select` 来自 PreToolUse hook，在选项弹给终端**之前**
+/// 就已写下、随 tasks 每轮实时上报；而 jsonl 里那条 select 是事后的，还要过客户端的 mtime
+/// 缓存和扫描周期才到得了 hub。等它到，人往往早就在终端上选完了。
+///
+/// 光是「晚」还不算完：会话一停下来等选择，status 就跃迁 Running→Idle，而那条跃迁走的是
+/// 实时的 tasks。于是「等待选择的会话不推任务完成」那道闸因为本函数还返回 false 而失效，
+/// 钉钉收到的是「🔔 任务完成 · 等待你的操作」，选项卡再没机会推（select_notified 的边沿
+/// 早被后来的消息带过去了）。08-17 线上实测：整段等待期 hub 一条 select 都没看见，只推了
+/// 两条 kind=Waiting，而唯一一次 kind=Select 是几小时前的事。
+///
+/// 兜底不能去掉：hook 没装/没配到的客户端 `pending_select` 恒为 None，那些机器只能靠扫
+/// 消息。作答后 hook 会把它写成 null（另有 jsonl tool_result 落盘时间兜底），不会一直挂着。
+///
+/// 扫消息的判据是「从末尾回看最近一条实质消息，若先遇到 select 则仍在等」——比「末条恰好
+/// 是 select」稳健：AskUserQuestion 记录常不在绝对末尾（后面可能还跟 assistant 文本）。
+pub(crate) fn task_is_selecting(
+    pending_select: Option<&Value>,
+    msgs: Option<&Vec<am_core::model::MessageBrief>>,
+) -> bool {
+    if pending_select.is_some_and(|v| !v.is_null()) {
+        return true;
+    }
+    let Some(ms) = msgs else { return false };
+    for m in ms.iter().rev() {
+        match m.role.as_str() {
+            "todos" | "bgtasks" => continue,
+            "select" => return true,
+            "user" | "tool_result" => return false,
+            _ => continue, // assistant/tool/plan：继续往前看
+        }
+    }
+    false
+}
+
 /// 等客户端回报「这次下发的文件实际落到哪」。
 ///
 /// `Some(Ok(绝对路径))` = 已落盘；`Some(Err(原因))` = 客户端明确写失败；`None` = 没等到。
@@ -2806,23 +2843,9 @@ async fn report(
                 crate::slots::anchor_of(t),
             )
         };
-        // 「等待选择」判定：从末尾回看最近一条实质消息 —— 若先遇到 select（其后没有 user/
-        // tool_result 应答），说明仍在等你选。比「末条恰好是 select」稳健：AskUserQuestion 记录
-        // 常不在绝对末尾（后面可能还跟 assistant 文本），但只要没被应答就仍算等待。
-        let is_pending_select = |ms: &[am_core::model::MessageBrief]| -> bool {
-            for m in ms.iter().rev() {
-                match m.role.as_str() {
-                    "todos" | "bgtasks" => continue,
-                    "select" => return true,
-                    "user" | "tool_result" => return false,
-                    _ => continue, // assistant/tool/plan：继续往前看
-                }
-            }
-            false
-        };
         let now_selecting: std::collections::HashSet<String> = tasks
             .iter()
-            .filter(|t| msgs_map.get(&t.id).map(|ms| is_pending_select(ms)).unwrap_or(false))
+            .filter(|t| task_is_selecting(t.pending_select.as_ref(), msgs_map.get(&t.id)))
             .map(|t| t.id.clone())
             .collect();
         for t in &tasks {
@@ -3029,12 +3052,17 @@ async fn report(
         // select」判定）且尚未提醒过时，推一条。edge 触发靠 select_notified 去重。
         for t in &tasks {
             if now_selecting.contains(&t.id) && !entry.select_notified.contains(&t.id) {
-                // 选项文本取自该会话最近一条 select 消息（未必是绝对末条）
-                let opts = msgs_map
-                    .get(&t.id)
-                    .and_then(|ms| ms.iter().rev().find(|m| m.role.as_str() == "select"))
-                    .map(|m| select_options_text(&m.content))
-                    .unwrap_or_default();
+                // 选项文本同样优先取 hook 自报的那一份：靠 pending_select 触发的这一轮，
+                // 消息里多半还没有那条 select（正是它慢才要改用 hook），去 msgs_map 里找
+                // 只会找到上一张卡、或者什么都找不到，推出去一条没有选项的「需要你选择」。
+                let opts = match t.pending_select.as_ref().filter(|v| !v.is_null()) {
+                    Some(v) => select_summary(v),
+                    None => msgs_map
+                        .get(&t.id)
+                        .and_then(|ms| ms.iter().rev().find(|m| m.role.as_str() == "select"))
+                        .map(|m| select_options_text(&m.content))
+                        .unwrap_or_default(),
+                };
                 events.push(NotifyEvent {
                     owner: owner.clone(),
                     kind: EventKind::Select,
@@ -3463,6 +3491,60 @@ mod chunked_support_tests {
     fn prerelease_suffix_tolerated() {
         assert!(agent_supports_chunked("0.10.5-beta1"));
         assert!(!agent_supports_chunked("0.10.4-rc1"));
+    }
+}
+
+#[cfg(test)]
+mod selecting_tests {
+    use super::task_is_selecting;
+    use am_core::model::MessageBrief;
+    use serde_json::json;
+
+    fn msg(role: &str) -> MessageBrief {
+        MessageBrief { role: role.into(), content: String::new(), timestamp: String::new() }
+    }
+    fn msgs(roles: &[&str]) -> Vec<MessageBrief> {
+        roles.iter().map(|r| msg(r)).collect()
+    }
+
+    /// hook 自报优先：消息里还没有那条 select 也照样算「正等你选」。
+    ///
+    /// 这是本判定存在的理由 —— select 从 jsonl 绕到 hub 要过 mtime 缓存和扫描周期，
+    /// 而会话停下来等选择的那一刻 status 就跃迁了。慢的那条一旦被当成唯一依据，
+    /// 钉钉推的就是「任务完成」而不是选项卡（08-17 线上实测）。
+    #[test]
+    fn hook_report_wins_over_stale_messages() {
+        let card = json!({ "questions": [{ "question": "选哪个?" }] });
+        // 消息还停在「工具跑完」的样子，一条 select 都没有
+        let stale = msgs(&["assistant", "tool", "tool_result", "bgtasks"]);
+        assert!(task_is_selecting(Some(&card), Some(&stale)));
+        // 连消息都还没上报上来的会话同样算
+        assert!(task_is_selecting(Some(&card), None));
+    }
+
+    /// 作答后 hook 把它写成 null —— 那就不该再算等待
+    #[test]
+    fn null_hook_report_is_not_waiting() {
+        let answered = msgs(&["select", "tool_result"]);
+        assert!(!task_is_selecting(Some(&serde_json::Value::Null), Some(&answered)));
+    }
+
+    /// hook 没装/没配到的客户端（恒为 None）：兜底扫消息，这条路不能断
+    #[test]
+    fn falls_back_to_messages_without_hook() {
+        // select 之后没有应答 → 仍在等
+        assert!(task_is_selecting(None, Some(&msgs(&["assistant", "select"]))));
+        // select 不必在绝对末尾，后面跟 assistant 文本也算
+        assert!(task_is_selecting(None, Some(&msgs(&["select", "assistant"]))));
+        // 状态快照追加在末尾，要跳过
+        assert!(task_is_selecting(None, Some(&msgs(&["select", "todos", "bgtasks"]))));
+        // 已被应答 → 不算
+        assert!(!task_is_selecting(None, Some(&msgs(&["select", "tool_result"]))));
+        // 用户又发了新任务 → 不算
+        assert!(!task_is_selecting(None, Some(&msgs(&["select", "user"]))));
+        // 从来没有选择卡
+        assert!(!task_is_selecting(None, Some(&msgs(&["assistant", "tool"]))));
+        assert!(!task_is_selecting(None, None));
     }
 }
 
