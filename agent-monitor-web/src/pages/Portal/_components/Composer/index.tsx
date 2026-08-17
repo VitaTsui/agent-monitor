@@ -545,8 +545,15 @@ const Composer: React.FC<ComposerProps> = (props) => {
           name,
         );
         if (res.code === 0) {
+          // 落盘名以客户端回报的为准：上面那个 name 只是预判，而**决定权在客户端手里**
+          // （撞名它会自己改名）。查目录到落盘之间目录又变了、或同一目录有别的写入抢先，
+          // 预判就会落空，回填的路径又指回那个同名旧文件。
+          // 够旧的客户端不回报（hub 不带 path），那就只能退回预判名。
+          const actual = res.data?.path?.split(/[\\/]/).pop() || name;
+          // 本批后续文件要避让的是**实际**占用的名字
+          taken.add(actual);
           // 回填相对路径（相对会话目录，正斜杠通用）——用最终名，不是本地文件名
-          ok.push(dirRel ? `./${dirRel}/${name}` : `./${name}`);
+          ok.push(dirRel ? `./${dirRel}/${actual}` : `./${actual}`);
         } else {
           failed.push(file.name);
         }

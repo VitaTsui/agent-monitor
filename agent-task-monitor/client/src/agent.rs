@@ -90,6 +90,8 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     let mut pending_dir_results: Vec<am_core::model::DirResult> = Vec::new();
     let mut pending_fs_op_results: Vec<am_core::model::FsOpResult> = Vec::new();
     let mut pending_file_fetches: Vec<am_core::model::FileFetchResult> = Vec::new();
+    // 下发文件的落盘回报：hub 拿它回填任务正文里的路径（见 write_transfer）
+    let mut pending_file_results: Vec<am_core::model::FileTransferResult> = Vec::new();
     // 配置同步：扫描器带哈希缓存；清单每 CONFIG_SCAN_INTERVAL_SECS 报一次（不是每轮），
     // hub 侧会把它缓存下来，pull/push 每轮都能基于缓存推进。
     let mut cfg_scanner = crate::configsync::ConfigScanner::new();
@@ -260,6 +262,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             dir_results: std::mem::take(&mut pending_dir_results),
             fs_op_results: std::mem::take(&mut pending_fs_op_results),
             file_fetch_results: std::mem::take(&mut pending_file_fetches),
+            file_results: std::mem::take(&mut pending_file_results),
             // take：清单发出去就清空，下一轮不再重发。这一轮若上报失败，最多等
             // 一个扫描周期后重来——不值得为此在内存里长期挂一份待发清单。
             config_manifest: cfg_manifest.take(),
@@ -374,7 +377,9 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         _ => Vec::new(),
                     };
                     for f in files {
-                        write_transfer(&f, &session_dirs);
+                        if let Some(r) = write_transfer(&f, &session_dirs) {
+                            pending_file_results.push(r);
+                        }
                     }
                     // 目录列举请求（上传选目录）：列出 cwd/rel 下的子目录
                     let dir_queries: Vec<am_core::model::DirQuery> = body
@@ -621,15 +626,33 @@ async fn attach_messages(state: &SharedState, tasks: &mut [Task], cache: &mut Ms
     cache.inner.retain(|k, _| alive.contains(k.as_str()));
 }
 
-/// 写入 hub 下发的文件到本机目标目录
-fn write_transfer(f: &am_core::model::FileTransfer, session_dirs: &[std::path::PathBuf]) {
+/// 写入 hub 下发的文件到本机目标目录。
+///
+/// 返回值是给 hub 的回报（`transfer_id` 为空 = hub 没要求回报，恒为 None）：**落盘名的
+/// 决定权在这里**，撞名会改名（见 `unique_target`），hub 拼进任务正文的路径得跟着改，
+/// 否则指向的是目录里那个同名旧文件。失败也回报，别让 hub 干等到超时。
+///
+/// 分片只在最后一片落完时回报一次（名字是第 0 片定的），中途失败即刻回报 —— 后续片
+/// 还会来，但 hub 那边按 transfer_id 覆盖，后到的不会把已知的失败翻回成功。
+fn write_transfer(
+    f: &am_core::model::FileTransfer,
+    session_dirs: &[std::path::PathBuf],
+) -> Option<am_core::model::FileTransferResult> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    let report = |ok: bool, path: String, err: String| -> Option<am_core::model::FileTransferResult> {
+        (!f.transfer_id.is_empty()).then(|| am_core::model::FileTransferResult {
+            transfer_id: f.transfer_id.clone(),
+            path,
+            ok,
+            err,
+        })
+    };
     // 这条链路的成败必须落进 client.log：GUI 客户端的 tracing 输出没人看得到，
     // 写失败时是彻底静默的 —— 网页说「已上传」、路径也回填进了输入框，终端却报文件
     // 不存在，从两头都查不出原因。落盘的路径也一并记上，改名后到底叫什么一目了然。
     let Ok(bytes) = B64.decode(f.content_b64.as_bytes()) else {
         crate::state::client_log(&format!("下发文件内容解码失败：{}", f.filename));
-        return;
+        return report(false, String::new(), "内容解码失败".into());
     };
     // 目标目录按本机的允许范围复验：不能只信 hub 校验过——
     // hub 的 upload_root 是另一台机器的，且响应链路一旦被篡改就等于本机任意写。
@@ -641,12 +664,12 @@ fn write_transfer(f: &am_core::model::FileTransfer, session_dirs: &[std::path::P
                 "拒绝写入下发文件 {}：{e}（目标目录 {}，不在本机允许范围内）",
                 f.filename, f.dir
             ));
-            return;
+            return report(false, String::new(), format!("目标目录不在允许范围内：{e}"));
         }
     };
     if let Err(e) = std::fs::create_dir_all(&dir) {
         crate::state::client_log(&format!("创建下发目录失败 {}：{e}", dir.display()));
-        return;
+        return report(false, String::new(), format!("创建目录失败：{e}"));
     }
     let safe = std::path::Path::new(&f.filename)
         .file_name()
@@ -687,11 +710,12 @@ fn write_transfer(f: &am_core::model::FileTransfer, session_dirs: &[std::path::P
             .open(&target)
             .and_then(|mut fh| fh.write_all(&bytes))
     };
-    match res {
+    let outcome = match res {
         // 记落盘全路径：撞名会改名（见 unique_target），回填进输入框的却是上游算的名字，
         // 两者对不上时终端就会报「文件不存在」—— 有这行才看得出到底叫什么、落在哪。
         Ok(_) if !chunked => {
             crate::state::client_log(&format!("已写入下发文件：{}", target.display()));
+            report(true, target.display().to_string(), String::new())
         }
         Ok(_) if f.chunk_index + 1 >= f.chunk_total => {
             crate::state::client_log(&format!(
@@ -699,23 +723,30 @@ fn write_transfer(f: &am_core::model::FileTransfer, session_dirs: &[std::path::P
                 f.chunk_total,
                 target.display()
             ));
+            report(true, target.display().to_string(), String::new())
         }
-        Ok(_) => {}
+        // 中间片：名字已定但内容还没齐，此时报路径会让 hub 把半个文件当成品拼进任务
+        Ok(_) => None,
         // 中途某片失败就别再追加了：后续分片会接在残缺内容后面，拼出一个看着"成功"
-        // 却是坏的文件。这里只能记日志——协议是单向下发，没有回执通道能叫停后续分片。
-        Err(e) => crate::state::client_log(&format!(
-            "写入下发文件失败（第 {}/{} 片，目标 {}）：{e}",
-            f.chunk_index + 1,
-            f.chunk_total.max(1),
-            target.display()
-        )),
-    }
+        // 却是坏的文件。协议是单向下发，没有回执通道能叫停后续分片——但至少能把失败
+        // 回报上去，让 hub 别再等这次传输。
+        Err(e) => {
+            crate::state::client_log(&format!(
+                "写入下发文件失败（第 {}/{} 片，目标 {}）：{e}",
+                f.chunk_index + 1,
+                f.chunk_total.max(1),
+                target.display()
+            ));
+            report(false, String::new(), format!("写盘失败：{e}"))
+        }
+    };
     // 最后一片落完就撤掉登记，免得这张表随传输次数一直长
     if chunked && f.chunk_index + 1 >= f.chunk_total {
         if let Some(m) = CHUNK_TARGETS.lock().unwrap().as_mut() {
             m.remove(&key);
         }
     }
+    outcome
 }
 
 /// 目标目录下取一个不会撞名的路径：已存在就在扩展名前挂序号，`a.png` → `a (1).png`。
@@ -1174,5 +1205,99 @@ mod fetch_tests {
         assert_eq!(image_mime(&[0xff, 0xd8, 0xff, 0xe0]), "image/jpeg");
         // 伪装成图片的文本：不认，页面据此不会当图片渲染
         assert_eq!(image_mime(b"#!/bin/sh\nrm -rf /"), "application/octet-stream");
+    }
+}
+
+#[cfg(test)]
+mod transfer_report_tests {
+    use super::*;
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+
+    fn transfer(dir: &std::path::Path, name: &str, body: &[u8], id: &str) -> am_core::model::FileTransfer {
+        am_core::model::FileTransfer {
+            dir: dir.to_string_lossy().to_string(),
+            filename: name.into(),
+            content_b64: B64.encode(body),
+            chunk_index: 0,
+            chunk_total: 0,
+            transfer_id: id.into(),
+        }
+    }
+
+    fn workdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("am-xfer-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// 回报的必须是**改名后**的真实路径。
+    ///
+    /// 这是整条回程的存在理由：钉钉来的图片一律叫「图片.jpg」，目标目录里几乎必有同名旧图，
+    /// 落盘会改成「图片 (1).jpg」。若回报原名，hub 拼进任务的路径就指向那张**旧图** ——
+    /// agent 照着读得到内容、不报错，只是读的是上一版。
+    #[test]
+    fn reports_renamed_path_not_original() {
+        let dir = workdir("rename");
+        std::fs::write(dir.join("图片.jpg"), b"OLD").unwrap();
+        let roots = vec![dir.clone()];
+
+        let r = write_transfer(&transfer(&dir, "图片.jpg", b"NEW", "tid-1"), &roots)
+            .expect("要求回报时必须有回报");
+        assert!(r.ok, "落盘应成功：{}", r.err);
+        assert_eq!(r.transfer_id, "tid-1");
+        assert_eq!(
+            r.path,
+            dir.join("图片 (1).jpg").to_string_lossy(),
+            "回报的应是改名后的路径"
+        );
+        // 旧图必须原封不动 —— 撞名是改名，不是覆盖
+        assert_eq!(std::fs::read(dir.join("图片.jpg")).unwrap(), b"OLD");
+        assert_eq!(std::fs::read(dir.join("图片 (1).jpg")).unwrap(), b"NEW");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 不撞名时回报的就是原路径（hub 的预判命中，不该被当成改名）
+    #[test]
+    fn reports_original_path_when_no_clash() {
+        let dir = workdir("noclash");
+        let roots = vec![dir.clone()];
+
+        let r = write_transfer(&transfer(&dir, "图片-2.jpg", b"NEW", "tid-2"), &roots).unwrap();
+        assert!(r.ok);
+        assert_eq!(r.path, dir.join("图片-2.jpg").to_string_lossy());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// transferId 为空 = 旧 hub 没要求回报：照常落盘，但不产生回报
+    #[test]
+    fn silent_when_hub_did_not_ask() {
+        let dir = workdir("silent");
+        let roots = vec![dir.clone()];
+
+        assert!(write_transfer(&transfer(&dir, "a.txt", b"x", ""), &roots).is_none());
+        assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"x");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 失败也必须回报：hub 那头有个等结果的窗口，不回报它只能干等到超时，
+    /// 再拿自己算的名字去拼路径 —— 而那个路径下根本没有文件
+    #[test]
+    fn reports_failure_so_hub_stops_waiting() {
+        let dir = workdir("fail");
+        let roots = vec![dir.clone()];
+        let mut f = transfer(&dir, "bad.bin", b"", "tid-3");
+        f.content_b64 = "不是合法的 base64!!".into();
+
+        let r = write_transfer(&f, &roots).expect("失败同样要回报");
+        assert!(!r.ok);
+        assert_eq!(r.transfer_id, "tid-3");
+        assert!(r.path.is_empty(), "失败时不该给出路径");
+        assert!(!r.err.is_empty(), "要说明原因");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -226,6 +226,9 @@ pub struct ReportPayload {
     /// 上一轮 hub 点名现取的文件内容（回传）。旧客户端不带 → 空。
     #[serde(default)]
     pub file_fetch_results: Vec<FileFetchResult>,
+    /// 上一轮下发文件的实际落盘路径（回传）。旧客户端不带 → 空，hub 退回自己算的名字。
+    #[serde(default)]
+    pub file_results: Vec<FileTransferResult>,
     /// 本机 agent 配置清单（只有哈希，没有内容）。旧客户端不带 → None，
     /// hub 据此判定「这台机器还不支持配置同步」，既不索要也不下发。
     #[serde(default)]
@@ -419,6 +422,32 @@ pub struct FileTransfer {
     /// 但也因此，hub 必须确认对端版本够新才允许分片（见 server 的上传处理）。
     #[serde(default)]
     pub chunk_total: u32,
+    /// 本次传输的标识：非空表示 hub 要求 agent 回报**实际落盘路径**（见 [`FileTransferResult`]）。
+    ///
+    /// 名字的最终决定权在 agent 手里 —— 目标已存在时它会改名成 `图片 (1).jpg`（不覆盖）。
+    /// 此前这个新名字没有回程，hub 拼进任务正文的路径仍是自己算的原名，指向目录里那个
+    /// **旧文件**：agent 照着读得到内容、不报错，只是读的是上一版。本字段就是那条回程。
+    ///
+    /// 分片传输只认第 0 片定下的名字，回报在最后一片落完时发一次。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub transfer_id: String,
+}
+
+/// agent → hub：文件实际落到了哪里。
+///
+/// 只在 [`FileTransfer::transfer_id`] 非空时回报。失败也必须回报（`ok=false`）——
+/// hub 那边有个等结果的窗口，不回报它只能干等到超时，再拿自己算的名字去拼路径。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileTransferResult {
+    pub transfer_id: String,
+    /// 实际落盘的绝对路径（agent 本机）。失败时为空。
+    #[serde(default)]
+    pub path: String,
+    pub ok: bool,
+    /// 失败原因（解码失败/目标越界/写盘失败）。
+    #[serde(default)]
+    pub err: String,
 }
 
 pub fn platform_dsr(platform: &str) -> String {

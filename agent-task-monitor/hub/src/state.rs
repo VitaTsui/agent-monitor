@@ -48,6 +48,11 @@ pub struct MachineEntry {
     pub file_fetch_results: HashMap<String, (am_core::model::FileFetchResult, Instant)>,
     /// 文件夹操作结果缓存：op_id → 结果（网页轮询后即读走）
     pub fsop_results: HashMap<String, am_core::model::FsOpResult>,
+    /// 下发文件的落盘回报：transfer_id → (结果, 到达时刻)。
+    ///
+    /// 落盘名的决定权在 agent 手里（撞名会改名），拼进任务正文的路径必须用这份回报里的
+    /// 真实路径，否则指向的是目录里那个同名旧文件。等回报的那一侧见 bot::attach_pending_file。
+    pub file_results: HashMap<String, (am_core::model::FileTransferResult, Instant)>,
     /// 目录列举结果缓存：(task_id, rel) → 子目录名
     /// (task_id, rel) → (子目录, 文件)。文件用于「选择文件回填相对路径」。
     pub dir_cache: HashMap<(String, String), (Vec<String>, Vec<String>)>,

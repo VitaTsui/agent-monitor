@@ -378,6 +378,57 @@ fn agent_supports_chunked(ver: &str) -> bool {
     }
 }
 
+/// 会回报「下发文件实际落到哪」的最低 agent 版本（见 model 的 `FileTransferResult`）。
+const FILE_RESULT_MIN_VER: (u32, u32, u32) = (0, 11, 48);
+
+/// 该 agent 版本是否会回报下发文件的落盘路径。
+///
+/// 解析不出来按「不会」处理：那样 hub 走的是老办法（下发前先问目录清单、自己避开撞名），
+/// 只是慢一点、且有个够不着的边角；赌错则是干等一轮超时，白让用户多等几秒。
+pub(crate) fn agent_reports_file_path(ver: &str) -> bool {
+    let mut it = ver.trim().trim_start_matches('v').split('.');
+    let parse = |x: Option<&str>| -> Option<u32> {
+        let s = x?.trim();
+        let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    };
+    match (parse(it.next()), parse(it.next()), parse(it.next())) {
+        (Some(a), Some(b), Some(c)) => (a, b, c) >= FILE_RESULT_MIN_VER,
+        _ => false,
+    }
+}
+
+/// 等客户端回报「这次下发的文件实际落到哪」。
+///
+/// `Some(Ok(绝对路径))` = 已落盘；`Some(Err(原因))` = 客户端明确写失败；`None` = 没等到。
+/// 三者必须分开：写失败要让用户看见（那条路径下根本没有文件），没等到则只能退回预判名。
+///
+/// 窗口 8s：一次往返要两轮上报（这轮取走文件、下轮才带回结果），客户端约 1.5s 一轮，
+/// 3s 是理论下限，扫描慢时留足余量。等不到也不再干等 —— 那头有人在等回执。
+pub(crate) async fn wait_file_result(
+    state: &SharedState,
+    machine_id: &str,
+    transfer_id: &str,
+) -> Option<Result<String, String>> {
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let hit = state
+            .machines
+            .read()
+            .await
+            .get(machine_id)
+            .and_then(|e| e.file_results.get(transfer_id).map(|(r, _)| r.clone()));
+        if let Some(r) = hit {
+            return Some(if r.ok {
+                Ok(r.path)
+            } else {
+                Err(if r.err.is_empty() { "未说明原因".into() } else { r.err })
+            });
+        }
+    }
+    None
+}
+
 /// 把固定名安装包对齐到最新版本。
 ///
 /// 客户端自更新固定去下 `agent-monitor-setup.exe`（见 client 的 `do_self_update`），而每次
@@ -2326,7 +2377,15 @@ async fn upload_file(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "file.bin".into());
 
-    {
+    // 整份、或分片的最后一片 —— 只有此刻文件才算齐，才谈得上「落在哪」
+    let done = chunk_total <= 1 || chunk_index + 1 >= chunk_total;
+    // 落盘名的决定权在客户端手里（撞名它会改成 `a (1).png`，见 client 的 unique_target）。
+    // 前端回填进输入框的路径是它自己算的，算法虽与客户端一致，却架不住「查完目录到落盘
+    // 之间目录又变了」—— 那时回填的路径指向的是那个同名旧文件，agent 照着读得到内容、
+    // 不报错，只是读的是上一版。够新的客户端会把实际路径回报回来，本接口等一等再返回，
+    // 把权威路径放进 `path` 交给前端。
+    let transfer_id = uuid::Uuid::new_v4().to_string();
+    let wants_result = {
         // 目标目录合法性由目标机权威校验：hub 是 Linux、目标机是 Mac 时，
         // /Users/xxx 这种目标机上完全合法的路径在 hub 侧无从判断。
         // 进文件队列由 agent 拉取，agent 侧用自己的 upload_root 复验后写入。
@@ -2346,20 +2405,46 @@ async fn upload_file(
                 "该设备的客户端版本过旧，不支持分片传输大文件，请先更新客户端",
             );
         }
+        let wants = done && agent_reports_file_path(&entry.version);
         entry.pending_files.push_back(am_core::model::FileTransfer {
             dir,
             filename: safe_name,
             content_b64: B64.encode(&bytes),
             chunk_index,
             chunk_total,
+            // 空 = 不要求回报（旧客户端本就不认识这个字段，发了也没人回）
+            transfer_id: if wants { transfer_id.clone() } else { String::new() },
         });
-        let done = chunk_total <= 1 || chunk_index + 1 >= chunk_total;
-        ok(json!({
+        wants
+    };
+    // 中间片、或客户端不会回报：保持原样立即返回，前端退回自己算的名字
+    if !wants_result {
+        return ok(json!({
             "result": if done { "已下发到目标设备，等待写入" } else { "分片已接收" },
             "size": bytes.len(),
             "chunkIndex": chunk_index,
             "chunkTotal": chunk_total,
-        }))
+        }));
+    }
+    match wait_file_result(&state, &id, &transfer_id).await {
+        // 写失败要明确报出来：此前是「上传成功」加一条指向空气的路径，
+        // 用户要到终端说「文件不存在」时才知道出了事
+        Some(Err(e)) => err(500, &format!("目标设备写入失败：{e}")),
+        // 等不到不算失败：文件多半已经在路上了，只是回报还没绕回来。不给 path，
+        // 前端退回自己算的名字（与旧版行为一致）。
+        res => {
+            let path = res.and_then(|r| r.ok());
+            if path.is_none() {
+                tracing::warn!("等不到落盘回报（设备 {id}，文件 {filename}），不回 path");
+            }
+            ok(json!({
+                "result": if path.is_some() { "已写入目标设备" } else { "已下发到目标设备，等待写入" },
+                "size": bytes.len(),
+                "chunkIndex": chunk_index,
+                "chunkTotal": chunk_total,
+                "path": path,
+            }))
+        }
     }
 }
 
@@ -2542,6 +2627,7 @@ async fn report(
                 pending_file_fetch: VecDeque::new(),
                 file_fetch_results: HashMap::new(),
                 fsop_results: HashMap::new(),
+                file_results: HashMap::new(),
                 dir_cache: HashMap::new(),
                 notified_online: false,
                 select_notified: std::collections::HashSet::new(),
@@ -2956,6 +3042,14 @@ async fn report(
     entry
         .file_fetch_results
         .retain(|_, (_, at)| at.elapsed().as_secs() < crate::state::FETCH_RESULT_TTL_SECS);
+    // 下发文件的落盘回报：等在 attach_pending_file 里的那一侧按 transfer_id 来认领。
+    // 同样带 TTL —— 等的人可能已经超时走了，没人来领的不留。
+    for r in payload.file_results {
+        entry.file_results.insert(r.transfer_id.clone(), (r, std::time::Instant::now()));
+    }
+    entry
+        .file_results
+        .retain(|_, (_, at)| at.elapsed().as_secs() < crate::state::FETCH_RESULT_TTL_SECS);
     // 清掉已消失会话的缓存：这两张表按会话 ID 累积，不清理的话
     // hub 长期运行会随「历史会话总数」无限增长（而非「当前会话数」）。
     let alive: std::collections::HashSet<&str> =
@@ -3278,6 +3372,41 @@ mod chunked_support_tests {
     fn prerelease_suffix_tolerated() {
         assert!(agent_supports_chunked("0.10.5-beta1"));
         assert!(!agent_supports_chunked("0.10.4-rc1"));
+    }
+}
+
+#[cfg(test)]
+mod file_result_support_tests {
+    use super::agent_reports_file_path;
+
+    /// 达标与超出都算「会回报」
+    #[test]
+    fn new_enough_versions_pass() {
+        assert!(agent_reports_file_path("0.11.48"));
+        assert!(agent_reports_file_path("0.11.49"));
+        assert!(agent_reports_file_path("0.12.0"));
+        assert!(agent_reports_file_path("1.0.0"));
+        assert!(agent_reports_file_path("v0.11.48"), "带 v 前缀也要认");
+        assert!(agent_reports_file_path("0.11.48-beta1"), "预发布后缀能力相同");
+    }
+
+    /// 差一个补丁号都不行：0.11.47 及更早不认识 transferId，发了也没人回，
+    /// 只会让每个附件白等一轮超时
+    #[test]
+    fn older_versions_rejected() {
+        assert!(!agent_reports_file_path("0.11.47"));
+        assert!(!agent_reports_file_path("0.11.0"));
+        assert!(!agent_reports_file_path("0.10.5"));
+    }
+
+    /// 解析不出来按「不会回报」：那样只是退回老办法（预判避让），
+    /// 赌错则是每个附件干等 8 秒超时，用户在钉钉那头等着
+    #[test]
+    fn unparsable_is_treated_as_unsupported() {
+        assert!(!agent_reports_file_path(""));
+        assert!(!agent_reports_file_path("unknown"));
+        assert!(!agent_reports_file_path("0.11"), "位数不足不能当成 0.11.0");
+        assert!(!agent_reports_file_path("a.b.c"));
     }
 }
 

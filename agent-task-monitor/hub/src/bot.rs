@@ -1145,18 +1145,42 @@ async fn dir_files_fresh(
     None
 }
 
-/// 把一个待发文件下发到会话目录，返回拼进任务正文的路径。
+/// 已进下发队列、等着认领落盘结果的一个文件。
+struct QueuedFile {
+    machine_id: String,
+    /// 空 = 该客户端不会回报，直接用 `target`
+    transfer_id: String,
+    /// hub 预判的落盘绝对路径（回报到不了时的退路）
+    target: String,
+    cwd: String,
+    sep: char,
+}
+
+impl QueuedFile {
+    /// 拼进任务正文的路径：目标在项目目录内 → 相对 `./子路径`，否则用绝对路径（Claude 才找得到）。
+    fn to_rel(&self, abs: String) -> String {
+        abs.strip_prefix(&format!("{}{}", self.cwd, self.sep))
+            .map(|r| format!("./{}", r.replace('\\', "/")))
+            .unwrap_or(abs)
+    }
+}
+
+/// 把一个待发文件放进下发队列，**不等**它落盘。
+///
+/// 入队与认领结果分成两步，是为了让同一批文件共用一次往返：客户端一轮就会把队列里的文件
+/// 全部取走、全部落盘，下一轮一起回报。若在这里就等，三个附件就是三次串行等待（最坏 24s），
+/// 而钉钉那头的人一直看着「已下发…」。
 ///
 /// `taken` 是本次下发的「已占用文件名」缓存：`None` 表示还没问过目标目录，本函数会问一次
 /// 并填上（问不到就记成 [`Taken::Unknown`]，不会一个文件重问一次）。同一批多个文件共用它，
 /// 既省掉重复往返，也让它们彼此避让 —— 落盘是异步的，第二个文件查目录时根本看不到第一个。
-async fn attach_pending_file(
+async fn queue_pending_file(
     state: &SharedState,
     username: &str,
     task_id: &str,
     pf: &crate::state::BotPendingFile,
     taken: &mut Option<Taken>,
-) -> Result<String, String> {
+) -> Result<QueuedFile, String> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     // 已经取好内容的直接用（bytes 非空）；钉钉那条才需要现在去下载。
     let bytes = match &pf.bytes {
@@ -1238,8 +1262,13 @@ async fn attach_pending_file(
         }
     };
     let target = format!("{}{sep}{safe}", dir.trim_end_matches(['/', '\\']));
+    // 落盘名的最终决定权在客户端手里（撞名它会改成 `图片 (1).jpg`，见 client 的 unique_target）。
+    // 上面的预判只是让名字好看、并给旧客户端兜底；够新的客户端会把**实际落盘路径**回报回来，
+    // 那份才是权威 —— 预判再准也架不住清单过时或落盘瞬间被别的写入抢了名字。
+    let transfer_id = uuid::Uuid::new_v4().to_string();
     let mut machines = state.machines.write().await;
     let entry = machines.get_mut(&task.machine_id).ok_or("会话所属设备已离线")?;
+    let wants_result = crate::server::agent_reports_file_path(&entry.version);
     entry.pending_files.push_back(am_core::model::FileTransfer {
         dir,
         filename: safe.clone(),
@@ -1248,14 +1277,47 @@ async fn attach_pending_file(
         // 再切片没有意义（切片是为了让**上行**的大文件不必一次性穿过 hub）。
         chunk_index: 0,
         chunk_total: 0,
+        // 空 = 不要求回报（旧客户端反序列化时本就取默认空串，发了也没人回）
+        transfer_id: if wants_result { transfer_id.clone() } else { String::new() },
     });
-    // 回填路径：目标在项目目录内 → 用相对 `./子路径`，否则用绝对路径（Claude 才找得到）。
-    let rel = target
-        .strip_prefix(&format!("{cwd}{sep}"))
-        .map(|r| format!("./{}", r.replace('\\', "/")))
-        .unwrap_or(target);
-    Ok(rel)
+    Ok(QueuedFile {
+        machine_id: task.machine_id,
+        transfer_id: if wants_result { transfer_id } else { String::new() },
+        target,
+        cwd,
+        sep,
+    })
 }
+
+/// 认领一个已入队文件的落盘结果，返回拼进任务正文的路径。
+///
+/// 一批文件依次调用即可：它们是同一轮下发、同一轮回报的，第一个等到之后其余的结果早已
+/// 躺在缓存里，后面几个立即返回 —— 总耗时仍是一次往返。
+async fn resolve_queued(state: &SharedState, q: &QueuedFile) -> Result<String, String> {
+    if q.transfer_id.is_empty() {
+        return Ok(q.to_rel(q.target.clone()));
+    }
+    // 等客户端回报真实落盘路径。等到 = 路径必定对得上；等不到就退回预判名 —— 那是入队时
+    // 算的、已尽力避开撞名的名字，不是原样的「图片.jpg」。
+    match crate::server::wait_file_result(state, &q.machine_id, &q.transfer_id).await {
+        Some(Ok(path)) => {
+            if path != q.target {
+                tracing::info!("下发文件落盘改名：预判 {} → 实际 {path}", q.target);
+            }
+            Ok(q.to_rel(path))
+        }
+        Some(Err(e)) => Err(format!("客户端写入失败：{e}")),
+        None => {
+            tracing::warn!(
+                "等不到落盘回报（设备 {}），回填路径改用预判名 {}",
+                q.machine_id,
+                q.target
+            );
+            Ok(q.to_rel(q.target.clone()))
+        }
+    }
+}
+
 
 /// 「文件」：列出当前挂起待发的文件（随下一条任务一起落到会话目录）。
 async fn list_pending_files(state: &SharedState, username: &str) -> String {
@@ -1404,13 +1466,22 @@ async fn send_input(
     // 超 20 分钟没跟任务的挂起文件视为过期，丢弃不附。
     let pending = state.bot_pending_files.write().await.remove(username).unwrap_or_default();
     let mut rels: Vec<String> = Vec::new();
-    // 目标目录的已用文件名，问一次即可；同批文件靠它彼此避让（见 attach_pending_file）
+    // 目标目录的已用文件名，问一次即可；同批文件靠它彼此避让（见 queue_pending_file）
     let mut taken: Option<Taken> = None;
+    // 先把整批都塞进下发队列，再统一认领落盘结果 —— 客户端一轮就会全部取走并落盘，
+    // 下一轮一起回报。逐个「下发→等回报」则是几次串行往返，附件多时能拖到半分钟。
+    let mut queued: Vec<QueuedFile> = Vec::new();
     for pf in &pending {
         if crate::state::now_secs().saturating_sub(pf.at) > 20 * 60 {
             continue;
         }
-        match attach_pending_file(state, username, &task_id, pf, &mut taken).await {
+        match queue_pending_file(state, username, &task_id, pf, &mut taken).await {
+            Ok(q) => queued.push(q),
+            Err(e) => return format!("附带文件下发失败：{e}"),
+        }
+    }
+    for q in &queued {
+        match resolve_queued(state, q).await {
             Ok(rel) => rels.push(rel),
             Err(e) => return format!("附带文件下发失败：{e}"),
         }
