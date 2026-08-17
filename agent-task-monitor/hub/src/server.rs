@@ -2641,6 +2641,7 @@ async fn report(
                 dir_cache: HashMap::new(),
                 notified_online: false,
                 select_notified: std::collections::HashSet::new(),
+                select_diag: HashMap::new(),
                 online_since: Instant::now(),
                 known_sessions: HashMap::new(),
                 session_last_seen: HashMap::new(),
@@ -2976,6 +2977,54 @@ async fn report(
                 full_content: None,
             });
         }
+        // ===== 临时诊断：查「终端在等选择，钉钉却没推」=====
+        //
+        // 08-17 抓到一次：同一会话连着两道 AskUserQuestion，第 1 题推了、第 2 题没推。本地拿
+        // 那份真实 jsonl 跑客户端解析器，role 序列是干净的（select 就在末尾、后面什么都没有），
+        // is_pending_select 本该返回 true；4000 字符截断、推送节流也都排除了。差的是 hub 这一轮
+        // 的运行时状态 —— 到底是该会话没进 tasks、还是 messages 没更新到、还是 select_notified
+        // 没清干净，静态看不出来，只能打出来。
+        //
+        // 两种情形都要覆盖：会话在本轮 tasks 里（打判定明细），以及**不在** tasks 里
+        //（那它永远轮不到推送，是最可疑的一种）。摘要不变就不打，否则 1.5s 一轮会刷屏。
+        let mut diag_updates: Vec<(String, String)> = Vec::new();
+        {
+            let live: std::collections::HashSet<&str> =
+                tasks.iter().map(|t| t.id.as_str()).collect();
+            let mut note = |id: &str, summary: String| {
+                if entry.select_diag.get(id).map(String::as_str) != Some(summary.as_str()) {
+                    tracing::info!("[select诊断] 会话={id} {summary}");
+                    diag_updates.push((id.to_string(), summary));
+                }
+            };
+            for (id, ms) in msgs_map {
+                if !ms.iter().any(|m| m.role.as_str() == "select") {
+                    continue; // 从没出现过选择卡的会话不关心
+                }
+                // 末几条 role（新→旧）：is_pending_select 正是从这一头往回看的
+                let tail: Vec<&str> = ms.iter().rev().take(6).map(|m| m.role.as_str()).collect();
+                note(
+                    id,
+                    if live.contains(id.as_str()) {
+                        format!(
+                            "在本轮tasks=是 selecting={} 已推过={} 消息{}条 末6role(新→旧)={:?}",
+                            now_selecting.contains(id),
+                            entry.select_notified.contains(id),
+                            ms.len(),
+                            tail
+                        )
+                    } else {
+                        // 不在 tasks 里 = 连判定的机会都没有（配对丢了/被判非活跃/换了 id）
+                        format!(
+                            "在本轮tasks=否（永远轮不到推送）已推过={} 消息{}条 末6role(新→旧)={:?}",
+                            entry.select_notified.contains(id),
+                            ms.len(),
+                            tail
+                        )
+                    },
+                );
+            }
+        }
         // 交互式选择提醒：会话仍在等待选择（now_selecting，已在上方按「最近实质消息是未应答的
         // select」判定）且尚未提醒过时，推一条。edge 触发靠 select_notified 去重。
         for t in &tasks {
@@ -3008,6 +3057,12 @@ async fn report(
             entry.last_select_at.insert(id.clone(), now_i);
         }
         entry.select_notified = now_selecting;
+        // 诊断摘要落库（上面只读 msgs_map/select_notified，写要等它们的借用结束）
+        for (id, s) in diag_updates {
+            entry.select_diag.insert(id, s);
+        }
+        // 会话没了就别留着它的摘要，否则这张表随历史会话总数一直长
+        entry.select_diag.retain(|id, _| entry.messages.contains_key(id));
     }
     if notify_owner.is_some() {
         entry.notified_online = true;
