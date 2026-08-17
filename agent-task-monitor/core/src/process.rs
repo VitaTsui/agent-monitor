@@ -37,6 +37,11 @@ impl ProcessScanner {
             let Some(agent) = agent_kind(proc_.name(), proc_.cmd()) else {
                 continue;
             };
+            // 服务模式（`codex app-server` 等）不是终端会话：它由某个真会话拉起、
+            // tty 是继承来的，下面的 tty 判据挡不住，见 [`is_service_mode`]。
+            if is_service_mode(agent, proc_.cmd()) {
+                continue;
+            }
             let cwd = match proc_.cwd() {
                 Some(p) => p.to_string_lossy().to_string(),
                 None => continue,
@@ -360,15 +365,17 @@ fn name_via_ps(_pid: u32) -> Option<String> {
     None
 }
 
+/// 路径的基名（同时认 / 与 \，兼顾 Windows）
+fn base(s: &str) -> &str {
+    s.rsplit(['/', '\\']).next().unwrap_or(s)
+}
+
 /// 判断进程属于哪种 AI 编码代理；未来在此扩展新代理（如 gemini 等）
 fn agent_kind(name: &str, cmd: &[String]) -> Option<&'static str> {
     // 只认「精确命中」：进程名、可执行文件基名、node 包装脚本的路径分量/基名。
     // 绝不能在整串命令行里 contains 子串 —— MCP 配置路径、扩展目录等参数里
     // 带个 "codex"/"claude" 字样，就会把无关进程识别成代理
     // （用户实际遇到：只开了 Claude Code，列表里却多出两个 codex）。
-    fn base(s: &str) -> &str {
-        s.rsplit(['/', '\\']).next().unwrap_or(s)
-    }
     for (agent, needle) in [
         ("claude", "claude"),
         ("codex", "codex"),
@@ -407,6 +414,38 @@ fn agent_kind(name: &str, cmd: &[String]) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// 这个代理进程是不是「服务模式」——虽然叫 codex/claude，却不是一个交互式终端会话。
+///
+/// 实际踩到的：终端里跑着 `codex --yolo`，它会拉起 ChatGPT 桌面版的
+/// `…/ChatGPT.app/Contents/Resources/codex app-server --listen stdio://` 作孙进程。
+/// 这个孙进程可执行文件基名正好是 `codex`、tty 又是从父进程继承来的，于是既过不了
+/// [`agent_kind`] 也过不了 tty 判据，最终变成一条「（会话尚未产生记录）」的占位会话；
+/// 更糟的是它的最近 shell 祖先与真会话同一个，号位锚一致 —— 同一个终端号下挂出两条会话。
+///
+/// 判据只看**第一个子命令**，不在整串命令行里找关键字：`codex "帮我看下 mcp"` 这种
+/// 提示词里带同名字样的绝不能被误挡。
+fn is_service_mode(agent: &str, cmd: &[String]) -> bool {
+    // 未来别的代理有同类服务模式（如 `xxx serve`）在这里加一行即可
+    let subs: &[&str] = match agent {
+        "codex" => &["app-server", "mcp", "mcp-server", "proto"],
+        _ => return false,
+    };
+    first_subcommand(cmd).is_some_and(|s| subs.contains(&s))
+}
+
+/// 命令行里的第一个子命令：跳过可执行文件（node 包装再多跳一层脚本路径），
+/// 再取第一个不以 `-` 开头的裸参数。
+///
+/// 取不到就是 None。注意「选项的值」也会被当成子命令候选（如 `codex -m gpt-5 …` 取到
+/// `gpt-5`）—— 这只会让 [`is_service_mode`] 漏挡，不会误挡，方向是安全的。
+fn first_subcommand(cmd: &[String]) -> Option<&str> {
+    let skip = match cmd.first().map(|s| base(s)) {
+        Some("node") | Some("node.exe") => 2,
+        _ => 1,
+    };
+    cmd.iter().skip(skip).find(|a| !a.starts_with('-')).map(String::as_str)
 }
 
 /// 对指定 pid 执行控制动作。返回动作的中文描述。
@@ -1394,6 +1433,49 @@ mod agent_kind_tests {
         );
         assert_eq!(agent_kind("Cursor Helper", &s(&["/Applications/Cursor.app/x"])), None);
         assert_eq!(agent_kind("claude-backup-tool", &s(&["claude-backup-tool"])), None);
+    }
+}
+
+#[cfg(test)]
+mod service_mode_tests {
+    use super::is_service_mode;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// 核心回归：终端里的 `codex --yolo` 会拉起 ChatGPT 桌面版的 app-server 孙进程，
+    /// 它继承同一个 tty、最近 shell 祖先也相同 —— 不挡掉就在同一个终端号下多出一条
+    /// 空占位会话（用户看到「#21 终端有两个会话」）。
+    #[test]
+    fn chatgpt_app_server_is_service() {
+        assert!(is_service_mode(
+            "codex",
+            &s(&[
+                "/Applications/ChatGPT.app/Contents/Resources/codex",
+                "app-server",
+                "--listen",
+                "stdio://",
+            ])
+        ));
+        assert!(is_service_mode("codex", &s(&["codex", "mcp"])));
+        assert!(is_service_mode("codex", &s(&["codex", "proto"])));
+        // node 包装形态多一层脚本路径
+        assert!(is_service_mode("codex", &s(&["node", "/opt/bin/codex", "app-server"])));
+    }
+
+    /// 交互式会话一律放行，选项与提示词都不能被当成子命令。
+    #[test]
+    fn interactive_sessions_pass() {
+        assert!(!is_service_mode("codex", &s(&["codex"])));
+        assert!(!is_service_mode("codex", &s(&["codex", "--yolo"])));
+        assert!(!is_service_mode("codex", &s(&["codex", "exec", "跑一下测试"])), "exec 是用户自己跑的一次性任务，照常监控");
+        assert!(
+            !is_service_mode("codex", &s(&["codex", "帮我看下 mcp 配置"])),
+            "提示词里带 mcp 字样不该被当成子命令"
+        );
+        // 其它代理没有服务模式表，一律放行
+        assert!(!is_service_mode("claude", &s(&["claude", "mcp", "serve"])));
     }
 }
 
