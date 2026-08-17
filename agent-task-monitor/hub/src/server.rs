@@ -1006,20 +1006,30 @@ pub(crate) fn select_summary(v: &Value) -> String {
                 let label = o.get("label").and_then(|x| x.as_str()).unwrap_or("");
                 out.push_str(&format!("{}. {}\n", i + 1, label));
             }
+            // 选项之后的作答提示。
+            //
+            // 那个「其它」不是可有可无的摆设：AskUserQuestion 的选择卡**始终**隐含它
+            // （占 N+1 号，Submit 才是 N+2），终端里能自己敲答案，网页端也补了「✎ 自行输入」。
+            // 唯独这份摘要只列 1..N，钉钉那头看到的就是一道封闭的单选题 —— 想说的话不在
+            // 列表里时，只能挑一个最接近的，或者干脆卡住不答。
+            let mut tips: Vec<String> = Vec::new();
             if multi {
-                // Submit 在终端选择卡里也占编号：N 个选项 + 「其它」占 N+1，Submit 是 N+2
-                out.push_str(&format!(
-                    "\n（多选：勾选的序号连写，末尾补 {}＝Submit，如 \"1{}\"）\n",
-                    opts.len() + 2,
-                    opts.len() + 2
-                ));
+                let n = opts.len() + 2;
+                tips.push(format!("多选：勾选的序号连写，末尾补 {n}＝Submit，如 \"1{n}\""));
+            }
+            // 多题时逐题重复太啰嗦，挪到末尾统一说一次
+            if !many {
+                tips.push("都不合适：直接写答案也行，不必从列表里挑".into());
+            }
+            for t in tips {
+                out.push_str(&format!("\n（{t}）\n"));
             }
         }
     }
     if many {
         // 每题的选项都从 1 编号，而作答是一次一题 —— 不说明的话，看到两组「1.」很容易
         // 以为可以直接回第二题的序号。
-        out.push_str("\n（多题：逐题作答，先回第 1 题的序号）");
+        out.push_str("\n（多题：逐题作答，先回第 1 题的序号；都不合适可以直接写答案）");
     }
     out.trim_end().to_string()
 }
@@ -2981,7 +2991,11 @@ async fn report(
                     kind: EventKind::Select,
                     task_id: Some(t.id.clone()),
                     text: format!(
-                        "**⌨️ 需要你选择**\n\n{}\n\n{}\n\n回复「发 {{N}} 序号」作答",
+                        // 只说「发 N 序号」就把选择卡讲成了封闭单选题：它始终隐含一个
+                        // 「其它」，自定义答案原样发过去即可（客户端按「非纯数字」识别，
+                        // 会替它补上提交回车，见 agent 的 from_select）。
+                        "**⌨️ 需要你选择**\n\n{}\n\n{}\n\n回复「发 {{N}} 序号」作答；\
+                         想自己写答案就「发 {{N}} 你的答案」",
                         body(t),
                         opts
                     ),
@@ -3332,6 +3346,28 @@ mod select_summary_tests {
         ]}));
         assert!(s.contains("（多选）"), "得到：\n{s}");
         assert!(s.contains("补 4＝Submit"), "2 个选项时 Submit 应是 4 号：\n{s}");
+        // 多选同样隐含「其它」，两条提示要并存
+        assert!(s.contains("直接写答案"), "多选也要给出自定义答案的出路：\n{s}");
+    }
+
+    /// 选择卡始终隐含一个「其它」（占 N+1 号）。只列 1..N 的话，钉钉那头看到的是一道
+    /// 封闭单选题 —— 想说的话不在列表里时只能挑个最接近的，或者卡住不答。
+    #[test]
+    fn custom_answer_is_offered() {
+        let s = select_summary(&json!({"questions": [
+            {"question": "继续吗？", "options": [{"label": "继续"}, {"label": "停"}]}
+        ]}));
+        assert!(s.contains("直接写答案"), "单题要给出自定义答案的出路：\n{s}");
+        // 提示自成一段，别被 lazy continuation 粘进最后一个选项
+        assert!(s.contains("2. 停\n\n（"), "提示前要空行：\n{s}");
+    }
+
+    /// 多题时逐题重复这句太啰嗦，末尾统一说一次即可
+    #[test]
+    fn custom_answer_hint_not_repeated_per_question() {
+        let s = select_summary(&two_questions());
+        assert_eq!(s.matches("直接写答案").count(), 1, "只该出现一次：\n{s}");
+        assert!(s.trim_end().ends_with("可以直接写答案）"), "该在末尾统一提示：\n{s}");
     }
 }
 
