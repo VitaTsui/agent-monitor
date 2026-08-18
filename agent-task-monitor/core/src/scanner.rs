@@ -16,7 +16,12 @@ pub struct SessionSummary {
     pub session_id: String,
     /// 项目目录编码名（~/.claude/projects 下的目录名），配对进程用
     pub project_key: String,
+    /// 归一化后的项目根（`encode_path` 等于 `project_key` 的那个 cwd）。配对/分组用，
+    /// 不随会话内 `cd` 漂移。
     pub cwd: String,
+    /// 会话**此刻**的工作目录：尾窗里最后一条记录的 cwd（空 = 尾窗没读到）。
+    /// 终端解析相对路径用的是它，不是 `cwd`（见 model 的 `Task::live_cwd`）。
+    pub live_cwd: String,
     /// 会话标题（首个用户提示词）
     pub title: String,
     pub prompt: String,
@@ -303,6 +308,9 @@ impl SessionScanner {
             provider: "codex".into(),
             session_id,
             project_key: encode_path(&cwd),
+            // codex 的 cwd 取自 session_meta，一条会话只有一个值、不存在漂移，
+            // 于是「项目根」与「此刻在哪」本就是同一个。
+            live_cwd: cwd.clone(),
             cwd,
             title: prompt.clone(),
             prompt,
@@ -395,6 +403,16 @@ impl SessionScanner {
             if let Some(hc) = &head.cwd {
                 summary.cwd = hc.clone();
             }
+        }
+        // 尾窗一条 cwd 都没读到（增量扫描时新行里没有、或极短会话）：沿用上一轮的结果，
+        // 再退回项目根。**不能就这么留空** —— 调用方一见空就退回 `project`，等于每隔
+        // 几轮上传落点就在「当前目录」和「项目根」之间跳一次，比一直用错更难查。
+        if summary.live_cwd.is_empty() {
+            summary.live_cwd = prev
+                .as_ref()
+                .map(|p| p.summary.live_cwd.clone())
+                .filter(|c| !c.is_empty())
+                .unwrap_or_else(|| summary.cwd.clone());
         }
         self.cache.insert(
             path.to_path_buf(),
@@ -856,6 +874,10 @@ pub fn build_tasks(
             pid: proc_info.as_ref().map(|p| p.pid),
             project: s.cwd.clone(),
             project_name: short_name(&s.cwd),
+            // 与 project 不同时才有意义（会话 cd 进了子目录）；相同就当没有，
+            // 让调用方走 project 那条老路，少一个可能对不上的来源。
+            live_cwd: (!s.live_cwd.is_empty() && s.live_cwd != s.cwd)
+                .then(|| s.live_cwd.clone()),
             prompt: s.prompt.clone(),
             last_action: s.last_action.clone(),
             status,
@@ -912,6 +934,9 @@ pub fn build_tasks(
             pid: Some(p.pid),
             project: p.cwd.clone(),
             project_name: short_name(&p.cwd),
+            // 占位任务只有进程、没有会话记录，谈不上「会话此刻在哪」——
+            // 进程 cwd 就是全部信息，已经在 project 里了。
+            live_cwd: None,
             prompt: "（会话尚未产生记录）".into(),
             last_action: "等待输入".into(),
             status,
@@ -955,6 +980,9 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
     let mut cwd = String::new();
     // 会话记录里的 cwd 会跟随 shell 漂移；以「编码后等于项目目录名」的 cwd 为准
     let mut canonical_cwd = String::new();
+    // 漂移后的**最新** cwd：终端解析 `./x` 用的是它。归一化到 canonical 是为了配对稳定，
+    // 但拿归一化结果当上传落点就会写到别的目录去（见 model 的 `Task::live_cwd`）。
+    let mut live_cwd = String::new();
     let mut prompt = String::new();
     let mut last_action = String::new();
     let mut turn_ended = false;
@@ -982,6 +1010,11 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
             }
             if canonical_cwd.is_empty() && encode_path(c) == project_key {
                 canonical_cwd = c.to_string();
+            }
+            // 每条都覆盖 —— 要的就是尾窗里**最后**那条。空串不算（有的记录带个空 cwd，
+            // 认了它等于把已知的工作目录抹成未知）。
+            if !c.is_empty() {
+                live_cwd = c.to_string();
             }
         }
         if let Some(ver) = v.get("version").and_then(Value::as_str) {
@@ -1142,6 +1175,7 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         session_id: session_id.to_string(),
         project_key,
         cwd: if canonical_cwd.is_empty() { cwd } else { canonical_cwd },
+        live_cwd,
         title: String::new(),
         prompt,
         last_action,
@@ -2493,6 +2527,7 @@ mod pairing_tests {
             session_id: id.into(),
             project_key: "-proj".into(),
             cwd: "/proj".into(),
+            live_cwd: "/proj".into(),
             title: id.into(),
             prompt: String::new(),
             last_action: String::new(),
@@ -3036,6 +3071,7 @@ mod codex_tests {
             session_id: id.into(),
             project_key: key.into(),
             cwd: format!("/w/{key}"),
+            live_cwd: format!("/w/{key}"),
             title: id.into(),
             prompt: String::new(),
             last_action: String::new(),
@@ -3137,6 +3173,71 @@ mod codex_tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Claude Code", "空目录名不该带「 · 」尾巴");
         assert!(!tasks[0].title.contains('·'));
+    }
+}
+
+#[cfg(test)]
+mod live_cwd_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn line(cwd: &str, text: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "cwd": cwd,
+                "timestamp": "2026-08-18T03:25:00Z",
+                "message": { "content": [{ "type": "text", "text": text }] }
+            })
+        )
+    }
+
+    /// 核心回归：会话 `cd` 进子目录后，`cwd` 仍是归一化的项目根（配对/分组靠它稳定），
+    /// 而 `live_cwd` 跟到最新的那个目录。
+    ///
+    /// 线上就栽在这个差上：网页拿项目根当上传落点、又回填相对路径 `./tmp/x.png`，
+    /// 终端按自己当前的目录解析 —— 文件写进了项目根的 tmp，终端在子目录的 tmp 里找，
+    /// 报「文件不存在」，而文件明明好好躺在盘上。
+    #[test]
+    fn live_cwd_follows_drift_while_cwd_stays_canonical() {
+        let root = "/tmp/amlive/proj";
+        let deep = "/tmp/amlive/proj/desktop/src-tauri";
+        let dir = std::env::temp_dir()
+            .join(format!("am-live-{}", std::process::id()))
+            .join(encode_path(root));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("s.jsonl");
+        let mut f = fs::File::create(&path).unwrap();
+        // 先在项目根，后 cd 进子目录 —— 最后一条才是终端此刻所在
+        f.write_all(line(root, "在项目根").as_bytes()).unwrap();
+        f.write_all(line("/tmp/amlive/proj/desktop", "cd 了一层").as_bytes()).unwrap();
+        f.write_all(line(deep, "又深了一层").as_bytes()).unwrap();
+        f.flush().unwrap();
+
+        let meta = fs::metadata(&path).unwrap();
+        let mut sc = SessionScanner::new(dir.parent().unwrap().to_path_buf());
+        let sum = sc.summarize(&path, meta.len(), 0).expect("应能解析出摘要");
+
+        assert_eq!(sum.cwd, root, "项目根必须归一化，配对/分组靠它");
+        assert_eq!(sum.live_cwd, deep, "live_cwd 必须跟到最新的工作目录");
+    }
+
+    /// 没漂移过的会话：两者相同，调用方按 `live_cwd == cwd` 走老路即可。
+    #[test]
+    fn live_cwd_equals_cwd_without_drift() {
+        let root = "/tmp/amlive2/proj";
+        let dir = std::env::temp_dir()
+            .join(format!("am-live2-{}", std::process::id()))
+            .join(encode_path(root));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("s.jsonl");
+        fs::write(&path, line(root, "一直没动")).unwrap();
+
+        let meta = fs::metadata(&path).unwrap();
+        let mut sc = SessionScanner::new(dir.parent().unwrap().to_path_buf());
+        let sum = sc.summarize(&path, meta.len(), 0).expect("应能解析出摘要");
+        assert_eq!(sum.live_cwd, sum.cwd);
     }
 }
 

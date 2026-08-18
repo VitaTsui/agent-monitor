@@ -110,11 +110,13 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   // 没有 cwd（历史会话、进程已退出）就不给 —— 那时路径无从解析，保持破图但不误导。
   const imageCtx = React.useMemo(() => {
     // PortalTask 的字段都是 Partial 的，三者齐全才谈得上解析
-    const cwd = task.process?.cwd ?? "";
+    // 与 Composer 同一个根：会话内容里的相对图片路径也是终端按当前目录写下的，
+    // 用进程 cwd 解析会在 cd 过的会话里全变破图。
+    const cwd = task.liveCwd || task.process?.cwd || "";
     return cwd && task.id && task.machineId
       ? { taskId: task.id, machineId: task.machineId, cwd }
       : undefined;
-  }, [task.id, task.machineId, task.process?.cwd]);
+  }, [task.id, task.machineId, task.liveCwd, task.process?.cwd]);
 
   const feedMessages = React.useMemo(
     () =>
@@ -690,7 +692,9 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
               paused ? "该终端已暂停，先恢复再发布" : "该会话无存活进程，无法发布"
             }
             machineId={task.machineId}
-            cwd={task.process?.cwd}
+            // 会话此刻的工作目录优先：会话 cd 进子目录后，进程 cwd 还钉在启动目录，
+            // 拿它当上传落点就会「文件写在项目根、终端在子目录里找」（见 Task.liveCwd）。
+            cwd={task.liveCwd || task.process?.cwd}
             onSend={(text) => {
               sendInput(id, text);
               // 发送后强制滚到底部：即使之前上滚看历史，发出内容也应带着滚回底部

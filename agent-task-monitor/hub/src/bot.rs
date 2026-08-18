@@ -1208,6 +1208,13 @@ async fn queue_pending_file(
         return Err("会话无项目目录".into());
     }
     let sep = if cwd.contains('\\') { '\\' } else { '/' };
+    // 接收目录仍以**项目根**为准（那是用户按项目配的，不该随会话 cd 漂移），但拼进任务
+    // 正文的路径要以**会话此刻所在目录**为基准算相对 —— 终端就是按它解析 `./x` 的。
+    // 两者不一致时 `to_rel` 的 strip_prefix 会落空，自动退回绝对路径，照样找得到。
+    let rel_base = crate::server::session_root(&task)
+        .trim_end_matches(['/', '\\'])
+        .to_string();
+    let rel_base = if rel_base.is_empty() { cwd.clone() } else { rel_base };
     // 该项目配置的接收目录；未配置则默认 `<cwd>/tmp`。配置值可为绝对路径或相对(相对项目)。
     let configured = state.registry.read().await.dingtalk_recv_dir(username, &cwd);
     let dir = match configured {
@@ -1284,7 +1291,7 @@ async fn queue_pending_file(
         machine_id: task.machine_id,
         transfer_id: if wants_result { transfer_id } else { String::new() },
         target,
-        cwd,
+        cwd: rel_base,
         sep,
     })
 }

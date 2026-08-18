@@ -68,8 +68,16 @@ interface IPortalTaskData {
   autoPaused: boolean;
   provider: string;
   providerDsr: string;
+  /** 项目根（归一化，不随会话内 cd 漂移）——分组、标题用 */
   project: string;
   projectName: string;
+  /**
+   * 会话**此刻**的工作目录（会话内 cd 后跟着走；与 project 相同时后端不下发）。
+   *
+   * 凡是要和终端的相对路径对齐的地方都用它：上传落点、目录浏览根、`./x` 回填。
+   * 用 project 的话，会话 cd 进子目录后文件会写到项目根、终端却在子目录里找。
+   */
+  liveCwd?: string;
   prompt: string;
   lastAction: string;
   status: string;

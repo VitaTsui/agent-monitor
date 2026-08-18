@@ -78,10 +78,23 @@ pub struct Task {
     pub id: String,
     /// 代理类型：claude / codex …
     pub provider: String,
-    /// 项目目录（会话 cwd）
+    /// 项目目录（会话 cwd）。**这是归一化后的「项目根」**，不随会话内 `cd` 漂移 ——
+    /// 它要与 `~/.claude/projects` 下的目录名对得上，会话↔进程配对和分组都靠它稳定
+    /// （见 scanner 的 `canonical_cwd`）。要「终端此刻在哪」请用 [`Task::live_cwd`]。
     pub project: String,
     /// 项目目录短名
     pub project_name: String,
+    /// **会话此刻的工作目录**：jsonl 尾部最后一条记录的 `cwd`。
+    ///
+    /// 与 `project` 的区别就是这个 bug 的全部：会话内 `cd` 进子目录后，jsonl 里的 cwd
+    /// 跟着走，而 `project` 被钉死在项目根。网页拿 `project` 当上传落点、又回填**相对**
+    /// 路径 `./tmp/x.png`，终端却按自己当前的 cwd 解析 —— 文件写在 A、终端在 B 找，
+    /// 表现为「上传成功但终端说文件不存在」。凡是要与终端的相对路径对齐的地方
+    /// （上传落点、目录浏览根、文件夹操作根）都该用它。
+    ///
+    /// None = 尾窗里一条 cwd 都没读到（极短会话/占位任务），调用方退回 `project`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_cwd: Option<String>,
     /// 会话标题：会话的首个用户提示词（原始任务），更像标题
     #[serde(default)]
     pub title: String,

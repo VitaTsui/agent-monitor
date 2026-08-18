@@ -549,11 +549,21 @@ const Composer: React.FC<ComposerProps> = (props) => {
           // （撞名它会自己改名）。查目录到落盘之间目录又变了、或同一目录有别的写入抢先，
           // 预判就会落空，回填的路径又指回那个同名旧文件。
           // 够旧的客户端不回报（hub 不带 path），那就只能退回预判名。
-          const actual = res.data?.path?.split(/[\\/]/).pop() || name;
+          const abs = res.data?.path ?? "";
+          const actual = abs.split(/[\\/]/).pop() || name;
           // 本批后续文件要避让的是**实际**占用的名字
           taken.add(actual);
-          // 回填相对路径（相对会话目录，正斜杠通用）——用最终名，不是本地文件名
-          ok.push(dirRel ? `./${dirRel}/${actual}` : `./${actual}`);
+          // 回填相对路径（相对会话目录，正斜杠通用）——用最终名，不是本地文件名。
+          //
+          // 但先核对一次「客户端真写到了我们以为的那个目录」：`cwd` 取的是会话此刻的
+          // 工作目录，正常情况下 abs 必然以 dir 开头。对不上就说明两边的根不一致（会话
+          // 在这中间又 cd 了、或落点被客户端改写过），这时相对路径必然指空 —— 宁可回填
+          // 丑一点的绝对路径，也不要给一条「看着对、终端却找不到」的相对路径。
+          const landedHere =
+            !abs || abs.slice(0, dir.length).toLowerCase() === dir.toLowerCase();
+          ok.push(
+            landedHere ? (dirRel ? `./${dirRel}/${actual}` : `./${actual}`) : abs,
+          );
         } else {
           failed.push(file.name);
         }

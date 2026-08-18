@@ -1326,6 +1326,21 @@ struct DirsQuery {
     rel: String,
 }
 
+/// 会话相对路径的解析根 —— **必须与终端解析 `./x` 用的目录一致**。
+///
+/// 优先 `live_cwd`（会话 jsonl 里最后一条记录的 cwd），退回进程 cwd。
+/// 两者的差就是那个「上传成功但终端说文件不存在」的 bug：会话 `cd` 进子目录后，
+/// 进程 cwd 还钉在启动目录，拿它当根，网页把文件写进 A、又回填 `./tmp/x.png`，
+/// 终端却按自己当前的目录解析，在 B 里找 —— 目录浏览、文件夹操作、取会话图片、
+/// 上传落点这四处只要有一处用了另一个根，就会各说各话。
+pub(crate) fn session_root(task: &am_core::model::Task) -> String {
+    task.live_cwd
+        .clone()
+        .filter(|c| !c.is_empty())
+        .or_else(|| task.process.as_ref().map(|p| p.cwd.clone()))
+        .unwrap_or_default()
+}
+
 /// GET /monitor/tasks/:id/dirs?rel=a/b —— 会话目录下的子目录（异步：
 /// 首次返回 pending，agent 下一轮上报带回结果后再查即有缓存）。
 async fn task_dirs(
@@ -1349,7 +1364,7 @@ async fn task_dirs(
     let Some(task) = task else {
         return err(404, "任务不存在");
     };
-    let cwd = task.process.as_ref().map(|p| p.cwd.clone()).unwrap_or_default();
+    let cwd = session_root(&task);
     if cwd.is_empty() {
         return err(400, "该会话没有工作目录信息");
     }
@@ -1397,7 +1412,7 @@ pub(crate) async fn fetch_session_file(
         return None;
     }
     let task = state.tasks_for(owner).await.into_iter().find(|t| t.id == task_id)?;
-    let cwd = task.process.as_ref().map(|p| p.cwd.clone()).unwrap_or_default();
+    let cwd = session_root(&task);
     if cwd.is_empty() {
         return None;
     }
@@ -1508,7 +1523,7 @@ async fn task_file(
     let Some(task) = state.tasks_for(&user).await.into_iter().find(|t| t.id == id) else {
         return err(404, "任务不存在");
     };
-    let cwd = task.process.as_ref().map(|p| p.cwd.clone()).unwrap_or_default();
+    let cwd = session_root(&task);
     if cwd.is_empty() {
         return err(400, "该会话没有工作目录信息");
     }
@@ -1585,7 +1600,7 @@ async fn task_fsop(
     let Some(task) = task else {
         return err(404, "任务不存在");
     };
-    let cwd = task.process.as_ref().map(|p| p.cwd.clone()).unwrap_or_default();
+    let cwd = session_root(&task);
     if cwd.is_empty() {
         return err(400, "该会话没有工作目录信息");
     }
