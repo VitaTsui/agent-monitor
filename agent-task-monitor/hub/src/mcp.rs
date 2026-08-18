@@ -208,7 +208,7 @@ fn tool_defs() -> Vec<Value> {
             "name": "answer_select",
             "description": "回答终端弹出的选择卡（AskUserQuestion）。会话在等你选时 session_detail 会列出\
                 问题和选项 —— 单选传选项序号（如 \"2\"）；多选把勾选的序号连写、末尾再加 Submit 的序号\
-                （选项 N 个时 Submit 是 N+2，因为选项之后还有一个「其它」占 N+1），例如 4 个选项里选 1 和 3 就传 \"136\"；\
+                （选项 N 个时 Submit 是 N+3：选项之后还有「其它」占 N+1、「chat about」占 N+2），例如 4 个选项里选 1 和 3 就传 \"137\"；\
                 想自己答就直接传文本。作答不会推送到钉钉、也不进交互历史 —— 孤零零一个「1」没有留存价值。",
             "inputSchema": {
                 "type": "object",

@@ -1046,12 +1046,15 @@ pub(crate) fn select_summary(v: &Value) -> String {
             // 选项之后的作答提示。
             //
             // 那个「其它」不是可有可无的摆设：AskUserQuestion 的选择卡**始终**隐含它
-            // （占 N+1 号，Submit 才是 N+2），终端里能自己敲答案，网页端也补了「✎ 自行输入」。
+            //（占 N+1 号，其后还有「chat about」占 N+2，Submit 是 N+3），终端里能自己敲
+            // 答案，网页端也补了「✎ 自行输入」。
             // 唯独这份摘要只列 1..N，钉钉那头看到的就是一道封闭的单选题 —— 想说的话不在
             // 列表里时，只能挑一个最接近的，或者干脆卡住不答。
             let mut tips: Vec<String> = Vec::new();
             if multi {
-                let n = opts.len() + 2;
+                // N+3：选项 N 个 +「其它」+「chat about」+ Submit。按 N+2 算会落在
+                // chat about 上，多选就此提交不掉（08-18 实测）。
+                let n = opts.len() + 3;
                 tips.push(format!("多选：勾选的序号连写，末尾补 {n}＝Submit，如 \"1{n}\""));
             }
             // 多题时逐题重复太啰嗦，挪到末尾统一说一次
@@ -3435,7 +3438,7 @@ mod select_summary_tests {
         assert!(s.starts_with("继续吗？"), "得到：\n{s}");
     }
 
-    /// 多选要标出来并给出作答格式（Submit 占 N+2 号）
+    /// 多选要标出来并给出作答格式（Submit 占 N+3 号：选项 +「其它」+「chat about」之后）
     #[test]
     fn multi_select_marked_with_submit_hint() {
         let s = select_summary(&json!({"questions": [
@@ -3443,7 +3446,7 @@ mod select_summary_tests {
              "options": [{"label": "A"}, {"label": "B"}]}
         ]}));
         assert!(s.contains("（多选）"), "得到：\n{s}");
-        assert!(s.contains("补 4＝Submit"), "2 个选项时 Submit 应是 4 号：\n{s}");
+        assert!(s.contains("补 5＝Submit"), "2 个选项时 Submit 应是 5 号：\n{s}");
         // 多选同样隐含「其它」，两条提示要并存
         assert!(s.contains("直接写答案"), "多选也要给出自定义答案的出路：\n{s}");
     }
