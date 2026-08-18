@@ -78,6 +78,13 @@ interface IPortalTaskData {
    * 用 project 的话，会话 cd 进子目录后文件会写到项目根、终端却在子目录里找。
    */
   liveCwd?: string;
+  /**
+   * 会话此刻的 shell 目录，**仅在它已漂到 liveCwd 之下时**后端才下发。
+   *
+   * 有值 = 「文件落在哪」与「终端站在哪」不是同一个目录，相对路径能不能被解析到
+   * 取决于终端拿哪个当根 —— 这件事没有确证，所以有值时就别赌，回填绝对路径。
+   */
+  shellCwd?: string;
   prompt: string;
   lastAction: string;
   status: string;

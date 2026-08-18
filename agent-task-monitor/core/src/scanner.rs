@@ -19,9 +19,19 @@ pub struct SessionSummary {
     /// 归一化后的项目根（`encode_path` 等于 `project_key` 的那个 cwd）。配对/分组用，
     /// 不随会话内 `cd` 漂移。
     pub cwd: String,
-    /// 会话**此刻**的工作目录：尾窗里最后一条记录的 cwd（空 = 尾窗没读到）。
-    /// 终端解析相对路径用的是它，不是 `cwd`（见 model 的 `Task::live_cwd`）。
+    /// 会话的**锚定目录**：`shell_cwd` 所在的 git 仓库根（不在仓库里就是 `shell_cwd`
+    /// 本身，尾窗没读到就退回 `cwd`）。上传落点、目录浏览根都用它。
+    ///
+    /// 之所以要往上收到仓库根：`shell_cwd` 随会话 `cd` 每一轮都在跳（实测同一会话几分钟内
+    /// 走过 `desktop`、`desktop/src-tauri`、`desktop/web/dist`），拿它当落点等于每次上传都
+    /// 不知道文件会落到哪，连构建产物目录都能落进去。仓库根则怎么 cd 都不变。
     pub live_cwd: String,
+    /// 尾窗里**最后一条**记录的 cwd 原样（空 = 尾窗没读到）。
+    ///
+    /// 只有一个用途：判断会话是否已经漂到锚定目录之下。漂了就说明「终端此刻在哪」与
+    /// 「文件落在哪」不是同一个目录，相对路径是否解析得对取决于终端拿哪个当根 —— 那件事
+    /// 我们无从确证，于是这种时候前端改回填绝对路径，把不确定性绕开（见 web 的 doUpload）。
+    pub shell_cwd: String,
     /// 会话标题（首个用户提示词）
     pub title: String,
     pub prompt: String,
@@ -309,8 +319,10 @@ impl SessionScanner {
             session_id,
             project_key: encode_path(&cwd),
             // codex 的 cwd 取自 session_meta，一条会话只有一个值、不存在漂移，
-            // 于是「项目根」与「此刻在哪」本就是同一个。
+            // 于是「项目根」「锚定目录」「此刻在哪」本就是同一个 —— 也因此不收到 git 根：
+            // codex 就在这个目录里跑，往上挪反而会让相对路径失准。
             live_cwd: cwd.clone(),
+            shell_cwd: cwd.clone(),
             cwd,
             title: prompt.clone(),
             prompt,
@@ -407,13 +419,23 @@ impl SessionScanner {
         // 尾窗一条 cwd 都没读到（增量扫描时新行里没有、或极短会话）：沿用上一轮的结果，
         // 再退回项目根。**不能就这么留空** —— 调用方一见空就退回 `project`，等于每隔
         // 几轮上传落点就在「当前目录」和「项目根」之间跳一次，比一直用错更难查。
-        if summary.live_cwd.is_empty() {
-            summary.live_cwd = prev
+        if summary.shell_cwd.is_empty() {
+            summary.shell_cwd = prev
                 .as_ref()
-                .map(|p| p.summary.live_cwd.clone())
+                .map(|p| p.summary.shell_cwd.clone())
                 .filter(|c| !c.is_empty())
-                .unwrap_or_else(|| summary.cwd.clone());
+                .unwrap_or_default();
         }
+        // 锚定目录 = shell_cwd 所在的 git 仓库根。收到仓库根是为了稳定：shell_cwd 每轮都在
+        // 跳，而仓库根怎么 cd 都不变。不在任何仓库里就用 shell_cwd 本身，再退项目根。
+        //
+        // 只在这里算（`summarize` 只有会话文件真变了才走到，缓存命中直接返回），
+        // 所以 stat 父链的开销只落在活跃会话上，不是每轮每会话。
+        summary.live_cwd = if summary.shell_cwd.is_empty() {
+            summary.cwd.clone()
+        } else {
+            git_root_of(&summary.shell_cwd).unwrap_or_else(|| summary.shell_cwd.clone())
+        };
         self.cache.insert(
             path.to_path_buf(),
             CacheEntry { size, mtime_ms, line_count, summary: summary.clone(), head },
@@ -878,6 +900,9 @@ pub fn build_tasks(
             // 让调用方走 project 那条老路，少一个可能对不上的来源。
             live_cwd: (!s.live_cwd.is_empty() && s.live_cwd != s.cwd)
                 .then(|| s.live_cwd.clone()),
+            // 只在「确实漂到锚定目录之下」时才下发 —— 相等就没有歧义，前端照常回填相对路径
+            shell_cwd: (!s.shell_cwd.is_empty() && s.shell_cwd != s.live_cwd)
+                .then(|| s.shell_cwd.clone()),
             prompt: s.prompt.clone(),
             last_action: s.last_action.clone(),
             status,
@@ -937,6 +962,7 @@ pub fn build_tasks(
             // 占位任务只有进程、没有会话记录，谈不上「会话此刻在哪」——
             // 进程 cwd 就是全部信息，已经在 project 里了。
             live_cwd: None,
+            shell_cwd: None,
             prompt: "（会话尚未产生记录）".into(),
             last_action: "等待输入".into(),
             status,
@@ -1175,7 +1201,10 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         session_id: session_id.to_string(),
         project_key,
         cwd: if canonical_cwd.is_empty() { cwd } else { canonical_cwd },
-        live_cwd,
+        // 此处先原样放最后那个 cwd；收到仓库根是在 summarize 里做的（那儿才有 prev 兜底，
+        // 且只在会话文件真的变了时才走一次，不会每轮都去 stat 一遍父链）。
+        live_cwd: live_cwd.clone(),
+        shell_cwd: live_cwd,
         title: String::new(),
         prompt,
         last_action,
@@ -1946,6 +1975,20 @@ fn count_lines_from(path: &Path, offset: u64) -> Result<u64> {
 }
 
 /// 与 Claude Code 的项目目录命名一致：非字母数字字符替换为 '-'
+/// 从 `dir` 向上找最近的 git 仓库根（含 `.git` 的目录），找不到返回 None。
+///
+/// `.git` 可能是目录（普通仓库）也可能是文件（worktree / submodule 里是一行 gitdir 指向），
+/// 所以只判存在、不判类型。`ancestors()` 走到根自然结束，不会无限向上。
+fn git_root_of(dir: &str) -> Option<String> {
+    if dir.is_empty() {
+        return None;
+    }
+    std::path::Path::new(dir)
+        .ancestors()
+        .find(|a| a.join(".git").exists())
+        .map(|a| a.to_string_lossy().to_string())
+}
+
 pub fn encode_path(p: &str) -> String {
     // 先去掉尾随分隔符再编码：Windows 上 sysinfo 上报的进程 cwd 常带尾随反斜杠
     // （D:\proj\），而 ~/.claude/projects 下的项目目录名由无尾随分隔符的 cwd
@@ -2528,6 +2571,7 @@ mod pairing_tests {
             project_key: "-proj".into(),
             cwd: "/proj".into(),
             live_cwd: "/proj".into(),
+            shell_cwd: "/proj".into(),
             title: id.into(),
             prompt: String::new(),
             last_action: String::new(),
@@ -3072,6 +3116,7 @@ mod codex_tests {
             project_key: key.into(),
             cwd: format!("/w/{key}"),
             live_cwd: format!("/w/{key}"),
+            shell_cwd: format!("/w/{key}"),
             title: id.into(),
             prompt: String::new(),
             last_action: String::new(),
@@ -3221,6 +3266,59 @@ mod live_cwd_tests {
 
         assert_eq!(sum.cwd, root, "项目根必须归一化，配对/分组靠它");
         assert_eq!(sum.live_cwd, deep, "live_cwd 必须跟到最新的工作目录");
+    }
+
+    /// 锚定到 git 仓库根：会话 `cd` 进仓库里的子目录后，`live_cwd` 收到仓库根（稳定，
+    /// 不随每一轮 cd 跳），`shell_cwd` 保留真实所在（前端据此决定要不要改用绝对路径）。
+    ///
+    /// 0.11.50 就是栽在这一步没做：直接拿最后那个 cwd 当上传落点，落点跟着会话在
+    /// `desktop`、`desktop/src-tauri`、`desktop/web/dist` 之间乱跳，连构建产物目录都能落进去。
+    #[test]
+    fn live_cwd_anchors_to_git_root() {
+        let base = std::env::temp_dir().join(format!("am-git-{}", std::process::id()));
+        let repo = base.join("repo");
+        let deep = repo.join("desktop/src-tauri");
+        let _ = fs::create_dir_all(&deep);
+        // 仓库标记：`.git` 是目录还是文件都算（worktree 里是文件）
+        let _ = fs::create_dir_all(repo.join(".git"));
+
+        let repo_s = repo.to_string_lossy().to_string();
+        let deep_s = deep.to_string_lossy().to_string();
+        let dir = base.join("projects").join(encode_path(&repo_s));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("s.jsonl");
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(line(&repo_s, "在仓库根").as_bytes()).unwrap();
+        f.write_all(line(&deep_s, "cd 进子目录").as_bytes()).unwrap();
+        f.flush().unwrap();
+
+        let meta = fs::metadata(&path).unwrap();
+        let mut sc = SessionScanner::new(dir.parent().unwrap().to_path_buf());
+        let sum = sc.summarize(&path, meta.len(), 0).expect("应能解析出摘要");
+
+        assert_eq!(sum.live_cwd, repo_s, "锚定目录必须收到 git 仓库根");
+        assert_eq!(sum.shell_cwd, deep_s, "shell_cwd 保留真实所在，供前端判断漂移");
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 不在任何 git 仓库里：没有仓库根可收，退回 shell_cwd 本身，不能凭空往上跳。
+    #[test]
+    fn live_cwd_falls_back_when_not_in_repo() {
+        let root = "/tmp/amlive3/proj";
+        let deep = "/tmp/amlive3/proj/sub";
+        let dir = std::env::temp_dir()
+            .join(format!("am-live3-{}", std::process::id()))
+            .join(encode_path(root));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("s.jsonl");
+        fs::write(&path, line(root, "起点") + &line(deep, "进子目录")).unwrap();
+
+        let meta = fs::metadata(&path).unwrap();
+        let mut sc = SessionScanner::new(dir.parent().unwrap().to_path_buf());
+        let sum = sc.summarize(&path, meta.len(), 0).expect("应能解析出摘要");
+        assert_eq!(sum.live_cwd, deep, "不在仓库里就用 shell_cwd 本身");
+        assert_eq!(sum.shell_cwd, deep);
     }
 
     /// 没漂移过的会话：两者相同，调用方按 `live_cwd == cwd` 走老路即可。

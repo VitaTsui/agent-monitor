@@ -63,8 +63,13 @@ interface ComposerProps {
   onSend: (text: string) => void;
   /** 会话所在设备（上传文件的目标） */
   machineId?: string;
-  /** 会话工作目录（上传落点；回填的相对路径以此为基准） */
+  /** 会话锚定目录（上传落点；回填的相对路径以此为基准） */
   cwd?: string;
+  /**
+   * 会话此刻的 shell 目录，仅在它已漂到 `cwd` 之下时才有值。
+   * 有值即「落点」与「终端所在」不是同一个目录 → 回填绝对路径，别赌终端按哪个根解析。
+   */
+  shellCwd?: string;
 }
 
 /**
@@ -73,7 +78,7 @@ interface ComposerProps {
  * - 命中危险模式（类 Claude Code bypass 权限等）时走两步确认。
  */
 const Composer: React.FC<ComposerProps> = (props) => {
-  const { taskId, disabled, disabledHint, onSend, machineId, cwd } = props;
+  const { taskId, disabled, disabledHint, onSend, machineId, cwd, shellCwd } = props;
   const offHint = disabledHint || "该会话无存活进程，无法发布";
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -457,7 +462,12 @@ const Composer: React.FC<ComposerProps> = (props) => {
    * 跨目录的同名条目会互相顶掉，插入时也无从知道它当初在哪一层。
    */
   const toggleFileRef = (name: string) => {
-    const rel = `./${dirRel ? `${dirRel}/` : ""}${name}`;
+    // 与上传回填同一条判据：会话漂到锚定目录之下时，相对路径未必解析得到，
+    // 改插绝对路径（目录浏览的根就是 `cwd`，拼起来即绝对）。
+    const sub = `${dirRel ? `${dirRel}/` : ""}${name}`;
+    const rel = shellCwd && shellCwd !== cwd && cwd
+      ? `${cwd}${cwd.includes("\\") ? "\\" : "/"}${sub.split("/").join(cwd.includes("\\") ? "\\" : "/")}`
+      : `./${sub}`;
     setPickedRefs((prev) =>
       prev.includes(rel) ? prev.filter((x) => x !== rel) : [...prev, rel],
     );
@@ -555,14 +565,22 @@ const Composer: React.FC<ComposerProps> = (props) => {
           taken.add(actual);
           // 回填相对路径（相对会话目录，正斜杠通用）——用最终名，不是本地文件名。
           //
-          // 但先核对一次「客户端真写到了我们以为的那个目录」：`cwd` 取的是会话此刻的
-          // 工作目录，正常情况下 abs 必然以 dir 开头。对不上就说明两边的根不一致（会话
-          // 在这中间又 cd 了、或落点被客户端改写过），这时相对路径必然指空 —— 宁可回填
-          // 丑一点的绝对路径，也不要给一条「看着对、终端却找不到」的相对路径。
+          // 相对路径只在**能证明它对**的时候才用，否则一律绝对路径：
+          //
+          // ① 落点核对：客户端回报的绝对路径必须以我们用的 dir 开头。对不上说明落点被
+          //    改写过或中途又变了，相对路径必然指空。
+          // ② 漂移核对：`shellCwd` 有值就说明终端此刻不在锚定目录里。终端解析 `./x` 到底
+          //    以仓库根还是以自己当前目录为准，我们没有确证（唯一一次观察是从一句自然语言
+          //    回复反推的，不足以当规则）—— 这种时候不赌，给绝对路径，两种解释下都找得到。
           const landedHere =
             !abs || abs.slice(0, dir.length).toLowerCase() === dir.toLowerCase();
+          const drifted = !!shellCwd && shellCwd !== cwd;
           ok.push(
-            landedHere ? (dirRel ? `./${dirRel}/${actual}` : `./${actual}`) : abs,
+            landedHere && !drifted
+              ? dirRel
+                ? `./${dirRel}/${actual}`
+                : `./${actual}`
+              : abs || `${dir}${sep}${actual}`,
           );
         } else {
           failed.push(file.name);

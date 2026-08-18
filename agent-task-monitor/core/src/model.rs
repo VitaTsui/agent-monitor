@@ -95,6 +95,14 @@ pub struct Task {
     /// None = 尾窗里一条 cwd 都没读到（极短会话/占位任务），调用方退回 `project`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_cwd: Option<String>,
+    /// 会话**此刻**的 shell 目录，仅在它已漂到 [`Task::live_cwd`] 之下时下发。
+    ///
+    /// 有值 = 「文件落在锚定目录」和「终端此刻站在哪」不是同一个地方。终端解析 `./x`
+    /// 到底以哪个为根，我们无从确证（观察到的一次是仓库根，但那是从一句自然语言回复里
+    /// 反推的，不足以当规则）。所以有值时前端就不赌了 —— 改回填绝对路径，两种解释下
+    /// 都找得到。没值时两者重合，相对路径没有歧义，照常用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_cwd: Option<String>,
     /// 会话标题：会话的首个用户提示词（原始任务），更像标题
     #[serde(default)]
     pub title: String,

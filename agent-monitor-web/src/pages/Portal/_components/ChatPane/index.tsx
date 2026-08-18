@@ -695,6 +695,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
             // 会话此刻的工作目录优先：会话 cd 进子目录后，进程 cwd 还钉在启动目录，
             // 拿它当上传落点就会「文件写在项目根、终端在子目录里找」（见 Task.liveCwd）。
             cwd={task.liveCwd || task.process?.cwd}
+            shellCwd={task.shellCwd}
             onSend={(text) => {
               sendInput(id, text);
               // 发送后强制滚到底部：即使之前上滚看历史，发出内容也应带着滚回底部
