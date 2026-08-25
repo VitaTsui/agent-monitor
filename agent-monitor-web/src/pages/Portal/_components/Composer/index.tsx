@@ -821,6 +821,10 @@ const Composer: React.FC<ComposerProps> = (props) => {
       <Chat.Input
         wrapperClassName={styles.chatInput}
         placeholder={blockReason || "输入任务，回车发布"}
+        // 发送按钮真的变灰、回车也不再提交（hsu-ui 2.4.8 起支持）。
+        // guardedSend 里那道闸留着不动：它负责给出「为什么发不出去」的提示，
+        // 而且危险指令二次确认那条路本来就绕过组件，仍要各自把关。
+        disabled={!!blockReason}
         onSend={guardedSend}
         uploadEnabled={false}
         buttonGroup={[

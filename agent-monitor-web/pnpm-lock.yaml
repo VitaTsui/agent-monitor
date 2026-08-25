@@ -45,8 +45,8 @@ importers:
         specifier: 0.0.27
         version: 0.0.27
       '@hsu-react/ui':
-        specifier: ^2.4.6
-        version: 2.4.6(@ant-design/icons@6.3.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@babel/runtime@8.0.0)(@codemirror/autocomplete@6.20.3)(@codemirror/language@6.12.4)(@codemirror/search@6.7.1)(@codemirror/theme-one-dark@6.1.3)(@types/react@18.3.31)(@wangeditor/core@1.1.19(@uppy/core@2.3.4)(@uppy/xhr-upload@2.1.3(@uppy/core@2.3.4))(dom7@3.0.0)(is-hotkey@0.2.0)(lodash.camelcase@4.3.0)(lodash.clonedeep@4.5.0)(lodash.debounce@4.0.8)(lodash.foreach@4.5.0)(lodash.isequal@4.5.0)(lodash.throttle@4.1.1)(lodash.toarray@4.4.0)(nanoid@3.3.18)(slate@0.72.8)(snabbdom@3.6.4))(antd@6.6.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(codemirror@6.0.2)(mobx-react-lite@4.1.1(mobx@6.16.1)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(mobx@6.16.1)(react-dom@18.3.1(react@18.3.1))(react-intl@6.8.9(react@18.3.1)(typescript@5.9.3))(react-router@6.30.4(react@18.3.1))(react@18.3.1)
+        specifier: ^2.4.8
+        version: 2.4.8(@ant-design/icons@6.3.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@babel/runtime@8.0.0)(@codemirror/autocomplete@6.20.3)(@codemirror/language@6.12.4)(@codemirror/search@6.7.1)(@codemirror/theme-one-dark@6.1.3)(@types/react@18.3.31)(@wangeditor/core@1.1.19(@uppy/core@2.3.4)(@uppy/xhr-upload@2.1.3(@uppy/core@2.3.4))(dom7@3.0.0)(is-hotkey@0.2.0)(lodash.camelcase@4.3.0)(lodash.clonedeep@4.5.0)(lodash.debounce@4.0.8)(lodash.foreach@4.5.0)(lodash.isequal@4.5.0)(lodash.throttle@4.1.1)(lodash.toarray@4.4.0)(nanoid@3.3.18)(slate@0.72.8)(snabbdom@3.6.4))(antd@6.6.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(codemirror@6.0.2)(mobx-react-lite@4.1.1(mobx@6.16.1)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(mobx@6.16.1)(react-dom@18.3.1(react@18.3.1))(react-intl@6.8.9(react@18.3.1)(typescript@5.9.3))(react-router@6.30.4(react@18.3.1))(react@18.3.1)
       '@iconify/react':
         specifier: ^5.0.1
         version: 5.2.1(react@18.3.1)
@@ -1217,8 +1217,8 @@ packages:
   '@hsu-react/single-router@0.0.28':
     resolution: {integrity: sha512-xsK4giJDYhAynunmcUM+3fgBkYXPDo6o80Ug6IxqeDsUnHLYB6Tb9NuJbpHAJ48SOfYC24p+XPahhyioS8QTsA==}
 
-  '@hsu-react/ui@2.4.6':
-    resolution: {integrity: sha512-AhpjhXJaiWsnIVK7yADoGrwID1IvBm2AXDP3bj2Ed/8vmZOZxtAnszgaPNCRmkFk2TCsfLnTfyBIidU40Myq2A==}
+  '@hsu-react/ui@2.4.8':
+    resolution: {integrity: sha512-9/Jm2I30ac11a8elr9uuQDfEa8BVtKdCxEwAnyIvCw6EJGMIiMUo5BkKhrOb/uM2Ebd5R7nLQwkFjiBEv8nNKg==}
     peerDependencies:
       '@ant-design/icons': '>=6'
       antd: '>=6'
@@ -8202,7 +8202,7 @@ snapshots:
     transitivePeerDependencies:
       - worker-loader
 
-  '@hsu-react/ui@2.4.6(@ant-design/icons@6.3.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@babel/runtime@8.0.0)(@codemirror/autocomplete@6.20.3)(@codemirror/language@6.12.4)(@codemirror/search@6.7.1)(@codemirror/theme-one-dark@6.1.3)(@types/react@18.3.31)(@wangeditor/core@1.1.19(@uppy/core@2.3.4)(@uppy/xhr-upload@2.1.3(@uppy/core@2.3.4))(dom7@3.0.0)(is-hotkey@0.2.0)(lodash.camelcase@4.3.0)(lodash.clonedeep@4.5.0)(lodash.debounce@4.0.8)(lodash.foreach@4.5.0)(lodash.isequal@4.5.0)(lodash.throttle@4.1.1)(lodash.toarray@4.4.0)(nanoid@3.3.18)(slate@0.72.8)(snabbdom@3.6.4))(antd@6.6.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(codemirror@6.0.2)(mobx-react-lite@4.1.1(mobx@6.16.1)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(mobx@6.16.1)(react-dom@18.3.1(react@18.3.1))(react-intl@6.8.9(react@18.3.1)(typescript@5.9.3))(react-router@6.30.4(react@18.3.1))(react@18.3.1)':
+  '@hsu-react/ui@2.4.8(@ant-design/icons@6.3.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@babel/runtime@8.0.0)(@codemirror/autocomplete@6.20.3)(@codemirror/language@6.12.4)(@codemirror/search@6.7.1)(@codemirror/theme-one-dark@6.1.3)(@types/react@18.3.31)(@wangeditor/core@1.1.19(@uppy/core@2.3.4)(@uppy/xhr-upload@2.1.3(@uppy/core@2.3.4))(dom7@3.0.0)(is-hotkey@0.2.0)(lodash.camelcase@4.3.0)(lodash.clonedeep@4.5.0)(lodash.debounce@4.0.8)(lodash.foreach@4.5.0)(lodash.isequal@4.5.0)(lodash.throttle@4.1.1)(lodash.toarray@4.4.0)(nanoid@3.3.18)(slate@0.72.8)(snabbdom@3.6.4))(antd@6.6.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(codemirror@6.0.2)(mobx-react-lite@4.1.1(mobx@6.16.1)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(mobx@6.16.1)(react-dom@18.3.1(react@18.3.1))(react-intl@6.8.9(react@18.3.1)(typescript@5.9.3))(react-router@6.30.4(react@18.3.1))(react@18.3.1)':
     dependencies:
       '@ant-design/icons': 6.3.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@ant-design/x': 2.9.0(antd@6.6.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
