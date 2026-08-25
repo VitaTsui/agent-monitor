@@ -532,68 +532,73 @@ const Composer: React.FC<ComposerProps> = (props) => {
 
     const ok: string[] = [];
     const failed: string[] = [];
-    // 先问一次目标目录里已有哪些文件，好在这边就把最终名定下来。
-    //
-    // 客户端撞名会自动改名（a.png → a (1).png，见 client 的 unique_target），而回填进
-    // 输入框的路径是这边拼的 —— 不先算出最终名，回填的就会指向目录里那个**旧文件**。
-    // 那比覆盖更隐蔽：agent 照着路径读到的是上一版内容，却没有任何迹象表明它拿错了。
-    // 查不到就退回原名（客户端仍会兜底改名，只是回填可能对不上），不因此挡住上传。
-    const taken = await fetchTakenNames(dirRel);
-    for (const file of files) {
-      // 本批内也要互相避让：一次选中两个同名文件时，后一个不能再叫同一个名字
-      const name = uniqueName(file.name, taken);
-      taken.add(name);
-      try {
-        const res = await uploadPortalFile(
-          machineId,
-          dir,
-          file,
-          (sent, total) => {
-            // 大文件单个就要传一会儿，只报「第几个文件」看着像卡住了，带上本文件的百分比
-            setUploadPct(total > 0 ? Math.round((sent / total) * 100) : 0);
-          },
-          name,
-        );
-        if (res.code === 0) {
-          // 落盘名以客户端回报的为准：上面那个 name 只是预判，而**决定权在客户端手里**
-          // （撞名它会自己改名）。查目录到落盘之间目录又变了、或同一目录有别的写入抢先，
-          // 预判就会落空，回填的路径又指回那个同名旧文件。
-          // 够旧的客户端不回报（hub 不带 path），那就只能退回预判名。
-          const abs = res.data?.path ?? "";
-          const actual = abs.split(/[\\/]/).pop() || name;
-          // 本批后续文件要避让的是**实际**占用的名字
-          taken.add(actual);
-          // 回填相对路径（相对会话目录，正斜杠通用）——用最终名，不是本地文件名。
-          //
-          // 相对路径只在**能证明它对**的时候才用，否则一律绝对路径：
-          //
-          // ① 落点核对：客户端回报的绝对路径必须以我们用的 dir 开头。对不上说明落点被
-          //    改写过或中途又变了，相对路径必然指空。
-          // ② 漂移核对：`shellCwd` 有值就说明终端此刻不在锚定目录里。终端解析 `./x` 到底
-          //    以仓库根还是以自己当前目录为准，我们没有确证（唯一一次观察是从一句自然语言
-          //    回复反推的，不足以当规则）—— 这种时候不赌，给绝对路径，两种解释下都找得到。
-          const landedHere =
-            !abs || abs.slice(0, dir.length).toLowerCase() === dir.toLowerCase();
-          const drifted = !!shellCwd && shellCwd !== cwd;
-          ok.push(
-            landedHere && !drifted
-              ? dirRel
-                ? `./${dirRel}/${actual}`
-                : `./${actual}`
-              : abs || `${dir}${sep}${actual}`,
+    // 整段包 try/finally：`uploading` 一旦卡在 true，发送就被永久挡住（见 blockReason），
+    // 那比转圈停不下来严重得多 —— 收尾动作必须在任何出口都跑到。
+    try {
+      // 先问一次目标目录里已有哪些文件，好在这边就把最终名定下来。
+      //
+      // 客户端撞名会自动改名（a.png → a (1).png，见 client 的 unique_target），而回填进
+      // 输入框的路径是这边拼的 —— 不先算出最终名，回填的就会指向目录里那个**旧文件**。
+      // 那比覆盖更隐蔽：agent 照着路径读到的是上一版内容，却没有任何迹象表明它拿错了。
+      // 查不到就退回原名（客户端仍会兜底改名，只是回填可能对不上），不因此挡住上传。
+      const taken = await fetchTakenNames(dirRel);
+      for (const file of files) {
+        // 本批内也要互相避让：一次选中两个同名文件时，后一个不能再叫同一个名字
+        const name = uniqueName(file.name, taken);
+        taken.add(name);
+        try {
+          const res = await uploadPortalFile(
+            machineId,
+            dir,
+            file,
+            (sent, total) => {
+              // 大文件单个就要传一会儿，只报「第几个文件」看着像卡住了，带上本文件的百分比
+              setUploadPct(total > 0 ? Math.round((sent / total) * 100) : 0);
+            },
+            name,
           );
-        } else {
+          if (res.code === 0) {
+            // 落盘名以客户端回报的为准：上面那个 name 只是预判，而**决定权在客户端手里**
+            // （撞名它会自己改名）。查目录到落盘之间目录又变了、或同一目录有别的写入抢先，
+            // 预判就会落空，回填的路径又指回那个同名旧文件。
+            // 够旧的客户端不回报（hub 不带 path），那就只能退回预判名。
+            const abs = res.data?.path ?? "";
+            const actual = abs.split(/[\\/]/).pop() || name;
+            // 本批后续文件要避让的是**实际**占用的名字
+            taken.add(actual);
+            // 回填相对路径（相对会话目录，正斜杠通用）——用最终名，不是本地文件名。
+            //
+            // 相对路径只在**能证明它对**的时候才用，否则一律绝对路径：
+            //
+            // ① 落点核对：客户端回报的绝对路径必须以我们用的 dir 开头。对不上说明落点被
+            //    改写过或中途又变了，相对路径必然指空。
+            // ② 漂移核对：`shellCwd` 有值就说明终端此刻不在锚定目录里。终端解析 `./x` 到底
+            //    以仓库根还是以自己当前目录为准，我们没有确证（唯一一次观察是从一句自然语言
+            //    回复反推的，不足以当规则）—— 这种时候不赌，给绝对路径，两种解释下都找得到。
+            const landedHere =
+              !abs || abs.slice(0, dir.length).toLowerCase() === dir.toLowerCase();
+            const drifted = !!shellCwd && shellCwd !== cwd;
+            ok.push(
+              landedHere && !drifted
+                ? dirRel
+                  ? `./${dirRel}/${actual}`
+                  : `./${actual}`
+                : abs || `${dir}${sep}${actual}`,
+            );
+          } else {
+            failed.push(file.name);
+          }
+        } catch {
           failed.push(file.name);
         }
-      } catch {
-        failed.push(file.name);
+        setUploadDone((n) => n + 1);
+        setUploadPct(0);
       }
-      setUploadDone((n) => n + 1);
+    } finally {
+      setUploading(false);
+      setUploadDone(0);
       setUploadPct(0);
     }
-
-    setUploading(false);
-    setUploadDone(0);
     // 一次性回填：逐个 append 会在输入框里触发多次光标跳动
     if (ok.length) {
       appendToInput(ok.join(" "));
@@ -638,11 +643,24 @@ const Composer: React.FC<ComposerProps> = (props) => {
     setConfirmInput("");
   };
 
+  /**
+   * 此刻不能发布的原因（空串 = 可以发）。所有发送入口都要过这一关。
+   *
+   * 上传期间必须挡住：路径是**整批传完之后**才 `appendToInput` 的，这中间放行等于让
+   * 消息先走、路径后到 —— 终端收到的要么是没带路径的空任务，要么指向一个还没落盘的
+   * 文件，跟「上传成功但终端说文件不存在」是同一类现象，只是这次是我们自己抢跑。
+   */
+  const blockReason = disabled
+    ? offHint
+    : uploading
+      ? "文件上传中，传完才能发布"
+      : "";
+
   const guardedSend = (raw: string) => {
     const text = raw.trim();
     if (!text) return;
-    if (disabled) {
-      message.warning(offHint);
+    if (blockReason) {
+      message.warning(blockReason);
       return;
     }
 
@@ -662,6 +680,12 @@ const Composer: React.FC<ComposerProps> = (props) => {
       return;
     }
     if (confirmInput.trim() === CONFIRM_WORD) {
+      // 二次确认这条路绕过了 guardedSend，同一道闸要再过一次：
+      // 弹窗开着的这段时间里完全可能有一批文件正在传
+      if (blockReason) {
+        message.warning(blockReason);
+        return;
+      }
       onSend(dangerText);
       closeDanger();
     }
@@ -796,9 +820,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
       {/* 注意：不传 assistanting —— 本产品要向「执行中」的会话注入输入 */}
       <Chat.Input
         wrapperClassName={styles.chatInput}
-        placeholder={
-          disabled ? offHint : "输入任务，回车发布"
-        }
+        placeholder={blockReason || "输入任务，回车发布"}
         onSend={guardedSend}
         uploadEnabled={false}
         buttonGroup={[
