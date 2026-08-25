@@ -207,9 +207,10 @@ fn tool_defs() -> Vec<Value> {
         json!({
             "name": "answer_select",
             "description": "回答终端弹出的选择卡（AskUserQuestion）。会话在等你选时 session_detail 会列出\
-                问题和选项 —— 单选传选项序号（如 \"2\"）；多选把勾选的序号连写、末尾再加 Submit 的序号\
-                （选项 N 个时 Submit 是 N+3：选项之后还有「其它」占 N+1、「chat about」占 N+2），例如 4 个选项里选 1 和 3 就传 \"137\"；\
-                想自己答就直接传文本。作答不会推送到钉钉、也不进交互历史 —— 孤零零一个「1」没有留存价值。",
+                问题和选项 —— 单选传选项序号（如 \"2\"）；多选把勾选的序号连写（如 \"13\"＝选第 1、3 项）；\
+                多题用逗号分开逐题作答（如 \"1,2\"）；想自己答就直接传文本。\
+                只管说选了什么，Submit 由 hub 按题型补上。\
+                作答不会推送到钉钉、也不进交互历史 —— 孤零零一个「1」没有留存价值。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -529,19 +530,22 @@ async fn answer_select(
     answer: &str,
 ) -> Result<String, String> {
     let id = resolve(state, user, sess).await?;
-    let waiting = state
+    let card = state
         .tasks_for(user)
         .await
         .into_iter()
         .find(|t| t.id == id)
         .and_then(|t| t.pending_select)
-        .is_some();
-    if !waiting {
+        .filter(|v| !v.is_null());
+    let Some(card) = card else {
         return Err(format!(
             "会话「{sess}」当前没有在等选择。用 session_detail 确认它是否真的弹了选择卡 —— \
              盲发答案会被当成普通任务执行。"
         ));
-    }
+    };
+    // 序号怎么落到按键上由 queue_command 按题型翻译（详见 plan_select_answer）——
+    // 钉钉、网页、MCP 三条入口都汇到那里，翻译只该有一份。
+    let _ = &card;
     crate::bot::queue_command(
         state,
         user,

@@ -873,9 +873,33 @@ async fn execute(
         }
         return;
     }
-    // 终端按键注入（撤回排队 ↑ / 插入排队 Esc）单独处理
+    // 终端按键注入（撤回排队 ↑ / 打断 Esc / 选择卡的 Tab+回车）单独处理
     if matches!(cmd.action, am_core::model::ControlAction::TermKey) {
         let spec = cmd.text.unwrap_or_default();
+        // 内嵌终端（Cursor/VSCode）同样注入不进按键 —— 那头是 ConPTY，
+        // WriteConsoleInput「可能报错、也可能成功却没送达」。输入早就改走桥接了，
+        // 按键这条却一直没有，于是在编辑器里跑的会话上，撤回/打断/选择卡提交
+        // 统统石沉大海。扩展只会发文本，所以把键名还原成终端本就认的控制字符发过去。
+        if let Some(chars) = am_core::process::key_spec_to_chars(&spec) {
+            if let Some(shell_pid) =
+                ide_shell_of.get(&pid).copied().or_else(|| am_core::process::ide_shell_pid(pid))
+            {
+                if crate::bridge::has_live_terminal(&state.config.data_dir, shell_pid)
+                    // submit=false：这串本身就是按键，补回车会多出一下
+                    && crate::bridge::send_via_extension(
+                        &state.config.data_dir,
+                        shell_pid,
+                        &chars,
+                        false,
+                    )
+                {
+                    crate::state::client_log(&format!(
+                        "注入按键：经 Cursor/VSCode 扩展桥接（终端 pid={shell_pid}，{spec}）"
+                    ));
+                    return;
+                }
+            }
+        }
         let spec_log = spec.clone();
         let res =
             tokio::task::spawn_blocking(move || am_core::process::send_terminal_keys(pid, &spec))
@@ -887,6 +911,27 @@ async fn execute(
             Err(e) => crate::state::client_log(&format!("注入按键阻塞任务异常：pid={pid} {e}")),
         }
         return;
+    }
+    // 「中断当前任务」＝按 Esc。内嵌终端里进程级的中断根本递不进 TUI，
+    // 与按键走同一条桥接才送得到（Windows 上 control() 内部也已改成发 Esc）。
+    if matches!(cmd.action, am_core::model::ControlAction::Interrupt) {
+        if let Some(shell_pid) =
+            ide_shell_of.get(&pid).copied().or_else(|| am_core::process::ide_shell_pid(pid))
+        {
+            if crate::bridge::has_live_terminal(&state.config.data_dir, shell_pid)
+                && crate::bridge::send_via_extension(
+                    &state.config.data_dir,
+                    shell_pid,
+                    "\x1b",
+                    false,
+                )
+            {
+                crate::state::client_log(&format!(
+                    "中断当前任务：经 Cursor/VSCode 扩展桥接发 Esc（终端 pid={shell_pid}）"
+                ));
+                return;
+            }
+        }
     }
     match am_core::process::control(pid, cmd.action) {
         Ok(label) => {
@@ -903,9 +948,17 @@ async fn execute(
                     auto.remove(&pid);
                 }
             }
-            tracing::info!("执行 hub 命令: 任务 {} pid={pid} {label}", cmd.task_id);
+            // 落盘，别只 tracing。注入输入/按键的成败一直写 client.log，唯独控制类
+            // 命令没有 —— 于是「点了没反应」时日志里一片空白，连它到底执行没执行都看不出来。
+            crate::state::client_log(&format!(
+                "执行控制命令成功：pid={pid} {label}（任务 {}）",
+                cmd.task_id
+            ));
         }
-        Err(e) => tracing::warn!("执行 hub 命令失败: {e}"),
+        Err(e) => crate::state::client_log(&format!(
+            "执行控制命令失败：pid={pid} {:?} {e}（任务 {}）",
+            cmd.action, cmd.task_id
+        )),
     }
 }
 

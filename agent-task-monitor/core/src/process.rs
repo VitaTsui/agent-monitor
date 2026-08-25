@@ -477,7 +477,17 @@ pub fn control(pid: u32, action: ControlAction) -> Result<&'static str> {
     #[cfg(windows)]
     {
         match action {
-            ControlAction::Stop | ControlAction::Kill | ControlAction::Interrupt => {
+            // 「中断当前任务」＝按 Esc，**不是**杀进程。
+            //
+            // 这里原先和 Stop/Kill 一起走 taskkill：那是南辕北辙 —— 真执行成功，用户的
+            // 整个会话就没了，而他要的只是让 claude 停下手上这件事。之所以一直没炸，
+            // 是因为不带 /F 的 taskkill 靠给顶层窗口发 WM_CLOSE，而 claude.exe 是终端里
+            // 共享 ConPTY 的子进程、没有自己的窗口，于是既杀不掉也没反应 —— 表现成
+            // 「点了没用」，反倒把真正的祸事盖住了。
+            //
+            // Unix 那边仍是 SIGINT，不动：它是那个平台上「中断」的常规做法。
+            ControlAction::Interrupt => send_terminal_keys(pid, "esc"),
+            ControlAction::Stop | ControlAction::Kill => {
                 let force = matches!(action, ControlAction::Kill);
                 let mut cmd = std::process::Command::new("taskkill");
                 cmd.arg("/PID").arg(pid.to_string());
@@ -494,7 +504,8 @@ pub fn control(pid: u32, action: ControlAction) -> Result<&'static str> {
                 Ok(action_label(action))
             }
             ControlAction::Pause | ControlAction::Resume => {
-                Err(anyhow!("Windows 平台暂不支持暂停/恢复"))
+                windows_suspend(pid, matches!(action, ControlAction::Pause))?;
+                Ok(action_label(action))
             }
             ControlAction::Input => Err(anyhow!("Input 动作需走 send_input")),
             ControlAction::TermKey => Err(anyhow!("TermKey 动作需走 send_terminal_keys")),
@@ -544,56 +555,107 @@ pub fn send_input_ex(pid: u32, text: &str, submit: bool) -> Result<&'static str>
     }
 }
 
-/// 向终端注入按键（不提交），用于「撤回排队(↑)」「插入排队(Esc)」。
-/// spec："up:3" = 按 3 次上键；"esc" = 按 1 次 Esc。仅 iTerm2(mac) 与 Windows 控制台
+/// 向终端注入按键（不提交），用于「撤回排队(↑)」「插入排队(Esc)」「多选卡提交(Tab+Enter)」。
+/// spec："up:3" = 按 3 次上键；"esc" = 按 1 次 Esc；逗号可串成**有序序列**：
+/// "tab:5,enter" = 先按 5 次 Tab 再按一次回车。仅 iTerm2(mac) 与 Windows 控制台
 /// 可干净注入；Terminal.app 无法在不切前台的前提下注入方向键 → 返回错误（前端走提示）。
+///
+/// 序列是多选选择卡唯一的提交途径：Submit 按钮不在选项列表里（数字键索引不到它），
+/// 只能 Tab 到最后一项之后再回车。分成两次下发的话，中间隔着队列轮询的几秒，
+/// 期间任何一次别的注入插进来都会把焦点带走 —— 必须在一次调用里连着发完。
 pub fn send_terminal_keys(pid: u32, spec: &str) -> Result<&'static str> {
     if pid == 0 || pid > i32::MAX as u32 {
         return Err(anyhow!("非法 pid: {pid}"));
     }
-    let (key, count) = parse_key_spec(spec);
-    if count == 0 {
+    let steps = parse_key_spec(spec);
+    if steps.is_empty() {
         return Ok("无按键");
     }
-    #[cfg(target_os = "macos")]
-    {
-        mac_send_key(pid, key, count)
+    // 逐段发。任何一段失败都立刻中止：序列是有序的，
+    // 前一段没送到还接着发后面的，只会把焦点留在半路上。
+    let mut last = "无按键";
+    for (key, count) in steps {
+        #[cfg(target_os = "macos")]
+        {
+            last = mac_send_key(pid, key, count)?;
+        }
+        #[cfg(windows)]
+        {
+            last = windows_send_key(pid, key, count)?;
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let tty = tty_of(pid).ok_or_else(|| anyhow!("无法定位进程 {pid} 的终端设备"))?;
+            last = tiocsti_send_key(&tty, key, count)?;
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (key, count, &mut last);
+            return Err(anyhow!("当前平台不支持按键注入"));
+        }
     }
-    #[cfg(windows)]
-    {
-        windows_send_key(pid, key, count)
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let tty = tty_of(pid).ok_or_else(|| anyhow!("无法定位进程 {pid} 的终端设备"))?;
-        tiocsti_send_key(&tty, key, count)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (key, count);
-        Err(anyhow!("当前平台不支持按键注入"))
-    }
+    Ok(last)
 }
 
-/// 解析 "up:3" / "esc" → (键名, 次数)。次数封顶 50 防误触发风暴。
-fn parse_key_spec(spec: &str) -> (&str, usize) {
-    let mut it = spec.splitn(2, ':');
-    let key = it.next().unwrap_or("").trim();
-    let count = it
-        .next()
-        .and_then(|c| c.trim().parse::<usize>().ok())
-        .unwrap_or(1);
-    (key, count.min(50))
+/// 解析 "up:3" / "esc" / "tab:5,enter" → [(键名, 次数)…]。
+///
+/// 逗号分隔成有序序列，每段 `键名[:次数]`。单段次数封顶 50 防误触发风暴，
+/// 段数同样封顶 —— spec 来自 hub 下发，不该无限长。
+fn parse_key_spec(spec: &str) -> Vec<(&str, usize)> {
+    spec.split(',')
+        .filter_map(|seg| {
+            let mut it = seg.splitn(2, ':');
+            let key = it.next().unwrap_or("").trim();
+            if key.is_empty() {
+                return None;
+            }
+            let count = it
+                .next()
+                .and_then(|c| c.trim().parse::<usize>().ok())
+                .unwrap_or(1);
+            // 次数 0 的段直接丢掉，别让它在下游被当成「发一次」
+            (count > 0).then(|| (key, count.min(50)))
+        })
+        .take(8)
+        .collect()
 }
 
 /// 键名 → 终端转义字节序列。↑ 用普通光标模式 ESC[A；Esc 单字节。
+/// Tab/回车是普通控制字符：TUI 把 CR(0x0D) 当「提交」，LF 只会换行，故回车必须用 \r。
 #[cfg(all(unix, not(target_os = "macos")))]
 fn key_seq(key: &str) -> Option<&'static [u8]> {
     match key {
         "up" => Some(b"\x1b[A"),
         "esc" => Some(b"\x1b"),
+        "tab" => Some(b"\t"),
+        "enter" => Some(b"\r"),
         _ => None,
     }
+}
+
+/// 把按键 spec 展开成可直接写进 pty 的控制字符串，供 IDE 桥接下发。
+///
+/// Cursor/VSCode 的内嵌终端走 ConPTY，`WriteConsoleInput` 那条路注入不进去
+///（扫描到桥接扩展时输入本就改走 `terminal.sendText`）。按键同理 —— 只是
+/// 扩展只会「发文本」，所以这里把键名还原成终端本来就认的控制字符。
+///
+/// **不能出现 `\n`**：扩展见到换行会把整段包进 bracketed paste，届时 TUI 会把
+/// ESC/Tab 当成粘贴进来的字面文本而不是按键。回车用 CR 正好避开这一点。
+pub fn key_spec_to_chars(spec: &str) -> Option<String> {
+    let mut out = String::new();
+    for (key, count) in parse_key_spec(spec) {
+        let seq = match key {
+            "up" => "\x1b[A",
+            "esc" => "\x1b",
+            "tab" => "\t",
+            "enter" => "\r",
+            _ => return None,
+        };
+        for _ in 0..count {
+            out.push_str(seq);
+        }
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 /// macOS 终端按键注入：先试 iTerm2（write text 转义序列，无需切前台），
@@ -603,10 +665,13 @@ fn mac_send_key(pid: u32, key: &str, count: usize) -> Result<&'static str> {
     let tty = tty_of(pid).ok_or_else(|| anyhow!("无法定位进程 {pid} 的终端设备"))?;
     let tty_e = tty.replace('\\', "\\\\").replace('"', "\\\"");
 
-    // 1) iTerm2：write text 直接把转义序列写进会话，不切前台
+    // 1) iTerm2：write text 直接把转义序列写进会话，不切前台。
+    // 回车用 CR(id 13) 而非 newline yes —— 后者有时发的是 LF，TUI 只换行不提交。
     let seq_expr = match key {
         "up" => "(character id 27) & \"[A\"",
         "esc" => "(character id 27)",
+        "tab" => "(character id 9)",
+        "enter" => "(character id 13)",
         _ => return Err(anyhow!("未知按键: {key}")),
     };
     let iterm = format!(
@@ -636,6 +701,8 @@ return "notfound""#
     let keycode = match key {
         "up" => 126,
         "esc" => 53,
+        "tab" => 48,
+        "enter" => 36, // Return，非小键盘 Enter(76)
         _ => return Err(anyhow!("未知按键: {key}")),
     };
     let terminal = format!(
@@ -694,14 +761,71 @@ fn tiocsti_send_key(tty: &str, key: &str, count: usize) -> Result<&'static str> 
     Ok("已注入按键")
 }
 
+/// Windows：挂起 / 恢复整个进程，充当 Unix 那边 SIGSTOP / SIGCONT 的对应物。
+///
+/// Windows 没有信号，此前这两个动作直接返回「暂不支持」—— 网页上按钮点了就是没反应。
+/// 唯一通用的做法是 ntdll 的 `NtSuspendProcess` / `NtResumeProcess`：它们没有官方文档，
+/// 但从 XP 起就在，任务管理器的「挂起」走的也是这条路。
+///
+/// 只申请 `PROCESS_SUSPEND_RESUME`（0x0800）这一项权限：暂停用不着更大的权柄，
+/// 万一句柄泄漏出去也做不了别的。
+#[cfg(windows)]
+fn windows_suspend(pid: u32, suspend: bool) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let dir = std::env::temp_dir();
+    let ps_path = dir.join(format!("am-susp-{pid}-{}.ps1", std::process::id()));
+    let script = r#"param([int]$TargetPid,[int]$Suspend)
+$ErrorActionPreference='Stop'
+$code=@'
+using System;
+using System.Runtime.InteropServices;
+public class AmSusp {
+  [DllImport("ntdll.dll")] static extern int NtSuspendProcess(IntPtr h);
+  [DllImport("ntdll.dll")] static extern int NtResumeProcess(IntPtr h);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint a, bool i, uint p);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool CloseHandle(IntPtr h);
+  public static bool Run(uint pid, bool suspend){
+    IntPtr h = OpenProcess(0x0800, false, pid);   // PROCESS_SUSPEND_RESUME
+    if(h==IntPtr.Zero) return false;
+    try { return (suspend ? NtSuspendProcess(h) : NtResumeProcess(h)) == 0; }
+    finally { CloseHandle(h); }
+  }
+}
+'@
+Add-Type -TypeDefinition $code -Language CSharp
+if([AmSusp]::Run([uint32]$TargetPid,[bool]$Suspend)){ exit 0 } else { exit 2 }
+"#;
+    std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
+        .arg(&ps_path)
+        .arg(pid.to_string())
+        .arg(if suspend { "1" } else { "0" })
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let _ = std::fs::remove_file(&ps_path);
+    let verb = if suspend { "暂停" } else { "恢复" };
+    match out {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(_) => Err(anyhow!(
+            "{verb}进程 {pid} 失败（可能已退出，或权限不足 —— 目标以更高完整性级别运行时需以管理员身份运行监控端）"
+        )),
+        Err(e) => Err(anyhow!("{verb}进程失败：powershell 执行失败: {e}")),
+    }
+}
+
 /// Windows：AttachConsole + WriteConsoleInput 发虚拟键（按下+抬起）count 次。
 #[cfg(windows)]
 fn windows_send_key(pid: u32, key: &str, count: usize) -> Result<&'static str> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let (vk, uch): (u16, u16) = match key {
-        "up" => (0x26, 0),   // VK_UP，非可打印字符 → UnicodeChar 0
-        "esc" => (0x1B, 27), // VK_ESCAPE，UnicodeChar = ESC
+        "up" => (0x26, 0),    // VK_UP，非可打印字符 → UnicodeChar 0
+        "esc" => (0x1B, 27),  // VK_ESCAPE，UnicodeChar = ESC
+        "tab" => (0x09, 9),   // VK_TAB，UnicodeChar = HT
+        "enter" => (0x0D, 13), // VK_RETURN，UnicodeChar = CR（TUI 认 CR 为提交）
         _ => return Err(anyhow!("未知按键: {key}")),
     };
 
@@ -1567,5 +1691,72 @@ mod session_pins_tests {
         );
         assert_eq!(got.get(&100), Some(&"sess-A".to_string()));
         assert_eq!(got.get(&101), Some(&"sess-B".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod key_spec_tests {
+    use super::parse_key_spec;
+
+    /// 单段仍按老样子解析 —— recall/flush 两条既有通路不能被序列化改动带偏。
+    #[test]
+    fn single_segment_keeps_working() {
+        assert_eq!(parse_key_spec("up:3"), vec![("up", 3)]);
+        assert_eq!(parse_key_spec("esc"), vec![("esc", 1)]);
+        // 次数封顶，防误触发风暴
+        assert_eq!(parse_key_spec("up:999"), vec![("up", 50)]);
+    }
+
+    /// 多选卡的提交序列：Tab 走到 Submit，再回车。
+    ///
+    /// 这两下**必须同属一个 spec**：拆成两次下发的话，中间隔着队列轮询的几秒，
+    /// 期间任何一次别的注入都会把焦点从 Submit 上带走，回车就落到别处去了。
+    #[test]
+    fn submit_sequence_is_ordered() {
+        assert_eq!(parse_key_spec("tab:5,enter"), vec![("tab", 5), ("enter", 1)]);
+        // 顺序即书写顺序，不做任何重排
+        assert_eq!(parse_key_spec("enter,tab:2"), vec![("enter", 1), ("tab", 2)]);
+    }
+
+    /// 空段与 0 次段一律丢掉：0 次若被当成「发一次」，会凭空多出一下按键，
+    /// 在选择卡上就是多勾一项或提前提交。
+    #[test]
+    fn empty_and_zero_segments_dropped() {
+        assert_eq!(parse_key_spec("tab:0,enter"), vec![("enter", 1)]);
+        assert_eq!(parse_key_spec(",,tab:2,"), vec![("tab", 2)]);
+        assert!(parse_key_spec("").is_empty());
+        assert!(parse_key_spec("   ").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod bridge_key_tests {
+    use super::key_spec_to_chars;
+
+    /// 按键要能还原成终端本就认的控制字符 —— 内嵌终端（ConPTY）只收得到文本，
+    /// 按键得靠这一步经桥接送达。
+    #[test]
+    fn keys_become_control_chars() {
+        assert_eq!(key_spec_to_chars("esc").as_deref(), Some("\x1b"));
+        assert_eq!(key_spec_to_chars("up:2").as_deref(), Some("\x1b[A\x1b[A"));
+        assert_eq!(key_spec_to_chars("tab:3,enter").as_deref(), Some("\t\t\t\r"));
+    }
+
+    /// 回车必须是 CR：换行会让扩展把整段包进 bracketed paste，
+    /// 届时 ESC/Tab 会被当成粘贴进来的字面文本，而不是按键。
+    #[test]
+    fn never_emits_a_newline() {
+        for spec in ["enter", "tab:5,enter", "up:50", "esc"] {
+            let s = key_spec_to_chars(spec).unwrap();
+            assert!(!s.contains('\n'), "{spec} 展开后不能含 \n：{s:?}");
+        }
+    }
+
+    /// 认不出的键名一律 None —— 宁可退回原生注入，也别把半串按键发出去。
+    #[test]
+    fn unknown_key_yields_none() {
+        assert!(key_spec_to_chars("f5").is_none());
+        assert!(key_spec_to_chars("tab:2,f5").is_none());
+        assert!(key_spec_to_chars("").is_none());
     }
 }

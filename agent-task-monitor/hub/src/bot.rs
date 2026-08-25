@@ -1796,20 +1796,39 @@ pub(crate) async fn queue_command(
     if entry.last_report.elapsed().as_secs() >= crate::state::OFFLINE_AFTER_SECS {
         return Err("会话所属设备已离线。".into());
     }
-    entry.pending.push_back(ControlCmd {
+    // 会话正卡在选择卡上 ⇒ 这条输入就是作答，客户端据此**不补提交回车**
+    let is_answer = answering_select(action, task.pending_select.as_ref());
+    let mk = |action: ControlAction, text: Option<String>| ControlCmd {
         task_id: task_id.to_string(),
         pid: task.pid,
         action,
-        text: text.clone(),
+        text,
         id: Some(uuid::Uuid::new_v4().to_string()),
-        // 会话正卡在选择卡上 ⇒ 这条输入就是作答，客户端据此**不补提交回车**
-        from_select: answering_select(action, task.pending_select.as_ref()),
-    });
+        from_select: is_answer,
+    };
+    match (is_answer, task.pending_select.as_ref(), text.as_deref()) {
+        // 作答要按题型翻译成一串动作：多选的 Submit 不在选项列表里、多题答完还压着
+        // 一层 Review，只发数字是提交不掉的（详见 server::plan_select_answer）。
+        // 三条入口都汇到这里，所以翻译只在此处做一次。
+        (true, Some(card), Some(ans)) => {
+            for step in crate::server::plan_select_answer(card, ans) {
+                let cmd = match step {
+                    crate::server::SelectStep::Text(t) => mk(ControlAction::Input, Some(t)),
+                    crate::server::SelectStep::Keys(k) => mk(ControlAction::TermKey, Some(k)),
+                };
+                entry.pending.push_back(cmd);
+            }
+        }
+        _ => entry.pending.push_back(mk(action, text.clone())),
+    }
     drop(machines); // 记历史要拿别的锁，先放掉
 
     // 下发的任务进「远程交互历史」的 user 侧。钉钉 / 网页 / MCP 三个入口都汇到这里，
     // 所以只需在此记一次；控制类指令（暂停/中断…）不入流，它们不是对话内容。
-    if matches!(action, ControlAction::Input) {
+    //
+    // 作答除外：孤零零一个「1」脱离问题本身毫无意义，网页端下发早就靠 fromSelect
+    // 把它挡在历史外了，钉钉与 MCP 这两条却一直照记不误 —— 同一件事该是同一个口径。
+    if matches!(action, ControlAction::Input) && !is_answer {
         if let Some(content) = text {
             let slot = crate::slots::slot_of(state, username, &crate::slots::anchor_of(&task)).await;
             crate::history::append(

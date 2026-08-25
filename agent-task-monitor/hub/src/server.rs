@@ -1042,20 +1042,31 @@ pub(crate) fn select_summary(v: &Value) -> String {
             for (i, o) in opts.iter().enumerate() {
                 let label = o.get("label").and_then(|x| x.as_str()).unwrap_or("");
                 out.push_str(&format!("{}. {}\n", i + 1, label));
+                // 选项说明：终端与网页端都把它显示在 label 下面，唯独这份摘要漏了，
+                // 于是钉钉那头看到的是一串光秃秃的短语 —— 选项之间差在哪根本看不出来。
+                // 缩进两格挂在列表项下，markdown 才不会把它当成新的一项。
+                if let Some(desc) = o.get("description").and_then(|x| x.as_str()) {
+                    let desc = desc.trim();
+                    if !desc.is_empty() {
+                        // 说明里的换行会截断列表项，压成一行再挂上去
+                        let flat = desc.split_whitespace().collect::<Vec<_>>().join(" ");
+                        out.push_str(&format!("   {flat}\n"));
+                    }
+                }
             }
             // 选项之后的作答提示。
             //
-            // 那个「其它」不是可有可无的摆设：AskUserQuestion 的选择卡**始终**隐含它
-            //（占 N+1 号，其后还有「chat about」占 N+2，Submit 是 N+3），终端里能自己敲
-            // 答案，网页端也补了「✎ 自行输入」。
-            // 唯独这份摘要只列 1..N，钉钉那头看到的就是一道封闭的单选题 —— 想说的话不在
-            // 列表里时，只能挑一个最接近的，或者干脆卡住不答。
+            // 那个「其它」不是可有可无的摆设：AskUserQuestion 的选择卡**始终**隐含它，
+            // 终端里能自己敲答案，网页端也补了「✎ 自行输入」。唯独这份摘要只列 1..N，
+            // 钉钉那头看到的就是一道封闭的单选题 —— 想说的话不在列表里时，只能挑一个
+            // 最接近的，或者干脆卡住不答。
+            //
+            // 但它的**序号**不该外传：Other 是个输入框，发 N+1 只会把焦点移进去、不提交；
+            // 多选的 Submit 更是压根不在列表里（详见 plan_select_answer）。远端只管说
+            // 「选了什么」，落到哪个键上由 hub 翻译。
             let mut tips: Vec<String> = Vec::new();
             if multi {
-                // N+3：选项 N 个 +「其它」+「chat about」+ Submit。按 N+2 算会落在
-                // chat about 上，多选就此提交不掉（08-18 实测）。
-                let n = opts.len() + 3;
-                tips.push(format!("多选：勾选的序号连写，末尾补 {n}＝Submit，如 \"1{n}\""));
+                tips.push("多选：勾选的序号连写，如 \"13\"＝选第 1、3 项".into());
             }
             // 多题时逐题重复太啰嗦，挪到末尾统一说一次
             if !many {
@@ -1067,11 +1078,77 @@ pub(crate) fn select_summary(v: &Value) -> String {
         }
     }
     if many {
-        // 每题的选项都从 1 编号，而作答是一次一题 —— 不说明的话，看到两组「1.」很容易
+        // 每题的选项都从 1 编号，逗号分题 —— 不说明的话，看到两组「1.」很容易
         // 以为可以直接回第二题的序号。
-        out.push_str("\n（多题：逐题作答，先回第 1 题的序号；都不合适可以直接写答案）");
+        out.push_str("\n（多题：逗号分开逐题作答，如 \"1,2\"；都不合适可以直接写答案）");
     }
     out.trim_end().to_string()
+}
+
+/// 选择卡作答要在终端上依次做的一步动作。
+///
+/// 作答不是「发一个序号」那么简单：终端选择卡的提交方式随题型而变（见
+/// [`plan_select_answer`]），远端只该给出选了什么，怎么落到按键上是 hub 的事。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SelectStep {
+    /// 文本注入，**不补提交回车**（序号或自定义答案）
+    Text(String),
+    /// 按键序列 spec，交给 `send_terminal_keys`
+    Keys(String),
+}
+
+/// 把远端给的答案翻译成终端上的动作序列。
+///
+/// 为什么需要翻译：选择卡的数字键**只能索引到选项列表之内**。列表是
+/// `N 个选项 + Other`（单选在 Other 之后还可能多一个 Chat about this），
+/// 而多选的 **Submit 根本不在列表里** —— 它是组件内一个独立的聚焦态，
+/// 只能 Tab 走到最后一项之后再回车。此前按 N+2 / N+3 发序号，两者都落在
+/// 列表长度之外，被组件静默丢弃，于是「怎么发都提交不掉」。
+///
+/// 多题则在所有题答完后还压着一层 Review（"Ready to submit your answers?"），
+/// 不再确认一次就一直挂在那儿等人 —— 这正是远端答完却仍要有人去终端点一下的原因。
+/// 好在那层的默认焦点就落在 Submit answers 上，一个回车即可了结。
+///
+/// 末尾那个回车对**没有** Review 的情形是无害的：它落在空的输入框上，什么也不会发出。
+pub(crate) fn plan_select_answer(card: &Value, answer: &str) -> Vec<SelectStep> {
+    let answer = answer.trim();
+    let Some(qs) = card.get("questions").and_then(|q| q.as_array()).filter(|q| !q.is_empty())
+    else {
+        // 认不出卡片结构就原样发，维持翻译之前的行为 —— 宁可不翻译，也不能把答案吃掉
+        return vec![SelectStep::Text(answer.to_string())];
+    };
+    // 自定义答案（不是纯序号）：原样发一份，落进 Other 的输入框，不做任何拆解。
+    // 判据只认 ASCII 数字与逗号 —— 中文逗号、空格等一律视作自定义文本。
+    if answer.is_empty() || !answer.chars().all(|c| c.is_ascii_digit() || c == ',') {
+        return vec![SelectStep::Text(answer.to_string())];
+    }
+
+    let mut steps = Vec::new();
+    let mut answered = 0usize;
+    for (i, seg) in answer.split(',').filter(|s| !s.is_empty()).enumerate() {
+        // 答案比题目还多：多出来的当没看见，别把它们当新任务发进终端
+        let Some(q) = qs.get(i) else { break };
+        steps.push(SelectStep::Text(seg.to_string()));
+        answered += 1;
+        if q.get("multiSelect").and_then(|x| x.as_bool()).unwrap_or(false) {
+            // 数字只是勾选，落定还得走 Submit。它排在「N 个选项 + Other」之后，
+            // 所以要 Tab 走 N+1 次（起始焦点在第 1 项）才轮到它。
+            let n = q.get("options").and_then(|o| o.as_array()).map(|o| o.len()).unwrap_or(0);
+            steps.push(SelectStep::Keys(format!("tab:{},enter", n + 1)));
+        }
+    }
+    if steps.is_empty() {
+        return vec![SelectStep::Text(answer.to_string())];
+    }
+    // 收尾的这一记回车**只有在题目全部答完时才能发**。
+    //
+    // 答一题即翻到下一题，题还没答完就补回车，那一下会落在下一题上、把它按默认高亮项
+    // 答掉。线上出过这个事故：三题的卡片只回了第 1 题的「1」，第 2、3 题被替人选了默认项，
+    // 最后反倒没提交。全部答完才有 Review 那层等着这记回车，也才轮得到它。
+    if answered >= qs.len() {
+        steps.push(SelectStep::Keys("enter".into()));
+    }
+    steps
 }
 
 /// 把一段 markdown 里的标题行（# ~ ######）改成加粗行：钉钉里 assistant 结果常带
@@ -3438,17 +3515,39 @@ mod select_summary_tests {
         assert!(s.starts_with("继续吗？"), "得到：\n{s}");
     }
 
-    /// 多选要标出来并给出作答格式（Submit 占 N+3 号：选项 +「其它」+「chat about」之后）
+    /// 多选要标出来并给出作答格式 —— 但**不能**带 Submit 的序号。
+    ///
+    /// 曾经这里断言「补 5＝Submit」（2 个选项时 N+3）。那条规则是错的：终端选择卡的
+    /// 数字键只能索引到「N 个选项 + Other」之内，Submit 压根不在列表里，N+2 / N+3 都
+    /// 越界并被静默丢弃 —— 发什么都提交不掉。真正的提交是 Tab 过去再回车，由
+    /// [`plan_select_answer`] 在下发时补上，远端只管说勾了哪几项。
     #[test]
-    fn multi_select_marked_with_submit_hint() {
+    fn multi_select_hint_carries_no_submit_index() {
         let s = select_summary(&json!({"questions": [
             {"question": "选哪些？", "multiSelect": true,
              "options": [{"label": "A"}, {"label": "B"}]}
         ]}));
         assert!(s.contains("（多选）"), "得到：\n{s}");
-        assert!(s.contains("补 5＝Submit"), "2 个选项时 Submit 应是 5 号：\n{s}");
+        assert!(s.contains("序号连写"), "要给出多选的作答格式：\n{s}");
+        assert!(!s.contains("Submit"), "Submit 无序号可言，不该出现在提示里：\n{s}");
         // 多选同样隐含「其它」，两条提示要并存
         assert!(s.contains("直接写答案"), "多选也要给出自定义答案的出路：\n{s}");
+    }
+
+    /// 选项说明要跟着 label 一起给出去。
+    ///
+    /// 终端与网页端都把 description 显示在 label 下面，唯独钉钉这份摘要漏了，
+    /// 于是那头看到的是一串光秃秃的短语，选项之间差在哪根本看不出来。
+    #[test]
+    fn option_description_is_rendered() {
+        let s = select_summary(&json!({"questions": [
+            {"question": "走哪条？", "options": [
+                {"label": "A", "description": "稳，但慢"},
+                {"label": "B", "description": "快\n有风险"}]}
+        ]}));
+        assert!(s.contains("稳，但慢"), "选项说明要带上：\n{s}");
+        // 说明里的换行会截断列表项，必须压平
+        assert!(s.contains("快 有风险"), "多行说明要压成一行：\n{s}");
     }
 
     /// 选择卡始终隐含一个「其它」（占 N+1 号）。只列 1..N 的话，钉钉那头看到的是一道
@@ -3672,5 +3771,116 @@ mod finish_notice_tests {
     #[test]
     fn future_mtime_does_not_underflow() {
         assert!(worth_finish_notice((NOW + 60) * 1000, NOW), "时钟偏差不该吞掉通知");
+    }
+}
+
+#[cfg(test)]
+mod select_answer_tests {
+    use super::{plan_select_answer, SelectStep};
+    use serde_json::json;
+
+    fn q(multi: bool, n: usize) -> serde_json::Value {
+        let opts: Vec<_> = (0..n).map(|i| json!({"label": format!("opt{i}")})).collect();
+        json!({"question": "Q", "multiSelect": multi, "options": opts})
+    }
+    fn text(s: &str) -> SelectStep {
+        SelectStep::Text(s.into())
+    }
+    fn keys(s: &str) -> SelectStep {
+        SelectStep::Keys(s.into())
+    }
+
+    /// 单选：一个序号即落定。末尾那记回车是给多题的 Review 层准备的，
+    /// 没有 Review 时它落在空输入框上，什么也不会发出去。
+    #[test]
+    fn single_choice_sends_the_number() {
+        let card = json!({"questions": [q(false, 3)]});
+        assert_eq!(plan_select_answer(&card, "2"), vec![text("2"), keys("enter")]);
+    }
+
+    /// 多选：数字只是勾选，Submit **不在选项列表里** —— 它排在
+    ///「N 个选项 + Other」之后，只能 Tab 过去再回车。
+    ///
+    /// 这正是「多选提交不掉」的病根：此前按 N+2 / N+3 发序号，两者都超出列表长度，
+    /// 被组件静默丢弃，发什么都没反应。
+    #[test]
+    fn multi_choice_tabs_to_submit() {
+        let card = json!({"questions": [q(true, 4)]});
+        // 4 个选项 + Other = 5 项，起始焦点在第 1 项 ⇒ Tab 5 次才轮到 Submit
+        assert_eq!(
+            plan_select_answer(&card, "13"),
+            vec![text("13"), keys("tab:5,enter"), keys("enter")]
+        );
+    }
+
+    /// 多题：逗号分题逐个作答，答完压着一层 Review（"Ready to submit your answers?"），
+    /// 不再确认一次就一直挂在终端上等人 —— 远端答完却仍要有人去点一下，就是这里漏了。
+    #[test]
+    fn multi_question_confirms_the_review_step() {
+        let card = json!({"questions": [q(false, 3), q(false, 2)]});
+        assert_eq!(
+            plan_select_answer(&card, "1,2"),
+            vec![text("1"), text("2"), keys("enter")]
+        );
+    }
+
+    /// 混合：第 1 题多选、第 2 题单选，各按各的题型翻译。
+    #[test]
+    fn per_question_type_is_respected() {
+        let card = json!({"questions": [q(true, 2), q(false, 3)]});
+        assert_eq!(
+            plan_select_answer(&card, "12,3"),
+            vec![text("12"), keys("tab:3,enter"), text("3"), keys("enter")]
+        );
+    }
+
+    /// 自定义答案原样发，不做任何拆解 —— 它要落进 Other 的输入框。
+    /// 判据只认 ASCII 数字与逗号，中文逗号/空格一律算文本。
+    #[test]
+    fn free_text_passes_through() {
+        let card = json!({"questions": [q(false, 3)]});
+        assert_eq!(plan_select_answer(&card, "换个思路吧"), vec![text("换个思路吧")]);
+        assert_eq!(plan_select_answer(&card, "1，2"), vec![text("1，2")]);
+    }
+
+    /// 认不出卡片结构就原样发：宁可不翻译，也不能把答案吃掉。
+    #[test]
+    fn unknown_card_falls_back_to_raw() {
+        assert_eq!(plan_select_answer(&json!({}), "2"), vec![text("2")]);
+        assert_eq!(plan_select_answer(&json!({"questions": []}), "2"), vec![text("2")]);
+    }
+
+    /// 答案比题目多：多出来的丢掉，别把它们当新任务发进终端。
+    #[test]
+    fn extra_segments_are_dropped() {
+        let card = json!({"questions": [q(false, 3)]});
+        assert_eq!(plan_select_answer(&card, "1,2,3"), vec![text("1"), keys("enter")]);
+    }
+
+    /// 题没答完，收尾的回车绝不能发。
+    ///
+    /// 答一题即翻到下一题，此时补的回车会落在下一题上、把它按默认高亮项答掉 ——
+    /// 线上出过：三题的卡片只回了第 1 题的「1」，第 2、3 题被替人选了默认项，最后反倒没提交。
+    #[test]
+    fn partial_answer_never_sends_the_trailing_enter() {
+        let card = json!({"questions": [q(false, 3), q(false, 2), q(false, 2)]});
+        assert_eq!(plan_select_answer(&card, "1"), vec![text("1")]);
+        assert_eq!(plan_select_answer(&card, "1,2"), vec![text("1"), text("2")]);
+        // 答满三题才轮到 Review 那层的回车
+        assert_eq!(
+            plan_select_answer(&card, "1,2,1"),
+            vec![text("1"), text("2"), text("1"), keys("enter")]
+        );
+    }
+
+    /// 多选题没答完同样不补收尾回车 —— 但每题自己的 Submit（Tab+回车）照发，
+    /// 那是本题落定所必需的，与收尾无关。
+    #[test]
+    fn partial_multi_answer_keeps_per_question_submit() {
+        let card = json!({"questions": [q(true, 2), q(false, 3)]});
+        assert_eq!(
+            plan_select_answer(&card, "12"),
+            vec![text("12"), keys("tab:3,enter")]
+        );
     }
 }
