@@ -176,6 +176,26 @@ pub(crate) fn is_immediate(text: &str) -> bool {
     ALL_CMDS.contains(&cmd.as_str())
 }
 
+/// 这条钉钉消息要不要进合并窗口。
+///
+/// 纯文件（没带一句话）**也要进**：它不占正文的一行，但要把窗口往后推。钉钉转发过来的
+///「图片→文字→图片→文字」是几次完全独立的回调，图片若不刷新窗口就只是白白占掉时间 ——
+/// 两条文字被图片隔开超过一个窗口，前一条自己到期先发了，一次转发被拆成好几条任务下发。
+///
+/// 指令不进：它的语义依赖单独成条（见 [`is_immediate`]）。带着文件发指令也一样立即执行，
+/// 文件继续挂着等下一条任务。
+pub(crate) fn should_batch(has_files: bool, content: &str) -> bool {
+    if content.trim().is_empty() {
+        // content 为空时 is_immediate 恒为 true，走不到下面，得在这里单独放行
+        return has_files;
+    }
+    !is_immediate(content)
+}
+
+/// 只收到文件、没带正文时的回执。窗口到期仍没等来文字就回它（见 [`batch_flush`]）。
+pub(crate) const FILE_ONLY_REPLY: &str = "📎 已收到文件，随下一条任务一起发出（如「@2 处理这个文件」），\
+                                          会存到该会话目录的 tmp/ 下并把路径拼到任务开头。";
+
 /// 把一条内容消息投进钉钉合并窗口，返回本次的世代号（交给 [`batch_flush`] 比对）。
 ///
 /// 为什么要攒：钉钉逐条转发给机器人的是几次**完全独立**的回调，payload 里没有转发标记、
@@ -202,7 +222,12 @@ pub(crate) async fn batch_push(
             robot_code: String::new(),
             gen: 0,
         });
-        b.lines.push(text.to_string());
+        // 空文本 = 纯图片/文件那一条：它只**刷新窗口**，不占正文的一行。
+        // 转发过来的「图片→文字→图片→文字」，图片若不刷新窗口，就只是白白占掉时间 ——
+        // 两条文字被图片隔开超过一个窗口，前一条自己到期先发了，一次转发被拆成好几条任务。
+        if !text.trim().is_empty() {
+            b.lines.push(text.to_string());
+        }
         // 回执地址取最新的一条：窗口 3s 远短于 sessionWebhook 的有效期，用哪条都行，
         // 用最新的最稳妥（前面几条离过期更近）。
         b.webhook = ctx.webhook.clone();
@@ -235,6 +260,11 @@ pub(crate) async fn batch_flush(
     };
 
     let n = batch.lines.len();
+    if n == 0 {
+        // 整批只有图片/文件、一句话都没有：文件继续挂着等下一条任务，别下发一条空任务。
+        //（回执要等满窗口才发，比从前晚几秒 —— 换来的是后面跟着的文字能并进同一批。）
+        return Some(FILE_ONLY_REPLY.to_string());
+    }
     let merged = batch.lines.join("\n");
     let ctx = ReplyCtx {
         webhook: batch.webhook,
@@ -1818,6 +1848,29 @@ mod tests {
         // 先压平再截断：额度不该被换行/多余空白吃掉
         assert_eq!(one_line("甲\n\n  乙   丙", 5), "甲 乙 丙");
         assert_eq!(one_line("abcdefgh", 3), "abc");
+    }
+
+    /// 纯图片那一条也要进窗口。
+    ///
+    /// 钉钉转发过来的「图片→文字→图片→文字」是几次完全独立的回调。图片若不刷新窗口，
+    /// 就只是白白占掉时间 —— 两条文字被它隔开超过一个窗口，前一条自己到期先发了，
+    /// 一次转发被拆成好几条任务下发。
+    #[test]
+    fn lone_file_still_extends_the_window() {
+        use super::should_batch;
+        assert!(should_batch(true, ""), "纯图片要把窗口往后推");
+        assert!(should_batch(true, "   "), "只有空白也算没带正文");
+        // 没文件又没正文：没什么可攒的
+        assert!(!should_batch(false, ""));
+        // 正文照常攒，带不带文件都一样
+        assert!(should_batch(false, "把这个改一下"));
+        assert!(should_batch(true, "把这个改一下"));
+        // 指令不攒：语义依赖单独成条。带着文件发指令也一样立即执行，文件继续挂着
+        assert!(!should_batch(false, "暂停"));
+        assert!(!should_batch(true, "暂停"));
+        assert!(!should_batch(true, "@2 撤回"));
+        // 「@N 正文」解析出来是「发」，那是内容，要攒
+        assert!(should_batch(true, "@2 处理这个文件"));
     }
 
     use super::{

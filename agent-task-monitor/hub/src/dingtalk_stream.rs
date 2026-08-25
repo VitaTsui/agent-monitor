@@ -215,7 +215,8 @@ async fn connect_once(
 
                 // 带文件/图片：仅对已绑定账号暂存（按账号存，send_input 也按账号取）。
                 // 多张图片/文件全部累积，落盘名去重避免互相覆盖（原来只取一张就是同名覆盖导致）。
-                if !files.is_empty() {
+                let has_files = !files.is_empty();
+                if has_files {
                     if let Ok(acct) = &account {
                         let now = crate::state::now_secs();
                         let mut map = state.bot_pending_files.write().await;
@@ -255,11 +256,12 @@ async fn connect_once(
                     // 任务调度决定：spawn 的启动顺序与消息到达顺序无关，放进任务里就会出现
                     // 一批四条转发、第三条的任务起晚一步，1/2/4 先攒齐并下发、它才入队自成一批
                     // 的情况（线上抓到过）。这里只是拿锁 push 一下，不会挡住心跳。
+                    // 纯文件那一条**也要进窗口**：它不占正文，但要把窗口往后推，好让
+                    //「图片→文字→图片→文字」这样一次转发攒成同一批（见 bot::should_batch）。
                     let batch_gen = match &account {
                         Ok(acct)
                             if bind_reply.is_none()
-                                && !file_only
-                                && !crate::bot::is_immediate(&content) =>
+                                && crate::bot::should_batch(has_files, &content) =>
                         {
                             Some(crate::bot::batch_push(&state, acct, &content, &ctx).await)
                         }
@@ -275,17 +277,13 @@ async fn connect_once(
                             _ if bind_reply.is_some() => bind_reply,
                             // 未绑定：回引导（登录链接 + 绑定码两条路）
                             Err(guide) => Some(guide),
-                            Ok(acct) if file_only => {
-                                let _ = &acct;
-                                Some(
-                                    "📎 已收到文件，随下一条任务一起发出（如「@2 处理这个文件」），\
-                                     会存到该会话目录的 tmp/ 下并把路径拼到任务开头。"
-                                        .to_string(),
-                                )
-                            }
                             Ok(acct) => match batch_gen {
-                                // 已入合并窗口：等它到期，由最后一条负责合并下发与回执
+                                // 已入合并窗口：等它到期，由最后一条负责合并下发与回执。
+                                // 纯文件的那条也走这里 —— 窗口到期时若一句话都没攒到，
+                                // batch_flush 只回「已收到文件」，不会下发空任务。
                                 Some(g) => crate::bot::batch_flush(&st, &acct, g).await,
+                                // 没入队且没正文：兜底回执（正常不会走到，条件已放行 file_only）
+                                None if file_only => Some(crate::bot::FILE_ONLY_REPLY.to_string()),
                                 // 没入队 = 指令，立即执行 —— 它的语义依赖单独成条，
                                 // 攒起来会被并进正文。
                                 None => Some(
