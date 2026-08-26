@@ -74,3 +74,55 @@ fn now_ms() -> u64 {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 连着投递两条必须产生**两个**文件。
+    ///
+    /// 选择卡的作答会被拆成多步下发（序号 + Tab/回车），客户端 `for cmd in commands`
+    /// 背靠背执行、中间没有任何等待。文件名若只有「毫秒-pid」，两次写入落在同一毫秒
+    /// 就会同名覆盖 —— 只剩后一条。单选「2」于是退化成一个裸回车，选择卡收到回车
+    /// 就选中默认高亮项，表现为「明明选的 2，终端选成了 1」。
+    #[test]
+    fn back_to_back_sends_never_collide() {
+        let dir = std::env::temp_dir().join(format!("am-bridge-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pid = 4321;
+        assert!(send_via_extension(&dir, pid, "2", false));
+        assert!(send_via_extension(&dir, pid, "\r", false));
+        let out = bridge_dir(&dir).join("outbox");
+        let n = std::fs::read_dir(&out).unwrap().count();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(n, 2, "两条投递被覆盖成了 {n} 个文件");
+    }
+
+    /// 文件名要能按字典序还原出投递顺序 —— 扩展是 readdir 之后顺序处理的，
+    /// 顺序错了就等于先回车后选号。
+    #[test]
+    fn filenames_sort_in_send_order() {
+        let dir = std::env::temp_dir().join(format!("am-bridge-ord-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pid = 4321;
+        for t in ["a", "b", "c", "d", "e"] {
+            assert!(send_via_extension(&dir, pid, t, false));
+        }
+        let out = bridge_dir(&dir).join("outbox");
+        let mut names: Vec<String> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        let texts: Vec<String> = names
+            .iter()
+            .map(|n| {
+                let txt = std::fs::read_to_string(out.join(n)).unwrap();
+                let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
+                v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string()
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(texts, vec!["a", "b", "c", "d", "e"], "字典序没能还原投递顺序");
+    }
+}

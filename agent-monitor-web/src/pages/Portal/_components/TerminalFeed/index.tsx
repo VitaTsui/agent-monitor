@@ -75,6 +75,8 @@ export const SelectCard: React.FC<{
   const [step, setStep] = useState(0);
   /** 多选题当前已勾选的选项序号（1 起，升序） */
   const [picked, setPicked] = useState<number[]>([]);
+  /** 已答过的各题答案，按题序攒着，答满了一次性发出（见 submit） */
+  const [answers, setAnswers] = useState<string[]>([]);
   // 刚提交的那一下：防手机上连点两次。不能只靠 step 变化后的重渲染 ——
   // 两次点击可能落在同一帧里，那时第二下打的已经是**下一题**的同位置选项了。
   const busy = React.useRef(false);
@@ -99,14 +101,26 @@ export const SelectCard: React.FC<{
   const total = questions.length;
   const q = questions[step];
 
+  /**
+   * 逐题记下答案，**答满了才一次性下发**（多题用逗号分隔，如 "1,2"）。
+   *
+   * 曾经是答一题发一条。那样 hub 永远只看到一题的答案，判不出「题已答满」，也就补不上
+   * 多题答完后那层 Review（"Ready to submit your answers?"）的确认回车 —— 卡片一直挂在
+   * 终端上等人，远端答完还得有人跑去终端手动 submit。
+   *
+   * 逐题发还有第二重害处：两题的按键前后脚送进终端，前一题若因故没落定，后一题的答案
+   * 就落回它身上。攒齐再发，整串由 hub 一次翻译成有序的按键序列。
+   */
   const submit = (text: string) => {
     if (busy.current || !onAnswer || !text) return;
     busy.current = true;
-    onAnswer(text);
+    const all = [...answers, text];
+    setAnswers(all);
     setCustom("");
     if (step + 1 < total) {
       setStep(step + 1);
     } else {
+      onAnswer(all.join(","));
       onDone?.();
     }
   };
@@ -121,35 +135,23 @@ export const SelectCard: React.FC<{
     );
 
   /**
-   * 多选的「Submit」在终端选择卡里的按键编号。
+   * 多选提交：只发勾选的序号，**不再自己补 Submit 键**。
    *
-   * 编号排布：N 个选项占 1..N，其后「其它/自定义」占 N+1，「chat about」占 N+2，
-   * **Submit 是 N+3**。多选要先逐个勾选、最后落在 Submit 上才提交。
+   * 曾经这里按 N+3 算 Submit（选项 N 个 +「其它」+「chat about」+ Submit），那条规则
+   * 是错的：终端选择卡的数字键只能索引到「N 个选项 + Other」之内，Submit 压根不在列表
+   * 里 —— 它是组件内一个独立的聚焦态，只能 Tab 过去再回车。N+2 / N+3 都越界并被静默
+   * 丢弃，于是多选**从来就没提交过**。
    *
-   * 曾经按 N+2 算，那时选项后只有「其它」一项；终端后来在它之后又加了「chat about」，
-   * 于是原来的 N+2 正好落在 chat about 上 —— 多选点了提交没反应，就是这么来的。
+   * 更糟的是卡片因此停在原地：紧接着下一题的答案发过来，落回前一题把已勾选的项
+   * toggle 掉 —— 表现成「明明选的 2，终端选成了 1」。（08-25 现场：4 选项的多选题
+   * 发出「127」，那个 7 越界，2 秒后第二题的「1」把第 1 项取消了。）
    *
-   * **单选不用它**：数字键按下即落定并翻页。曾经单选也补这一下，理由是「数字键只是
-   * 移动高亮、不翻页」—— 那个判断是错的。当年观察到的「终端停在本题等确认」，真凶
-   * 是客户端两秒后自动补的回车（它翻了页，让人以为数字键没翻），而那道补回车早已按
-   * from_select 关掉了。
-   *
-   * 多发的这一下不是无害的：3 个选项时（当时还按 N+2 算）它是「5」，而单选那张卡根本
-   * 没有 5 号键，整条作答就此卡住 —— 卡片停在原地，点了等于没点。（08-17 抓到：钉钉回
-   *「4」1 秒即落定，网页点同一张卡发出「15」，53 秒毫无动静，最后是人跑去终端手动选的。）
+   * 现在只负责说「勾了哪几项」，怎么落到按键上由 hub 按题型翻译（plan_select_answer），
+   * 与钉钉、MCP 共用同一份 —— 各算各的正是这个 bug 的由来。
    */
-  const nextKey = () => String((q?.options?.length ?? 0) + 3);
+  const submitPicked = () => submit(picked.join(""));
 
-  /**
-   * 多选提交：勾选序号 + 末尾补一个 [`nextKey`]，连成一串发出去。
-   * 4 选项里勾 1、3 就发 "137" —— 逐个数字键勾选，最后一下落在 Submit 上。
-   *
-   * 序号连写不加分隔符，因为终端认的是按键而不是文本。AskUserQuestion 每题至多 4 个
-   * 选项，编号最大到 7，不会出现两位数带来的歧义。
-   */
-  const submitPicked = () => submit(picked.join("") + nextKey());
-
-  /** 单选提交：一个序号就够 —— 数字键按下即落定并翻页（见 [`nextKey`] 为何不补）。 */
+  /** 单选提交：一个序号就够 —— 数字键按下即落定并翻页。 */
   const submitOne = (n: number) => submit(String(n));
 
   if (!q) return null;

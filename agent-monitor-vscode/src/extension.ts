@@ -84,6 +84,10 @@ export function activate(context: vscode.ExtensionContext) {
     } catch {
       return;
     }
+    // 文件名以毫秒时间戳打头，排序即投递顺序。readdir 本身不保证顺序，
+    // 而选择卡的作答是一串**有序**按键（选项序号 → Tab → 回车），顺序错了
+    // 就等于先回车后选号。
+    files.sort();
     for (const f of files) {
       const fp = path.join(outbox, f);
       let cmd: { pid?: number; text?: string; submit?: boolean; ts?: number };
@@ -134,6 +138,13 @@ export function activate(context: vscode.ExtensionContext) {
         appendLog(
           `sendText → 终端「${term.name}」processId=${cmd.pid}：${text.slice(0, 40)}`,
         );
+        // 本轮到此为止：一次只送一条。
+        //
+        // 选择卡的作答会被拆成一串按键（每题的序号、多选的 Tab、收尾的回车），
+        // 而终端那头是个 TUI —— 答完一题要重渲染、翻到下一题，才认得下一个按键。
+        // 原先一轮把 outbox 里的全部连着送出去，中间零间隔，后面的按键很可能落在
+        // 还没翻过去的上一题上。借 poll 自己的 500ms 周期当节拍，稳且不必另起计时器。
+        return;
       }
       // 不是本窗口的终端就留着，交给拥有该终端的窗口处理（TTL 兜底清理）
     }

@@ -1140,12 +1140,17 @@ pub(crate) fn plan_select_answer(card: &Value, answer: &str) -> Vec<SelectStep> 
     if steps.is_empty() {
         return vec![SelectStep::Text(answer.to_string())];
     }
-    // 收尾的这一记回车**只有在题目全部答完时才能发**。
+    // 收尾的这一记回车只为**多题**答完后那层 Review 而发，且必须答满才发。
     //
-    // 答一题即翻到下一题，题还没答完就补回车，那一下会落在下一题上、把它按默认高亮项
-    // 答掉。线上出过这个事故：三题的卡片只回了第 1 题的「1」，第 2、3 题被替人选了默认项，
-    // 最后反倒没提交。全部答完才有 Review 那层等着这记回车，也才轮得到它。
-    if answered >= qs.len() {
+    // 两条限制都是血的教训：
+    // · 没答满就补，那一下会落在下一题上、把它按默认高亮项答掉。线上出过：三题的卡片
+    //   只回了第 1 题的「1」，第 2、3 题被替人选了默认项，最后反倒没提交。
+    // · 单题**一律不补**。单选的数字键按下即落定、多选自己带了 Tab+回车，收尾这一下
+    //   纯属多余；而只要卡片还没关闭，它就会落在卡片上选中默认高亮项 —— 表现就是
+    //   「明明选的 2，终端选成了 1」。曾经为「单题多选也许也有 Review」补过这一下，
+    //   那只是没有依据的猜测，却要拿误选来换。真有那种情形，宁可留着让人去终端点一下，
+    //   也好过替人选错 —— 前者看得见，后者是静悄悄地答错。
+    if qs.len() > 1 && answered >= qs.len() {
         steps.push(SelectStep::Keys("enter".into()));
     }
     steps
@@ -1219,15 +1224,34 @@ async fn input_task(
     tracing::info!("已向机器 {} 下发输入: {}", task.machine_id, truncate_log(&text));
     let cmd_id = uuid::Uuid::new_v4().to_string();
     let text_for_notify = text.clone();
-    entry.pending.push_back(ControlCmd {
-        task_id: id.clone(),
-        pid,
-        action: am_core::model::ControlAction::Input,
-        text: Some(text),
-        id: Some(cmd_id.clone()),
-        // 带给客户端：选择卡的作答不能走「补回车」那道保险（见 ControlCmd::from_select）
-        from_select: req.from_select,
-    });
+    // 选择卡的作答要按题型翻译成一串动作 —— 多选的 Submit 不在选项列表里、多题答完还
+    // 压着一层 Review（详见 plan_select_answer）。
+    //
+    // 这一步早先只加在 bot::queue_command 上，而网页/桌面客户端走的是这里、**自己压队列**，
+    // 于是翻译对它完全没生效：网页自己算了个 N+3 当 Submit 发出去，那个序号越界被终端
+    // 静默丢弃，多选压根没提交；卡片还停在原地，下一题的答案就落回前一题、把已勾选的项
+    // toggle 掉 —— 表现成「明明选的 2，终端选成了 1」。翻译只该有一份，两条入口都用它。
+    let steps = match task.pending_select.as_ref().filter(|v| !v.is_null()) {
+        Some(card) if req.from_select => plan_select_answer(card, &text),
+        _ => vec![SelectStep::Text(text)],
+    };
+    for (i, step) in steps.into_iter().enumerate() {
+        let (action, body) = match step {
+            SelectStep::Text(t) => (am_core::model::ControlAction::Input, t),
+            SelectStep::Keys(k) => (am_core::model::ControlAction::TermKey, k),
+        };
+        entry.pending.push_back(ControlCmd {
+            task_id: id.clone(),
+            pid,
+            action,
+            text: Some(body),
+            // cmd_id 用于「撤回排队中的输入」，只有第一条认领它：作答本就不该被撤回，
+            // 多条共用一个 id 反而会让撤回只摘掉其中一条、留下半串按键。
+            id: (i == 0).then(|| cmd_id.clone()),
+            // 带给客户端：选择卡的作答不能走「补回车」那道保险（见 ControlCmd::from_select）
+            from_select: req.from_select,
+        });
+    }
     drop(machines); // 释放锁：下面后台任务会再读 machines
     // 记进「远程交互历史」的 user 侧。网页这条路径没走 bot::queue_command（它自己压队列），
     // 所以要单独记一次，否则网页发的任务不会出现在聊天记录里。
@@ -3790,12 +3814,32 @@ mod select_answer_tests {
         SelectStep::Keys(s.into())
     }
 
-    /// 单选：一个序号即落定。末尾那记回车是给多题的 Review 层准备的，
-    /// 没有 Review 时它落在空输入框上，什么也不会发出去。
+    /// 单选：一个序号即落定，**后面不许再跟任何东西**。
     #[test]
     fn single_choice_sends_the_number() {
         let card = json!({"questions": [q(false, 3)]});
-        assert_eq!(plan_select_answer(&card, "2"), vec![text("2"), keys("enter")]);
+        assert_eq!(plan_select_answer(&card, "2"), vec![text("2")]);
+    }
+
+    /// 单题一律不补收尾回车 ——「明明选的 2，终端选成了 1」就是它干的。
+    ///
+    /// 单选按下数字即落定、多选自己带了 Tab+回车，收尾这一下纯属多余；而只要卡片
+    /// 还没关闭，它就会落在卡片上选中**默认高亮项**（第 1 项），把人选的那个覆盖掉。
+    /// 曾经为「单题多选也许也有 Review」补过这一下 —— 没有依据的猜测，代价是静悄悄地答错。
+    #[test]
+    fn single_question_never_appends_a_trailing_enter() {
+        for card in [
+            json!({"questions": [q(false, 3)]}),        // 单题单选
+            json!({"questions": [q(true, 3)]}),         // 单题多选
+            json!({"questions": [q(false, 2)]}),
+        ] {
+            let steps = plan_select_answer(&card, "2");
+            assert_ne!(
+                steps.last(),
+                Some(&keys("enter")),
+                "单题不该以收尾回车结束：{steps:?}"
+            );
+        }
     }
 
     /// 多选：数字只是勾选，Submit **不在选项列表里** —— 它排在
@@ -3809,7 +3853,7 @@ mod select_answer_tests {
         // 4 个选项 + Other = 5 项，起始焦点在第 1 项 ⇒ Tab 5 次才轮到 Submit
         assert_eq!(
             plan_select_answer(&card, "13"),
-            vec![text("13"), keys("tab:5,enter"), keys("enter")]
+            vec![text("13"), keys("tab:5,enter")]
         );
     }
 
@@ -3854,7 +3898,7 @@ mod select_answer_tests {
     #[test]
     fn extra_segments_are_dropped() {
         let card = json!({"questions": [q(false, 3)]});
-        assert_eq!(plan_select_answer(&card, "1,2,3"), vec![text("1"), keys("enter")]);
+        assert_eq!(plan_select_answer(&card, "1,2,3"), vec![text("1")]);
     }
 
     /// 题没答完，收尾的回车绝不能发。
