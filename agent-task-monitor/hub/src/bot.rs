@@ -1501,7 +1501,9 @@ async fn send_input(
     }
     // 挂起待发文件（可多个）：随本条任务落到会话目录，相对路径按序拼到任务开头（空格隔开）。
     // 超 20 分钟没跟任务的挂起文件视为过期，丢弃不附。
-    let pending = state.bot_pending_files.write().await.remove(username).unwrap_or_default();
+    // 只读一份，**先不摘**：下面任何一步失败都会 return，那时若已经 remove，待发文件就
+    // 永久没了 —— 用户重发一遍指令也带不上，只能重新上传。落盘全部成功后再摘（见下方）。
+    let pending = state.bot_pending_files.read().await.get(username).cloned().unwrap_or_default();
     let mut rels: Vec<String> = Vec::new();
     // 目标目录的已用文件名，问一次即可；同批文件靠它彼此避让（见 queue_pending_file）
     let mut taken: Option<Taken> = None;
@@ -1522,6 +1524,10 @@ async fn send_input(
             Ok(rel) => rels.push(rel),
             Err(e) => return format!("附带文件下发失败：{e}"),
         }
+    }
+    // 全部落定了才摘。中途失败时上面已经 return，待发列表原样留着，重发一遍指令即可再试。
+    if !pending.is_empty() {
+        state.bot_pending_files.write().await.remove(username);
     }
     if !rels.is_empty() {
         text = format!("{} {text}", rels.join(" "));

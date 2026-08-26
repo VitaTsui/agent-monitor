@@ -191,10 +191,28 @@ async fn connect_once(
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
+                // msgtype 与解析出的文件数都要记：少了它们，「文件没带上」在日志里完全是隐形的
+                //（只看得到一条内容为空的消息，看不出它本来是个 pdf）。
                 tracing::info!(
-                    "钉钉 Stream 收到机器人消息 user={user} 内容={content:?} 有回发地址={}",
+                    "钉钉 Stream 收到机器人消息 user={user} msgtype={msgtype} 文件数={} 内容={content:?} 有回发地址={}",
+                    files.len(),
                     !session_webhook.is_empty()
                 );
+                // 明明是富媒体消息却一个下载码都没捞到 —— 这条消息的文件就此丢了。
+                // 必须当场说出来：否则它会被当成一条空文本走完全程，人在目录里扑空还以为是
+                // 落盘出了问题。带上 msgtype 是为了让这一句本身就够定位。
+                //
+                // 在这里就把整句话拼好（而不是把 msgtype 带进下面的 spawn）：msgtype 借自 m，
+                // 跨不过 spawn 的 'static 边界。
+                let unparsed_media_reply = (files.is_empty()
+                    && content.is_empty()
+                    && msgtype != "text")
+                    .then(|| {
+                        format!(
+                            "⚠️ 收到一条 {msgtype} 消息，但没能从中取到文件下载码，\
+                             这个文件**没有**被暂存。请把这句话连同文件类型告知维护者。"
+                        )
+                    });
 
                 // 先 ACK 该帧（钉钉据此认为已消费）
                 ack(&mut ws, &message_id).await?;
@@ -277,6 +295,8 @@ async fn connect_once(
                             _ if bind_reply.is_some() => bind_reply,
                             // 未绑定：回引导（登录链接 + 绑定码两条路）
                             Err(guide) => Some(guide),
+                            // 富媒体但没捞到下载码：直说，别让它冒充「已收到文件」
+                            Ok(_) if unparsed_media_reply.is_some() => unparsed_media_reply,
                             Ok(acct) => match batch_gen {
                                 // 已入合并窗口：等它到期，由最后一条负责合并下发与回执。
                                 // 纯文件的那条也走这里 —— 窗口到期时若一句话都没攒到，
@@ -346,7 +366,7 @@ where
 /// 从一条消息里抽出**全部**待发文件：(downloadCode, 建议文件名)。richText 内嵌多图会全取，
 /// 不再只取第一张。名字可能重复（多张「图片.jpg」），去重交由存储时的 `unique_name`。
 fn extract_files(m: &Value, msgtype: &str) -> Vec<(String, String)> {
-    match msgtype {
+    let by_path = match msgtype {
         "file" => m
             .pointer("/content/downloadCode")
             .and_then(Value::as_str)
@@ -377,7 +397,54 @@ fn extract_files(m: &Value, msgtype: &str) -> Vec<(String, String)> {
             })
             .unwrap_or_default(),
         _ => Vec::new(),
+    };
+    if !by_path.is_empty() {
+        return by_path;
     }
+    // 写死的路径取不到就深捞一次。
+    //
+    // 下载码的字段名与层级并不只有上面这几种：不同来源（直接发、从聊天记录转发、钉盘选取）
+    // 和钉钉自身的版本差异都会让它换地方。而取不到的后果是**静默**的 —— 这条消息会被当成
+    // 一条没有文件的空文本走完全程，任务照常下发、回执还是「📤 已下发」的成功样子，
+    // 人只能在目录里扑个空（线上就这么丢过 pdf）。宁可多捞一层，也好过悄悄丢掉。
+    let name = m
+        .pointer("/content/fileName")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(if msgtype == "picture" { "图片.jpg" } else { "钉钉文件" })
+        .to_string();
+    deep_download_codes(m.get("content").unwrap_or(&Value::Null))
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| (c, if i == 0 { name.clone() } else { format!("{i}-{name}") }))
+        .collect()
+}
+
+/// 深捞 JSON 里所有「…downloadCode」字段（按出现顺序，去重）。
+///
+/// 只认字段名后缀，不认层级 —— 正是因为层级不可靠才要有这一步。
+fn deep_download_codes(v: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::Object(map) => {
+                for (k, val) in map {
+                    if k.ends_with("ownloadCode") {
+                        if let Some(s) = val.as_str().filter(|s| !s.trim().is_empty()) {
+                            if !out.iter().any(|x| x == s) {
+                                out.push(s.to_string());
+                            }
+                        }
+                    }
+                    walk(val, out);
+                }
+            }
+            Value::Array(arr) => arr.iter().for_each(|it| walk(it, out)),
+            _ => {}
+        }
+    }
+    walk(v, &mut out);
+    out
 }
 
 /// 文件名去重：已存在同名就在扩展名前加 -2/-3…，避免多张「图片.jpg」落盘时互相覆盖。
@@ -397,5 +464,65 @@ pub(crate) fn unique_name(existing: &[crate::state::BotPendingFile], name: &str)
             return cand;
         }
         i += 1;
+    }
+}
+
+#[cfg(test)]
+mod extract_files_tests {
+    use super::extract_files;
+    use serde_json::json;
+
+    /// 标准结构照旧 —— 兜底不能改变原本就能解析的情形。
+    #[test]
+    fn standard_shapes_unchanged() {
+        let m = json!({"content": {"downloadCode": "c1", "fileName": "a.pdf"}});
+        assert_eq!(extract_files(&m, "file"), vec![("c1".into(), "a.pdf".into())]);
+
+        let m = json!({"content": {"pictureDownloadCode": "p1"}});
+        assert_eq!(extract_files(&m, "picture"), vec![("p1".into(), "图片.jpg".into())]);
+
+        let m = json!({"content": {"richText": [
+            {"downloadCode": "r1"}, {"text": "说明"}, {"downloadCode": "r2"}]}});
+        assert_eq!(
+            extract_files(&m, "richText"),
+            vec![("r1".into(), "图片1.jpg".into()), ("r2".into(), "图片2.jpg".into())]
+        );
+    }
+
+    /// 下载码换了层级/字段名也要捞得到。
+    ///
+    /// 取不到的后果是**静默**的：消息被当成一条没有文件的空文本走完全程，任务照常下发、
+    /// 回执还是「📤 已下发」的成功样子，人只能在目录里扑空（线上就这么丢过 pdf）。
+    #[test]
+    fn nested_or_renamed_code_still_found() {
+        // 嵌在附件数组里
+        let m = json!({"content": {"attachments": [{"fileDownloadCode": "x9", "fileName": "报告.pdf"}]},
+                       "msgtype": "file"});
+        assert_eq!(extract_files(&m, "file"), vec![("x9".into(), "钉钉文件".into())]);
+
+        // fileName 在 content 顶层、下载码在深处
+        let m = json!({"content": {"fileName": "年报.pdf", "space": {"downloadCode": "d7"}}});
+        assert_eq!(extract_files(&m, "file"), vec![("d7".into(), "年报.pdf".into())]);
+
+        // 完全不认识的 msgtype，只要有下载码也捞出来
+        let m = json!({"content": {"someDownloadCode": "k1"}});
+        assert_eq!(extract_files(&m, "spaceFile"), vec![("k1".into(), "钉钉文件".into())]);
+    }
+
+    /// 多个下载码要全部捞到且去重，文件名不能互相覆盖。
+    #[test]
+    fn multiple_codes_deduped_and_named_apart() {
+        let m = json!({"content": {"a": {"downloadCode": "c1"}, "b": {"downloadCode": "c2"},
+                                   "dup": {"downloadCode": "c1"}}});
+        let got = extract_files(&m, "file");
+        assert_eq!(got.len(), 2, "重复的下载码要去掉：{got:?}");
+        assert_ne!(got[0].1, got[1].1, "两个文件不能同名，否则落盘互相覆盖");
+    }
+
+    /// 真的没有文件就别硬造 —— 纯文本消息不该被当成富媒体。
+    #[test]
+    fn plain_text_yields_nothing() {
+        let m = json!({"text": {"content": "@7 跑一下"}});
+        assert!(extract_files(&m, "text").is_empty());
     }
 }
