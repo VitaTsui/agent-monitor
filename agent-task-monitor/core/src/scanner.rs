@@ -900,9 +900,6 @@ pub fn build_tasks(
             // 让调用方走 project 那条老路，少一个可能对不上的来源。
             live_cwd: (!s.live_cwd.is_empty() && s.live_cwd != s.cwd)
                 .then(|| s.live_cwd.clone()),
-            // 只在「确实漂到锚定目录之下」时才下发 —— 相等就没有歧义，前端照常回填相对路径
-            shell_cwd: (!s.shell_cwd.is_empty() && s.shell_cwd != s.live_cwd)
-                .then(|| s.shell_cwd.clone()),
             prompt: s.prompt.clone(),
             last_action: s.last_action.clone(),
             status,
@@ -962,7 +959,6 @@ pub fn build_tasks(
             // 占位任务只有进程、没有会话记录，谈不上「会话此刻在哪」——
             // 进程 cwd 就是全部信息，已经在 project 里了。
             live_cwd: None,
-            shell_cwd: None,
             prompt: "（会话尚未产生记录）".into(),
             last_action: "等待输入".into(),
             status,
@@ -1941,6 +1937,56 @@ fn extract_command_args(text: &str) -> Option<String> {
 }
 
 // ---------- 文件工具 ----------
+
+/// 会话**此刻**的工作目录：现读 jsonl 尾部，取最后一条记录的 `cwd`。
+///
+/// 与 [`SessionSummary::shell_cwd`] 同源，区别只在时机：那份来自定期扫描的快照，
+/// 而扫描循环在 macOS 后台被 App Nap 压到一两分钟一轮；本函数是**按需现读**，
+/// 新鲜度等同于调用它的那一刻。目录浏览、文件夹操作、文件落盘都要用它 ——
+/// 定位差一个 `cd`，给会话的路径它自己去看就是错的。
+///
+/// 只读尾部 64KB：会话 jsonl 动辄几十 MB，这里要的只是最后一条记录，
+/// 而每次目录查询都会调用它，不能走完整解析。
+pub fn current_cwd_of_session(jsonl: &Path) -> Option<String> {
+    const TAIL: u64 = 64 * 1024;
+    let tail = read_tail(jsonl, TAIL).ok()?;
+    // 从后往前找第一条能解析出 cwd 的记录。逐行反向比整体解析便宜得多，
+    // 而且尾部第一行常是被截断的半行，正向扫描反而更容易踩空。
+    for line in tail.lines().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if let Some(c) = v.get("cwd").and_then(Value::as_str) {
+            if !c.is_empty() {
+                return Some(c.to_string());
+            }
+        }
+    }
+    None
+}
+
+impl SessionScanner {
+    /// 按会话 id 找到它的 jsonl（在扫描目录下逐个项目目录找 `<id>.jsonl`）。
+    ///
+    /// 项目目录通常十来个，一次 `join + exists` 就命中，不做递归。
+    pub fn session_path(&self, session_id: &str) -> Option<PathBuf> {
+        if session_id.is_empty() || session_id.contains(['/', '\\']) {
+            return None; // 防路径穿越：id 来自 hub 下发
+        }
+        let file = format!("{session_id}.jsonl");
+        let rd = fs::read_dir(&self.projects_dir).ok()?;
+        for e in rd.flatten() {
+            let cand = e.path().join(&file);
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+        None
+    }
+
+    /// 会话此刻的工作目录（找不到会话或读不出 cwd 时 None）
+    pub fn session_cwd_now(&self, session_id: &str) -> Option<String> {
+        current_cwd_of_session(&self.session_path(session_id)?)
+    }
+}
 
 fn read_tail(path: &Path, max_bytes: u64) -> Result<String> {
     let mut f = fs::File::open(path)?;
@@ -3319,6 +3365,42 @@ mod live_cwd_tests {
         let sum = sc.summarize(&path, meta.len(), 0).expect("应能解析出摘要");
         assert_eq!(sum.live_cwd, deep, "不在仓库里就用 shell_cwd 本身");
         assert_eq!(sum.shell_cwd, deep);
+    }
+
+    /// 按需现读：`current_cwd_of_session` 必须拿到**最后一条**记录的 cwd，
+    /// 而且要能跟上刚追加的内容 —— 目录浏览/落盘的定位准不准全看它。
+    #[test]
+    fn current_cwd_reads_latest_and_follows_appends() {
+        let dir = std::env::temp_dir().join(format!("am-now-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("s.jsonl");
+        fs::write(&path, line("/a/proj", "起点") + &line("/a/proj/sub", "cd 了")).unwrap();
+        assert_eq!(current_cwd_of_session(&path).as_deref(), Some("/a/proj/sub"));
+
+        // 再 cd 一次：不带任何缓存，下一次调用就该看到新值
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(line("/a/proj/sub/deeper", "又深了").as_bytes()).unwrap();
+        f.flush().unwrap();
+        assert_eq!(
+            current_cwd_of_session(&path).as_deref(),
+            Some("/a/proj/sub/deeper"),
+            "定期扫描的快照会滞后一两分钟，这条路径必须是现读的"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 尾部第一行常是被截断的半行（只读最后 64KB），不能因此整个取空。
+    #[test]
+    fn current_cwd_tolerates_truncated_first_line() {
+        let dir = std::env::temp_dir().join(format!("am-trunc-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("s.jsonl");
+        // 头一行是被字节截断的半行（后面跟着换行，与 read_tail 的真实产物一致），
+        // 其后才是完整记录
+        fs::write(&path, "{\"cwd\":\"/a/br\n".to_string() + &line("/a/proj", "好行")).unwrap();
+        assert_eq!(current_cwd_of_session(&path).as_deref(), Some("/a/proj"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 没漂移过的会话：两者相同，调用方按 `live_cwd == cwd` 走老路即可。

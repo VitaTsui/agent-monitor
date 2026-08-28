@@ -78,13 +78,6 @@ interface IPortalTaskData {
    * 用 project 的话，会话 cd 进子目录后文件会写到项目根、终端却在子目录里找。
    */
   liveCwd?: string;
-  /**
-   * 会话此刻的 shell 目录，**仅在它已漂到 liveCwd 之下时**后端才下发。
-   *
-   * 有值 = 「文件落在哪」与「终端站在哪」不是同一个目录，相对路径能不能被解析到
-   * 取决于终端拿哪个当根 —— 这件事没有确证，所以有值时就别赌，回填绝对路径。
-   */
-  shellCwd?: string;
   prompt: string;
   lastAction: string;
   status: string;
@@ -348,6 +341,14 @@ export const uploadPortalFile = async (
    * 「回填进输入框的名字」出自同一处，不会各说各话。
    */
   asName?: string,
+  /**
+   * 会话 id + 相对该会话**当前**目录的子路径。
+   *
+   * 带上它们，落点就由 agent 在写盘那一刻现算（它现读会话记录拿到当前 cwd），
+   * 而不是用 `dir` 那份 hub 事先算好的绝对路径 —— 后者来自定期扫描的快照，
+   * 会话期间 `cd` 过就已经指向别处。`dir` 仍然要传，作旧客户端的兜底。
+   */
+  session?: { taskId: string; relDir: string },
 ) => {
   const url = `/monitor/devices/${id}/upload`;
   const total = file.size;
@@ -359,6 +360,10 @@ export const uploadPortalFile = async (
     // 显式传文件名（UTF-8 文本字段）：multipart 的 Content-Disposition filename 对非 ASCII
     // （如粘贴图片的「粘贴-xxx.png」）编码在服务端会被解歪，导致落盘名与回填名对不上。
     form.append("name", name);
+    if (session?.taskId) {
+      form.append("taskId", session.taskId);
+      form.append("relDir", session.relDir);
+    }
     form.append("file", file);
     const res = await post<{ path?: string; result?: string; size: number }>(url, form);
     onProgress?.(total, total);
@@ -375,6 +380,10 @@ export const uploadPortalFile = async (
     form.append("name", name);
     form.append("chunkIndex", String(i));
     form.append("chunkTotal", String(chunkTotal));
+    if (session?.taskId) {
+      form.append("taskId", session.taskId);
+      form.append("relDir", session.relDir);
+    }
     form.append("file", blob, name);
     last = await post<{ path?: string; result?: string; size: number }>(url, form);
     // 任一片失败即中止：继续传后面的只会在 agent 那边拼出一个残缺却"看着成功"的文件

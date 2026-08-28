@@ -55,7 +55,11 @@ pub struct MachineEntry {
     pub file_results: HashMap<String, (am_core::model::FileTransferResult, Instant)>,
     /// 目录列举结果缓存：(task_id, rel) → 子目录名
     /// (task_id, rel) → (子目录, 文件)。文件用于「选择文件回填相对路径」。
-    pub dir_cache: HashMap<(String, String), (Vec<String>, Vec<String>)>,
+    /// (task_id, rel) → (子目录, 文件, **agent 实际据以列举的绝对根**)。
+    ///
+    /// root 必须一路带到网页：只有 agent 知道会话此刻在哪，hub 自己那份是旧快照。
+    /// 网页拿它当上传落点与相对路径的基准。
+    pub dir_cache: HashMap<(String, String), (Vec<String>, Vec<String>, String)>,
     /// 上次通知过的在线状态（钉钉推送用，边沿触发上线/离线，避免重复）
     pub notified_online: bool,
     /// 已推过「等待选择」提醒的会话 ID（边沿触发：进入 select 推一次，离开清除）

@@ -65,11 +65,6 @@ interface ComposerProps {
   machineId?: string;
   /** 会话锚定目录（上传落点；回填的相对路径以此为基准） */
   cwd?: string;
-  /**
-   * 会话此刻的 shell 目录，仅在它已漂到 `cwd` 之下时才有值。
-   * 有值即「落点」与「终端所在」不是同一个目录 → 回填绝对路径，别赌终端按哪个根解析。
-   */
-  shellCwd?: string;
 }
 
 /**
@@ -77,8 +72,19 @@ interface ComposerProps {
  * - 上方为该模型可用斜杠命令 chips，点击直接发布；
  * - 命中危险模式（类 Claude Code bypass 权限等）时走两步确认。
  */
+/**
+ * 目录清单的轮询节奏（毫秒）。总时长约 92 秒。
+ *
+ * 目录由 agent 在**下一轮上报**时带回，实测上报约 31 秒一轮，刚错过一轮就是 62 秒。
+ * 原先固定 1.2s × 8 ≈ 9.6 秒，比实际往返短 3～6 倍，于是几乎必然超时。
+ * 前几拍保持密集（缓存已热时秒回），随后退避，避免长时间空转刷请求。
+ */
+const DIR_POLL_DELAYS = [
+  1200, 1200, 1500, 2000, 3000, 4000, 5000, 6000, 8000, 10000, 12000, 15000, 22000,
+];
+
 const Composer: React.FC<ComposerProps> = (props) => {
-  const { taskId, disabled, disabledHint, onSend, machineId, cwd, shellCwd } = props;
+  const { taskId, disabled, disabledHint, onSend, machineId, cwd } = props;
   const offHint = disabledHint || "该会话无存活进程，无法发布";
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -250,9 +256,25 @@ const Composer: React.FC<ComposerProps> = (props) => {
   /** 当前这个文件的分片进度百分比（大文件切片上传时才有意义） */
   const [uploadPct, setUploadPct] = useState(0);
   const [dirRel, setDirRel] = useState("");
+  /**
+   * agent 实际据以列举的**绝对根** —— 即会话此刻真正所在的目录，由它现读会话记录得出。
+   *
+   * 不要用 `cwd` prop 代替：那份来自定期扫描的快照，扫描循环在 macOS 后台被压到
+   * 一两分钟一轮，会话 `cd` 过之后就指向别处了。空 = 还没查过目录（或旧客户端没回报）。
+   */
+  const [dirRoot, setDirRoot] = useState("");
   const [dirList, setDirList] = useState<string[]>([]);
   const [dirFiles, setDirFiles] = useState<string[]>([]);
   const [dirLoading, setDirLoading] = useState(false);
+  /**
+   * 轮询用尽仍没等到客户端回应。
+   *
+   * 必须与「目录真的是空的」分开：目录清单要等客户端下一轮上报才带回来（实测约 31 秒
+   * 一轮，刚错过一轮就是 62 秒），此前把 dirs/files 直接设成空数组，界面上「还没取到」
+   * 和「这里就是空的」长得一模一样，也没有重试入口 —— 用户看到的就是「上传/选择文件
+   * 显示的目录是空的」。
+   */
+  const [dirTimedOut, setDirTimedOut] = useState(false);
   const dirPollRef = useRef(0);
   // 「选择文件回填相对路径」模态（与上传共用目录浏览，但只读、点文件即插入路径）
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -263,6 +285,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
   const loadDirs = (rel: string, attempt = 0) => {
     if (!taskId) return;
     const seq = ++dirPollRef.current;
+    if (attempt === 0) setDirTimedOut(false);
     setDirLoading(true);
     getTaskDirs(taskId, rel)
       .then((res) => {
@@ -272,12 +295,22 @@ const Composer: React.FC<ComposerProps> = (props) => {
           message.error(res.msg ?? "读取目录失败");
           return;
         }
-        if (res.data?.pending && attempt < 8) {
-          window.setTimeout(() => loadDirs(rel, attempt + 1), 1200);
+        // 窗口必须盖得住一轮上报（实测约 31s，刚错过一轮 62s）。1.2s 起步逐步退避、
+        // 总时长约 90s：前几次照顾「缓存已热、秒回」的情况，后面拉长避免空转。
+        if (res.data?.pending && attempt < DIR_POLL_DELAYS.length) {
+          window.setTimeout(() => loadDirs(rel, attempt + 1), DIR_POLL_DELAYS[attempt]);
           return;
         }
+        if (res.data?.pending) {
+          // 等不到就明说，别把它渲染成一个空目录
+          setDirTimedOut(true);
+          setDirLoading(false);
+          return;
+        }
+        setDirTimedOut(false);
         setDirList(res.data?.dirs ?? []);
         setDirFiles(res.data?.files ?? []);
+        if (res.data?.cwd) setDirRoot(res.data.cwd);
         setDirLoading(false);
       })
       .catch(() => {
@@ -462,12 +495,10 @@ const Composer: React.FC<ComposerProps> = (props) => {
    * 跨目录的同名条目会互相顶掉，插入时也无从知道它当初在哪一层。
    */
   const toggleFileRef = (name: string) => {
-    // 与上传回填同一条判据：会话漂到锚定目录之下时，相对路径未必解析得到，
-    // 改插绝对路径（目录浏览的根就是 `cwd`，拼起来即绝对）。
-    const sub = `${dirRel ? `${dirRel}/` : ""}${name}`;
-    const rel = shellCwd && shellCwd !== cwd && cwd
-      ? `${cwd}${cwd.includes("\\") ? "\\" : "/"}${sub.split("/").join(cwd.includes("\\") ? "\\" : "/")}`
-      : `./${sub}`;
+    // 相对路径在这里是**准确的**：目录树的根就是 agent 现读会话记录得到的「会话此刻所在
+    // 目录」，与终端解析 `./x` 用的是同一个位置。之前要退绝对路径，是因为那时的根来自
+    // hub 的旧快照、会话 cd 过就对不上；现在这个前提没有了。
+    const rel = `./${dirRel ? `${dirRel}/` : ""}${name}`;
     setPickedRefs((prev) =>
       prev.includes(rel) ? prev.filter((x) => x !== rel) : [...prev, rel],
     );
@@ -524,8 +555,11 @@ const Composer: React.FC<ComposerProps> = (props) => {
       return;
     }
     // 设备侧绝对目录 = 会话目录 + 相对子路径（按设备的分隔符拼）
-    const sep = cwd.includes("\\") ? "\\" : "/";
-    const dir = dirRel ? `${cwd}${sep}${dirRel.split("/").join(sep)}` : cwd;
+    // 兜底用的绝对目录：优先 agent 回报的权威根（会话此刻真正所在），其次退回快照 cwd。
+    // 新客户端根本不看它 —— 落点由 agent 在写盘那一刻现算；它只为旧客户端保留。
+    const base = dirRoot || cwd;
+    const sep = base.includes("\\") ? "\\" : "/";
+    const dir = dirRel ? `${base}${sep}${dirRel.split("/").join(sep)}` : base;
     setUploading(true);
     setUploadDone(0);
     setPendingFiles([]);
@@ -556,6 +590,8 @@ const Composer: React.FC<ComposerProps> = (props) => {
               setUploadPct(total > 0 ? Math.round((sent / total) * 100) : 0);
             },
             name,
+            // 让 agent 在落盘那一刻按会话当前目录解析落点 —— 定位与终端永远同步
+            { taskId, relDir: dirRel },
           );
           if (res.code === 0) {
             // 落盘名以客户端回报的为准：上面那个 name 只是预判，而**决定权在客户端手里**
@@ -568,23 +604,15 @@ const Composer: React.FC<ComposerProps> = (props) => {
             taken.add(actual);
             // 回填相对路径（相对会话目录，正斜杠通用）——用最终名，不是本地文件名。
             //
-            // 相对路径只在**能证明它对**的时候才用，否则一律绝对路径：
-            //
-            // ① 落点核对：客户端回报的绝对路径必须以我们用的 dir 开头。对不上说明落点被
-            //    改写过或中途又变了，相对路径必然指空。
-            // ② 漂移核对：`shellCwd` 有值就说明终端此刻不在锚定目录里。终端解析 `./x` 到底
-            //    以仓库根还是以自己当前目录为准，我们没有确证（唯一一次观察是从一句自然语言
-            //    回复反推的，不足以当规则）—— 这种时候不赌，给绝对路径，两种解释下都找得到。
-            const landedHere =
-              !abs || abs.slice(0, dir.length).toLowerCase() === dir.toLowerCase();
-            const drifted = !!shellCwd && shellCwd !== cwd;
-            ok.push(
-              landedHere && !drifted
-                ? dirRel
-                  ? `./${dirRel}/${actual}`
-                  : `./${actual}`
-                : abs || `${dir}${sep}${actual}`,
-            );
+            // 相对路径只在**能证明它对**的时候才用，否则退回绝对路径。判据变了：落点现在
+            // 由 agent 按会话**当前**目录解析（写盘那一刻现读会话记录），所以只要它回报的
+            // 绝对路径确实以我们要的子路径收尾，就说明 `./<子路径>` 从终端所在位置解析得到。
+            // 这比拿 hub 的旧快照去比对可靠得多，也不必再因为「会话漂移过」就一律退绝对
+            // 路径 —— 那恰恰是它最该用相对路径的时候。
+            const expected = dirRel ? `${dirRel}/${actual}` : actual;
+            const provenRelative =
+              !!abs && abs.replace(/\\/g, "/").endsWith(`/${expected}`);
+            ok.push(provenRelative ? `./${expected}` : abs || `${dir}${sep}${actual}`);
           } else {
             failed.push(file.name);
           }
@@ -944,6 +972,19 @@ const Composer: React.FC<ComposerProps> = (props) => {
             ) : null}
             {dirLoading ? (
               <div className={styles.dirEmpty}>读取目录中…</div>
+            ) : dirTimedOut ? (
+              <div className={styles.dirEmpty}>
+                客户端还没回应（约 30 秒一轮）
+                <span
+                  className={styles.dirNewBtn}
+                  role="button"
+                  tabIndex={0}
+                  style={{ marginLeft: 8 }}
+                  onClick={() => loadDirs(dirRel)}
+                >
+                  重试
+                </span>
+              </div>
             ) : dirList.length === 0 ? (
               <div className={styles.dirEmpty}>{dirRel ? "没有子目录" : "该目录下没有子目录"}</div>
             ) : (
@@ -1025,6 +1066,19 @@ const Composer: React.FC<ComposerProps> = (props) => {
             ) : null}
             {dirLoading ? (
               <div className={styles.dirEmpty}>读取目录中…</div>
+            ) : dirTimedOut ? (
+              <div className={styles.dirEmpty}>
+                客户端还没回应（约 30 秒一轮）
+                <span
+                  className={styles.dirNewBtn}
+                  role="button"
+                  tabIndex={0}
+                  style={{ marginLeft: 8 }}
+                  onClick={() => loadDirs(dirRel)}
+                >
+                  重试
+                </span>
+              </div>
             ) : dirList.length === 0 && dirFiles.length === 0 ? (
               <div className={styles.dirEmpty}>该目录为空</div>
             ) : (

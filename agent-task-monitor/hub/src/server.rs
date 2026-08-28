@@ -1489,13 +1489,17 @@ async fn task_dirs(
     {
         entry.pending_dir.push_back(am_core::model::DirQuery {
             task_id: id.clone(),
+            // 仍然填着，只为旧客户端兜底；新客户端看 by_session、自己现读会话记录
             cwd: cwd.clone(),
             rel: rel.clone(),
+            by_session: true,
         });
     }
     match cached {
-        Some((dirs, files)) => {
-            ok(json!({ "dirs": dirs, "files": files, "cwd": cwd, "pending": false }))
+        // root 以 agent 回报的为准；旧客户端不回报（空）时退回 hub 这份旧快照
+        Some((dirs, files, root)) => {
+            let root = if root.is_empty() { cwd } else { root };
+            ok(json!({ "dirs": dirs, "files": files, "cwd": root, "pending": false }))
         }
         None => ok(json!({ "dirs": [], "files": [], "cwd": cwd, "pending": true })),
     }
@@ -1532,6 +1536,8 @@ pub(crate) async fn fetch_session_file(
                 fetch_id: fetch_id.clone(),
                 cwd,
                 rel: rel.to_string(),
+                task_id: task_id.to_string(),
+                by_session: true,
             });
         }
     }
@@ -1651,6 +1657,8 @@ async fn task_file(
             fetch_id,
             cwd,
             rel,
+            task_id: id.clone(),
+            by_session: true,
         });
     }
     ok(json!({ "pending": true }))
@@ -1725,6 +1733,8 @@ async fn task_fsop(
         op: req.op,
         name: req.name,
         new_name: req.new_name,
+        // 与目录浏览同一个根，否则「看到的目录」和「操作落到的目录」会是两个
+        by_session: true,
     });
     // 该目录的列举缓存作废：操作后网页会重新拉取，须重新向 agent 查询而非返回旧缓存
     entry.dir_cache.remove(&(id, rel));
@@ -2511,6 +2521,8 @@ async fn upload_file(
     // 分片信息：前端切大文件时带上，缺省即「整份就这一个」
     let mut chunk_index: u32 = 0;
     let mut chunk_total: u32 = 0;
+    let mut task_id = String::new();
+    let mut rel_dir = String::new();
     while let Ok(Some(field)) = multipart.next_field().await {
         match field.name().unwrap_or("") {
             "dir" => dir = field.text().await.unwrap_or_default(),
@@ -2522,6 +2534,10 @@ async fn upload_file(
             "chunkTotal" => {
                 chunk_total = field.text().await.ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
             }
+            // 会话 id + 相对会话当前目录的子路径：由 agent 在落盘那一刻解析落点，
+            // 比 hub 事先算好的 dir 新鲜一整轮往返（见 model 的 FileTransfer::by_session）
+            "taskId" => task_id = field.text().await.unwrap_or_default(),
+            "relDir" => rel_dir = field.text().await.unwrap_or_default(),
             "file" => {
                 filename = field.file_name().unwrap_or("file.bin").to_string();
                 bytes = field.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
@@ -2551,6 +2567,17 @@ async fn upload_file(
     // 不报错，只是读的是上一版。够新的客户端会把实际路径回报回来，本接口等一等再返回，
     // 把权威路径放进 `path` 交给前端。
     let transfer_id = uuid::Uuid::new_v4().to_string();
+    // 归属校验：taskId 必须是这台设备上、该用户名下的会话，否则不认 —— 否则等于让调用方
+    // 拿别的会话的当前目录当落点。
+    //
+    // **必须在取 machines 写锁之前算**：tasks_for 内部要取 machines 读锁，
+    // 放进下面那个写锁守卫里就是自锁死（编译器不会拦，只会在运行时挂住整个上传接口）。
+    let by_session = !task_id.trim().is_empty()
+        && state
+            .tasks_for(&user)
+            .await
+            .iter()
+            .any(|t| t.id == task_id.trim() && t.machine_id == id);
     let wants_result = {
         // 目标目录合法性由目标机权威校验：hub 是 Linux、目标机是 Mac 时，
         // /Users/xxx 这种目标机上完全合法的路径在 hub 侧无从判断。
@@ -2574,6 +2601,9 @@ async fn upload_file(
         let wants = done && agent_reports_file_path(&entry.version);
         entry.pending_files.push_back(am_core::model::FileTransfer {
             dir,
+            task_id: if by_session { task_id.trim().to_string() } else { String::new() },
+            rel_dir: if by_session { rel_dir.trim().trim_matches('/').to_string() } else { String::new() },
+            by_session,
             filename: safe_name,
             content_b64: B64.encode(&bytes),
             chunk_index,
@@ -3241,7 +3271,7 @@ async fn report(
     let pending_history = history_records;
     // 缓存 agent 回传的 git 对比结果
     for r in payload.dir_results {
-        entry.dir_cache.insert((r.task_id.clone(), r.rel.clone()), (r.dirs, r.files));
+        entry.dir_cache.insert((r.task_id.clone(), r.rel.clone()), (r.dirs, r.files, r.root));
     }
     // 文件夹操作结果：按 op_id 存起来供网页轮询（上限防止 map 无限涨）
     for r in payload.fs_op_results {

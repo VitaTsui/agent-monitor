@@ -376,7 +376,20 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                             }),
                         _ => Vec::new(),
                     };
-                    for f in files {
+                    for mut f in files {
+                        // 落盘那一刻现算目标目录：hub 排队 + 网络往返期间会话可能又 cd 了，
+                        // 事先算好的绝对路径就已经过时（见 model 的 FileTransfer::by_session）
+                        if f.by_session {
+                            match session_root_now(&state, &f.task_id).await {
+                                Some(root) => f.dir = join_rel(&root, &f.rel_dir),
+                                // 解析不出来（会话记录已删/读不到）就退回 hub 算的那份，
+                                // 总比整份传输直接失败强
+                                None => crate::state::client_log(&format!(
+                                    "下发文件按会话解析目录失败（task={}），退回 hub 给的 {}",
+                                    f.task_id, f.dir
+                                )),
+                            }
+                        }
                         if let Some(r) = write_transfer(&f, &session_dirs) {
                             pending_file_results.push(r);
                         }
@@ -387,12 +400,18 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
                     for q in dir_queries {
-                        let (dirs, files) = list_entries(&q.cwd, &q.rel);
+                        // 根以本机现读为准：hub 那份来自定期扫描的快照，会话 cd 过就偏了
+                        let root = match q.by_session {
+                            true => session_root_now(&state, &q.task_id).await.unwrap_or(q.cwd),
+                            false => q.cwd,
+                        };
+                        let (dirs, files) = list_entries(&root, &q.rel);
                         pending_dir_results.push(am_core::model::DirResult {
                             dirs,
                             files,
                             task_id: q.task_id,
                             rel: q.rel,
+                            root,
                         });
                     }
                     // 文件夹操作（上传选目录弹窗里的新建/删除/重命名）
@@ -400,7 +419,13 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         .pointer("/data/fsOps")
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
-                    for op in fs_ops {
+                    for mut op in fs_ops {
+                        // 必须与目录浏览同一个根，否则「网页上看到的目录」与「操作落到的目录」是两个
+                        if op.by_session {
+                            if let Some(root) = session_root_now(&state, &op.task_id).await {
+                                op.cwd = root;
+                            }
+                        }
                         let (ok, msg) = run_fs_op(&op);
                         pending_fs_op_results.push(am_core::model::FsOpResult {
                             op_id: op.op_id,
@@ -413,7 +438,13 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         .pointer("/data/fileFetches")
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
-                    for f in fetches {
+                    for mut f in fetches {
+                        // 会话内容里的相对图片路径也是终端按当前目录写下的，根同上
+                        if f.by_session {
+                            if let Some(root) = session_root_now(&state, &f.task_id).await {
+                                f.cwd = root;
+                            }
+                        }
                         pending_file_fetches.push(read_session_file(&f));
                     }
                     // 配置同步：hub 点名索要的文件内容（下一轮随上报回传）
@@ -624,6 +655,34 @@ async fn attach_messages(state: &SharedState, tasks: &mut [Task], cache: &mut Ms
     // 清理消失的会话
     let alive: std::collections::HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
     cache.inner.retain(|k, _| alive.contains(k.as_str()));
+}
+
+/// 会话**此刻**的工作目录（现读它的 jsonl 尾部）。
+///
+/// 每轮上报里这类请求通常 0～2 条，逐条加锁的开销可以忽略；换来的是「解析发生在
+/// 用它的那一刻」——扫描循环被 App Nap 压到一两分钟一轮也不影响定位准确性。
+async fn session_root_now(state: &crate::state::AppState, task_id: &str) -> Option<String> {
+    if task_id.is_empty() {
+        return None;
+    }
+    state.scanner.lock().await.session_cwd_now(task_id)
+}
+
+/// `root` + 相对子路径（子路径用 '/' 分隔，按本机分隔符拼回去）。
+///
+/// 只做拼接，不做越界校验 —— 调用方随后走 `safe_upload_dir_within`，那里才是权威闸门。
+fn join_rel(root: &str, rel: &str) -> String {
+    let rel = rel.trim().trim_matches('/');
+    if rel.is_empty() {
+        return root.to_string();
+    }
+    let sep = if root.contains('\\') { '\\' } else { '/' };
+    let joined: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+    format!(
+        "{}{sep}{}",
+        root.trim_end_matches(['/', '\\']),
+        joined.join(&sep.to_string())
+    )
 }
 
 /// 写入 hub 下发的文件到本机目标目录。
@@ -1222,6 +1281,9 @@ mod fetch_tests {
             fetch_id: "t".into(),
             cwd: cwd.into(),
             rel: rel.into(),
+            // 这些用例验的是「根之内/之外」的边界，直接给定根，不走按会话解析
+            task_id: String::new(),
+            by_session: false,
         })
     }
 
@@ -1274,6 +1336,10 @@ mod transfer_report_tests {
             chunk_index: 0,
             chunk_total: 0,
             transfer_id: id.into(),
+            // 同上：用例直接给绝对 dir，不走按会话解析
+            task_id: String::new(),
+            rel_dir: String::new(),
+            by_session: false,
         }
     }
 

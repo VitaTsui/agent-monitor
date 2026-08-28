@@ -1149,6 +1149,10 @@ async fn dir_files_fresh(
         entry.dir_cache.remove(&key);
         if !entry.pending_dir.iter().any(|q| q.task_id == task_id && q.rel == rel) {
             entry.pending_dir.push_back(am_core::model::DirQuery {
+                // 钉钉这条**不按会话解析**：接收目录是按项目配的（见下面的 recv_dir），
+                // 落点就该钉在项目根。若这里按会话当前目录解析，「问到的目录」与
+                // 「文件实际落的目录」就成了两个，重名避让会全部落空。
+                by_session: false,
                 task_id: task_id.to_string(),
                 cwd: cwd.to_string(),
                 rel: rel.to_string(),
@@ -1166,7 +1170,7 @@ async fn dir_files_fresh(
             .await
             .get(machine_id)
             .and_then(|e| e.dir_cache.get(&key).cloned());
-        if let Some((_, files)) = hit {
+        if let Some((_, files, _)) = hit {
             tracing::debug!("查目录清单：{rel} 下 {} 个文件", files.len());
             return Some(files);
         }
@@ -1308,6 +1312,10 @@ async fn queue_pending_file(
     let wants_result = crate::server::agent_reports_file_path(&entry.version);
     entry.pending_files.push_back(am_core::model::FileTransfer {
         dir,
+        // 同上：钉钉的落点按项目根算，不随会话 cd 走
+        task_id: String::new(),
+        rel_dir: String::new(),
+        by_session: false,
         filename: safe.clone(),
         content_b64: B64.encode(&bytes),
         // 钉钉转发的附件一律整份下发：走的是钉钉自己的下载接口，文件已完整落在 hub 内存里，

@@ -95,14 +95,6 @@ pub struct Task {
     /// None = 尾窗里一条 cwd 都没读到（极短会话/占位任务），调用方退回 `project`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_cwd: Option<String>,
-    /// 会话**此刻**的 shell 目录，仅在它已漂到 [`Task::live_cwd`] 之下时下发。
-    ///
-    /// 有值 = 「文件落在锚定目录」和「终端此刻站在哪」不是同一个地方。终端解析 `./x`
-    /// 到底以哪个为根，我们无从确证（观察到的一次是仓库根，但那是从一句自然语言回复里
-    /// 反推的，不足以当规则）。所以有值时前端就不赌了 —— 改回填绝对路径，两种解释下
-    /// 都找得到。没值时两者重合，相对路径没有歧义，照常用。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shell_cwd: Option<String>,
     /// 会话标题：会话的首个用户提示词（原始任务），更像标题
     #[serde(default)]
     pub title: String,
@@ -317,10 +309,21 @@ pub struct ConfigPush {
 #[serde(rename_all = "camelCase")]
 pub struct DirQuery {
     pub task_id: String,
-    /// 会话项目目录（agent 本机路径，作为根，不允许越出）
+    /// 会话项目目录（agent 本机路径，作为根，不允许越出）。
+    ///
+    /// **hub 算的这份必然偏旧**：它来自定期扫描上报的快照，而扫描循环在 macOS 后台会被
+    /// App Nap 压到一两分钟一轮。会话期间 `cd` 过之后，拿它当根就会定位到别处 ——
+    /// 用户看到的是「上传/选择文件列出来的是另一个目录」。故新客户端改用 [`Self::by_session`]。
+    /// 这里仍然填着，纯为旧客户端兜底。
     pub cwd: String,
     /// 相对根的子路径（"" 表示根本身），分隔符统一 '/'
     pub rel: String,
+    /// **由 agent 自己按 `task_id` 现读会话记录解析根**，而不是用上面那份 `cwd`。
+    ///
+    /// 新鲜度因此等同于本次往返本身，扫描循环再慢也不影响。旧客户端不认识这个字段，
+    /// 反序列化取 false → 照旧用 `cwd`，行为不变。
+    #[serde(default)]
+    pub by_session: bool,
 }
 
 /// agent → hub：目录列表结果
@@ -335,6 +338,12 @@ pub struct DirResult {
     /// 旧客户端不带该字段 → 反序列化为空。
     #[serde(default)]
     pub files: Vec<String>,
+    /// agent 实际据以列举的**绝对根**（不含 `rel`）。空 = 旧客户端没回报。
+    ///
+    /// 网页拿它当上传落点与相对路径的基准 —— 只有 agent 知道会话此刻真正在哪，
+    /// hub 手里那份是旧的。
+    #[serde(default)]
+    pub root: String,
 }
 
 /// hub → agent：现取一个会话目录内的文件（网页要看 agent 输出里引用的截图）。
@@ -346,10 +355,17 @@ pub struct DirResult {
 pub struct FileFetch {
     /// 本次取件的标识，结果按它认领
     pub fetch_id: String,
-    /// 会话项目目录（agent 本机路径，作为根，不允许越出）
+    /// 会话项目目录（agent 本机路径，作为根，不允许越出）。旧客户端兜底用。
     pub cwd: String,
     /// 相对根的子路径，分隔符统一 '/'
     pub rel: String,
+    /// 会话 id（`by_session` 为真时据此解析根）
+    #[serde(default)]
+    pub task_id: String,
+    /// 同 [`DirQuery::by_session`]。会话内容里的相对图片路径也是终端按当前目录写下的，
+    /// 用旧快照的根解析，会话 `cd` 过之后就会全变破图。
+    #[serde(default)]
+    pub by_session: bool,
 }
 
 /// agent → hub：现取文件的结果
@@ -385,6 +401,10 @@ pub struct FsOp {
     /// rename 的新名（其余操作忽略）
     #[serde(default)]
     pub new_name: String,
+    /// 同 [`DirQuery::by_session`]：由 agent 按 `task_id` 现读会话记录解析根。
+    /// 必须与目录浏览用同一个根，否则「在网页上看到的目录」和「操作落到的目录」会是两个。
+    #[serde(default)]
+    pub by_session: bool,
 }
 
 /// agent → hub：文件夹操作结果
@@ -425,8 +445,22 @@ pub struct ControlCmd {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileTransfer {
-    /// 目标目录（agent 本机）
+    /// 目标目录（agent 本机绝对路径）。`by_session` 为真时忽略它，改用
+    /// `会话当前目录 + rel_dir`；旧客户端不认新字段，仍然只看这里。
     pub dir: String,
+    /// 会话 id（`by_session` 为真时据此解析落点根）
+    #[serde(default)]
+    pub task_id: String,
+    /// 相对会话当前目录的子路径（"" = 就落在会话当前目录），分隔符统一 '/'
+    #[serde(default)]
+    pub rel_dir: String,
+    /// **由 agent 在落盘那一刻解析目标目录**，而不是用 hub 事先算好的 `dir`。
+    ///
+    /// 这一步把「定位」推到了最晚的时刻：hub 排队、网络往返期间会话若又 `cd` 了，
+    /// 事先算的绝对路径就已经过时。agent 落盘时现算，再把实际路径回报回去
+    /// （见 [`FileTransferResult::path`]），网页据此回填，两端永远说的是同一个位置。
+    #[serde(default)]
+    pub by_session: bool,
     pub filename: String,
     /// base64 编码的文件内容（分片传输时是这一片的内容）
     pub content_b64: String,
