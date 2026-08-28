@@ -60,6 +60,15 @@ pub struct MachineEntry {
     /// root 必须一路带到网页：只有 agent 知道会话此刻在哪，hub 自己那份是旧快照。
     /// 网页拿它当上传落点与相对路径的基准。
     pub dir_cache: HashMap<(String, String), (Vec<String>, Vec<String>, String)>,
+    /// task_id → (浏览期间**钉住**的根, 最近一次确认时间)。
+    ///
+    /// 根必须在一次浏览里保持不变：会话的 cwd 每一轮都在动（实测同一会话 60 条记录里
+    /// 出现过 4 个不同目录），若每次查询各自解析，用户点进子目录时根已经换了，
+    /// `<新根>/<刚点的子目录>` 不存在 → 列出来是空的，且没有任何提示。
+    ///
+    /// 只在 `rel == ""`（进弹窗那一次）按会话重新解析并改写这里，其余查询一律复用，
+    /// 于是「入口是终端当前目录」与「浏览过程自洽」两者兼得。
+    pub dir_roots: HashMap<String, (String, std::time::Instant)>,
     /// 上次通知过的在线状态（钉钉推送用，边沿触发上线/离线，避免重复）
     pub notified_online: bool,
     /// 已推过「等待选择」提醒的会话 ID（边沿触发：进入 select 推一次，离开清除）

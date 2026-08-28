@@ -1430,6 +1430,33 @@ struct DirsQuery {
     rel: String,
 }
 
+/// `root` + 相对子路径，按 root 自身的分隔符拼（目标机可能是 Windows）
+fn join_under(root: &str, rel: &str) -> String {
+    if rel.is_empty() {
+        return root.to_string();
+    }
+    let sep = if root.contains('\\') { '\\' } else { '/' };
+    let parts: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+    format!(
+        "{}{sep}{}",
+        root.trim_end_matches(['/', '\\']),
+        parts.join(&sep.to_string())
+    )
+}
+
+/// 浏览期间钉住的根有效期。够长以覆盖一次「打开弹窗 → 逐层点进去 → 传文件」，
+/// 又不至于让隔了半天再来的那次沿用一个早已过时的位置。
+const DIR_ROOT_TTL_SECS: u64 = 600;
+
+/// 取该会话钉住的根（过期或没有则 None）
+fn pinned_root(entry: &crate::state::MachineEntry, task_id: &str) -> Option<String> {
+    entry
+        .dir_roots
+        .get(task_id)
+        .filter(|(r, at)| !r.is_empty() && at.elapsed().as_secs() < DIR_ROOT_TTL_SECS)
+        .map(|(r, _)| r.clone())
+}
+
 /// 会话相对路径的解析根 —— **必须与终端解析 `./x` 用的目录一致**。
 ///
 /// 优先 `live_cwd`（会话 jsonl 里最后一条记录的 cwd），退回进程 cwd。
@@ -1487,12 +1514,15 @@ async fn task_dirs(
             .iter()
             .any(|x| x.task_id == id && x.rel == rel)
     {
+        // 进弹窗那一次（rel==""）才按会话重新解析；之后逐层点进去一律复用钉住的根，
+        // 否则会话在两次点击之间 cd 了，`<新根>/<刚点的子目录>` 不存在，列出来就是空的。
+        let pinned = if rel.is_empty() { None } else { pinned_root(entry, &id) };
         entry.pending_dir.push_back(am_core::model::DirQuery {
             task_id: id.clone(),
-            // 仍然填着，只为旧客户端兜底；新客户端看 by_session、自己现读会话记录
-            cwd: cwd.clone(),
+            // by_session 为真时客户端不看它，只为旧客户端兜底；复用钉住的根时它就是权威值
+            cwd: pinned.clone().unwrap_or_else(|| cwd.clone()),
             rel: rel.clone(),
-            by_session: true,
+            by_session: pinned.is_none(),
         });
     }
     match cached {
@@ -1725,16 +1755,17 @@ async fn task_fsop(
     if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
         return err(500, "任务所属机器已离线");
     }
+    let pinned = pinned_root(entry, &id);
     entry.pending_fsop.push_back(am_core::model::FsOp {
         op_id: op_id.clone(),
         task_id: id.clone(),
-        cwd,
+        cwd: pinned.clone().unwrap_or(cwd),
         rel: rel.clone(),
         op: req.op,
         name: req.name,
         new_name: req.new_name,
         // 与目录浏览同一个根，否则「看到的目录」和「操作落到的目录」会是两个
-        by_session: true,
+        by_session: pinned.is_none(),
     });
     // 该目录的列举缓存作废：操作后网页会重新拉取，须重新向 agent 查询而非返回旧缓存
     entry.dir_cache.remove(&(id, rel));
@@ -2599,10 +2630,20 @@ async fn upload_file(
             );
         }
         let wants = done && agent_reports_file_path(&entry.version);
+        // 落点必须落在**用户亲眼选的那棵树**里：浏览期间钉住的根优先，没有才现解析。
+        // 若这里再按会话现解析，用户浏览完到上传之间会话 cd 一次，文件就落到别处去了 ——
+        // 界面上还显示「已上传到你选的目录」，人是查不出来的。
+        let pinned = pinned_root(entry, task_id.trim());
+        let rel_dir_clean = rel_dir.trim().trim_matches('/').to_string();
+        let (dir, by_session) = match (&pinned, by_session) {
+            (Some(root), _) => (join_under(root, &rel_dir_clean), false),
+            (None, true) => (dir, true),
+            (None, false) => (dir, false),
+        };
         entry.pending_files.push_back(am_core::model::FileTransfer {
             dir,
             task_id: if by_session { task_id.trim().to_string() } else { String::new() },
-            rel_dir: if by_session { rel_dir.trim().trim_matches('/').to_string() } else { String::new() },
+            rel_dir: if by_session { rel_dir_clean.clone() } else { String::new() },
             by_session,
             filename: safe_name,
             content_b64: B64.encode(&bytes),
@@ -2825,6 +2866,7 @@ async fn report(
                 fsop_results: HashMap::new(),
                 file_results: HashMap::new(),
                 dir_cache: HashMap::new(),
+                dir_roots: HashMap::new(),
                 notified_online: false,
                 select_notified: std::collections::HashSet::new(),
                 select_diag: HashMap::new(),
@@ -3271,6 +3313,21 @@ async fn report(
     let pending_history = history_records;
     // 缓存 agent 回传的 git 对比结果
     for r in payload.dir_results {
+        // 记住这次 agent 实际用的根。根一旦变了（用户重开弹窗、会话期间 cd 过），
+        // 该会话此前缓存的各层清单都是在**另一个根**下列出来的，必须整批作废 ——
+        // 否则点进子目录会拿到上一个位置的旧内容，比空白更难发现。
+        if !r.root.is_empty() {
+            let changed = entry
+                .dir_roots
+                .get(&r.task_id)
+                .is_none_or(|(old, _)| old != &r.root);
+            if changed {
+                entry.dir_cache.retain(|(t, _), _| t != &r.task_id);
+            }
+            entry
+                .dir_roots
+                .insert(r.task_id.clone(), (r.root.clone(), std::time::Instant::now()));
+        }
         entry.dir_cache.insert((r.task_id.clone(), r.rel.clone()), (r.dirs, r.files, r.root));
     }
     // 文件夹操作结果：按 op_id 存起来供网页轮询（上限防止 map 无限涨）
