@@ -801,41 +801,57 @@ class PortalStore {
           // 累积合并：拉取是滑动窗口会丢老消息，这里按 key 去重后只增不减，
           // 保证对话流稳定增长、不因窗口滑动丢历史。
           let prev = this._messagesById[id] ?? [];
+          // key 带上全文长度，降低同时间戳+同前缀不同消息被误判重复的概率
+          const mkey = (m: PortalMessage) =>
+            `${m.timestamp}|${m.role}|${m.content.length}|${m.content.slice(0, 60)}`;
+          // 先算「这一轮新出现的消息」，回显接管只认它们（理由见 echoTakenOver）。
+          const seen = new Set(prev.map(mkey));
+          const fresh = incoming.filter((m) => {
+            const k = mkey(m);
+            if (seen.has(k)) {
+              return false;
+            }
+            seen.add(k);
+            return true;
+          });
           // 终端同步回了同内容的 user 消息 → 撤下对应的本地乐观回显，
           // 让真实消息（带终端时间戳）接管，避免同一条显示两遍。
           // 归一化比对：空白差异（换行/缩进/首尾）一律视为同一条
           const norm = (s: string) => s.replace(/\s+/g, " ").trim();
-          const ts = (s?: string) => (s ? new Date(s).getTime() : 0);
-          const incomingUsers = incoming
-            .filter((m) => m.role === "user")
-            .map((m) => ({ text: norm(m.content), at: ts(m.timestamp) }));
           // 回显能否被某条同步回来的 user 消息接管：
           // 除了完全相等，还接受「同步内容包含回显全文」——终端把注入的文本
           // 记进 jsonl 时常会带上结构化前后文（工具结果、上下文块等），导致内容
           // 比原始输入更长，只做全等比对会漏判、两条并存。长度阈值挡掉过短回显
           // （如 “ok”）被任意长消息命中的误伤。
           //
-          // **只认不早于这条回显的消息**：incoming 是整个滑动窗口，里头全是历史。
-          // 不卡时间的话，会话里任何一条旧消息只要包含这段文本，就会把刚发出去的
-          // 回显判成「已被接管」而撤下 —— 现象是正文里根本看不到自己刚发的内容
-          // （它被一条很久以前的消息「顶替」了，而那条远在上面）。留 5s 容差，
-          // 兜住终端时钟与本机的偏差。
-          const echoTakenOver = (echoNorm: string, echoAt: number) => {
+          // **只认这一轮新出现的消息（fresh），不比时间戳**。
+          // 需要「只认新的」是因为 incoming 是整个滑动窗口、里头全是历史：不加约束的话，
+          // 会话里任何一条旧消息只要含这段文本，就会把刚发出去的回显判成「已被接管」
+          // 而撤下，正文里根本看不到自己刚发的内容。
+          // 但这个约束**不能拿时间戳来做**：回显的时间戳是**看的这台机器**的浏览器时钟，
+          // 同步回来的消息的时间戳是**跑终端那台机器**写进 jsonl 的时钟，两者毫无关系。
+          // 原先的 `u.at >= echoAt - 5000` 等于假设两台机器的钟差不超过 5s——只要看的
+          // 这端快一点，接管就**永久**失效：回显一直留着，真实消息又照常进流，
+          // 于是排队清掉的那一刻同一句话在对话流里冒出两条一模一样的气泡。
+          // 「新出现」本身就是顺序事实（回显先于本轮响应被处理），不需要任何时钟。
+          const freshUserTexts = fresh
+            .filter((m) => m.role === "user")
+            .map((m) => norm(m.content));
+          const echoTakenOver = (echoNorm: string) => {
             if (!echoNorm) {
               return false;
             }
-            return incomingUsers.some(
-              (u) =>
-                u.at >= echoAt - 5000 &&
-                (u.text === echoNorm ||
-                  (echoNorm.length >= 4 && u.text.includes(echoNorm))),
+            return freshUserTexts.some(
+              (t) =>
+                t === echoNorm ||
+                (echoNorm.length >= 4 && t.includes(echoNorm)),
             );
           };
           const withoutEcho = prev.filter((m) => {
             if (!m.local) {
               return true;
             }
-            if (echoTakenOver(norm(m.content), ts(m.timestamp))) {
+            if (echoTakenOver(norm(m.content))) {
               return false;
             }
             // 回显一旦送达终端就**永久保留**，直到被同步回来的真实消息接管。
@@ -852,18 +868,6 @@ class PortalStore {
           });
           const echoReplaced = withoutEcho.length !== prev.length;
           prev = withoutEcho;
-          // key 带上全文长度，降低同时间戳+同前缀不同消息被误判重复的概率
-          const mkey = (m: PortalMessage) =>
-            `${m.timestamp}|${m.role}|${m.content.length}|${m.content.slice(0, 60)}`;
-          const seen = new Set(prev.map(mkey));
-          const fresh = incoming.filter((m) => {
-            const k = mkey(m);
-            if (seen.has(k)) {
-              return false;
-            }
-            seen.add(k);
-            return true;
-          });
           // 无新消息就不换引用：轮询每 2s 一次，无条件替换会让整条对话流
           // 每 2s 白重渲染一遍（长会话下明显掉帧）。
           if (fresh.length || echoReplaced) {
