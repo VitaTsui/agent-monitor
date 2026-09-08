@@ -104,7 +104,6 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
         set.has(normText(m.content))
       );
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task.queuedInputs]);
 
   // 会话上下文：内容里的本地图片路径以会话 cwd 为根解析（见 utils/sessionImages）。

@@ -138,7 +138,6 @@ const Composer: React.FC<ComposerProps> = (props) => {
       },
     );
     return dispose;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId]);
 
   // 监听输入框内容：以「/xxx」（无空格）开头就进命令模式并按 xxx 过滤。
