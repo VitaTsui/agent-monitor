@@ -20,6 +20,7 @@ import PortalStore from "../../PortalStore";
 import Composer from "../Composer";
 import TerminalFeed, { SelectCard } from "../TerminalFeed";
 import SessionPanels from "../SessionPanels";
+import SubAgentChip from "../SubAgentChip";
 import styles from "./index.module.scss";
 
 interface ChatPaneProps {
@@ -352,6 +353,10 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 </span>
               </Tooltip>
             ) : null}
+            {/* 子会话胶囊：只在有子会话跑着时出现，点开看名字/状态/耗时。
+                摆在这一行而不是右上那排图标里 —— 那排低于 FLAT_MIN_W 就整排折成
+                ⋯ 菜单，再塞个非按钮元素会让折叠提前发生。 */}
+            <SubAgentChip messages={messages} />
           </div>
         </div>
         <div

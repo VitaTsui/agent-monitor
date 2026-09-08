@@ -1604,26 +1604,33 @@ struct TodoItem {
     status: String,
 }
 
-/// 后台运行的任务（run_in_background 的命令 / 异步子代理）
+/// 后台运行的任务（后台命令 / 异步子代理）
 #[derive(Debug, Clone, Serialize)]
 struct BgTask {
     id: String,
     label: String,
     /// running | completed | failed | killed | stopped
     status: String,
-    /// "agent"（子代理 Task）| "bg"（后台命令）—— 前端据此拆成独立的子代理列表
+    /// "agent"（异步子代理）| "bg"（后台命令）—— 前端据此拆成独立的子代理列表
     kind: String,
+    /// 起跑时刻（会话记录里的 ISO8601 时间戳），前端据此算耗时；拿不到就空串
+    #[serde(rename = "startedAt")]
+    started_at: String,
 }
 
 /// 追踪会话里「在后台跑着」的任务。
 ///
 /// 同样是跨记录的状态：
-/// - 启动：tool_use 带 run_in_background=true，任务号要等 tool_result 里的
-///   "…with ID: xxx"（子代理则是 "agentId: xxx"）才拿得到；
+/// - 启动：tool_use 只给得出展示名，任务号与种类都要等它的 tool_result 才成形；
 /// - 结束：后续某条 user 记录里的 <task-notification> 带 <task-id> 与 <status>。
+///
+/// **种类判定只认 `toolUseResult` 里的结构化字段**（`agentId` / `backgroundTaskId`），
+/// 不看工具名、也不看入参：工具名是会变的（`Task` 早已改叫 `Agent`），
+/// `run_in_background` 这个入参更是压根不出现在派子代理的调用里 ——
+/// 按名字或入参判会随上游改名而整条哑掉。
 #[derive(Default)]
 struct BgTracker {
-    /// tool_use_id -> (展示名, 种类 agent|bg)（等 tool_result 回填任务号）
+    /// tool_use_id -> (展示名, 起跑时刻)（等 tool_result 定种类、回填任务号）
     pending: HashMap<String, (String, String)>,
     items: Vec<BgTask>,
     dirty: bool,
@@ -1637,6 +1644,10 @@ impl BgTracker {
         if let Some(s) = v.get("content").and_then(Value::as_str) {
             self.on_notification(s);
         }
+        let ts = v.get("timestamp").and_then(Value::as_str).unwrap_or("");
+        // 工具结果的结构化元数据是记录的顶层字段，与 message 平级 ——
+        // 种类判定要用它，所以得从这一层带下去。
+        let meta = v.get("toolUseResult");
         // 挂在消息体上的：内容可能是纯字符串，也可能是分块数组
         if let Some(c) = v.pointer("/message/content") {
             match c {
@@ -1644,8 +1655,8 @@ impl BgTracker {
                 Value::Array(items) => {
                     for item in items {
                         match item.get("type").and_then(Value::as_str) {
-                            Some("tool_use") => self.on_tool_use(item),
-                            Some("tool_result") => self.on_tool_result(item),
+                            Some("tool_use") => self.on_tool_use(item, ts),
+                            Some("tool_result") => self.on_tool_result(item, meta, ts),
                             Some("text") => {
                                 if let Some(t) = item.get("text").and_then(Value::as_str) {
                                     self.on_notification(t);
@@ -1660,41 +1671,61 @@ impl BgTracker {
         }
     }
 
-    fn on_tool_use(&mut self, item: &Value) {
-        let input = item.get("input");
-        let is_bg = input
-            .and_then(|i| i.get("run_in_background"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if !is_bg {
-            return;
-        }
+    /// 每个 tool_use 都先记下展示名与起跑时刻 —— 此刻还判不出它是不是后台任务
+    /// （入参里没有任何可靠标记），真正的甄别在 tool_result 那步做。
+    /// 条目在配对的 tool_result 到达时立刻移除，所以这张表始终只存「在途」的那几条。
+    fn on_tool_use(&mut self, item: &Value, ts: &str) {
         let Some(use_id) = item.get("id").and_then(Value::as_str) else {
             return;
         };
         let name = item.get("name").and_then(Value::as_str).unwrap_or("任务");
         // description 最贴近人看的说明，没有再退回工具名
-        let label = input
+        let label = item
+            .get("input")
             .and_then(|i| i.get("description"))
             .and_then(Value::as_str)
             .map(|s| truncate(s, 80))
             .unwrap_or_else(|| name.to_string());
-        // Task 工具 = 子代理；其余 run_in_background 的（Bash 等）= 后台命令
-        let kind = if name == "Task" { "agent" } else { "bg" };
         self.pending
-            .insert(use_id.to_string(), (label, kind.to_string()));
+            .insert(use_id.to_string(), (label, ts.to_string()));
     }
 
-    fn on_tool_result(&mut self, item: &Value) {
+    fn on_tool_result(&mut self, item: &Value, meta: Option<&Value>, ts: &str) {
         let Some(use_id) = item.get("tool_use_id").and_then(Value::as_str) else {
             return;
         };
-        let Some((label, kind)) = self.pending.remove(use_id) else {
-            return;
+        let started = self.pending.remove(use_id);
+        // 只有 toolUseResult 交出任务号的，才是「还在后台跑着」的任务：
+        //   agentId          → 异步子代理
+        //   backgroundTaskId → 后台命令
+        // 其余（绝大多数）工具调用当场就结束了，不进清单。
+        let Some((id, kind)) = bg_identity(meta) else { return };
+        let (label, started_at) = match started {
+            Some((l, t)) => (l, t),
+            // tool_use 落在重放窗口之外（极少见）：退回结果里的说明，时间用当前这条
+            None => (
+                meta.and_then(|m| m.get("description"))
+                    .and_then(Value::as_str)
+                    .map(|s| truncate(s, 80))
+                    .unwrap_or_else(|| "后台任务".to_string()),
+                ts.to_string(),
+            ),
         };
-        let text = tool_result_text(item);
-        let Some(id) = parse_bg_id(&text) else { return };
-        self.items.push(BgTask { id, label, status: "running".into(), kind });
+        // 同一个子代理被唤醒续跑时会再来一条结果：原地复活，别堆重复条目
+        if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
+            t.label = label;
+            t.status = "running".into();
+            t.started_at = started_at;
+            self.dirty = true;
+            return;
+        }
+        self.items.push(BgTask {
+            id,
+            label,
+            status: "running".into(),
+            kind: kind.to_string(),
+            started_at,
+        });
         self.dirty = true;
     }
 
@@ -1756,18 +1787,22 @@ fn tag_value(text: &str, tag: &str) -> Option<String> {
     Some(text[s..e].trim().to_string())
 }
 
-/// 从后台任务的 tool_result 文本里取任务号：
-/// 命令是 "…background with ID: xxx"，子代理是 "agentId: xxx"
-fn parse_bg_id(text: &str) -> Option<String> {
-    for marker in ["with ID: ", "agentId: "] {
-        if let Some(p) = text.find(marker) {
-            let rest = &text[p + marker.len()..];
-            let id: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-                .collect();
+/// 从 `toolUseResult` 判定「这次调用有没有留下一个还在后台跑的东西」，
+/// 返回 (任务号, 种类)。判据只取结构化字段，理由：
+///
+/// - 工具名会变：派子代理的工具从 `Task` 改成了 `Agent`，按名字判会整条哑掉；
+/// - 入参不可靠：派子代理的 input 里根本没有 `run_in_background`；
+/// - 文本标记会误伤：结果正文里出现 "with ID: " 的普通命令（比如 grep 到了这段
+///   源码本身）会被错认成后台任务。
+///
+/// 而任务号本身就只由这两个字段给出，没有它就不可能有后续的完成通知 ——
+/// 「有任务号」与「是后台任务」是同一件事，用它当判据不会错位。
+fn bg_identity(meta: Option<&Value>) -> Option<(String, &'static str)> {
+    let m = meta?;
+    for (field, kind) in [("agentId", "agent"), ("backgroundTaskId", "bg")] {
+        if let Some(id) = m.get(field).and_then(Value::as_str) {
             if !id.is_empty() {
-                return Some(id);
+                return Some((id.to_string(), kind));
             }
         }
     }
@@ -2188,25 +2223,50 @@ mod todo_tests {
 mod bg_tests {
     use super::*;
 
+    /// 派活的 tool_use：故意不带 `run_in_background` —— 真实记录里派子代理时它
+    /// 压根不存在，判定不该依赖它，也不该依赖工具名。
     fn bg_use(id: &str, name: &str, desc: &str) -> Value {
         serde_json::json!({
             "type": "assistant",
             "timestamp": "2026-07-17T10:00:00Z",
             "message": { "content": [
                 { "type": "tool_use", "id": id, "name": name,
-                  "input": { "command": "yarn start", "description": desc, "run_in_background": true } }
+                  "input": { "command": "yarn start", "description": desc } }
             ]}
         })
     }
 
-    fn result(use_id: &str, text: &str) -> Value {
+    /// 工具结果 + 顶层 toolUseResult 元数据（种类与任务号的唯一来源）
+    fn result_with(use_id: &str, text: &str, meta: Value) -> Value {
         serde_json::json!({
             "type": "user",
             "timestamp": "2026-07-17T10:00:01Z",
+            "toolUseResult": meta,
             "message": { "content": [
                 { "type": "tool_result", "tool_use_id": use_id, "content": text }
             ]}
         })
+    }
+
+    /// 后台命令：任务号在 backgroundTaskId
+    fn bg_result(use_id: &str, task_id: &str) -> Value {
+        result_with(
+            use_id,
+            "Command running in background",
+            serde_json::json!({ "stdout": "", "stderr": "", "backgroundTaskId": task_id }),
+        )
+    }
+
+    /// 异步子代理：任务号在 agentId
+    fn agent_result(use_id: &str, agent_id: &str) -> Value {
+        result_with(
+            use_id,
+            "Async agent launched successfully.",
+            serde_json::json!({
+                "isAsync": true, "status": "async_launched",
+                "agentId": agent_id, "description": "审查后端"
+            }),
+        )
     }
 
     fn notification(text: &str) -> Value {
@@ -2223,7 +2283,7 @@ mod bg_tests {
         t.observe(&bg_use("u1", "Bash", "启动前端 dev server"));
         assert!(t.items.is_empty(), "拿到任务号前不该成形");
 
-        t.observe(&result("u1", "Command running in background with ID: bhb69r9ff. Output..."));
+        t.observe(&bg_result("u1", "bhb69r9ff"));
         assert_eq!(t.items.len(), 1);
         assert_eq!(t.items[0].id, "bhb69r9ff");
         assert_eq!(t.items[0].label, "启动前端 dev server");
@@ -2240,7 +2300,7 @@ mod bg_tests {
     fn tracks_background_agent_by_agent_id() {
         let mut t = BgTracker::default();
         t.observe(&bg_use("u1", "Agent", "审查后端"));
-        t.observe(&result("u1", "Async agent launched successfully.\nagentId: a21278fd478be0810 (internal)"));
+        t.observe(&agent_result("u1", "a21278fd478be0810"));
         assert_eq!(t.items.len(), 1);
         assert_eq!(t.items[0].id, "a21278fd478be0810");
     }
@@ -2250,9 +2310,9 @@ mod bg_tests {
     fn notification_with_multiple_ids_skips_internal_markers() {
         let mut t = BgTracker::default();
         t.observe(&bg_use("u1", "Bash", "甲"));
-        t.observe(&result("u1", "Command running in background with ID: b5eauqs4i."));
+        t.observe(&bg_result("u1", "b5eauqs4i"));
         t.observe(&bg_use("u2", "Bash", "乙"));
-        t.observe(&result("u2", "Command running in background with ID: bmojunb33."));
+        t.observe(&bg_result("u2", "bmojunb33"));
         let _ = t.take_snapshot("ts");
 
         t.observe(&notification(
@@ -2268,9 +2328,9 @@ mod bg_tests {
     fn orphan_summary_stops_unlisted_running_tasks() {
         let mut t = BgTracker::default();
         t.observe(&bg_use("u1", "Bash", "被枚举的"));
-        t.observe(&result("u1", "Command running in background with ID: b5eauqs4i."));
+        t.observe(&bg_result("u1", "b5eauqs4i"));
         t.observe(&bg_use("u2", "Bash", "漏网的 dev server"));
-        t.observe(&result("u2", "Command running in background with ID: bvvgsfndf."));
+        t.observe(&bg_result("u2", "bvvgsfndf"));
         let _ = t.take_snapshot("ts");
 
         // 通知里只列了 b5eauqs4i，没列 bvvgsfndf，但带 __orphan_summary__ 标记
@@ -2288,9 +2348,9 @@ mod bg_tests {
     fn normal_notification_leaves_unlisted_tasks_running() {
         let mut t = BgTracker::default();
         t.observe(&bg_use("u1", "Bash", "甲"));
-        t.observe(&result("u1", "Command running in background with ID: b1."));
+        t.observe(&bg_result("u1", "b1"));
         t.observe(&bg_use("u2", "Bash", "乙"));
-        t.observe(&result("u2", "Command running in background with ID: b2."));
+        t.observe(&bg_result("u2", "b2"));
 
         t.observe(&notification(
             "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>",
@@ -2308,20 +2368,49 @@ mod bg_tests {
         assert_eq!(encode_path("D:\\Program\\Foo"), "d--program-foo");
     }
 
-    /// 非后台的普通命令不该被收进来
+    /// 前台命令不该被收进来 —— 哪怕它的输出里恰好出现 "with ID: " 这串字。
+    /// （真事：grep 源码时把这段注释本身 grep 出来了。按文本标记判会把它当后台任务。）
     #[test]
-    fn foreground_command_is_ignored() {
+    fn foreground_command_is_ignored_even_if_output_mentions_id() {
         let mut t = BgTracker::default();
-        let v = serde_json::json!({
-            "type": "assistant",
-            "message": { "content": [
-                { "type": "tool_use", "id": "u1", "name": "Bash",
-                  "input": { "command": "ls", "description": "列目录" } }
-            ]}
-        });
-        t.observe(&v);
-        t.observe(&result("u1", "Command running in background with ID: zzz."));
-        assert!(t.items.is_empty());
+        t.observe(&bg_use("u1", "Bash", "列目录"));
+        t.observe(&result_with(
+            "u1",
+            "scanner.rs:1: Command running in background with ID: zzz",
+            serde_json::json!({ "stdout": "…with ID: zzz", "stderr": "" }),
+        ));
+        assert!(t.items.is_empty(), "没有任务号就不是后台任务");
+    }
+
+    /// 工具名换了也要照认：判据是 toolUseResult.agentId，不是 "Task"/"Agent" 这些名字
+    #[test]
+    fn agent_detected_regardless_of_tool_name() {
+        for name in ["Task", "Agent", "SomeFutureName"] {
+            let mut t = BgTracker::default();
+            t.observe(&bg_use("u1", name, "调研"));
+            t.observe(&agent_result("u1", "a1"));
+            assert_eq!(t.items.len(), 1, "工具名 {name} 应照样识别");
+            assert_eq!(t.items[0].kind, "agent");
+            assert_eq!(t.items[0].label, "调研");
+            assert_eq!(t.items[0].started_at, "2026-07-17T10:00:00Z", "起跑时刻取 tool_use 那条");
+        }
+    }
+
+    /// 同一个子代理被唤醒续跑（再来一条结果）应原地复活，而不是堆出重复条目
+    #[test]
+    fn resumed_agent_revives_in_place() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Agent", "调研"));
+        t.observe(&agent_result("u1", "a1"));
+        t.observe(&notification(
+            "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>",
+        ));
+        assert_eq!(t.items[0].status, "completed");
+
+        t.observe(&bg_use("u2", "Agent", "调研"));
+        t.observe(&agent_result("u2", "a1"));
+        assert_eq!(t.items.len(), 1, "同一个 agentId 不该堆两条");
+        assert_eq!(t.items[0].status, "running");
     }
 
     /// take_snapshot 反映的始终是当前状态，且取走后不重复产出
@@ -2329,7 +2418,7 @@ mod bg_tests {
     fn snapshot_reflects_current_state_once() {
         let mut t = BgTracker::default();
         t.observe(&bg_use("u1", "Bash", "甲"));
-        t.observe(&result("u1", "Command running in background with ID: b1."));
+        t.observe(&bg_result("u1", "b1"));
 
         let first = t.take_snapshot("ts").expect("首次应有快照");
         assert!(first.content.contains("running"));
@@ -2362,9 +2451,10 @@ mod bg_notification_path_tests {
         }));
         t.observe(&serde_json::json!({
             "type": "user",
+            "toolUseResult": { "isAsync": true, "agentId": "a21278fd478be0810" },
             "message": { "content": [
                 { "type": "tool_result", "tool_use_id": "u1",
-                  "content": "Async agent launched successfully.\nagentId: a21278fd478be0810" }
+                  "content": "Async agent launched successfully." }
             ]}
         }));
         assert_eq!(t.items[0].status, "running");
@@ -3434,3 +3524,4 @@ mod short_name_tests {
         assert_eq!(short_name(r"D:\cursor\"), "cursor");
     }
 }
+
