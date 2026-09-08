@@ -404,10 +404,13 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
         // （清单与后台任务是「当前状态」，已由 ChatPane 抽成单独面板；
         // 选择卡同理挂在输入框上方，都不进内容流。）
         const visibleItems = keyed;
-        // 执行中时给一条「最近动作」预览（最后一条工具调用）
+        // 执行中时给一条「最近动作」预览（最后一条工具调用）＋ 已走的步数
         const lastTool = inProgress
           ? [...turn.items].reverse().find((m) => m.role === "tool")
           : undefined;
+        const runSteps = inProgress
+          ? turn.items.filter((m) => m.role === "tool").length
+          : 0;
 
         return (
           <div key={turn.key} className={styles.turn}>
@@ -479,11 +482,18 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                   {(() => {
                     const out: React.ReactNode[] = [];
                     let group: { m: PortalMessage; k: string }[] = [];
+                    // 折叠组的身份 = 「本轮里的第几个过程块」，不是「第一条消息的指纹」。
+                    // 执行中每落下一段新正文，分组就会重新切一次：原先挂在末尾的过程块
+                    // 被并进前一个块里，若按首条指纹取 key，key 一变，用户刚点开的
+                    // 过程块就自己合上了。按序号取则跨刷新稳定，展开/收起都由用户说了算
+                    // （默认收起，`expanded` 只被点击写入，没有任何地方会重置它）。
+                    let gIdx = 0;
                     const flush = () => {
                       if (!group.length) {
                         return;
                       }
-                      const gkey = `tg-${group[0].k}`;
+                      const gkey = `tg|${turn.key}|${gIdx}`;
+                      gIdx += 1;
                       const openG = !!expanded[gkey];
                       // 有工具就按工具步数报数（「查了 6 步」比「6 条消息」更贴近直觉），
                       // 纯文字过程才退回条数
@@ -518,19 +528,21 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                       group = [];
                     };
 
-                    // 回合已结束：结论已经有了，中间的摸索过程就不该再一条条占屏 ——
-                    // 把「最后一条产出」之前的**全部**内容（工具流水、中途的助手说明、
-                    // 已被后续结论取代的方案卡）并成一行折叠，只留结论展开。
+                    // 「最后一条产出」之前的**全部**内容（工具流水、中途的助手说明、
+                    // 已被后续结论取代的方案卡）并成一行折叠，只留最后那条产出展开。
                     //
-                    // 执行中：还没有结论可留，于是**全部**进折叠组 —— 折叠行会随着
-                    // 步数实时增长，既不刷屏也看得见在动，想看点开即可。
-                    const lastOutIdx = inProgress
-                      ? visibleItems.length
-                      : visibleItems.reduce(
-                          (acc, { m }, i) =>
-                            ["assistant", "plan"].includes(m.role) ? i : acc,
-                          -1,
-                        );
+                    // 执行中与已结束**共用这一条规则**，没有第二套判断：执行中的
+                    // 「最后一条产出」就是它此刻正在写的那段正文，本来就该看得见。
+                    // 曾经执行中走的是 `visibleItems.length`（＝全部进折叠组），于是
+                    // 已经产出的内容被整段折起来，卡片上只剩一行「执行中…」，
+                    // 一轮还没落下任何条目时连折叠行都没有 —— 就是那张空卡。
+                    // 共用一套规则还顺带保证：running 翻成 false 的那一刻布局不变，
+                    // 只是底部的「执行中…」消失，不会闪、不会跳。
+                    const lastOutIdx = visibleItems.reduce(
+                      (acc, { m }, i) =>
+                        ["assistant", "plan"].includes(m.role) ? i : acc,
+                      -1,
+                    );
 
                     visibleItems.forEach((it, i) => {
                       const { m, k } = it;
@@ -559,6 +571,11 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                       <span className={styles.workingDot} />
                       <span className={styles.workingText}>
                         执行中…
+                        {runSteps > 0 ? (
+                          <span className={styles.workingSteps}>
+                            已 {runSteps} 步
+                          </span>
+                        ) : null}
                         {lastTool ? (
                           <span className={styles.workingAction}>
                             {lastTool.content}

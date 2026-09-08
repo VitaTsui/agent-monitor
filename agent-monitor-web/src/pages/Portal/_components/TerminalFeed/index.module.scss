@@ -385,6 +385,14 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     .workingText {
       min-width: 0;
 
+      // 已走的步数：紧跟「执行中…」，用弱化色，别抢正文
+      .workingSteps {
+        margin-left: 8px;
+        color: $term-dim;
+        font-size: 11.5px;
+        white-space: nowrap;
+      }
+
       .workingAction {
         margin-left: 10px;
         color: $term-dim;
