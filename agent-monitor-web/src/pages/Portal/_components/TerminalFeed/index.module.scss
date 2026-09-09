@@ -168,71 +168,253 @@
     }
   }
 
-  // ---------- 过程：工具调用与命令输出 ----------
-  // 默认折成一行灰字，点开才是那一列步骤 —— 过程不该把结论顶下去。
-  .process {
-    .processHead {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      font-size: var(--text-sm);
-      color: var(--muted-foreground);
-      cursor: pointer;
-      user-select: none;
+  // ---------- 过程：一条竖线时间轴 ----------
+  //
+  // 形态照 VitaAgent（web/src/pages/chat/_components/MessageList/index.module.scss
+  // :327-448、:600-720），数值原样搬 —— 两边正文都是 16/1.5，同一套节奏才对得上。
+  //
+  // **没有卡片、没有边框**：图标 ＋ 名称直接落在背景上，相邻两步之间用一小段
+  // 竖线连起来。上一版每次调用是一行等宽原文 ＋ 一块深色输出面，一轮调四次
+  // 工具，结论就被四块深底切碎了 —— 而这些是过程，视觉重量不该压过答案。
+  // 层级靠位置、字重与色阶表达。
+  .chain {
+    display: flex;
+    flex-direction: column;
 
-      &:hover {
-        color: var(--foreground);
-      }
-
-      .processArrow {
-        font-size: var(--text-md);
-      }
-    }
-
-    .processBody {
-      margin-top: 8px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      // 缩进到与折叠行的文字对齐，视觉上「这些属于上面那行」
-      padding-left: 14px;
-      border-left: 1px solid var(--border);
+    // 与后面那段正文之间留一档，跟 .agent 的 gap 同一个 10：
+    // 这一轮的三块（过程 / 结论 / 落款）间距一致，读起来才是三块
+    & + * {
+      margin-top: 10px;
     }
   }
 
-  // 工具调用行：`Bash(ls -la)` 这类。它是命令，等宽。
-  .toolLine {
+  // 折起来的那一行摘要：`跑了 6 条命令，查了 3 次资料`
+  .chainHead {
     display: flex;
+    align-items: center;
     gap: 8px;
+    padding: 4px 0;
+    border: none;
+    background: transparent;
+    color: var(--muted-foreground);
+    text-align: left;
+    cursor: pointer;
 
-    .toolText {
-      min-width: 0;
-      font-family: var(--font-mono);
-      font-size: var(--text-sm);
-      line-height: 1.6;
+    &:hover .chainText {
       color: var(--foreground);
-      white-space: pre-wrap;
-      word-break: break-word;
-      overflow-wrap: anywhere;
     }
+
+    // 箭头静止时不显示，悬停 / 展开才出现（VitaAgent :628-641）——
+    // 这一行是「回答之上的一句交代」，常驻一个箭头会把它读成一个控件
+    .stepCaret {
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+
+    &:hover .stepCaret,
+    &[aria-expanded="true"] .stepCaret {
+      opacity: 1;
+    }
+  }
+
+  .chainText {
+    font-size: var(--text-md); // 14，与 VitaAgent 的 --vita-font-size 同档
+    color: var(--muted-foreground);
+    transition: color 0.15s;
+  }
+
+  // 跑的时候「还在外面的那几条」与上面那句摘要之间的距离：
+  // 它们是两种东西（已收进去的 / 还在外面的），贴着排会被读成「摘要的内容」
+  .chainLive {
+    display: flex;
+    flex-direction: column;
+    margin-top: 14px;
+  }
+
+  // 链上的旁白：模型一边干活一边说的那几句。是话，不是一步操作 ——
+  // 所以缩到文字列（20 图标列 ＋ 8 间距）、没有图标。
+  .chainNote {
+    padding: 6px 0 6px 28px;
+
+    // 旁白**不是结论**，不该用正文的重量：markdown 基线给的是 16/1.5 ＋ 正文色，
+    // 摆在一列 12px 的步骤中间，过程反倒比答案还显眼。
+    // 压到 13/1.7 ＋ 次级色（VitaAgent `.chainNote` 同一档）。
+    // 多套一层类就压得住，不需要 !important。
+    .assistantText {
+      color: var(--muted-foreground);
+      font-size: var(--text-base);
+      line-height: 1.7;
+    }
+  }
+
+  // 一条步骤行
+  .step {
+    position: relative;
+  }
+
+  // 连接线只画在「上一条也是步骤」时：无条件画的话，一段旁白后面那条
+  // 步骤上方会吊着一截连到空处的线。
+  //
+  // **写全 `.step + .step`，不能写 `& + &`**：这一块嵌在 `.TerminalFeed` 里，
+  // scss 的 `&` 展开成整条复合选择器，`& + &` 出来的是
+  // `.TerminalFeed .step + .TerminalFeed .step` —— 要求相邻兄弟自己是
+  // 一个 .TerminalFeed，永远匹配不上（实测：那条竖线一根都没画出来）。
+  .step + .step {
+    margin-top: 2px;
+
+    &::before {
+      content: "";
+      position: absolute;
+      left: 10px; // 图标列宽 20 的中线
+      top: -8px;
+      width: 1px;
+      height: 10px;
+      background: var(--border);
+    }
+  }
+
+  .stepHead {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 28px; // 这一屏最轻的一档，比正文行还要再紧一档
+    padding: 0;
+    border: none;
+    background: transparent;
+    // 次级色：它是「回答之前发生了什么」，不该和结论抢重量
+    color: var(--muted-foreground);
+    font-size: var(--text-md);
+    text-align: left;
+    cursor: pointer;
+
+    // 没有底色可加（整行就落在背景上），所以悬停整行提亮
+    &:hover {
+      color: var(--foreground);
+
+      .stepName,
+      .stepCaret,
+      .stepStatus {
+        color: var(--foreground);
+      }
+    }
+  }
+
+  // 图标固定占一列 20px，让所有步骤的文字起点对齐 —— 竖线也按这一列的中线画
+  .stepIcon {
+    display: inline-flex;
+    justify-content: center;
+    flex: none;
+    width: 20px;
+    color: var(--muted-foreground);
+    font-size: 16px;
+  }
+
+  // 执行中：与 SessionPanels 同一口径走 --primary（墨黑 / 暗色下近白），
+  // 绿留给「成功」—— 一屏之内不出现两种「执行中」
+  .stepIconLive {
+    color: var(--primary);
+  }
+
+  .stepName {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: var(--text-sm);
+    transition: color 0.15s;
+  }
+
+  // 「正在处理…」那一行的名称走正文色：它是这一刻唯一在动的东西
+  .stepNameLive {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: var(--text-sm);
+    color: var(--foreground);
+  }
+
+  // 工具名：一枚淡底小标，不与这次的入参抢字重
+  .stepFrom {
+    flex: none;
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    background: var(--muted);
+    color: var(--muted-foreground);
+    font-size: var(--text-sm);
+    line-height: 18px;
+  }
+
+  // 状态紧跟名称、用间隔点连起来，不甩到行尾：耗时/状态是这一步的一部分，
+  // 推到右边缘之后名称和它之间隔着一整行空白，要来回扫两次才读得到一句话
+  .stepStatus {
+    flex: none;
+    color: var(--muted-foreground);
+    font-size: var(--text-sm);
+    font-variant-numeric: tabular-nums;
+    transition: color 0.15s;
+
+    &::before {
+      content: "·";
+      margin: 0 6px;
+    }
+  }
+
+  // 箭头紧跟内容，不顶到行尾
+  .stepCaret {
+    flex: none;
+    margin-left: 6px;
+    color: var(--muted-foreground);
+    font-size: var(--text-sm);
+    transition: color 0.15s;
+  }
+
+  // 展开的详情缩进到文字列，并由一条竖线兜住：缩进说明「这是上面那步的内容」，
+  // 竖线让长内容展开后仍看得出归属
+  .stepBody {
+    margin: 4px 0 2px 10px;
+    padding: 2px 0 2px 20px;
+    border-left: 1px solid var(--border);
+  }
+
+  .stepLabel {
+    margin: 8px 0 5px;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--muted-foreground);
+
+    &:first-child {
+      margin-top: 0;
+    }
+  }
+
+  .stepCode {
+    margin: 0;
+    padding: 8px 10px;
+    max-height: 260px;
+    overflow: auto;
+    border-radius: var(--radius-sm);
+    background: var(--muted);
+    color: var(--foreground);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    line-height: 1.65;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   // 命令输出：终端吐出来的原文。深色终端面 + 等宽 —— 这是唯一还需要
   // 终端形态的地方（--term-* 不跟随主题，见 tokens.scss）。
+  // **和上面的模型正文是两类东西**：正文是写给人读的一段话（比例字 16/1.5），
+  // 输出是按列对齐才读得懂的机器文本，换成比例字就散了。
   .resultLine {
     display: flex;
     gap: 8px;
+    margin-top: 5px;
     padding: 8px 10px;
-    border-radius: var(--radius);
+    border-radius: var(--radius-sm);
     background: var(--term-bg);
-
-    .resultElbow {
-      flex: none;
-      font-family: var(--font-mono);
-      font-size: var(--text-sm);
-      line-height: 1.6;
-      color: color-mix(in srgb, var(--term-fg) 30%, transparent);
-    }
 
     .resultBody {
       min-width: 0;
@@ -264,60 +446,11 @@
     }
   }
 
-  // ---------- 执行中：一行「正在处理… · 7秒」 ----------
-  // 秒表是「还在跑」与「卡死了」的唯一区别，所以它一直挂在这一轮末尾走字。
-  .working {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: var(--text-base);
-    color: var(--muted-foreground);
-
-    .workingDot {
-      flex: none;
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--primary);
-      animation: working-pulse 1.1s ease-in-out infinite;
-    }
-
-    .workingText {
-      color: var(--foreground);
-    }
-
-    .workingElapsed {
-      font-variant-numeric: tabular-nums;
-    }
-
-    // 已走的步数 / 最近一个动作：弱化，别抢正文
-    .workingSteps {
-      white-space: nowrap;
-    }
-
-    .workingAction {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-family: var(--font-mono);
-      font-size: var(--text-sm);
-    }
-  }
 }
 
-@keyframes working-pulse {
-  0%,
-  100% {
-    transform: scale(1);
-    opacity: 1;
-  }
-
-  50% {
-    transform: scale(1.45);
-    opacity: 0.55;
-  }
-}
+// 「正在处理…」不再是独立形态：它就是这条链的最后一行，走的是上面那套
+// `.step` / `.stepIcon` / `.stepStatus`（见组件里的 Working）。原先那颗
+// 脉冲圆点与两种「执行中」记号已删 —— 一屏之内只留一套。
 
   // 交互式选择卡片（AskUserQuestion 同步）：琥珀色调，暗示「等待输入」。
   //

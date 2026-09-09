@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 
 import dayjs from "dayjs";
+import { Icon } from "@hsu-react/ui";
 import SessionMarkdown from "../SessionMarkdown";
 import { SessionImageCtx } from "@/utils/sessionImages";
 
@@ -362,6 +363,96 @@ const ClampBox: React.FC<{
   );
 };
 
+/* ---------- 执行链：把一轮的过程排成一条竖线时间轴 ---------- */
+
+/**
+ * 一条 `role=tool` 的内容拆成「工具名 ＋ 这次拿它干了什么」。
+ *
+ * 不是猜的格式：后端就是 `format!("{name}: {hint}")` 拼出来的
+ * （am-core `scanner.rs:1806-1811` 的 claude 链路、`:1699-1705` 的 codex 链路），
+ * 而工具名里不可能出现 `": "` —— 所以按**第一个** `": "` 切一刀就是原样还原。
+ *
+ * 切不到就整条当工具名（没有入参提示的调用，如 `ListAgents`）。
+ *
+ * **不按 `" | "` 再切成多次调用**：后端确实用它连接同一条记录里的多次调用
+ * （`scanner.rs:1841` 的 `tools.join(" | ")`），但入参提示本身可以带管道
+ * （`Bash: ls | grep x`），按字面切会把一条命令劈成两步。实测最近 8 个会话的
+ * 891 次调用**全部**是「一条记录一次调用」，所以这里不冒那个险 ——
+ * 真要拆开，该由后端出结构化数组（见文件末尾的 TODO）。
+ */
+const splitToolLine = (content: string) => {
+  const i = content.indexOf(": ");
+  if (i < 0) return { name: content.trim(), hint: "" };
+  return {
+    name: content.slice(0, i).trim(),
+    hint: content.slice(i + 2).trim(),
+  };
+};
+
+/**
+ * `mcp__playwright__browser_click` → `Browser click`。
+ *
+ * 照 VitaAgent `MessageList/index.tsx:71-79`：链上写的是「一句人话」，
+ * 不是原始函数名 —— 原始名在展开后仍看得到，排查时要的是它，
+ * 扫一眼「它刚做了什么」时要的是这句。`server__` 前缀去掉，来源另有一枚标。
+ */
+const humanTool = (name: string) => {
+  const bare = name.includes("__")
+    ? name.slice(name.lastIndexOf("__") + 2)
+    : name;
+  const words = bare.replace(/[_-]+/g, " ").trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : name;
+};
+
+/** 执行链里的一步：一次工具调用（带它的输出），或模型干活途中说的一段话 */
+interface ChainCall {
+  kind: "call";
+  key: string;
+  /** 原始工具名，展开后照原样给 */
+  name: string;
+  /** 入参提示（命令 / 路径 / 描述），后端 `tool_input_hint` 挑出来的那一个 */
+  hint: string;
+  /** 这次调用的输出。一条调用可能跟着多条输出记录 */
+  results: { key: string; text: string }[];
+}
+interface ChainNote {
+  kind: "note";
+  key: string;
+  msg: PortalMessage;
+}
+type ChainItem = ChainCall | ChainNote;
+
+/**
+ * 一串链项概括成一句话：`跑了 6 条命令，查了 3 次资料`。
+ *
+ * 照 VitaAgent `MessageList/index.tsx:260-297`：按类别数数，不逐条列。
+ * 分类只按工具名的形态，不做「哪个工具叫什么」的字面表；名字对不上就落到
+ * 「调用了 N 次工具」这一档 —— 少说一句总好过说错。
+ *
+ * 接受**任意子集**而不是整条链：跑的时候这一行概括的是「已经收进去的那些」，
+ * 跑完了才是整条链，两处同一套措辞。
+ */
+const summarizeChain = (items: ChainItem[]): string => {
+  const calls = items.filter((i): i is ChainCall => i.kind === "call");
+  const ran = calls.filter((c) => /^bash/i.test(c.name));
+  const rest1 = calls.filter((c) => !ran.includes(c));
+  const looked = rest1.filter((c) =>
+    /^(read|glob|grep|websearch|webfetch|notebookread|ls)$|search|query|fetch|list|read/i.test(
+      c.name,
+    ),
+  );
+  const rest2 = rest1.filter((c) => !looked.includes(c));
+  const wrote = rest2.filter((c) => /write|edit|patch/i.test(c.name));
+  const others = rest2.filter((c) => !wrote.includes(c));
+
+  const clauses: string[] = [];
+  if (ran.length) clauses.push(`跑了 ${ran.length} 条命令`);
+  if (looked.length) clauses.push(`查了 ${looked.length} 次资料`);
+  if (wrote.length) clauses.push(`改了 ${wrote.length} 个文件`);
+  if (others.length) clauses.push(`调用了 ${others.length} 次工具`);
+  return clauses.join("，");
+};
+
 /**
  * 一轮执行中的秒表：「正在处理… · 7秒」。
  *
@@ -369,14 +460,21 @@ const ClampBox: React.FC<{
  * 推理里它能十几秒纹丝不动，看着和卡死没有区别。**耗时是「还在跑」与
  * 「卡住了」的唯一区别**，所以它每秒走字。
  *
+ * 形态与链上的步骤行统一（`.step`）：它就是这条链的最后一行 ——
+ * 照 VitaAgent `MessageList/index.tsx:158-186` 的 `Working`，
+ * 那边同样是「转圈图标 ＋ 正在处理… ＋ 耗时」这一套步骤行，
+ * 挂在链与正文的下面（`:1068`）。
+ *
+ * 「最近动作」不再单列：链上摊着的最后三步已经把它说得更清楚，
+ * 再在这里印一遍就是同一句话说两回。
+ *
  * 口径与 SessionPanels / SubAgentChip 共用 `fmtElapsed`：起点取这一轮的
  * 起始时间戳（会话记录里的时刻），全项目只有这一套算法。
  */
 const Working: React.FC<{
   since?: string;
   steps: number;
-  lastAction?: string;
-}> = ({ since, steps, lastAction }) => {
+}> = ({ since, steps }) => {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -386,16 +484,242 @@ const Working: React.FC<{
   const elapsed = fmtElapsed(since, now);
 
   return (
-    <div className={styles.working}>
-      <span className={styles.workingDot} />
-      <span className={styles.workingText}>正在处理…</span>
-      {elapsed ? (
-        <span className={styles.workingElapsed}>· {elapsed}</span>
+    <div className={styles.step}>
+      <div className={styles.stepHead}>
+        <Icon
+          icon="LoadingOutlined"
+          className={`${styles.stepIcon} ${styles.stepIconLive}`}
+        />
+        <span className={styles.stepNameLive}>正在处理…</span>
+        {elapsed ? (
+          <span className={styles.stepStatus}>{elapsed}</span>
+        ) : null}
+        {steps > 0 ? (
+          <span className={styles.stepStatus}>已 {steps} 步</span>
+        ) : null}
+      </div>
+    </div>
+  );
+};
+
+/**
+ * 命令的原始输出。**这一块仍然是终端形态**：等宽字 ＋ 深色终端面。
+ *
+ * 它和模型正文是两类东西，改成执行链之后这条界线一点没松：正文走比例字
+ * 16/1.5 ＋ markdown 基线（`styles/_chatMarkdown.scss`），输出走 `--term-*`
+ * 那块深底 —— 按列对齐才读得懂的东西，换成比例字就散了。
+ */
+const ResultBlock: React.FC<{
+  text: string;
+  open: boolean;
+  onToggle: () => void;
+}> = ({ text, open, onToggle }) => {
+  const lines = text.split("\n");
+  const long = lines.length > RESULT_CLAMP_LINES;
+  const clamped = long && !open;
+  const shown = clamped
+    ? lines.slice(0, RESULT_CLAMP_LINES).join("\n")
+    : text;
+
+  return (
+    <div className={styles.resultLine}>
+      <div className={styles.resultBody}>
+        <pre className={styles.resultText}>{shown}</pre>
+        {long ? (
+          <span
+            className={styles.expandBtn}
+            role="button"
+            tabIndex={0}
+            aria-expanded={!clamped}
+            onClick={onToggle}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onToggle();
+              }
+            }}
+          >
+            {clamped
+              ? `展开其余 ${lines.length - RESULT_CLAMP_LINES} 行`
+              : "收起"}
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+};
+
+/**
+ * 链上的一步。**不是卡片**：图标 ＋ 名称直接落在背景上，
+ * 相邻两步之间由一小段竖线连起来（`.step + .step::before`）。
+ *
+ * 照 VitaAgent `MessageList/index.tsx:81-148` 的 `ToolCard`：
+ * 图标列 20 宽、行高 28、名称与状态之间用间隔点连读、箭头紧跟内容，
+ * 展开后是「工具 / 入参 / 返回」三段。
+ *
+ * 右端的状态**只在真有依据时才写**：这一步还在跑（跑着的那一轮里、最后一次
+ * 调用还没有任何输出）写「执行中…」。耗时与成功/失败后端没下发 ——
+ * 详见文件末尾的 TODO，宁可空着也不拿两条记录的时间戳相减冒充。
+ */
+const StepRow: React.FC<{
+  step: ChainCall;
+  running: boolean;
+  open: boolean;
+  onToggle: () => void;
+  expanded: Record<string, boolean>;
+  toggleExpand: (key: string) => void;
+}> = ({ step, running, open, onToggle, expanded, toggleExpand }) => {
+  const human = step.name ? humanTool(step.name) : "命令输出";
+
+  return (
+    <div className={styles.step}>
+      <button
+        type="button"
+        className={styles.stepHead}
+        aria-expanded={open}
+        onClick={onToggle}
+      >
+        <Icon
+          icon={running ? "LoadingOutlined" : "ToolOutlined"}
+          className={`${styles.stepIcon} ${running ? styles.stepIconLive : ""}`}
+        />
+        {/* 工具名挂成一枚淡底小标：一列 `Browser click` / `Bash` 里，
+            「这是哪个工具」比它这次的入参更先要回答。
+            没有入参提示时它就是这一行的全部内容，不再另摆一枚重复的标 */}
+        {step.hint ? (
+          <span className={styles.stepFrom}>{human}</span>
+        ) : null}
+        <span className={styles.stepName}>{step.hint || human}</span>
+        {running ? <span className={styles.stepStatus}>执行中…</span> : null}
+        <Icon
+          icon={open ? "UpOutlined" : "DownOutlined"}
+          className={styles.stepCaret}
+        />
+      </button>
+
+      {open ? (
+        <div className={styles.stepBody}>
+          {/* 原始工具名只在展开后给 —— 收起时那一行要读起来像句话 */}
+          <div className={styles.stepLabel}>工具</div>
+          <pre className={styles.stepCode}>{step.name || "—"}</pre>
+          {step.hint ? (
+            <>
+              <div className={styles.stepLabel}>入参</div>
+              <pre className={styles.stepCode}>{step.hint}</pre>
+            </>
+          ) : null}
+          {step.results.length ? (
+            <>
+              <div className={styles.stepLabel}>返回</div>
+              {step.results.map((r) => (
+                <ResultBlock
+                  key={r.key}
+                  text={r.text}
+                  open={!!expanded[r.key]}
+                  onToggle={() => toggleExpand(r.key)}
+                />
+              ))}
+            </>
+          ) : null}
+        </div>
       ) : null}
-      {steps > 0 ? <span className={styles.workingSteps}>· 已 {steps} 步</span> : null}
-      {lastAction ? (
-        <span className={styles.workingAction}>{lastAction}</span>
+    </div>
+  );
+};
+
+/** 跑的时候留在链外的步数（在跑的那一条 ＋ 它前面两条），照 VitaAgent `:342` */
+const RECENT_STEPS = 3;
+
+/**
+ * 一轮的执行链：一条竖线时间轴，**结论不在里面**。
+ *
+ * 折叠策略照 VitaAgent `MessageList/index.tsx:316-360`：
+ *
+ *   跑完了 → 整条链收成一行摘要（`跑了 6 条命令，查了 3 次资料`），
+ *            默认收起。那时人要读的是结论，过程该让位。
+ *   跑着呢 → **最近三步摊在外面**、更早的收进摘要行。那会儿用户盯的正是
+ *            「现在到哪一步了」，全折起来等于把它在干什么藏了。
+ *
+ * 摘要行为空（一次工具都没调）时整条链不成立，调用方直接按正文渲染 ——
+ * 否则跑完之后这一轮会渲染成一个空的折叠块，内容凭空消失。
+ */
+const ExecChain: React.FC<{
+  items: ChainItem[];
+  live?: boolean;
+  open: boolean;
+  onToggle: () => void;
+  expanded: Record<string, boolean>;
+  toggleExpand: (key: string) => void;
+  renderNote: (m: PortalMessage, key: string) => React.ReactNode;
+}> = ({
+  items,
+  live,
+  open,
+  onToggle,
+  expanded,
+  toggleExpand,
+  renderNote,
+}) => {
+  /* 留在外面的按「步」数，不按「链项」数：旁白是围着某一步说的话，
+     跟着它一起留在外面。按链项切的话，一段长旁白就能把窗口占满，
+     屏幕上只剩一条步骤 —— VitaAgent `:336-341` 记的就是这个实测 */
+  const stepAt = items
+    .map((it, i) => (it.kind === "call" ? i : -1))
+    .filter((i) => i >= 0);
+  const firstKeep =
+    stepAt.length > RECENT_STEPS ? stepAt[stepAt.length - RECENT_STEPS] : 0;
+  const hidden = live && !open ? firstKeep : 0;
+  const shown = open ? items : live ? items.slice(hidden) : [];
+  /** 头一行概括谁：跑的时候是收进去的那些，展开或跑完了是整条链 */
+  const headText = summarizeChain(open || !live ? items : items.slice(0, hidden));
+
+  /* 「还在跑的那一步」：跑着的这一轮里，最后一次调用还没有任何输出。
+     判据是结构上的（调用与它的输出成对出现），不是拿时间戳猜的 */
+  const lastCall = [...items]
+    .reverse()
+    .find((i): i is ChainCall => i.kind === "call");
+  const runningKey =
+    live && lastCall && !lastCall.results.length ? lastCall.key : "";
+
+  return (
+    <div className={styles.chain}>
+      {/* 刚开跑、还没有东西可收的时候不摆这一行 */}
+      {headText ? (
+        <button
+          type="button"
+          className={styles.chainHead}
+          aria-expanded={open}
+          onClick={onToggle}
+        >
+          <span className={styles.chainText}>{headText}</span>
+          <Icon
+            icon={open ? "UpOutlined" : "DownOutlined"}
+            className={styles.stepCaret}
+          />
+        </button>
       ) : null}
+      {/* 跑的时候「还在外面的那几条」要和上面那句摘要拉开距离：它们是两种东西 ——
+          上面那行是「已经收进去的」，下面这几条是「还在外面的」。
+          贴着排的话看上去就成了「摘要展开后的内容」，正好是反的 */}
+      <div className={live && headText && !open ? styles.chainLive : undefined}>
+        {shown.map((it) =>
+          it.kind === "note" ? (
+            <div key={it.key} className={styles.chainNote}>
+              {renderNote(it.msg, it.key)}
+            </div>
+          ) : (
+            <StepRow
+              key={it.key}
+              step={it}
+              running={it.key === runningKey}
+              open={!!expanded[it.key]}
+              onToggle={() => toggleExpand(it.key)}
+              expanded={expanded}
+              toggleExpand={toggleExpand}
+            />
+          ),
+        )}
+      </div>
     </div>
   );
 };
@@ -423,48 +747,8 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
       );
     }
 
-    // 工具调用行：这是条命令，等宽字
-    if (m.role === "tool") {
-      return (
-        <div key={key} className={styles.toolLine}>
-          <span className={styles.toolText}>{m.content}</span>
-        </div>
-      );
-    }
-
-    // 命令输出：终端吐出来的原文，深色终端面 + 等宽字
-    if (m.role === "tool_result") {
-      const lines = m.content.split("\n");
-      const clamped = lines.length > RESULT_CLAMP_LINES && !expanded[key];
-      const shown = clamped
-        ? lines.slice(0, RESULT_CLAMP_LINES).join("\n")
-        : m.content;
-      return (
-        <div key={key} className={styles.resultLine}>
-          <span className={styles.resultElbow}>⎿</span>
-          <div className={styles.resultBody}>
-            <pre className={styles.resultText}>{shown}</pre>
-            {lines.length > RESULT_CLAMP_LINES && (
-              <span
-                className={styles.expandBtn}
-                role="button"
-                tabIndex={0}
-                aria-expanded={!clamped}
-                onClick={() => toggleExpand(key)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    toggleExpand(key);
-                  }
-                }}
-              >
-                {clamped ? `展开其余 ${lines.length - RESULT_CLAMP_LINES} 行` : "收起"}
-              </span>
-            )}
-          </div>
-        </div>
-      );
-    }
+    // 工具调用与命令输出不走这里：它们是过程，一律进执行链（见 ExecChain）。
+    // 只有链才认得「一次调用 ＋ 它的输出」这对关系，摊成两行平铺是上一版的形态。
 
     // 模型正文：比例字 + 共享 markdown 基线，平铺，不带卡片
     return (
@@ -503,10 +787,8 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
         // （清单与后台任务是「当前状态」，已由 ChatPane 抽成单独的状态卡，
         // 挂在对话流末尾；选择卡同理挂在输入框上方，都不进内容流。）
         const visibleItems = keyed;
-        // 执行中时给一条「最近动作」预览（最后一条工具调用）＋ 已走的步数
-        const lastTool = inProgress
-          ? [...turn.items].reverse().find((m) => m.role === "tool")
-          : undefined;
+        // 执行中时报一下已走的步数。「最近动作」不再单列 ——
+        // 链上摊着的最后三步已经把它说得更清楚（见 ExecChain）
         const runSteps = inProgress
           ? turn.items.filter((m) => m.role === "tool").length
           : 0;
@@ -539,97 +821,110 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
             {(visibleItems.length > 0 || inProgress) && (
               <div className={styles.agent}>
                 {(() => {
-                    const out: React.ReactNode[] = [];
-                    let group: { m: PortalMessage; k: string }[] = [];
-                    // 折叠组的身份 = 「本轮里的第几个过程块」，不是「第一条消息的指纹」。
-                    // 执行中每落下一段新正文，分组就会重新切一次：原先挂在末尾的过程块
-                    // 被并进前一个块里，若按首条指纹取 key，key 一变，用户刚点开的
-                    // 过程块就自己合上了。按序号取则跨刷新稳定，展开/收起都由用户说了算
-                    // （默认收起，`expanded` 只被点击写入，没有任何地方会重置它）。
-                    let gIdx = 0;
-                    const flush = () => {
-                      if (!group.length) {
-                        return;
-                      }
-                      const gkey = `tg|${turn.key}|${gIdx}`;
-                      gIdx += 1;
-                      const openG = !!expanded[gkey];
-                      // 有工具就按工具步数报数（「查了 6 步」比「6 条消息」更贴近直觉），
-                      // 纯文字过程才退回条数
-                      const steps = group.filter((x) => x.m.role === "tool").length;
-                      out.push(
-                        <div key={gkey} className={styles.process}>
-                          <span
-                            className={styles.processHead}
-                            role="button"
-                            tabIndex={0}
-                            aria-expanded={openG}
-                            onClick={() => toggleExpand(gkey)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" || e.key === " ") {
-                                e.preventDefault();
-                                toggleExpand(gkey);
-                              }
-                            }}
-                          >
-                            <span className={styles.processArrow}>
-                              {openG ? "▾" : "▸"}
-                            </span>
-                            执行过程 · {steps || group.length} 步
-                          </span>
-                          {openG ? (
-                            <div className={styles.processBody}>
-                              {group.map(({ m, k }) => renderItem(m, k))}
-                            </div>
-                          ) : null}
-                        </div>,
-                      );
-                      group = [];
-                    };
+                    /* 一轮拆成两半：**过程进链，结论进正文**。
+                       这是这一版的全部：工具调用不再是平铺的一行原始文本，
+                       而是链上的一步；最终答案不再是链里的一个节点，
+                       而是普通正文（比例字 ＋ markdown 基线）。
 
-                    // 「最后一条产出」之前的**全部**内容（工具流水、中途的助手说明、
-                    // 已被后续结论取代的方案卡）并成一行折叠，只留最后那条产出展开。
-                    //
-                    // 执行中与已结束**共用这一条规则**，没有第二套判断：执行中的
-                    // 「最后一条产出」就是它此刻正在写的那段正文，本来就该看得见。
-                    // 曾经执行中走的是 `visibleItems.length`（＝全部进折叠组），于是
-                    // 已经产出的内容被整段折起来，卡片上只剩一行「执行中…」，
-                    // 一轮还没落下任何条目时连折叠行都没有 —— 就是那张空卡。
-                    // 共用一套规则还顺带保证：running 翻成 false 的那一刻布局不变，
-                    // 只是底部的「正在处理…」消失，不会闪、不会跳。
-                    const lastOutIdx = visibleItems.reduce(
-                      (acc, { m }, i) =>
-                        ["assistant", "plan"].includes(m.role) ? i : acc,
-                      -1,
-                    );
+                       分界线照 VitaAgent `MessageList/index.tsx:601-637`：
+
+                         跑完了 → **最后一段产出（assistant / plan）就是结论**，
+                                  留在正文；它之前的一切都是过程，收进链。
+                                  不能按「最后一次工具调用」切：一轮若以工具结尾
+                                  （问路那种），它前面那段正文恰恰是说给人听的话，
+                                  按那个判据整条回答会一个字都不剩。
+                         跑着呢 → **最后一步过程之后的正文才是「正在写的那段」**，
+                                  之前的每段正文都是旁白，按发生顺序收进链。
+                                  沿用跑完那条的话，旁白会被留在链的**下面**、
+                                  而它引出的那几步却在链里 —— 顺序整个反了。 */
+                    const isProc = (m: PortalMessage) =>
+                      m.role === "tool" || m.role === "tool_result";
+                    let lastOut = -1;
+                    let lastProc = -1;
+                    visibleItems.forEach(({ m }, i) => {
+                      if (
+                        (m.role === "assistant" || m.role === "plan") &&
+                        m.content.trim()
+                      ) {
+                        lastOut = i;
+                      }
+                      if (isProc(m)) lastProc = i;
+                    });
+
+                    const chain: ChainItem[] = [];
+                    const body: { m: PortalMessage; k: string }[] = [];
 
                     visibleItems.forEach((it, i) => {
                       const { m, k } = it;
-                      // 待批准的方案在执行中永远展开：它在等你点头，折起来
-                      // 就等于把要办的事藏了。（回合结束后它已被结论取代，照折。）
-                      if (inProgress && m.role === "plan") {
-                        flush();
-                        out.push(renderItem(m, k));
+                      if (m.role === "tool") {
+                        const { name, hint } = splitToolLine(m.content);
+                        chain.push({
+                          kind: "call",
+                          key: k,
+                          name,
+                          hint,
+                          results: [],
+                        });
                         return;
                       }
-                      // 结论之前的一律进折叠组；结论及其之后的按原规则（工具仍折叠）
-                      const isTool = m.role === "tool" || m.role === "tool_result";
-                      if (isTool || (lastOutIdx >= 0 && i < lastOutIdx)) {
-                        group.push(it);
-                      } else {
-                        flush();
-                        out.push(renderItem(m, k));
+                      if (m.role === "tool_result") {
+                        /* 输出挂到**它前面那次调用**上：协议顺序就是先调用后回结果，
+                           所以「紧挨着的上一步」就是它的归属，不用再猜。
+                           一次调用可能跟着多条输出记录，全挂上去。
+                           找不到上一步（历史裁剪把调用那条丢了）就自成一步，
+                           内容一条都不丢。 */
+                        const last = chain[chain.length - 1];
+                        if (last && last.kind === "call") {
+                          last.results.push({ key: k, text: m.content });
+                        } else {
+                          chain.push({
+                            kind: "call",
+                            key: k,
+                            name: "",
+                            hint: "",
+                            results: [{ key: k, text: m.content }],
+                          });
+                        }
+                        return;
                       }
+                      // 待批准的方案在执行中永远留在正文：它在等你点头，
+                      // 收进链里就等于把要办的事藏了
+                      if (inProgress && m.role === "plan") {
+                        body.push(it);
+                        return;
+                      }
+                      const isBody = inProgress ? i > lastProc : i >= lastOut;
+                      if (isBody) body.push(it);
+                      else chain.push({ kind: "note", key: k, msg: m });
                     });
-                    flush();
-                    return out;
+
+                    /* 一次工具都没调：整轮都是正文，不摆链。
+                       摆的话摘要行是空字符串、跑完之后 `shown` 又是空数组，
+                       这一轮会渲染成一个什么都没有的空块 —— 内容凭空消失。 */
+                    if (!chain.some((c) => c.kind === "call")) {
+                      return visibleItems.map(({ m, k }) => renderItem(m, k));
+                    }
+
+                    const ckey = `chain|${turn.key}`;
+                    return [
+                      <ExecChain
+                        key="chain"
+                        items={chain}
+                        live={inProgress}
+                        open={!!expanded[ckey]}
+                        onToggle={() => toggleExpand(ckey)}
+                        expanded={expanded}
+                        toggleExpand={toggleExpand}
+                        renderNote={renderItem}
+                      />,
+                      ...body.map(({ m, k }) => renderItem(m, k)),
+                    ];
                 })()}
                 {inProgress ? (
                   <Working
                     // 起点取这一轮的起始时刻：有用户消息就用它，否则退回首条产出
                     since={turn.user?.timestamp ?? turn.items[0]?.timestamp}
                     steps={runSteps}
-                    lastAction={lastTool?.content}
                   />
                 ) : null}
                 {/* 落款：来源代理 + 时间。原先挂在终端卡的标题栏上，卡片撤掉之后
@@ -656,5 +951,30 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
     </div>
   );
 };
+
+/*
+ * TODO(am-core): 执行链缺三样后端此刻不下发的东西，都要改 `MessageBrief`
+ * （`agent-task-monitor/core/src/model.rs:77`）＋ `entry_to_brief`
+ * （`core/src/scanner.rs:1727` 起）才能补上：
+ *
+ *   1. **每步耗时**。原始 jsonl 里根本没有：`durationMs` 只挂在
+ *      `type=system, subtype=turn_duration` 上（**整轮**的耗时），
+ *      `toolUseResult` 里一个时间字段都没有。拿「工具那条记录的时间戳」减
+ *      「结果那条记录的时间戳」不成立 —— 实测最近 8 个会话 891 对里，
+ *      `Agent` 全部落在 0.02–0.1s（子代理实际跑几分钟），`Bash` 中位数 0.08s
+ *      而最小 0.01s（一个 shell 都起不来）。它量的是记录落盘的间隔，不是执行时间。
+ *      要真耗时得后端在调用与结果配对时自己计时并下发 `durationMs`。
+ *   2. **每步成败**。这个原始数据里**有**：`tool_result` 块上带 `is_error`
+ *      （实测 27 条 true / 1152 条 false），但 `entry_to_brief` 只取了文本、
+ *      把它丢了（`scanner.rs:1758-1766`）。加一个 `isError?: bool` 即可，
+ *      前端这边 `.stepBad` 的样式已经备好了。
+ *   3. **多次调用的拆分**。同一条 assistant 记录里的多次 tool_use 被
+ *      `tools.join(" | ")` 拼成一条（`scanner.rs:1841`），前端没法安全拆开
+ *      （命令自己就可能带管道）。该出成结构化数组而不是拼字符串。
+ *
+ * 思考过程（VitaAgent 单独一档）**这一版不做，也不建议做**：原始 jsonl 里
+ * 有 `thinking` 块，但实测 25 个会话 1339 个块里 1326 个的 `thinking` 是空串
+ * （只剩加密的 `signature`）—— 能显示内容的不到 1%，做出来的是一排空壳。
+ */
 
 export default TerminalFeed;
