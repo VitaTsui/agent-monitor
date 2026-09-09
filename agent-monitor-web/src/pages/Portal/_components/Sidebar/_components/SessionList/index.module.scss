@@ -53,9 +53,11 @@
     border-radius: 50%;
     background: var(--subtle-foreground);
 
+    // 「执行中」走主色（墨黑 / 暗色下近白）＋ 光晕，不是绿色 ——
+    // 绿是「成功」的语义。全项目一个口径：SessionPanels、TerminalFeed 同此。
     &.running {
-      background: var(--success);
-      box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 16%, transparent);
+      background: var(--primary);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent);
     }
     &.idle {
       background: var(--warning);
@@ -112,12 +114,16 @@
       border-radius: var(--radius-full);
       font-size: var(--text-xs);
       line-height: 17px;
+      // 两个字的状态在窄侧栏里会被折成两行（「执行 / 中」），胶囊也就跟着裂开
+      white-space: nowrap;
       background: color-mix(in srgb, var(--foreground) 7%, transparent);
       color: var(--muted-foreground);
 
+      // 「执行中」走主色而不是绿：绿留给「成功」。不加粗 —— 侧栏就这么宽，
+      // 加粗把胶囊撑出容器、末字被裁掉；深浅差已经够把它和其余状态分开。
       &.running {
-        background: color-mix(in srgb, var(--success) 14%, transparent);
-        color: var(--success);
+        background: color-mix(in srgb, var(--primary) 12%, transparent);
+        color: var(--primary);
       }
 
       &.idle {

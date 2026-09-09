@@ -136,8 +136,9 @@
         vertical-align: middle;
         background: var(--border);
 
+        // 「执行中」走主色 + 脉冲，绿留给「成功」（全项目一个口径）
         &.running {
-          background: var(--success);
+          background: var(--primary);
           animation: mobilePulse 1.4s ease-in-out infinite;
         }
         &.idle {

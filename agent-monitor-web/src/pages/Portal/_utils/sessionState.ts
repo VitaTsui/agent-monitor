@@ -38,14 +38,36 @@ export interface BgTask {
   startedAt?: string;
 }
 
-/** 已结束的后台任务状态：不再有关注价值，不展示 */
-export const BG_DONE = ["completed", "failed", "killed", "stopped"];
+/**
+ * **正常跑完**的后台任务：结论已经并回主对话，清单里不必再占位置。
+ *
+ * 这里曾经把 `failed / killed / stopped` 一起算作「已结束」滤掉 —— 于是一个跑砸的
+ * 子代理在界面上是**无声消失**的：它先显示「执行中」，某一刻自己没了，既没有失败提示
+ * 也没有痕迹，人只会以为它跑完了。而恰恰是失败/被终止这几种收场需要被看见：
+ * 成功的产出会出现在正文里，失败的什么都不会留下。
+ */
+export const BG_DONE = ["completed"];
+
+/**
+ * **异常收场**的后台任务：跑砸了、被杀了、被停了。
+ *
+ * 与 `BG_DONE` 分开的原因见上：这几种不能滤掉，要留在清单里并标成失败态。
+ * 会话记录里没有失败原因字段（scanner 的 `<task-notification>` 只解析 `<status>`），
+ * 所以能说的只有「哪一条、什么收场」——比原先什么都不说强得多。
+ */
+export const BG_FAILED = ["failed", "killed", "stopped"];
+
+/** 这条后台任务是异常收场（跑砸 / 被终止） */
+export const isBgFailed = (status: string) => BG_FAILED.includes(status);
 
 /** 后台任务状态的中文说法 */
 export const BG_LABEL: Record<string, string> = {
   running: "执行中",
   pending: "等待中",
   queued: "等待中",
+  failed: "失败",
+  killed: "已终止",
+  stopped: "已停止",
 };
 
 /**
@@ -67,17 +89,31 @@ export function parseLast<T>(messages: PortalMessage[], role: string): T[] {
   }
 }
 
-/** 还没结束的后台任务（执行中 / 等待中）。跑完的一律不算 */
+/**
+ * 值得展示的后台任务：还在跑的、在等的，**以及跑砸/被终止的**。
+ * 只有正常跑完的那些掉出去（理由见 `BG_DONE`）。
+ */
 export const aliveBgTasks = (messages: PortalMessage[]): BgTask[] =>
   parseLast<BgTask>(messages, "bgtasks").filter(
     (t) => !BG_DONE.includes(t.status),
   );
 
-/** 还在跑的子会话（异步子代理）—— 头部胶囊与子代理面板共用这一条口径 */
+/**
+ * 还在跑的子会话（异步子代理）—— 头部胶囊专用。
+ *
+ * 胶囊上写的是「运行中的子会话 · N」，所以这里比 `aliveBgTasks` 多滤一道异常收场：
+ * 失败的子代理该留在清单里被看见，但不该被数进「还在跑」的条数。
+ */
 export const runningSubAgents = (messages: PortalMessage[]): BgTask[] =>
+  aliveBgTasks(messages).filter(
+    (t) => t.kind === "agent" && !isBgFailed(t.status),
+  );
+
+/** 展示用的子会话（含失败/被终止的）—— 清单里要看得见 */
+export const visibleSubAgents = (messages: PortalMessage[]): BgTask[] =>
   aliveBgTasks(messages).filter((t) => t.kind === "agent");
 
-/** 还没结束的后台命令（子代理之外的那些） */
+/** 值得展示的后台命令（子代理之外的那些，含失败/被终止的） */
 export const aliveBgCommands = (messages: PortalMessage[]): BgTask[] =>
   aliveBgTasks(messages).filter((t) => t.kind !== "agent");
 

@@ -73,7 +73,12 @@
   // ---- 等宽字体 ----
   // 终端输出、会话 id、命令行这些「按列对齐才读得懂」的地方用它。
   // 同样是收口：原来五个 scss 各自写了一份，其中两份漏了 Linux 的 Liberation Mono。
-  --font-mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  //
+  // **必须带中文兜底**：行内代码里常夹着中文（文件名、字段说明），而前面这几支
+  // 西文等宽字都没有中文字形，中文会一路回退到浏览器默认字体 —— 那是比例字且字宽
+  // 极大，表现成「一句话中间的字忽然被撑开一截」。
+  --font-mono: "SF Mono", Menlo, Consolas, "Liberation Mono", "PingFang SC",
+    "Microsoft YaHei", monospace;
 
   // ---- 描边 / 聚焦 ----
   --border: var(--vita-border);

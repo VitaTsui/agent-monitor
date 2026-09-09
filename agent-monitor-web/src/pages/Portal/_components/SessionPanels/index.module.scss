@@ -1,221 +1,211 @@
-@use "@hsu-react/ui/es/styles/responsive" as r;
+// 会话的「当前状态」：排在对话流末尾的一组卡片，与正文同宽同侧、跟着一起滚。
+//
+// 形态照 VitaAgent 的任务卡（`web/src/pages/chat/_components/TaskCard/index.module.scss`）：
+//   卡片   padding 14/16、1px 描边、圆角 lg(12)、卡间距 8      （:14-19）
+//   头图标 28×28 描边色块、图标 16px 次级色                    （:36-51）
+//   条目   padding 8px 0、发丝线分隔、名字 13px 正文色          （:132-163）
+//   元信息 12px 次级色，与标题隔 2                              （:106-113）
+//   量胶囊 padding 2/6、圆角 sm、muted 底、11px/500、等宽数字   （:376-388）
+//   状态色 成功=success、失败=error、执行中=primary + 转动      （:94-119）
+//
+// 「执行中」在这里是**主色墨黑 + 脉冲**，不是绿色：VitaAgent 同一位置用的就是
+// `--vita-primary`（那边同样是 #18181b 墨黑），绿留给「成功」。原先本项目两处并存
+// —— 这里墨黑、TerminalFeed 与侧栏绿色，同一屏能同时出现两种「执行中」。
 
-// 悬浮在本格右侧的状态浮层：任务清单与后台任务两块独立堆叠、各自可收起。
-// 定位锚点是各自的 ChatPane（其 position: relative），
-// 这样多个会话并排时每格各带各的，不会叠在一起。
 .SessionPanels {
-  position: absolute;
-  // 头部高 62px，再留 6px 间距，避免贴着（甚至压住）头部
-  top: 68px;
-  right: 12px;
-  z-index: 5;
-  width: 250px;
-  // 窄格（多会话并排）时不许把内容压死
-  max-width: calc(100% - 24px);
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
   gap: 8px;
-  // 容器本身不拦截点击，只有面板实体拦
-  pointer-events: none;
-
-  > * {
-    pointer-events: auto;
-  }
-
-  // 窄屏：两块默认都是收起的胶囊，让它们并排一行，别各占一行；
-  // 移动端顶栏只有 48px(桌面头部 62)，胶囊往上贴近顶栏
-  @include r.down(md) {
-    // 胶囊相对 ChatPane(已在顶栏下方)定位，直接 10px 贴近内容顶部；
-    // 不能再加顶栏高度/刘海安全区(那已由 ChatPane 的位置计入，否则双重叠加)
-    top: 10px;
-    flex-direction: row;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-    gap: 6px;
-  }
+  // 与上方最后一条消息拉开一档：它不是对话的一部分，是这一格此刻的状态
+  margin-top: 20px;
 }
 
-%floating {
-  background: color-mix(in srgb, var(--term-fg) 96%, transparent);
-  backdrop-filter: blur(6px);
-  border: 1px solid var(--overlay-2);
-  box-shadow: 0 4px 20px color-mix(in srgb, var(--foreground) 12%, transparent);
+.card {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
 }
 
-.dock {
-  @extend %floating;
-  width: 100%;
-  min-height: 0;
+.head {
   display: flex;
-  flex-direction: column;
-  border-radius: var(--radius);
-  overflow: hidden;
-
-  .dockHead {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 7px 6px 7px 12px;
-    border-bottom: 1px solid var(--overlay-2);
-
-    .dockTitle {
-      flex: 1;
-      font-size: var(--text-sm);
-      font-weight: 600;
-      color: var(--foreground);
-    }
-
-    .dockCount {
-      font-size: var(--text-xs);
-      color: var(--primary);
-    }
-
-    .closeBtn {
-      width: 20px;
-      height: 20px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      border-radius: var(--radius-sm);
-      cursor: pointer;
-      color: var(--muted-foreground);
-      font-size: var(--text-xs);
-
-      &:hover {
-        background: var(--overlay-1);
-        color: var(--foreground);
-      }
-    }
-  }
-
-  // 悬浮在对话上方的浮层，占高了就挡内容：高度随内容自适应，132px 作为上限——
-  // 内容少时贴合真实高度不留空白，多了才滚动。
-  .dockBody {
-    max-height: 132px;
-    overflow-y: auto;
-    padding: 8px 12px;
-  }
+  align-items: flex-start;
+  gap: 10px;
 }
 
-// 收起态：一枚小胶囊，仍一眼可见进度 / 执行中数量
-.pill {
-  @extend %floating;
+// 图标放进一个描边色块 —— 它是这张卡「是什么」的标记
+.headTile {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 10px;
-  border-radius: var(--radius-full);
-  cursor: pointer;
-  font-size: 11.5px;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--background);
   color: var(--muted-foreground);
-  user-select: none;
+  font-size: 16px;
+}
 
-  &:hover {
-    color: var(--foreground);
+.headText {
+  flex: 1;
+  min-width: 0;
+}
+
+.headTitle {
+  display: block;
+  color: var(--foreground);
+  font-size: var(--text-md);
+  font-weight: 500;
+  line-height: 1.6;
+}
+
+.headMeta {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+}
+
+.list {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  // 条目多时自己滚，别把对话流末尾撑成一整屏清单
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.item {
+  padding: 8px 0;
+  // 分隔线用 --border 而不是 --border-weak：后者压在卡面上几乎看不见，
+  // 条目之间等于没有分隔
+  border-top: 1px solid var(--border);
+
+  &:first-child {
+    border-top: none;
+    padding-top: 0;
+  }
+
+  &:last-child {
+    padding-bottom: 0;
   }
 }
 
-.todoItem {
+.itemHead {
   display: flex;
-  align-items: flex-start; // 方框与首行文字对齐（文字可换行，不能整体居中）
+  align-items: center;
   gap: 8px;
-  font-size: var(--text-sm);
-  line-height: 1.7;
-  margin-bottom: 2px;
+  min-width: 0;
+}
 
-  // 真正的方框：尺寸/位置可控，替代对不齐的 unicode glyph
-  .todoBox {
+.itemName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--foreground);
+  font-size: var(--text-base);
+}
+
+.itemStatus {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+}
+
+// 「这一条跑了多久」单独框成一枚胶囊：裸字挨着状态会连成一片
+.itemMeta {
+  flex: none;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+// 状态点：执行中主色 + 脉冲，等待中中性
+.dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted-foreground);
+
+  &.running {
+    background: var(--primary);
+    animation: statePulse 1.4s ease-in-out infinite;
+  }
+}
+
+// 异常收场（失败 / 被终止 / 被停止）：整行走 destructive。
+// 这几种原来被当成「已完成」整条滤掉了 —— 跑砸的子代理在界面上无声消失。
+.failed {
+  .itemIcon {
     flex: none;
-    position: relative;
-    top: 3px; // 压到首行文字的视觉中线
-    width: 13px;
-    height: 13px;
-    border-radius: 3px;
-    border: 1.5px solid color-mix(in srgb, var(--foreground) 35%, transparent);
-    box-sizing: border-box;
+    color: var(--destructive);
+    font-size: 13px;
+  }
+
+  .itemName {
+    color: var(--destructive);
+  }
+
+  .itemStatus {
+    color: var(--destructive);
+  }
+}
+
+// ---------- 任务清单 ----------
+
+.todoBox {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  border: 1.5px solid color-mix(in srgb, var(--foreground) 35%, transparent);
+  box-sizing: border-box;
+}
+
+.todoText {
+  flex: 1;
+  min-width: 0;
+  color: var(--foreground);
+  font-size: var(--text-base);
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+// 进行中：实心主色 + 脉冲，文字也跟着主色
+// （已完成项不进清单，所以空框=待办、实心=进行中，语义清晰）
+.in_progress {
+  .todoBox {
+    border-color: var(--primary);
+    background: var(--primary);
+    animation: statePulse 1.4s ease-in-out infinite;
   }
 
   .todoText {
-    min-width: 0;
-    overflow-wrap: anywhere;
-    color: var(--foreground);
-  }
-
-  // 进行中（仅会话运行时）：整块主题色实心 + 脉冲，文字主题色。
-  // （已完成项不进清单，空框=待办、实心=进行中，语义清晰，不再用对角半填充）
-  &.in_progress {
-    .todoBox {
-      border-color: var(--primary);
-      background: var(--primary);
-      animation: todoPulse 1.4s ease-in-out infinite;
-    }
-
-    .todoText {
-      color: var(--primary);
-      font-weight: 500;
-    }
-  }
-
-  // 未完成（含会话已停的原进行中项）：空框、中性文字
-  &.pending .todoBox {
-    border-color: color-mix(in srgb, var(--foreground) 35%, transparent);
+    color: var(--primary);
+    font-weight: 500;
   }
 }
 
-@keyframes todoPulse {
+.pending .todoBox {
+  border-color: color-mix(in srgb, var(--foreground) 35%, transparent);
+}
+
+@keyframes statePulse {
   0%,
   100% {
     opacity: 1;
   }
+
   50% {
     opacity: 0.4;
-  }
-}
-
-.bgItem {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  line-height: 1.9;
-  font-size: var(--text-sm);
-
-  .bgDot {
-    width: 6px;
-    height: 6px;
-    min-width: 6px;
-    border-radius: 50%;
-    background: var(--muted-foreground);
-
-    &.running {
-      background: var(--primary);
-      // 执行中用呼吸态与等待中区分开
-      animation: bgPulse 1.6s ease-in-out infinite;
-    }
-  }
-
-  .bgText {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--foreground);
-  }
-
-  .bgStatus {
-    flex: none;
-    font-size: 10.5px;
-    color: var(--muted-foreground);
-  }
-}
-
-@keyframes bgPulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
   }
 }

@@ -1,9 +1,24 @@
 @use "@hsu-react/ui/es/styles/responsive" as r;
-// 颜色全部直接写 styles/tokens.scss 的令牌（中间那层 scss 别名已删）。
-// 终端那几支 --term-* 是**不跟随主题**的独立语义，见 tokens.scss 的说明。
-// 用户气泡：语义是「谁说的话」，不是品牌淡染。原先映射到 --primary-subtle 是错的——
-// 主色一换（青 → shadcn 单色墨黑），它跟着变成 zinc-100 #f4f4f5，压在 #fafafa 的对话流
-// 底上只差 6/255，气泡等于消失。改成从对话流底往文字色压一档，任何配色下都有稳定落差。
+@use "@/styles/chatMarkdown" as md;
+
+// 对话流。**模型正文与命令输出是两类东西，排版也分开**：
+//
+//   模型正文（role `assistant` / `plan`）——它是一段写给人读的话，
+//     走比例字 16/1.5 ＋ 共享的 markdown 基线（styles/_chatMarkdown.scss），
+//     **平铺在背景上，不带气泡、不带卡片**。
+//   命令输出（role `tool` / `tool_result`）——它是终端吐出来的原文，
+//     按列对齐才读得懂，继续走等宽字，并保留深色终端面（--term-*）。
+//
+// 这两类的分界不是猜的，是后端就分好的：am-core `scanner.rs` 的 `entry_to_brief`
+// 只把 assistant 消息里的 `text` 块拼成 role=assistant（:1775 起），
+// 把 `tool_result` 块单独出成 role=tool_result（:1755-1766），
+// codex 那条链路同样分成 function_call → tool / function_call_output → tool_result
+// （:1704-1716）。前端此前把它们塞进同一个 `.termBody`（`font-family: var(--font-mono);
+// font-size: 12.5px`），所以助手正文才变成「12.5px 等宽字塞在深色终端卡里」。
+//
+// 颜色：终端那几支 --term-* 不跟随主题（见 tokens.scss），只用在命令输出上。
+// 「执行中」统一走 --primary（墨黑/暗色下近白）＋ 动效，绿留给「成功」——
+// 与 SessionPanels 同一口径，一屏之内不再出现两种「执行中」。
 
 .TerminalFeed {
   display: flex;
@@ -16,7 +31,7 @@
     gap: 12px;
   }
 
-  // 用户消息（Claude 式浅米色气泡，靠右）
+  // ---------- 用户消息：靠右的气泡 ----------
   .userRow {
     display: flex;
     flex-direction: column;
@@ -24,6 +39,7 @@
     gap: 3px;
 
     .userBubble {
+      position: relative;
       max-width: 85%;
       background: color-mix(in srgb, var(--foreground) 8%, transparent);
       color: var(--foreground);
@@ -34,21 +50,6 @@
       white-space: pre-wrap;
       word-break: break-word;
       overflow-wrap: anywhere;
-
-      // 过长内容折叠：正文夹断后另起一行给「展开全部 / 收起」
-      .userExpandBtn {
-        display: block;
-        margin-top: 4px;
-        font-size: var(--text-sm);
-        font-weight: 500;
-        color: var(--primary-active);
-        cursor: pointer;
-        user-select: none;
-
-        &:hover {
-          text-decoration: underline;
-        }
-      }
     }
 
     .userTime {
@@ -58,275 +59,179 @@
     }
   }
 
-  // 助手回合（Claude Code 终端式深色卡片）
-  .terminal {
-    background: var(--term-bg);
-    border-radius: var(--radius-lg);
-    overflow: hidden;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
-
-    .termHeader {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 12px;
-      background: color-mix(in srgb, var(--term-fg) 4%, transparent);
-      border-bottom: 1px solid color-mix(in srgb, var(--term-fg) 6%, transparent);
-
-      .termDots {
-        display: flex;
-        gap: 5px;
-
-        i {
-          width: 9px;
-          height: 9px;
-          border-radius: 50%;
-          background: color-mix(in srgb, var(--term-fg) 18%, transparent);
-
-          &:nth-child(1) {
-            background: var(--destructive);
-          }
-          &:nth-child(2) {
-            background: var(--warning);
-          }
-          &:nth-child(3) {
-            background: var(--success);
-          }
-        }
-      }
-
-      .termTitle {
-        flex: 1;
-        font-family: var(--font-mono);
-        font-size: var(--text-xs);
-        color: var(--term-dim);
-      }
-
-      .termTime {
-        font-size: var(--text-xs);
-        color: color-mix(in srgb, var(--term-fg) 25%, transparent);
-      }
+  // 过长内容折叠。**限高 + 渐隐，不切字符串**：原先按 12 行 / 600 字
+  // `slice` 原文，那一刀落在多字节字符中间就会切出半个汉字/表情；
+  // 而「超没超」本该由实际渲染高度说了算，不是由字数估。
+  .clampBox {
+    .clampInner {
+      // 遮罩挂在**被夹断的内容**上，不是挂在整个 clampBox 上 ——
+      // 后者还装着「展开全部」，遮罩会连按钮一起蒙掉（它在 DOM 里更靠后，
+      // 无 z-index 时后画的赢）。
+      position: relative;
+      overflow: hidden;
     }
 
-    .termBody {
-      padding: 12px 14px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      font-family: var(--font-mono);
-      font-size: 12.5px;
-      line-height: 1.7;
+    &.clamped .clampInner {
+      max-height: 200px;
+    }
+
+    // 48px 渐隐遮罩：告诉人「下面还有」，而不是硬生生截断一行
+    &.clamped .clampInner::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 48px;
+      pointer-events: none;
+      background: linear-gradient(
+        to bottom,
+        transparent,
+        var(--clamp-fade, var(--background))
+      );
+    }
+
+    .clampBtn {
+      display: block;
+      margin-top: 4px;
+      font-size: var(--text-sm);
+      font-weight: 500;
+      color: var(--primary);
+      cursor: pointer;
+      user-select: none;
+
+      &:hover {
+        text-decoration: underline;
+      }
     }
   }
 
-  // 助手文本行：⏺ + 正文
-  .assistantLine {
+  // 用户气泡里的遮罩要压在气泡底色上，不是画布底色
+  .userBubble .clampBox {
+    --clamp-fade: color-mix(in srgb, var(--foreground) 8%, var(--background));
+  }
+
+  // ---------- 助手回合：平铺，无卡片 ----------
+  .agent {
     display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  /* 模型正文。排版走共享基线（对话流与「远程往来」历史页同一套）。
+     不带气泡不带卡片 —— 长回答落在背景上比框在卡里好读得多，
+     而这一段本来就是这一轮的结论，不该被过程的视觉重量压住。 */
+  .assistantText {
+    @include md.chat-markdown;
+
+    min-width: 0;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+
+  // 一轮末尾的落款：来源代理 + 时间。原先这两样挂在终端卡的标题栏上，
+  // 卡片撤掉之后它们仍要有地方待着 —— 时间是回看时定位用的。
+  .turnMeta {
+    display: flex;
+    align-items: center;
     gap: 8px;
+    font-size: var(--text-xs);
+    color: color-mix(in srgb, var(--foreground) 35%, transparent);
 
-    .assistantDot {
-      color: var(--term-green);
-      flex: none;
-    }
-
-    .assistantText {
-      color: var(--term-text);
-      word-break: break-word;
-      overflow-wrap: anywhere;
-      min-width: 0;
-
-      // Markdown 渲染在深色终端卡片内：全部继承终端配色，压掉默认浅色主题
-      :global(.hsu-markdown),
-      :global(.markdown-body) {
-        background: transparent;
-        color: var(--term-text);
-        font-family: var(--font-mono);
-        font-size: 12.5px;
-      }
-
-      p,
-      ul,
-      ol,
-      blockquote,
-      pre,
-      h1,
-      h2,
-      h3,
-      h4,
-      h5,
-      h6,
-      table {
-        margin: 0 0 6px;
-        color: var(--term-text);
-
-        &:last-child {
-          margin-bottom: 0;
-        }
-      }
-
-      h1,
-      h2,
-      h3,
-      h4 {
-        font-size: var(--text-base);
-        font-weight: 700;
-      }
-
-      ul,
-      ol {
-        padding-left: 1.7em;
-        list-style-position: outside;
-      }
-
-      // 行内 code：略亮的底 + 高对比青色，看得清又不刺眼
-      code {
-        background: color-mix(in srgb, var(--term-fg) 14%, transparent);
-        border-radius: 4px;
-        padding: 1px 5px;
-        font-family: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
-        font-size: 12.5px;
-        color: color-mix(in srgb, var(--term-accent) 55%, #ffffff);
-      }
-
-      // 无语言标记的代码块：ReactMarkdown 只输出 <pre><code>，这里自绘深底盒子——
-      // 明显更暗的实底 + 描边，与深色卡片拉开层次；文字提亮到接近纯白，长行横向滚动不撑破布局
-      pre {
-        background: var(--term-bg);
-        border: 1px solid color-mix(in srgb, var(--term-fg) 14%, transparent);
-        border-radius: var(--radius);
-        padding: 10px 12px;
-        overflow-x: auto;
-        font-size: 12.5px;
-        line-height: 1.55;
-
-        code {
-          background: none;
-          padding: 0;
-          font-size: 12.5px;
-          color: var(--term-text);
-        }
-      }
-
-      // 带语言标记的代码块：hsu-ui 已自带「边框 + 顶栏复制」的盒子(div.code)，
-      // 外层 pre 若再套一层黑底描边就成了双重包裹。剥掉 pre 自身的盒子样式，
-      // 让内层 div.code 独立成盒，代码正文补回内边距与横向滚动。
-      pre:has(> div) {
-        background: transparent;
-        border: none;
-        border-radius: 0;
-        padding: 0;
-        overflow: visible;
-
-        code {
-          display: block;
-          padding: 10px 12px;
-          overflow-x: auto;
-          color: var(--term-text);
-        }
-
-        // 顶栏(.nav #212121)里的复制按钮(hsu-ui Copy)默认取浅色主题变量(深灰)，
-        // 落在深色顶栏上几乎看不见 → 就近把顶栏内的文字/图标主题变量提亮
-        > div > div:first-child {
-          --vita-muted-foreground: var(--term-text);
-          --vita-foreground: var(--term-fg);
-          --cf-row-hover: color-mix(in srgb, var(--term-fg) 12%, transparent);
-        }
-      }
-
-      a {
-        color: color-mix(in srgb, var(--term-accent) 75%, #ffffff);
-      }
-
-      blockquote {
-        border-left: 3px solid color-mix(in srgb, var(--term-fg) 25%, transparent);
-        padding-left: 10px;
-        color: color-mix(in srgb, var(--term-fg) 75%, transparent);
-      }
-
-      table {
-        border-collapse: collapse;
-
-        th,
-        td {
-          border: 1px solid color-mix(in srgb, var(--term-fg) 18%, transparent);
-          padding: 3px 8px;
-        }
-      }
-
-      hr {
-        border: none;
-        border-top: 1px solid color-mix(in srgb, var(--term-fg) 18%, transparent);
-        margin: 8px 0;
-      }
+    .turnProvider {
+      font-family: var(--font-mono);
     }
   }
 
-  // plan 模式的待批准方案：终端里独立成框，比工具流水更显眼
+  // ---------- plan 模式的待批准方案 ----------
+  // 它是个要你点头的结构化对象，所以有边框；正文仍走 markdown 基线。
   .planCard {
-    border: 1px solid color-mix(in srgb, var(--term-accent) 35%, transparent);
-    border-radius: var(--radius);
-    margin: 2px 0 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
     overflow: hidden;
 
     .planHead {
-      padding: 5px 10px;
-      background: color-mix(in srgb, var(--term-accent) 12%, transparent);
-      color: var(--term-accent);
+      padding: 7px 14px;
+      background: var(--muted);
+      border-bottom: 1px solid var(--border);
+      color: var(--foreground);
       font-size: var(--text-sm);
       font-weight: 600;
     }
 
     .planBody {
-      padding: 8px 10px;
-      color: var(--term-text);
+      @include md.chat-markdown;
+
+      padding: 12px 14px;
       min-width: 0;
-      // 方案正文是 markdown，交给组件渲染；这里只压掉它的默认外边距，
-      // 避免在终端卡里撑出多余留白。
-      p,
-      ul,
-      ol,
-      pre {
-        margin: 0 0 6px;
-      }
-
-      :last-child {
-        margin-bottom: 0;
-      }
-
-      code {
-        font-family: var(--font-mono);
-      }
     }
   }
 
-  // 工具调用行：⏺ Tool(args)
+  // ---------- 过程：工具调用与命令输出 ----------
+  // 默认折成一行灰字，点开才是那一列步骤 —— 过程不该把结论顶下去。
+  .process {
+    .processHead {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: var(--text-sm);
+      color: var(--muted-foreground);
+      cursor: pointer;
+      user-select: none;
+
+      &:hover {
+        color: var(--foreground);
+      }
+
+      .processArrow {
+        font-size: var(--text-md);
+      }
+    }
+
+    .processBody {
+      margin-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      // 缩进到与折叠行的文字对齐，视觉上「这些属于上面那行」
+      padding-left: 14px;
+      border-left: 1px solid var(--border);
+    }
+  }
+
+  // 工具调用行：`Bash(ls -la)` 这类。它是命令，等宽。
   .toolLine {
     display: flex;
     gap: 8px;
 
-    .toolDot {
-      color: var(--term-accent);
-      flex: none;
-    }
-
     .toolText {
-      color: var(--term-text);
+      min-width: 0;
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      line-height: 1.6;
+      color: var(--foreground);
       white-space: pre-wrap;
       word-break: break-word;
       overflow-wrap: anywhere;
-      min-width: 0;
     }
   }
 
-  // 工具结果行：⎿ 缩进暗色
+  // 命令输出：终端吐出来的原文。深色终端面 + 等宽 —— 这是唯一还需要
+  // 终端形态的地方（--term-* 不跟随主题，见 tokens.scss）。
   .resultLine {
     display: flex;
     gap: 8px;
-    padding-left: 14px;
+    padding: 8px 10px;
+    border-radius: var(--radius);
+    background: var(--term-bg);
 
     .resultElbow {
-      color: color-mix(in srgb, var(--term-fg) 22%, transparent);
       flex: none;
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      line-height: 1.6;
+      color: color-mix(in srgb, var(--term-fg) 30%, transparent);
     }
 
     .resultBody {
@@ -337,15 +242,16 @@
         margin: 0;
         font-family: var(--font-mono);
         font-size: var(--text-sm);
-        color: var(--term-dim);
+        line-height: 1.6;
+        color: var(--term-text);
         white-space: pre-wrap;
         word-break: break-word;
-      overflow-wrap: anywhere;
+        overflow-wrap: anywhere;
       }
 
       .expandBtn {
         display: inline-block;
-        margin-top: 2px;
+        margin-top: 4px;
         font-size: var(--text-xs);
         color: var(--term-accent);
         cursor: pointer;
@@ -358,54 +264,45 @@
     }
   }
 
-  // 执行中指示
+  // ---------- 执行中：一行「正在处理… · 7秒」 ----------
+  // 秒表是「还在跑」与「卡死了」的唯一区别，所以它一直挂在这一轮末尾走字。
   .working {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 8px;
-    color: var(--term-accent);
+    font-size: var(--text-base);
+    color: var(--muted-foreground);
 
     .workingDot {
       flex: none;
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: var(--success);
+      background: var(--primary);
       animation: working-pulse 1.1s ease-in-out infinite;
     }
 
     .workingText {
-      min-width: 0;
-
-      // 已走的步数：紧跟「执行中…」，用弱化色，别抢正文
-      .workingSteps {
-        margin-left: 8px;
-        color: var(--term-dim);
-        font-size: 11.5px;
-        white-space: nowrap;
-      }
-
-      .workingAction {
-        margin-left: 10px;
-        color: var(--term-dim);
-        font-size: 11.5px;
-        display: inline-block;
-        max-width: 100%;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        vertical-align: bottom;
-      }
+      color: var(--foreground);
     }
-  }
-}
 
-@keyframes spinStar {
-  0% {
-    transform: rotate(0deg);
-  }
-  100% {
-    transform: rotate(360deg);
+    .workingElapsed {
+      font-variant-numeric: tabular-nums;
+    }
+
+    // 已走的步数 / 最近一个动作：弱化，别抢正文
+    .workingSteps {
+      white-space: nowrap;
+    }
+
+    .workingAction {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+    }
   }
 }
 
@@ -419,88 +316,6 @@
   50% {
     transform: scale(1.45);
     opacity: 0.55;
-  }
-}
-
-.TerminalFeed {
-  // 排队中的气泡：虚线边 + 弱化底色，与已接收消息区分
-  .userBubble.queued {
-    opacity: 0.85;
-    border: 1px dashed color-mix(in srgb, var(--primary) 45%, transparent);
-  }
-
-  .queuedRow {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-top: 3px;
-
-    .queuedTag {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      font-size: var(--text-xs);
-      color: var(--term-dim);
-
-      .queuedDot {
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        background: var(--warning);
-        animation: queuedPulse 1.2s ease-in-out infinite;
-      }
-    }
-
-    .recallBtn {
-      font-size: var(--text-xs);
-      color: var(--primary);
-      cursor: pointer;
-
-      &:hover {
-        text-decoration: underline;
-      }
-    }
-  }
-}
-
-@keyframes queuedPulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.3;
-  }
-}
-
-
-.TerminalFeed {
-  .toolGroup {
-    .toolGroupHead {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      font-size: var(--text-sm);
-      color: color-mix(in srgb, var(--term-fg) 55%, transparent);
-      cursor: pointer;
-      user-select: none;
-
-      &:hover {
-        color: color-mix(in srgb, var(--term-fg) 85%, transparent);
-      }
-
-      .toolGroupArrow {
-        font-size: var(--text-md);
-      }
-    }
-
-    .toolGroupBody {
-      margin-top: 6px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
   }
 }
 

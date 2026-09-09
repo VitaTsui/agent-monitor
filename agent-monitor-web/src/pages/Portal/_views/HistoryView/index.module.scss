@@ -1,4 +1,5 @@
 @use "@hsu-react/ui/es/styles/responsive" as r;
+@use "@/styles/chatMarkdown" as md;
 // 配色与 Composer 保持一致（同一屏内的组件，色板不该各写各的）。
 // 滚动容器是 views.module.scss 的 .fixedBody，本文件不再自己开一个高度受限的
 // 内滚区 —— 那是弹窗时代的产物（62vh），页面化之后由页面骨架统一管。
@@ -42,69 +43,24 @@
 }
 
 .bubbleUser {
+  /* 正文排版走共享基线 —— 与会话对话流**同一套**（styles/_chatMarkdown.scss）。
+     原来这里自己写了一份：标题 h1–h6 一律 13.5px/600（等于没有层级）、
+     列表左内边距 18、表格 12px。同一段内容在会话页和这里是两种排版，
+     而这一页恰恰是「回看那段对话」。 */
+  @include md.chat-markdown;
+
   max-width: 78%;
-  padding: 6px 12px;
+  padding: 10px 14px;
   border-radius: 12px 12px 2px 12px;
   background: color-mix(in srgb, var(--primary) 10%, transparent);
-  color: var(--foreground);
-  font-size: var(--text-base);
-  // 正文交给 Markdown.Views 渲染，这里只管容器：长串（URL/路径）要能断行
+  // 长串（URL/路径）要能断行，别把气泡撑破
   word-break: break-word;
   overflow-wrap: anywhere;
 
-  // 压紧 markdown 在气泡里的默认间距 —— 它按文档排版，首尾留白在气泡里会显得很空
-  :global {
-    p,
-    ul,
-    ol,
-    pre,
-    blockquote,
-    table {
-      margin: 4px 0;
-    }
-    p:first-child,
-    ul:first-child,
-    ol:first-child,
-    pre:first-child {
-      margin-top: 0;
-    }
-    p:last-child,
-    ul:last-child,
-    ol:last-child,
-    pre:last-child {
-      margin-bottom: 0;
-    }
-    h1, h2, h3, h4, h5, h6 {
-      margin: 6px 0 4px;
-      font-size: 13.5px;
-      font-weight: 600;
-    }
-    ul, ol {
-      padding-left: 18px;
-    }
-    // 代码块在气泡内自己横向滚动，不要把气泡撑破
-    pre {
-      max-width: 100%;
-      overflow-x: auto;
-      padding: 8px 10px;
-      border-radius: var(--radius-sm);
-      background: var(--overlay-1);
-      font-size: var(--text-sm);
-      line-height: 1.55;
-    }
-    code {
-      font-family: var(--font-mono);
-      font-size: var(--text-sm);
-    }
-    table {
-      display: block;
-      max-width: 100%;
-      overflow-x: auto;
-      font-size: var(--text-sm);
-    }
-    img {
-      max-width: 100%;
-    }
+  // 气泡里的代码块自己横向滚动
+  :global(.markdown-body) pre {
+    max-width: 100%;
+    overflow-x: auto;
   }
 }
 
@@ -112,7 +68,6 @@
   @extend .bubbleUser;
   border-radius: 12px 12px 12px 2px;
   background: color-mix(in srgb, var(--foreground) 5%, transparent);
-  color: color-mix(in srgb, var(--foreground) 85%, transparent);
 }
 
 .time {
@@ -125,7 +80,6 @@
 @include r.down(md) {
   // 手机屏窄，气泡放宽些才不至于一行没几个字
   .bubbleUser {
-    max-width: 88%;
-    font-size: var(--text-md); // 移动端正文小于 14px 会偏吃力
+    max-width: 92%;
   }
 }

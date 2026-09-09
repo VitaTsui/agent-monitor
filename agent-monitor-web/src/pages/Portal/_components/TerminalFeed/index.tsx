@@ -1,10 +1,11 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 
 import dayjs from "dayjs";
 import SessionMarkdown from "../SessionMarkdown";
 import { SessionImageCtx } from "@/utils/sessionImages";
 
 import { PortalMessage, SelectPayload } from "@/services/apis/portal";
+import { fmtElapsed } from "../../_utils/sessionState";
 import styles from "./index.module.scss";
 
 interface TerminalFeedProps {
@@ -296,10 +297,108 @@ export const SelectCard: React.FC<{
 
 /** 工具结果超过该行数时折叠 */
 const RESULT_CLAMP_LINES = 4;
-// 下发的用户内容过长时，正文里先折起来：超过这些行数、或字数（应对单行超长
-// 粘贴）就夹断，给个「展开全部 / 收起」。阈值取「一屏能顺手扫完」的量。
-const USER_CLAMP_LINES = 12;
-const USER_CLAMP_CHARS = 600;
+/** 长内容折叠的高度阈值（px）。超过它才夹断并给渐隐遮罩 */
+const CLAMP_MAX_H = 200;
+
+/**
+ * 超高就夹断的容器：限高 200px ＋ 底部 48px 渐隐，点「展开全部」放开。
+ *
+ * **按实际渲染高度判断，不按字数估、更不切字符串**。原先是
+ * `lines.slice(0, 12).join("\n").slice(0, 600)` —— 两个问题：
+ *   - `slice(0, 600)` 按 UTF-16 码元切，落在一个汉字或表情的两个码元中间
+ *     就会切出半个字符（emoji 直接变成乱码方块）；
+ *   - 12 行 / 600 字与「屏幕上占多高」没有关系：一行 200 字的粘贴算 1 行，
+ *     12 行短句却可能只有三行高。该不该折叠本来就是个高度问题。
+ * 量一次真实高度，这两件事一起没了。
+ */
+const ClampBox: React.FC<{
+  children: React.ReactNode;
+  /** 展开态由父级统一持有（跨刷新稳定，见 msgKey 的说明） */
+  open: boolean;
+  onToggle: () => void;
+}> = ({ children, open, onToggle }) => {
+  const innerRef = React.useRef<HTMLDivElement>(null);
+  const [overflow, setOverflow] = useState(false);
+
+  // 内容是异步长出来的（markdown、代码块、字体、图片），一次性测量会偏小，
+  // 所以挂 ResizeObserver 跟着内容走。
+  useEffect(() => {
+    const el = innerRef.current;
+    if (!el) {
+      return;
+    }
+    const measure = () => setOverflow(el.scrollHeight > CLAMP_MAX_H + 8);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [children]);
+
+  const clamped = overflow && !open;
+
+  return (
+    <div className={`${styles.clampBox} ${clamped ? styles.clamped : ""}`}>
+      <div className={styles.clampInner} ref={innerRef}>
+        {children}
+      </div>
+      {overflow ? (
+        <span
+          className={styles.clampBtn}
+          role="button"
+          tabIndex={0}
+          aria-expanded={open}
+          onClick={onToggle}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              onToggle();
+            }
+          }}
+        >
+          {clamped ? "展开全部" : "收起"}
+        </span>
+      ) : null}
+    </div>
+  );
+};
+
+/**
+ * 一轮执行中的秒表：「正在处理… · 7秒」。
+ *
+ * 原先只有「执行中… + 已 N 步」——步数在两次工具调用之间是不动的，一段长
+ * 推理里它能十几秒纹丝不动，看着和卡死没有区别。**耗时是「还在跑」与
+ * 「卡住了」的唯一区别**，所以它每秒走字。
+ *
+ * 口径与 SessionPanels / SubAgentChip 共用 `fmtElapsed`：起点取这一轮的
+ * 起始时间戳（会话记录里的时刻），全项目只有这一套算法。
+ */
+const Working: React.FC<{
+  since?: string;
+  steps: number;
+  lastAction?: string;
+}> = ({ since, steps, lastAction }) => {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const elapsed = fmtElapsed(since, now);
+
+  return (
+    <div className={styles.working}>
+      <span className={styles.workingDot} />
+      <span className={styles.workingText}>正在处理…</span>
+      {elapsed ? (
+        <span className={styles.workingElapsed}>· {elapsed}</span>
+      ) : null}
+      {steps > 0 ? <span className={styles.workingSteps}>· 已 {steps} 步</span> : null}
+      {lastAction ? (
+        <span className={styles.workingAction}>{lastAction}</span>
+      ) : null}
+    </div>
+  );
+};
 
 const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
   const { messages, running, providerDsr, imageCtx } = props;
@@ -324,6 +423,7 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
       );
     }
 
+    // 工具调用行：这是条命令，等宽字
     if (m.role === "tool") {
       return (
         <div key={key} className={styles.toolLine}>
@@ -332,6 +432,7 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
       );
     }
 
+    // 命令输出：终端吐出来的原文，深色终端面 + 等宽字
     if (m.role === "tool_result") {
       const lines = m.content.split("\n");
       const clamped = lines.length > RESULT_CLAMP_LINES && !expanded[key];
@@ -365,12 +466,10 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
       );
     }
 
-    // assistant 文本：按 Markdown 渲染（同步内容常带 **加粗**/代码块/列表）
+    // 模型正文：比例字 + 共享 markdown 基线，平铺，不带卡片
     return (
-      <div key={key} className={styles.assistantLine}>
-        <div className={styles.assistantText}>
-          <SessionMarkdown content={m.content} imageCtx={imageCtx} />
-        </div>
+      <div key={key} className={styles.assistantText}>
+        <SessionMarkdown content={m.content} imageCtx={imageCtx} />
       </div>
     );
   };
@@ -401,8 +500,8 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
         // 「执行过程 · N 步」）—— 一条条冒出来是噪音、还不停把视图往下推，
         // 但整段藏掉又会让人不知道它在干什么。折叠着实时长，想看点开即可。
         //
-        // （清单与后台任务是「当前状态」，已由 ChatPane 抽成单独面板；
-        // 选择卡同理挂在输入框上方，都不进内容流。）
+        // （清单与后台任务是「当前状态」，已由 ChatPane 抽成单独的状态卡，
+        // 挂在对话流末尾；选择卡同理挂在输入框上方，都不进内容流。）
         const visibleItems = keyed;
         // 执行中时给一条「最近动作」预览（最后一条工具调用）＋ 已走的步数
         const lastTool = inProgress
@@ -414,47 +513,22 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
 
         return (
           <div key={turn.key} className={styles.turn}>
-            {/* 对话流只管「我说了什么」。排队状态与撤回一律交给输入框上方的排队条 ——
-                两处都摆一份的话，同一条任务在正文和排队条各显示一遍，还得为了去重
+            {/* 对话流只管「我说了什么」。排队状态与撤回一律交给对话流末尾的排队卡 ——
+                两处都摆一份的话，同一条任务在正文和排队卡各显示一遍，还得为了去重
                 把正文里的消息藏起来，于是「我发的内容在对话流里不见了」。
                 职责分开之后，正文永远是完整的对话记录。 */}
             {turn.user ? (
               (() => {
                 const uKey = `u|${turn.key}`;
-                const uContent = turn.user.content;
-                const uLines = uContent.split("\n");
-                const uLong =
-                  uLines.length > USER_CLAMP_LINES ||
-                  uContent.length > USER_CLAMP_CHARS;
-                const uClamped = uLong && !expanded[uKey];
-                let uShown = uContent;
-                if (uClamped) {
-                  uShown = uLines.slice(0, USER_CLAMP_LINES).join("\n");
-                  if (uShown.length > USER_CLAMP_CHARS) {
-                    uShown = uShown.slice(0, USER_CLAMP_CHARS);
-                  }
-                }
                 return (
                   <div className={styles.userRow}>
                     <div className={styles.userBubble}>
-                      {uClamped ? `${uShown}…` : uShown}
-                      {uLong && (
-                        <span
-                          className={styles.userExpandBtn}
-                          role="button"
-                          tabIndex={0}
-                          aria-expanded={!uClamped}
-                          onClick={() => toggleExpand(uKey)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault();
-                              toggleExpand(uKey);
-                            }
-                          }}
-                        >
-                          {uClamped ? "展开全部" : "收起"}
-                        </span>
-                      )}
+                      <ClampBox
+                        open={!!expanded[uKey]}
+                        onToggle={() => toggleExpand(uKey)}
+                      >
+                        {turn.user.content}
+                      </ClampBox>
                     </div>
                     <div className={styles.userTime}>{fmtTime(turn.user.timestamp)}</div>
                   </div>
@@ -463,23 +537,8 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
             ) : null}
 
             {(visibleItems.length > 0 || inProgress) && (
-              <div className={styles.terminal}>
-                <div className={styles.termHeader}>
-                  <span className={styles.termDots}>
-                    <i />
-                    <i />
-                    <i />
-                  </span>
-                  <span className={styles.termTitle}>{providerDsr || "终端"}</span>
-                  <span className={styles.termTime}>
-                    {fmtTime(
-                      turn.items[turn.items.length - 1]?.timestamp ??
-                        turn.user?.timestamp
-                    )}
-                  </span>
-                </div>
-                <div className={styles.termBody}>
-                  {(() => {
+              <div className={styles.agent}>
+                {(() => {
                     const out: React.ReactNode[] = [];
                     let group: { m: PortalMessage; k: string }[] = [];
                     // 折叠组的身份 = 「本轮里的第几个过程块」，不是「第一条消息的指纹」。
@@ -499,9 +558,9 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                       // 纯文字过程才退回条数
                       const steps = group.filter((x) => x.m.role === "tool").length;
                       out.push(
-                        <div key={gkey} className={styles.toolGroup}>
+                        <div key={gkey} className={styles.process}>
                           <span
-                            className={styles.toolGroupHead}
+                            className={styles.processHead}
                             role="button"
                             tabIndex={0}
                             aria-expanded={openG}
@@ -513,13 +572,13 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                               }
                             }}
                           >
-                            <span className={styles.toolGroupArrow}>
+                            <span className={styles.processArrow}>
                               {openG ? "▾" : "▸"}
                             </span>
                             执行过程 · {steps || group.length} 步
                           </span>
                           {openG ? (
-                            <div className={styles.toolGroupBody}>
+                            <div className={styles.processBody}>
                               {group.map(({ m, k }) => renderItem(m, k))}
                             </div>
                           ) : null}
@@ -537,7 +596,7 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                     // 已经产出的内容被整段折起来，卡片上只剩一行「执行中…」，
                     // 一轮还没落下任何条目时连折叠行都没有 —— 就是那张空卡。
                     // 共用一套规则还顺带保证：running 翻成 false 的那一刻布局不变，
-                    // 只是底部的「执行中…」消失，不会闪、不会跳。
+                    // 只是底部的「正在处理…」消失，不会闪、不会跳。
                     const lastOutIdx = visibleItems.reduce(
                       (acc, { m }, i) =>
                         ["assistant", "plan"].includes(m.role) ? i : acc,
@@ -564,27 +623,30 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                     });
                     flush();
                     return out;
-                  })()}
-                  {inProgress ? (
-                    <div className={styles.working}>
-                      {/* 只有正在执行的条目带（会动的）圆点，其余内容与终端一致不加点 */}
-                      <span className={styles.workingDot} />
-                      <span className={styles.workingText}>
-                        执行中…
-                        {runSteps > 0 ? (
-                          <span className={styles.workingSteps}>
-                            已 {runSteps} 步
-                          </span>
-                        ) : null}
-                        {lastTool ? (
-                          <span className={styles.workingAction}>
-                            {lastTool.content}
-                          </span>
-                        ) : null}
-                      </span>
-                    </div>
-                  ) : null}
-                </div>
+                })()}
+                {inProgress ? (
+                  <Working
+                    // 起点取这一轮的起始时刻：有用户消息就用它，否则退回首条产出
+                    since={turn.user?.timestamp ?? turn.items[0]?.timestamp}
+                    steps={runSteps}
+                    lastAction={lastTool?.content}
+                  />
+                ) : null}
+                {/* 落款：来源代理 + 时间。原先挂在终端卡的标题栏上，卡片撤掉之后
+                    这两样仍要有地方待着 —— 时间是回看时定位用的。 */}
+                {visibleItems.length > 0 ? (
+                  <div className={styles.turnMeta}>
+                    <span className={styles.turnProvider}>
+                      {providerDsr || "终端"}
+                    </span>
+                    <span>
+                      {fmtTime(
+                        turn.items[turn.items.length - 1]?.timestamp ??
+                          turn.user?.timestamp
+                      )}
+                    </span>
+                  </div>
+                ) : null}
               </div>
             )}
           </div>
