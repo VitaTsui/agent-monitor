@@ -48,6 +48,16 @@ pub struct ProcessInfo {
     pub memory: u64,
     /// 命令行
     pub command: String,
+    /// 终端锚：该 agent 最近的 shell 祖先 pid（powershell/bash…）。终端 shell 的 pid 跨
+    /// claude 的 /clear、--resume、重启都不变，比易变的 claude pid 更适合做「会话↔进程」
+    /// 配对的稳定锚。扫描时算好，供持久化/配对复用（见 process::ProcessScanner::nearest_shell）。
+    #[serde(default)]
+    pub shell_pid: Option<u32>,
+    /// 终端锚 shell 的启动时间（epoch 秒）。与 shell_pid 一起唯一确定「同一个 shell」——
+    /// Windows 会重用 pid：关掉终端再开一个可能拿到同一个 shell pid，光比 pid 会把新终端
+    /// 错配到旧会话。配对恢复时须 pid + start 都对上才算同一 shell。
+    #[serde(default)]
+    pub shell_start: Option<u64>,
 }
 
 /// 会话内一条简要消息（用于详情展示）
@@ -68,10 +78,23 @@ pub struct Task {
     pub id: String,
     /// 代理类型：claude / codex …
     pub provider: String,
-    /// 项目目录（会话 cwd）
+    /// 项目目录（会话 cwd）。**这是归一化后的「项目根」**，不随会话内 `cd` 漂移 ——
+    /// 它要与 `~/.claude/projects` 下的目录名对得上，会话↔进程配对和分组都靠它稳定
+    /// （见 scanner 的 `canonical_cwd`）。要「终端此刻在哪」请用 [`Task::live_cwd`]。
     pub project: String,
     /// 项目目录短名
     pub project_name: String,
+    /// **会话此刻的工作目录**：jsonl 尾部最后一条记录的 `cwd`。
+    ///
+    /// 与 `project` 的区别就是这个 bug 的全部：会话内 `cd` 进子目录后，jsonl 里的 cwd
+    /// 跟着走，而 `project` 被钉死在项目根。网页拿 `project` 当上传落点、又回填**相对**
+    /// 路径 `./tmp/x.png`，终端却按自己当前的 cwd 解析 —— 文件写在 A、终端在 B 找，
+    /// 表现为「上传成功但终端说文件不存在」。凡是要与终端的相对路径对齐的地方
+    /// （上传落点、目录浏览根、文件夹操作根）都该用它。
+    ///
+    /// None = 尾窗里一条 cwd 都没读到（极短会话/占位任务），调用方退回 `project`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_cwd: Option<String>,
     /// 会话标题：会话的首个用户提示词（原始任务），更像标题
     #[serde(default)]
     pub title: String,
@@ -126,6 +149,19 @@ pub struct Task {
     /// 最近若干条消息摘要（agent 上报时携带，供 hub 缓存）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_messages: Vec<MessageBrief>,
+    /// 终端里 claude 原生排队、尚未被接受执行的输入（按入队顺序，供前端底部挂载显示）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_inputs: Vec<String>,
+    /// **终端此刻正等你选**：AskUserQuestion 的整份 input（questions/options）。
+    ///
+    /// 来自 PreToolUse hook，即在选项弹给终端用户**之前**就已知道 —— 因此远端能同步
+    /// 弹出选项框、替终端做决定。（从 jsonl 读到的 select 消息是事后的，等它出现时
+    /// 人早在终端上选完了。）用户选完即由后续 hook 覆盖清除，见 client/hookrec.rs。
+    ///
+    /// 存 `Value` 而不是「字符串里塞一份 JSON」：后者每经一层就再转义一次，
+    /// 前端还得自己 parse 并兜住解析失败。结构化之后各层都能直接读它。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_select: Option<serde_json::Value>,
 }
 
 /// 控制动作
@@ -144,6 +180,9 @@ pub enum ControlAction {
     Kill,
     /// 向会话注入输入（发布任务）
     Input,
+    /// 向终端注入按键（不提交）：text 形如 "up:3"（按 3 次上键撤回排队）/ "esc"（插入排队）。
+    /// 仅 iTerm2(mac) 与 Windows 控制台可干净注入；Terminal.app 不支持（前端走提示）。
+    TermKey,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,53 +231,77 @@ pub struct ReportPayload {
     #[serde(default)]
     pub owner: Option<String>,
     pub tasks: Vec<Task>,
-    /// 上一轮 hub 请求的 git 对比结果（回传）
-    #[serde(default)]
-    pub git_results: Vec<GitResult>,
     #[serde(default)]
     pub dir_results: Vec<DirResult>,
-}
-
-/// 一个改动文件（git status --porcelain 解析）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GitFile {
-    /// 两位状态码，如 " M"、"??"、"A "
-    pub status: String,
-    pub path: String,
-}
-
-/// 某会话项目目录的 git 概览（改动文件 + 统一 diff）
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct GitOverview {
-    pub is_repo: bool,
-    pub branch: String,
-    pub files: Vec<GitFile>,
-    /// 相对上次提交的统一 diff 文本（含暂存与未暂存改动）
-    pub diff: String,
-    /// 未跟踪文件列表（不在 diff 里，单列）
-    pub untracked: Vec<String>,
-    /// 计算出错时的提示（如非 git 项目）
+    /// 上一轮 hub 请求的文件夹操作结果（回传）。旧客户端不带 → 空。
     #[serde(default)]
-    pub error: String,
+    pub fs_op_results: Vec<FsOpResult>,
+    /// 上一轮 hub 点名现取的文件内容（回传）。旧客户端不带 → 空。
+    #[serde(default)]
+    pub file_fetch_results: Vec<FileFetchResult>,
+    /// 上一轮下发文件的实际落盘路径（回传）。旧客户端不带 → 空，hub 退回自己算的名字。
+    #[serde(default)]
+    pub file_results: Vec<FileTransferResult>,
+    /// 本机 agent 配置清单（只有哈希，没有内容）。旧客户端不带 → None，
+    /// hub 据此判定「这台机器还不支持配置同步」，既不索要也不下发。
+    #[serde(default)]
+    pub config_manifest: Option<ConfigManifest>,
+    /// 上一轮 hub 通过 `configPulls` 点名索要的文件内容（回传）。
+    #[serde(default)]
+    pub config_bodies: Vec<ConfigFileBody>,
 }
 
-/// agent → hub：git 对比结果（对应某 task）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 配置同步：单个文件的指纹。
+///
+/// `path` 一律是**归一化相对路径**（`claude/agents/x.md`、`codex/AGENTS.md`），
+/// 绝不放绝对路径 —— mac 的 `/Users/vita/...` 推到 Windows 机器上既拼不出目标位置，
+/// 又把本机用户名泄露给同账号的其它设备。目标绝对路径由客户端自己用本机 home 拼。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct GitResult {
-    pub task_id: String,
-    pub overview: GitOverview,
+pub struct ConfigFileMeta {
+    pub path: String,
+    /// 内容的 sha256（小写十六进制）。差异判定只看它，不看 mtime ——
+    /// 各机器时钟不一定同步，mtime 比大小会把「时钟慢的那台」永远判成落后。
+    pub sha256: String,
+    pub size: u64,
+    /// 本机修改时间（unix 秒）。仅用于客户端自己的扫描缓存与界面展示。
+    #[serde(default)]
+    pub mtime: u64,
 }
 
-/// hub → agent：请求对某 task 的项目目录做 git 对比
+/// 配置同步：一台机器的全部在管配置文件指纹
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigManifest {
+    pub files: Vec<ConfigFileMeta>,
+    /// 扫描完成时刻（unix 秒）
+    #[serde(default)]
+    pub scanned_at: u64,
+}
+
+/// agent → hub：被点名索要的配置文件内容
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GitQuery {
-    pub task_id: String,
-    /// 会话项目目录（agent 本机路径）
-    pub cwd: String,
+pub struct ConfigFileBody {
+    pub path: String,
+    pub content_b64: String,
+    /// 内容哈希，hub 落基线前复验，防止传输途中截断
+    pub sha256: String,
+}
+
+/// hub → agent：待写入的配置文件。
+///
+/// 不复用 `FileTransfer`：那条链路的 `dir` 是**绝对路径**（hub 并不知道对端 home 在哪），
+/// 且 `write_transfer` 是直接整份覆盖、不备份 —— 用户的 CLAUDE.md / agents 被无声盖掉
+/// 是不可接受的。这里只给相对路径，客户端拼本机 home 并走「备份 + 原子写」。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigPush {
+    /// 归一化相对路径，同 `ConfigFileMeta::path`
+    pub path: String,
+    pub content_b64: String,
+    /// 内容哈希，客户端落盘前复验
+    pub sha256: String,
 }
 
 /// hub → agent：列出会话目录下某相对子路径的子目录（上传选目录用）
@@ -246,10 +309,21 @@ pub struct GitQuery {
 #[serde(rename_all = "camelCase")]
 pub struct DirQuery {
     pub task_id: String,
-    /// 会话项目目录（agent 本机路径，作为根，不允许越出）
+    /// 会话项目目录（agent 本机路径，作为根，不允许越出）。
+    ///
+    /// **hub 算的这份必然偏旧**：它来自定期扫描上报的快照，而扫描循环在 macOS 后台会被
+    /// App Nap 压到一两分钟一轮。会话期间 `cd` 过之后，拿它当根就会定位到别处 ——
+    /// 用户看到的是「上传/选择文件列出来的是另一个目录」。故新客户端改用 [`Self::by_session`]。
+    /// 这里仍然填着，纯为旧客户端兜底。
     pub cwd: String,
     /// 相对根的子路径（"" 表示根本身），分隔符统一 '/'
     pub rel: String,
+    /// **由 agent 自己按 `task_id` 现读会话记录解析根**，而不是用上面那份 `cwd`。
+    ///
+    /// 新鲜度因此等同于本次往返本身，扫描循环再慢也不影响。旧客户端不认识这个字段，
+    /// 反序列化取 false → 照旧用 `cwd`，行为不变。
+    #[serde(default)]
+    pub by_session: bool,
 }
 
 /// agent → hub：目录列表结果
@@ -258,8 +332,89 @@ pub struct DirQuery {
 pub struct DirResult {
     pub task_id: String,
     pub rel: String,
-    /// 子目录名（仅目录，不含文件；已排序，隐藏目录靠后）
+    /// 子目录名（仅目录；已排序，隐藏目录靠后）
     pub dirs: Vec<String>,
+    /// 该目录下的文件名（已排序，隐藏文件靠后）。用于「选择文件回填相对路径」。
+    /// 旧客户端不带该字段 → 反序列化为空。
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// agent 实际据以列举的**绝对根**（不含 `rel`）。空 = 旧客户端没回报。
+    ///
+    /// 网页拿它当上传落点与相对路径的基准 —— 只有 agent 知道会话此刻真正在哪，
+    /// hub 手里那份是旧的。
+    #[serde(default)]
+    pub root: String,
+}
+
+/// hub → agent：现取一个会话目录内的文件（网页要看 agent 输出里引用的截图）。
+///
+/// **只为中转，不为存储**：hub 拿到内容后只在内存里放很短一会儿、交给等着的那个
+/// 网页请求就丢掉 —— 会话内容不落我方存储是这个项目的既定原则，截图同样算会话内容。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileFetch {
+    /// 本次取件的标识，结果按它认领
+    pub fetch_id: String,
+    /// 会话项目目录（agent 本机路径，作为根，不允许越出）。旧客户端兜底用。
+    pub cwd: String,
+    /// 相对根的子路径，分隔符统一 '/'
+    pub rel: String,
+    /// 会话 id（`by_session` 为真时据此解析根）
+    #[serde(default)]
+    pub task_id: String,
+    /// 同 [`DirQuery::by_session`]。会话内容里的相对图片路径也是终端按当前目录写下的，
+    /// 用旧快照的根解析，会话 `cd` 过之后就会全变破图。
+    #[serde(default)]
+    pub by_session: bool,
+}
+
+/// agent → hub：现取文件的结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileFetchResult {
+    pub fetch_id: String,
+    /// 失败原因（不存在/越界/过大）。非空即失败，此时 content_b64 为空。
+    #[serde(default)]
+    pub err: String,
+    /// 按魔数判定的 MIME（不看扩展名 —— 扩展名是内容里写的，改个名就能让页面按别的类型解析）
+    #[serde(default)]
+    pub mime: String,
+    #[serde(default)]
+    pub content_b64: String,
+}
+
+/// hub → agent：会话目录内的文件夹操作（上传选目录弹窗里新建/删除/重命名）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsOp {
+    /// 操作 id：网页据此轮询结果
+    pub op_id: String,
+    pub task_id: String,
+    /// 会话项目目录（agent 本机路径，作为根，不允许越出）
+    pub cwd: String,
+    /// 目标所在相对目录（"" = 根），分隔符统一 '/'
+    pub rel: String,
+    /// 操作类型：mkdir / delete / rename
+    pub op: String,
+    /// 目标名（rel 下的目录/文件名）
+    pub name: String,
+    /// rename 的新名（其余操作忽略）
+    #[serde(default)]
+    pub new_name: String,
+    /// 同 [`DirQuery::by_session`]：由 agent 按 `task_id` 现读会话记录解析根。
+    /// 必须与目录浏览用同一个根，否则「在网页上看到的目录」和「操作落到的目录」会是两个。
+    #[serde(default)]
+    pub by_session: bool,
+}
+
+/// agent → hub：文件夹操作结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsOpResult {
+    pub op_id: String,
+    pub ok: bool,
+    #[serde(default)]
+    pub msg: String,
 }
 
 /// hub → agent 的待执行控制命令
@@ -274,17 +429,80 @@ pub struct ControlCmd {
     /// 队列指令 id：网页据此查询「还在排队」与撤回（旧客户端忽略该字段）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// 这条 Input 是在回答终端弹出的选择卡（选项序号或自定义答案），不是主动发的任务。
+    ///
+    /// 客户端据此**跳过「补回车」**（见 client 的 PendingSubmit）：补回车的判据是「会话
+    /// 最新用户消息不是刚发的那条 ⇒ 没提交成功」，而选择卡的作答永远不会成为一条用户
+    /// 消息，判据恒成立 —— 于是每答一题必补两个回车，正好打在下一题上、替人选了默认项。
+    /// 表现是「答完第一题，剩下的题自己就没了」。
+    ///
+    /// 选择卡本就不需要这道保险：数字键按下即落定，没有「文字进了输入框却没提交」那回事。
+    #[serde(default)]
+    pub from_select: bool,
 }
 
 /// hub → agent 的待写入文件（传输文件到远程设备目录）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileTransfer {
-    /// 目标目录（agent 本机）
+    /// 目标目录（agent 本机绝对路径）。`by_session` 为真时忽略它，改用
+    /// `会话当前目录 + rel_dir`；旧客户端不认新字段，仍然只看这里。
     pub dir: String,
+    /// 会话 id（`by_session` 为真时据此解析落点根）
+    #[serde(default)]
+    pub task_id: String,
+    /// 相对会话当前目录的子路径（"" = 就落在会话当前目录），分隔符统一 '/'
+    #[serde(default)]
+    pub rel_dir: String,
+    /// **由 agent 在落盘那一刻解析目标目录**，而不是用 hub 事先算好的 `dir`。
+    ///
+    /// 这一步把「定位」推到了最晚的时刻：hub 排队、网络往返期间会话若又 `cd` 了，
+    /// 事先算的绝对路径就已经过时。agent 落盘时现算，再把实际路径回报回去
+    /// （见 [`FileTransferResult::path`]），网页据此回填，两端永远说的是同一个位置。
+    #[serde(default)]
+    pub by_session: bool,
     pub filename: String,
-    /// base64 编码的文件内容
+    /// base64 编码的文件内容（分片传输时是这一片的内容）
     pub content_b64: String,
+    /// 分片序号（0 起）。非分片传输恒为 0。
+    ///
+    /// 大文件必须切片：整份读进内存再 base64 会膨胀 1/3，还要在 hub 的下发队列里
+    /// 驻留到 agent 来取 —— 一个 100MB 的文件就能让 hub 吃掉 130MB+。
+    #[serde(default)]
+    pub chunk_index: u32,
+    /// 分片总数。0 或 1 都表示「不是分片，就这一份」。
+    ///
+    /// 旧版 agent 不认识这两个字段，反序列化时按 default 取 0，于是走原来的整份覆盖
+    /// 写入路径 —— 语义正好落在「非分片」上，不会把某一片当成完整文件写坏。
+    /// 但也因此，hub 必须确认对端版本够新才允许分片（见 server 的上传处理）。
+    #[serde(default)]
+    pub chunk_total: u32,
+    /// 本次传输的标识：非空表示 hub 要求 agent 回报**实际落盘路径**（见 [`FileTransferResult`]）。
+    ///
+    /// 名字的最终决定权在 agent 手里 —— 目标已存在时它会改名成 `图片 (1).jpg`（不覆盖）。
+    /// 此前这个新名字没有回程，hub 拼进任务正文的路径仍是自己算的原名，指向目录里那个
+    /// **旧文件**：agent 照着读得到内容、不报错，只是读的是上一版。本字段就是那条回程。
+    ///
+    /// 分片传输只认第 0 片定下的名字，回报在最后一片落完时发一次。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub transfer_id: String,
+}
+
+/// agent → hub：文件实际落到了哪里。
+///
+/// 只在 [`FileTransfer::transfer_id`] 非空时回报。失败也必须回报（`ok=false`）——
+/// hub 那边有个等结果的窗口，不回报它只能干等到超时，再拿自己算的名字去拼路径。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileTransferResult {
+    pub transfer_id: String,
+    /// 实际落盘的绝对路径（agent 本机）。失败时为空。
+    #[serde(default)]
+    pub path: String,
+    pub ok: bool,
+    /// 失败原因（解码失败/目标越界/写盘失败）。
+    #[serde(default)]
+    pub err: String,
 }
 
 pub fn platform_dsr(platform: &str) -> String {

@@ -53,6 +53,85 @@ fn write_close_behavior(state: &SharedState, b: CloseBehavior) {
     }
 }
 
+// ---- 保持电脑唤醒（防休眠/息屏）----
+fn keep_awake_pref_path(state: &SharedState) -> std::path::PathBuf {
+    state.config.data_dir.join("keepawake.pref")
+}
+fn read_keep_awake(state: &SharedState) -> bool {
+    std::fs::read_to_string(keep_awake_pref_path(state))
+        .map(|s| s.trim() == "on")
+        .unwrap_or(false)
+}
+fn write_keep_awake(state: &SharedState, on: bool) {
+    if let Err(e) = std::fs::write(keep_awake_pref_path(state), if on { "on" } else { "off" }) {
+        tracing::warn!("保持唤醒设置写入失败: {e}");
+    }
+}
+
+/// 保持电脑唤醒：mac 用 caffeinate 子进程（-w 本进程退出即自停，防遗留）；
+/// Windows 用 SetThreadExecutionState 在专线程持有 ES_CONTINUOUS。
+#[cfg(target_os = "macos")]
+mod keep_awake {
+    use std::process::Child;
+    use std::sync::Mutex;
+    static CAFFEINATE: Mutex<Option<Child>> = Mutex::new(None);
+    pub fn set(on: bool) {
+        let mut g = CAFFEINATE.lock().unwrap();
+        if on {
+            if g.is_some() {
+                return;
+            }
+            // -d 防息屏 -i 防空闲休眠 -s 防系统休眠 -u 声明用户活跃 -w 绑本进程存活
+            let pid = std::process::id().to_string();
+            match std::process::Command::new("caffeinate")
+                .args(["-disu", "-w", &pid])
+                .spawn()
+            {
+                Ok(c) => *g = Some(c),
+                Err(e) => tracing::warn!("启动 caffeinate 失败: {e}"),
+            }
+        } else if let Some(mut c) = g.take() {
+            let _ = c.kill();
+        }
+    }
+}
+#[cfg(windows)]
+mod keep_awake {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ON: AtomicBool = AtomicBool::new(false);
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    extern "system" {
+        fn SetThreadExecutionState(flags: u32) -> u32;
+    }
+    const ES_CONTINUOUS: u32 = 0x8000_0000;
+    const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
+    const ES_DISPLAY_REQUIRED: u32 = 0x0000_0002;
+    pub fn set(on: bool) {
+        ON.store(on, Ordering::SeqCst);
+        if on && !RUNNING.swap(true, Ordering::SeqCst) {
+            std::thread::spawn(|| {
+                // ES_CONTINUOUS 是线程级持续态：同一线程反复置位、关闭时清位并退出
+                while ON.load(Ordering::SeqCst) {
+                    unsafe {
+                        SetThreadExecutionState(
+                            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED,
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                }
+                unsafe {
+                    SetThreadExecutionState(ES_CONTINUOUS);
+                }
+                RUNNING.store(false, Ordering::SeqCst);
+            });
+        }
+    }
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+mod keep_awake {
+    pub fn set(_on: bool) {}
+}
+
 /// 窗口显示时：作为一般应用（macOS 显示 Dock 图标）。
 #[cfg(target_os = "macos")]
 fn set_app_visible_in_dock<R: tauri::Runtime>(app: &tauri::AppHandle<R>, visible: bool) {
@@ -67,6 +146,61 @@ fn set_app_visible_in_dock<R: tauri::Runtime>(app: &tauri::AppHandle<R>, visible
 }
 #[cfg(not(target_os = "macos"))]
 fn set_app_visible_in_dock<R: tauri::Runtime>(_app: &tauri::AppHandle<R>, _visible: bool) {}
+
+/// 关掉 macOS App Nap。窗口关到托盘/失焦后，系统会把本进程的定时器合并到约 60s，
+/// 于是 1.5s 的扫描上报被压到一分钟一次——终端里发了任务，会话状态迟迟不更新。
+/// 持有一个 UserInitiatedAllowingIdleSystemSleep 活动令牌即可豁免节流（仍允许系统正常休眠）。
+/// 令牌需活到进程结束，故 forget 掉、永不 endActivity。
+#[cfg(target_os = "macos")]
+fn disable_app_nap() {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+    let reason = NSString::from_str("持续扫描 AI 代理会话，禁用 App Nap 定时器节流");
+    let token = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+        NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+        &reason,
+    );
+    std::mem::forget(token);
+}
+/// Windows 11 的 EcoQoS 会把后台/最小化进程降频（CPU 降速、定时器合并），把 1.5s 的
+/// 扫描与命令轮询拉长到几十秒——表现为「网页发了任务，终端几十秒后才收到、像没送达」。
+/// 用 SetProcessInformation 关掉本进程的「执行速度节流」，后台也按正常频率跑。
+#[cfg(windows)]
+fn disable_app_nap() {
+    #[repr(C)]
+    struct ProcessPowerThrottlingState {
+        version: u32,
+        control_mask: u32,
+        state_mask: u32,
+    }
+    const PROCESS_POWER_THROTTLING_EXECUTION_SPEED: u32 = 0x1;
+    const CURRENT_VERSION: u32 = 1;
+    const PROCESS_POWER_THROTTLING: i32 = 4; // PROCESS_INFORMATION_CLASS::ProcessPowerThrottling
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn SetProcessInformation(
+            h: isize,
+            class: i32,
+            info: *const core::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+    // control_mask 指定「我要管执行速度节流」，state_mask=0 表示「关闭该节流」（始终全速）
+    let st = ProcessPowerThrottlingState {
+        version: CURRENT_VERSION,
+        control_mask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        state_mask: 0,
+    };
+    unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            PROCESS_POWER_THROTTLING,
+            &st as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<ProcessPowerThrottlingState>() as u32,
+        );
+    }
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+fn disable_app_nap() {}
 
 /// 把主窗口最小化到托盘：隐藏窗口 + macOS 退出 Dock（程序仍在后台跑）。
 fn minimize_to_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
@@ -88,7 +222,14 @@ pub fn message_box(title: &str, text: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
     let wide = |x: &str| x.encode_utf16().chain([0]).collect::<Vec<u16>>();
     let (t, m) = (wide(title), wide(text));
-    unsafe { MessageBoxW(std::ptr::null_mut(), m.as_ptr(), t.as_ptr(), MB_OK | MB_ICONWARNING) };
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            m.as_ptr(),
+            t.as_ptr(),
+            MB_OK | MB_ICONWARNING,
+        )
+    };
 }
 
 /// Windows：检测 WebView2 运行时。缺失时 Tauri 建不出窗口、进程会静默退出，
@@ -116,10 +257,19 @@ fn ensure_webview2() -> bool {
     );
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     let wide = |x: &str| x.encode_utf16().chain([0]).collect::<Vec<u16>>();
-    let (op, url) = (wide("open"), wide("https://go.microsoft.com/fwlink/p/?LinkId=2124703"));
+    let (op, url) = (
+        wide("open"),
+        wide("https://go.microsoft.com/fwlink/p/?LinkId=2124703"),
+    );
     unsafe {
-        ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), url.as_ptr(),
-            std::ptr::null(), std::ptr::null(), 1)
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            op.as_ptr(),
+            url.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        )
     };
     false
 }
@@ -130,7 +280,11 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
         let path = state.config.data_dir.join("startup.log");
         move |step: &str| {
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 let _ = writeln!(f, "{step}");
             }
         }
@@ -148,11 +302,19 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
     // 网页会自动把本机绑定到该账号（无需任何手工令牌）。
     let (pair_q, unpaired) = tauri::async_runtime::block_on(async {
         let paired = state.device_token.read().await.is_some();
-        let legacy = std::env::var("AM_AGENT_TOKEN").ok().filter(|s| !s.is_empty()).is_some();
+        let legacy = std::env::var("AM_AGENT_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_some();
         let code = if paired {
             None
         } else {
-            state.pair_info.read().await.as_ref().map(|(c, _)| c.clone())
+            state
+                .pair_info
+                .read()
+                .await
+                .as_ref()
+                .map(|(c, _)| c.clone())
         };
         (code, !paired && !legacy)
     });
@@ -180,13 +342,48 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             autostart_set,
             client_auth,
             local_machine_id,
+            read_session_image,
+            clear_device_token,
             terminals_get,
             terminal_set_excluded,
             update_status,
-            update_start
+            update_start,
+            plugin_status,
+            plugin_update,
+            win_minimize,
+            win_close
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+
+            // 后台/托盘态下必须持续以 1.5s 扫描上报会话状态，故先豁免 App Nap，
+            // 否则定时器被系统压到 ~60s，终端里发的任务要一分钟才反映到面板。
+            disable_app_nap();
+            // 恢复上次「保持电脑唤醒」设置
+            keep_awake::set(read_keep_awake(&state_setup));
+            // 默认装上 Cursor/VSCode 桥接扩展（内嵌终端下发靠它）：后台 best-effort，
+            // 每个扩展版本只装一次；未装编辑器 / CLI 不在 PATH 就静默跳过。
+            {
+                let hub = web_base.clone();
+                let dd = state_setup.config.data_dir.clone();
+                std::thread::spawn(move || {
+                    let _ = ensure_bridge_extension(&hub, &dd, false);
+                });
+            }
+
+            // 同理自动写入 Claude Code 的配对 hook（~/.claude/settings.json）：让 agent 自己
+            // 报出会话身份，取代靠猜的配对。手工配这段 JSON 太容易出错，而且错了完全静默
+            // （尤其 Windows 路径的反斜杠会被 bash 吞掉），所以由客户端代劳。
+            // 每个配置版本只写一次；Claude Code 没装过（没有 settings.json）就静默跳过。
+            {
+                let dd = state_setup.config.data_dir.clone();
+                let exe = std::env::current_exe().unwrap_or_default();
+                std::thread::spawn(move || {
+                    if crate::hookrec::ensure_hook_config(&dd, &exe, false) {
+                        ulog("[hook] 已写入 Claude Code 配对 hook（新开的会话即生效）");
+                    }
+                });
+            }
 
             // 作为一般桌面应用运行：macOS 显示 Dock 图标（Regular）。
             // agent 模式启动即后台，初始就用 Accessory —— 若先 Regular 再切，
@@ -227,7 +424,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                     }
                 }
             }
-            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("终端任务监控")
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(960.0, 640.0)
@@ -238,8 +435,43 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         reveal(w.app_handle(), want_visible);
                     }
-                })
-                .build()?;
+                });
+            // 仅 macOS 用 Overlay 融合式标题栏：保留原生红黄绿交通灯、隐藏标题文字，
+            // 网页内容延伸到标题栏区域（对标 Claude / Codex 桌面端）。Windows/Linux 保持
+            // 系统原生边框不动 —— 之前 Windows 去边框自绘按钮点不动、无法关闭缩小。
+            #[cfg(target_os = "macos")]
+            let builder = builder
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true);
+            let win = builder.build()?;
+            // 默认「网页授权跳转登录」：未配对时自动在系统浏览器打开授权页。浏览器有完整
+            // 能力（第三方登录/密码管理器/已有登录态），用户在浏览器登录并授权本机后，客户端
+            // 轮询拿到 device_token，内嵌 webview 随即自动重载并静默登录（见后台线程
+            // reload-on-token）。内嵌页仍保留登录入口作兜底。
+            if need_onboard {
+                let st = state_setup.clone();
+                let base = web_base.clone();
+                tauri::async_runtime::spawn(async move {
+                    // 稍延后：先让主窗露出来，再弹浏览器，避免一上来就抢焦点
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    // 必须等配对码真到手再开浏览器。领码是一次网络请求，启动这一瞬
+                    // 往往还没回来 —— 那时 portal_url 就退化成不带 ?pair= 的裸地址，
+                    // 用户在浏览器里登录了本机也绑不上，现象是「弹了网页却说没有配对码」。
+                    // 所以这里读**当下**的 pair_info，而不是启动瞬间的快照。
+                    for _ in 0..40 {
+                        let code = st.pair_info.read().await.as_ref().map(|(c, _)| c.clone());
+                        if let Some(code) = code {
+                            open_external(&format!("{base}/portal?pair={code}"));
+                            return;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    // 等了 ~20s 还没领到（离线/hub 不可达）：退回裸地址，
+                    // 至少让用户看见登录页和失败原因，而不是什么都不弹
+                    tracing::warn!("配对码迟迟未就绪，先打开登录页（本机需稍后从托盘重新登录绑定）");
+                    open_external(&format!("{base}/portal"));
+                });
+            }
             // 兜底：远程页面加载失败/超时也要露出主窗（白屏好过永远的启动窗）
             {
                 let h = app.handle().clone();
@@ -320,6 +552,25 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                             };
                             write_close_behavior(&state_evt, next);
                         }
+                        "keep_awake" => {
+                            // 切换「保持电脑唤醒」并立即生效；落盘让重启后保持
+                            let on = !read_keep_awake(&state_evt);
+                            write_keep_awake(&state_evt, on);
+                            keep_awake::set(on);
+                        }
+                        "install_ext" => {
+                            // 手动强制重装 Cursor/VSCode 桥接扩展，装完弹提示
+                            let hub = web_base_menu.clone();
+                            let dd = state_evt.config.data_dir.clone();
+                            std::thread::spawn(move || {
+                                let n = ensure_bridge_extension(&hub, &dd, true);
+                                notify_progress(&if n > 0 {
+                                    format!("已把桥接扩展安装到 {n} 个编辑器（Cursor/VSCode），重载窗口即生效")
+                                } else {
+                                    "未检测到 Cursor/VSCode 的命令行（code/cursor 未加入 PATH）。请在编辑器里执行「Shell Command: Install 'code'/'cursor' command in PATH」后重试".to_string()
+                                });
+                            });
+                        }
                         "quit" => app.exit(0),
                         other => {
                             // 监控范围勾选项：id=excl::<tty>
@@ -353,8 +604,25 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             let state_bg = state_setup.clone();
             std::thread::spawn(move || {
                 let mut last_sig = String::new();
+                // 记住上轮是否已配对：从「未配对」跳到「已配对」（浏览器授权完成、拿到
+                // device_token）时重载 webview，让页面 client_auth 静默登录接管、直接进
+                // 已授权门户，无需用户在客户端里再登一次。
+                let mut was_paired = tauri::async_runtime::block_on(async {
+                    state_bg.device_token.read().await.is_some()
+                });
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(3));
+                    let paired_now = tauri::async_runtime::block_on(async {
+                        state_bg.device_token.read().await.is_some()
+                    });
+                    if paired_now && !was_paired {
+                        was_paired = true;
+                        // 授权完成 = 该把人接回客户端了。原先只是悄悄重载内嵌页，
+                        // 用户在浏览器里点完授权，客户端那边毫无动静，得自己想起来切回去。
+                        // 这里连带把窗口显示并聚焦，「回到客户端」这一步才是闭合的。
+                        show_main(&handle_bg);
+                        reload_main(&handle_bg);
+                    }
                     let (terminals, excluded, hub_err, upd) = tauri::async_runtime::block_on(async {
                         let t = state_bg.terminals.read().await.clone();
                         let e = state_bg.excludes.read().await.list();
@@ -439,7 +707,11 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                     });
                 }
             }
-            // 更新监视：新版本弹确认框；低于强制下限必须更新否则退出
+            // 先结算上次自更新装没装上（一次性提示 + 清标记），避免陈标记把后续「点击更新」
+            // 永久卡成「请手动下载」。必须在 watcher/点击之前做。
+            settle_update_marker();
+            // 更新监视：常规新版本只发系统通知气泡 + 托盘置顶「点击更新」项，不弹模态；
+            // 仅当本机低于强制下限（desktopMin）时才弹必须更新的模态，否则退出。
             spawn_update_watcher(handle.clone(), state_setup.clone(), web_base.clone());
             // [test] 模拟点击更新：与托盘/设置里的真实点击走同一路径
             if std::env::var("AM_TEST_UPDATE_CLICK").ok().as_deref() == Some("1") {
@@ -453,13 +725,22 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .map_err(|e| {
             // GUI 子系统没有控制台：失败必须让用户看见，否则就是「双击没反应」
             #[cfg(windows)]
             message_box("终端任务监控", &format!("启动失败：{e}"));
             anyhow::anyhow!("Tauri 运行失败: {e}")
-        })?;
+        })?
+        .run(|_app, _event| {
+            // macOS：点 Dock 图标唤回主窗口。关闭窗口会缩到托盘（切 Accessory、Dock
+            // 图标消失），此时点 Dock 上残留/固定的图标会触发 Reopen —— Tauri 默认不处理，
+            // 缺了它就表现为「点程序坞图标没反应、界面打不开」。收到即恢复 Dock 图标并显示窗口。
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                show_main(_app);
+            }
+        });
     Ok(())
 }
 
@@ -477,7 +758,11 @@ fn build_tray_menu<R: tauri::Runtime>(
         "refresh",
         "刷新界面",
         true,
-        Some(if cfg!(target_os = "macos") { "Cmd+R" } else { "Ctrl+R" }),
+        Some(if cfg!(target_os = "macos") {
+            "Cmd+R"
+        } else {
+            "Ctrl+R"
+        }),
     )?;
     let browser = MenuItem::with_id(manager, "browser", "在浏览器打开", true, None::<&str>)?;
     let scope = build_scope_submenu(manager, state)?;
@@ -496,6 +781,21 @@ fn build_tray_menu<R: tauri::Runtime>(
         "开机自启",
         true,
         autostart_enabled(),
+        None::<&str>,
+    )?;
+    let keep_awake = CheckMenuItem::with_id(
+        manager,
+        "keep_awake",
+        "保持电脑唤醒（防休眠/息屏）",
+        true,
+        read_keep_awake(state),
+        None::<&str>,
+    )?;
+    let install_ext = MenuItem::with_id(
+        manager,
+        "install_ext",
+        "安装 Cursor/VSCode 桥接扩展",
+        true,
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(manager, "quit", "退出", true, None::<&str>)?;
@@ -547,6 +847,8 @@ fn build_tray_menu<R: tauri::Runtime>(
     menu.append(&sep()?)?;
     menu.append(&close_to_tray)?;
     menu.append(&autostart)?;
+    menu.append(&keep_awake)?;
+    menu.append(&install_ext)?;
     menu.append(&sep()?)?;
     menu.append(&scope)?;
     menu.append(&sep()?)?;
@@ -629,10 +931,7 @@ fn autostart_target() -> Option<std::path::PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn launch_agent_plist_path() -> Option<std::path::PathBuf> {
-    Some(
-        dirs::home_dir()?
-            .join("Library/LaunchAgents/com.vitahsu.agentmonitor.plist"),
-    )
+    Some(dirs::home_dir()?.join("Library/LaunchAgents/com.vitahsu.agentmonitor.plist"))
 }
 
 /// Windows 上起 `reg` 这类控制台程序的统一入口。
@@ -688,6 +987,71 @@ fn local_machine_id(ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>) -> String {
     ctx.state.config.machine_id.clone()
 }
 
+/// 单张图片上限。整份要经 base64 塞进 data URL 交给页面，太大既卡渲染又占内存。
+const MAX_LOCAL_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// 网页端 IPC：读会话目录里的一张图片，回 data URL。
+///
+/// agent 的输出常带 `![说明](qa/evidence/xxx.png)` 这种**本机相对路径** —— 那是跑
+/// agent 那台机器上的文件，网页拿它去拼站点地址只会 404。而在桌面客户端里，
+/// 这个路径本来就是有意义的：文件就在本机。于是这里把它读出来直接给页面。
+///
+/// **只允许会话项目目录内的文件**：canonicalize 后必须仍在 cwd 之下 —— 会话内容
+/// 可能来自别处（比如另一台机器同步过来的），不能让一段 `![](../../.ssh/id_rsa)`
+/// 就把目录外的东西读出去。判据与 agent 的 list_entries 同源。
+#[tauri::command]
+fn read_session_image(cwd: String, rel: String) -> Result<String, String> {
+    use std::path::Path;
+    if rel.split(['/', '\\']).any(|s| s == "..") {
+        return Err("非法路径".into());
+    }
+    let base = Path::new(&cwd).join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let (Ok(file), Ok(root)) = (base.canonicalize(), Path::new(&cwd).canonicalize()) else {
+        return Err("文件不存在".into());
+    };
+    if !file.starts_with(&root) {
+        return Err("越出会话目录".into());
+    }
+    let meta = std::fs::metadata(&file).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("不是文件".into());
+    }
+    if meta.len() > MAX_LOCAL_IMAGE_BYTES {
+        return Err(format!("图片过大（{} MB）", meta.len() / 1024 / 1024));
+    }
+    let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    Ok(format!(
+        "data:{};base64,{}",
+        crate::desktop::image_mime(&bytes),
+        B64.encode(&bytes)
+    ))
+}
+
+/// 按魔数判图片类型。**不看扩展名** —— 扩展名是内容里写的，改个名就能让页面
+/// 按别的类型解析；魔数是文件自己说的。认不出就不给（宁可不显示，也不猜）。
+pub(crate) fn image_mime(b: &[u8]) -> &'static str {
+    match b {
+        _ if b.starts_with(b"\x89PNG") => "image/png",
+        _ if b.starts_with(&[0xff, 0xd8, 0xff]) => "image/jpeg",
+        _ if b.starts_with(b"GIF8") => "image/gif",
+        _ if b.starts_with(b"RIFF") && b.len() > 11 && &b[8..12] == b"WEBP" => "image/webp",
+        _ if b.starts_with(b"<svg") || b.starts_with(b"<?xml") => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
+/// 网页端 IPC：设备令牌被 hub 判为无效（换了服务器 / 设备被删 / 数据重建）时，
+/// 清掉本地令牌（含 device-token.dpapi），让 agent 循环回到配对流程重新绑定。
+/// —— 用户无需再手动去找并删除那个文件（静默续登拿到 401 时页面会调这里）。
+#[tauri::command]
+async fn clear_device_token(ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>) -> Result<(), String> {
+    *ctx.state.device_token.write().await = None;
+    crate::secrets::clear(&ctx.state.config.data_dir);
+    tracing::info!("设备令牌被判无效，已清除本地令牌，将自动重新配对");
+    Ok(())
+}
+
 /// 网页端 IPC：本机探测到的终端列表（含排除状态），设置页「监控范围」用
 #[tauri::command]
 async fn terminals_get(
@@ -735,16 +1099,84 @@ async fn update_status(
 
 /// 网页端 IPC：立即执行应用内更新（设置页「检查更新 → 立即更新」）
 #[tauri::command]
-fn update_start(
-    app: tauri::AppHandle,
-    ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>,
-) {
+fn update_start(app: tauri::AppHandle, ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>) {
     spawn_self_update_inner(app, ctx.web_base.clone(), false);
+}
+
+/// 网页端 IPC：桥接插件（Cursor/VSCode 扩展）版本状态 —— 与「客户端版本」对应。
+/// `installed` = 编辑器里实际已装的版本（任一编辑器；null = 未装或 CLI 不在 PATH）；
+/// `latest` = 本客户端将安装到的目标版本（BRIDGE_EXT_VERSION）。二者不等即有更新。
+/// 跑子进程查版本，放 spawn_blocking 免阻塞异步执行器。
+#[tauri::command]
+async fn plugin_status() -> Result<serde_json::Value, String> {
+    let v = tauri::async_runtime::spawn_blocking(|| {
+        let editors: Vec<serde_json::Value> = [("cursor", "Cursor"), ("code", "VSCode")]
+            .iter()
+            .map(|(cli, name)| {
+                serde_json::json!({
+                    "cli": cli, "name": name, "installed": installed_ext_version(cli),
+                })
+            })
+            .collect();
+        // 任一编辑器已装即取其版本（多编辑器版本一致）
+        let installed = editors
+            .iter()
+            .find_map(|e| e["installed"].as_str().map(str::to_string));
+        serde_json::json!({
+            "installed": installed,
+            "latest": BRIDGE_EXT_VERSION,
+            "editors": editors,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(v)
+}
+
+/// 网页端 IPC：检查并（强制）更新桥接插件 —— 从 hub 拉最新 vsix 重装到 Cursor/VSCode。
+/// 返回安装到的编辑器个数与装后实际版本，供页面提示。
+#[tauri::command]
+async fn plugin_update(
+    ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>,
+) -> Result<serde_json::Value, String> {
+    let hub = ctx.web_base.clone();
+    let dd = ctx.state.config.data_dir.clone();
+    let (installed, version) = tauri::async_runtime::spawn_blocking(move || {
+        let n = ensure_bridge_extension(&hub, &dd, true);
+        let version = ["cursor", "code"]
+            .iter()
+            .find_map(|c| installed_ext_version(c));
+        (n, version)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "installed": installed, "version": version }))
 }
 
 /// 网页端 IPC：查询开机自启状态。
 /// 客户端窗口加载的是远端前台页；页面里的「开机自启」开关经这两个命令
 /// 操作本机（浏览器里打开同一页面时没有 __TAURI__，开关不渲染）。
+/// 无边框窗口的自绘顶栏用：最小化 / 关闭当前窗口（Windows 去掉系统边框后
+/// 没有原生按钮，靠网页顶栏按钮走 IPC 调这两个命令）。关闭沿用「收进托盘」
+/// 语义（隐藏窗口而非退出进程），与点原生关闭按钮一致。
+#[tauri::command]
+fn win_minimize(window: tauri::Window) {
+    let _ = window.minimize();
+}
+
+#[tauri::command]
+fn win_close(window: tauri::Window) {
+    // 与关闭按钮/托盘一致：隐藏到托盘，保持后台上报，不退出进程
+    let _ = window.hide();
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = window
+            .app_handle()
+            .set_activation_policy(ActivationPolicy::Accessory);
+    }
+}
+
 #[tauri::command]
 fn autostart_get() -> bool {
     autostart_enabled()
@@ -889,8 +1321,9 @@ fn show_main_with_pair<R: tauri::Runtime>(app: &tauri::AppHandle<R>, pair_url: O
     }
     // 从托盘重新打开：恢复 Dock 图标（macOS），再显示并聚焦窗口
     set_app_visible_in_dock(app, true);
-    // 非强制更新的确认弹窗只在重新打开 GUI 时出现（每个版本一次）
-    maybe_prompt_update(app);
+    // 非强制更新不再弹任何模态框（打开窗口也不弹）—— 只靠托盘「更新」菜单项 +
+    // 每版本一次的系统通知气泡提示，用户想更新时自己点。模态确认只保留给强制更新
+    // （低于 desktopMin，见 spawn_update_watcher）。
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
@@ -909,14 +1342,23 @@ fn open_external(url: &str) {
         let wide = |x: &str| x.encode_utf16().chain([0]).collect::<Vec<u16>>();
         let (op, u) = (wide("open"), wide(url));
         let h = unsafe {
-            ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), u.as_ptr(),
-                std::ptr::null(), std::ptr::null(), 1)
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                op.as_ptr(),
+                u.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
         };
         // 按 Win32 约定，返回值 > 32 表示成功
         if h as usize > 32 {
             Ok(())
         } else {
-            Err(std::io::Error::other(format!("ShellExecuteW 返回 {}", h as usize)))
+            Err(std::io::Error::other(format!(
+                "ShellExecuteW 返回 {}",
+                h as usize
+            )))
         }
     };
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -957,6 +1399,47 @@ fn ulog(msg: &str) {
     crate::state::client_log(msg);
 }
 
+/// 「上次尝试更新时我是哪个版本」的落盘位置。
+/// 与 client_log 同一套目录定位：这段在后台线程里跑，拿不到 state。
+fn update_attempt_path() -> std::path::PathBuf {
+    std::env::var("AM_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| dirs::data_dir().unwrap_or_default().join("AgentMonitor"))
+        .join("update-attempt")
+}
+
+/// 启动即结算「上次自更新到底装没装上」，然后**清掉标记**。
+/// 标记文件存着上次更新前的版本：
+/// - 版本已变（marker ≠ 当前）：装成功了，静默清掉即可；顺带清掉旧机器人手动换包留下的陈标记。
+/// - 版本没变（marker == 当前）：那次没生效，提示一次「请手动下载」，然后一样清掉。
+///
+/// 关键是**无论哪种都清标记**：老逻辑把结算拖到「下次点击更新」时才做、且同版本时不清标记，
+/// 于是每次点更新都被这道闸直接回绝成「请手动下载」，永远不再尝试。改到启动做一次性结算后，
+/// 点更新时标记已不在，必定真去下载重装。
+fn settle_update_marker() {
+    let local = env!("CARGO_PKG_VERSION");
+    let marker = update_attempt_path();
+    let Ok(raw) = std::fs::read_to_string(&marker) else {
+        return; // 没有标记 = 上次不是更新重启，无需结算
+    };
+    let prev = raw.trim();
+    // 无论成败，先把上次遗留的「正在下载/重启」进度清掉：新实例已经起来了。
+    clear_update_progress();
+    if !prev.is_empty() && prev == local {
+        ulog(&format!(
+            "[update] 上次更新后仍是 v{local} —— 未生效，提示手动更新一次"
+        ));
+        notify_progress(&format!(
+            "自动更新未生效（仍是 v{local}），请下载安装包手动更新一次"
+        ));
+    } else {
+        ulog(&format!(
+            "[update] 上次更新已生效（v{prev} → v{local}），清理标记"
+        ));
+    }
+    let _ = std::fs::remove_file(&marker);
+}
+
 /// 托盘「点击更新」：后台线程执行自更新。
 /// - macOS：下载 zip → 原地替换 .app → 重启（全自动，无需用户操作）
 /// - Windows：下载安装器静默安装并自动重启
@@ -972,7 +1455,9 @@ fn notify_new_version(v: &str) {
         let script = format!(
             "display notification \"新版本 v{v} 可用，重新打开窗口或在托盘中即可更新\" with title \"终端任务监控\""
         );
-        let _ = std::process::Command::new("osascript").args(["-e", &script]).output();
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output();
     }
     #[cfg(windows)]
     {
@@ -991,41 +1476,6 @@ fn notify_new_version(v: &str) {
     let _ = v;
 }
 
-/// 窗口（重新）显示时：有待更新版本且尚未弹过窗 → 弹确认框。
-/// 非强制更新只在这里弹，平时不打断使用。
-static UPDATE_DIALOG_SHOWN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-fn maybe_prompt_update<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    let Some(ctx) = app.try_state::<std::sync::Arc<IpcCtx>>() else {
-        return;
-    };
-    let ctx = ctx.inner().clone();
-    let app = app.clone();
-    std::thread::spawn(move || {
-        let latest = tauri::async_runtime::block_on(async {
-            ctx.state.hub_latest_version.read().await.clone()
-        });
-        let Some(v) = latest else { return };
-        {
-            let mut shown = UPDATE_DIALOG_SHOWN.lock().unwrap();
-            if shown.as_deref() == Some(v.as_str()) {
-                return;
-            }
-            *shown = Some(v.clone());
-        }
-        let local = env!("CARGO_PKG_VERSION");
-        let ok = confirm_box(
-            "终端任务监控 · 发现新版本",
-            &format!("新版本 v{v} 可用（当前 v{local}）。\n更新将自动完成并重启，是否立即更新？"),
-            "立即更新",
-            "稍后",
-        );
-        if ok {
-            spawn_self_update_inner(app, ctx.web_base.clone(), false);
-        }
-    });
-}
-
 /// 更新进行中的轻量提示（不打断）：mac 系统通知 / Windows 右下角气泡
 fn notify_progress(msg: &str) {
     ulog(&format!("[update] {msg}"));
@@ -1035,7 +1485,9 @@ fn notify_progress(msg: &str) {
             "display notification \"{}\" with title \"终端任务监控\"",
             msg.replace('"', "'")
         );
-        let _ = std::process::Command::new("osascript").args(["-e", &script]).output();
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output();
     }
     #[cfg(windows)]
     {
@@ -1066,7 +1518,9 @@ fn alert_box(title: &str, text: &str) {
             esc(text),
             esc(title)
         );
-        let _ = std::process::Command::new("osascript").args(["-e", &script]).output();
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output();
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -1078,30 +1532,49 @@ fn alert_box(title: &str, text: &str) {
 /// 流式下载 + 进度日志 + 30s 无数据即报错：跨境网络常见「连上了但一直
 /// 不来数据」，整体超时要干等 5 分钟且全程无反馈（实际用户日志：三次
 /// 「开始自更新」后连下载完成都没有）——停滞必须快速可见地失败。
-fn download_to(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
-    // 弱网环境（跨境链路）单次失败很常见：自动重试一次，两次都挂才报错
-    match download_to_once(url, dest) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            ulog(&format!("[update] 首次下载失败（{e}），3s 后重试一次"));
-            std::thread::sleep(std::time::Duration::from_secs(3));
-            download_to_once(url, dest)
+/// 下载文件。`report`=true 才把进度写进「更新进度」通道（自更新用；扩展 vsix 等辅助
+/// 下载传 false，别污染更新 UI）。`min_bytes` 是最小合法大小（安装包用 1MB 挡半包，
+/// 小文件如 vsix 传更小）。
+fn download_to(
+    url: &str,
+    dest: &std::path::Path,
+    report: bool,
+    min_bytes: usize,
+) -> anyhow::Result<()> {
+    // 跨境链路（中国→海外 Vultr）慢且易抖：多试几次，指数退避，最后一次挂了才报错。
+    let mut last = String::new();
+    for attempt in 1..=4 {
+        match download_to_once(url, dest, report, min_bytes) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = format!("{e}");
+                let wait = attempt * 3;
+                ulog(&format!(
+                    "[update] 第{attempt}次下载失败（{e}），{wait}s 后重试"
+                ));
+                std::thread::sleep(std::time::Duration::from_secs(wait as u64));
+            }
         }
     }
+    anyhow::bail!("多次下载均失败：{last}")
 }
 
-fn download_to_once(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+fn download_to_once(
+    url: &str,
+    dest: &std::path::Path,
+    report: bool,
+    min_bytes: usize,
+) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     let bytes = rt.block_on(async {
         let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(15))
+            .connect_timeout(std::time::Duration::from_secs(30))
             .build()?;
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            client.get(url).send(),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("连接更新服务器超时（30s）"))??;
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(60), client.get(url).send())
+            .await
+            .map_err(|_| anyhow::anyhow!("连接更新服务器超时（60s）"))??;
         if !resp.status().is_success() {
             anyhow::bail!("下载失败 HTTP {}", resp.status());
         }
@@ -1111,21 +1584,20 @@ fn download_to_once(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
         let mut out: Vec<u8> = Vec::with_capacity(total as usize);
         let mut last_mark = 0usize;
         loop {
-            let chunk = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                resp.chunk(),
-            )
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "下载停滞（30s 无数据，已收 {}/{} 字节），请稍后重试或到官网手动下载",
-                    out.len(),
-                    total
-                )
-            })??;
+            let chunk = tokio::time::timeout(std::time::Duration::from_secs(120), resp.chunk())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "下载停滞（120s 无数据，已收 {}/{} 字节），请稍后重试或到官网手动下载",
+                        out.len(),
+                        total
+                    )
+                })??;
             let Some(chunk) = chunk else { break };
             out.extend_from_slice(&chunk);
-            set_update_progress("downloading", out.len() as u64, total);
+            if report {
+                set_update_progress("downloading", out.len() as u64, total);
+            }
             // 每 2MB 记一次进度，网络问题可从日志直接定位
             if out.len() - last_mark >= 2 * 1024 * 1024 {
                 last_mark = out.len();
@@ -1134,8 +1606,8 @@ fn download_to_once(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
         }
         Ok::<_, anyhow::Error>(out)
     })?;
-    if bytes.len() < 1024 * 1024 {
-        anyhow::bail!("更新包异常（{} 字节），已取消", bytes.len());
+    if bytes.len() < min_bytes {
+        anyhow::bail!("下载内容异常（{} 字节），已取消", bytes.len());
     }
     std::fs::write(dest, &bytes)?;
     Ok(())
@@ -1157,6 +1629,180 @@ pub fn self_update_probe(hub: &str) {
     }
 }
 
+/// 桥接扩展版本：随扩展 package.json 的 version 走；变更时改这里，客户端会重装一次。
+const BRIDGE_EXT_VERSION: &str = "0.1.6";
+
+/// 默认把 Cursor/VSCode 桥接扩展装上：从 hub 下 vsix → 检测 cursor/code CLI → 安装。
+/// 每个扩展版本只装一次（标记文件）。装不上（未装编辑器/CLI 不在 PATH）静默跳过。
+/// `force` 为真时忽略标记、强制重装（托盘手动触发用）。
+fn ensure_bridge_extension(hub: &str, data_dir: &std::path::Path, force: bool) -> u32 {
+    let marker = data_dir.join(format!("bridge-ext-{BRIDGE_EXT_VERSION}.done"));
+    if !force && marker.exists() {
+        return 0;
+    }
+    let vsix = data_dir.join("agent-monitor-bridge.vsix");
+    // 静默下载（report=false，不动更新进度 UB）、最小 1KB（vsix 才几 KB）
+    // 同样带 cache-buster：vsix 也是 CDN 默认缓存的类型，发了新版却下到旧的，
+    // 表现就是「扩展装上了、行为还是老的」——比自更新那次更难查（版本号还对得上）
+    if let Err(e) = download_to(
+        &cache_busted(hub, "agent-monitor-bridge.vsix"),
+        &vsix,
+        false,
+        1024,
+    ) {
+        ulog(&format!("[bridge] 扩展 vsix 下载失败: {e}"));
+        return 0;
+    }
+    let mut installed = 0u32;
+    for name in ["cursor", "code"] {
+        // 每个编辑器按候选顺序试：PATH 短名优先，装不上再退回应用内置 CLI 的绝对路径。
+        // 用户没执行「Shell Command: Install 'cursor' command in PATH」时短名找不到，
+        // 但 app 包里一直有这个 CLI —— 不兜底就会：扩展装不上→内嵌终端下发悄悄失败。
+        for cli in editor_clis(name) {
+            if install_vsix(&cli, &vsix) {
+                installed += 1;
+                ulog(&format!("[bridge] 已安装桥接扩展到 {name}（{cli}）"));
+                break; // 该编辑器装成功一个候选即够
+            }
+        }
+    }
+    // 校验实际已装版本 == 期望版本，才打标记。否则——hub 上的 vsix 可能还是旧版（发版时漏了
+    // 重新打包部署），install --force 装的仍是旧内容，若照 BRIDGE_EXT_VERSION 直接打标记就会
+    // 「标记说装了新版、实际还是旧版」，从此再不重试。不打标记 → 下次启动继续重试，直到 hub
+    // 真的提供了该版本，自纠正。
+    let ver_ok = installed > 0
+        && ["cursor", "code"]
+            .iter()
+            .any(|c| installed_ext_version(c).as_deref() == Some(BRIDGE_EXT_VERSION));
+    if ver_ok {
+        let _ = std::fs::write(&marker, BRIDGE_EXT_VERSION);
+    } else if installed > 0 {
+        ulog(&format!(
+            "[bridge] 已装但版本非 {BRIDGE_EXT_VERSION}（hub vsix 可能未更新），不打标记、下次重试"
+        ));
+    }
+    installed
+}
+
+/// 某编辑器（"cursor" / "code"）的候选 CLI 列表：PATH 短名优先，再兜底到应用内置 CLI 的
+/// 绝对路径。绝对路径仅在文件真实存在时加入，避免给未安装的编辑器留下无效候选。
+fn editor_clis(name: &str) -> Vec<String> {
+    #[allow(unused_mut)]
+    let mut v = vec![name.to_string()]; // PATH 短名
+    #[cfg(target_os = "macos")]
+    {
+        let app = match name {
+            "cursor" => "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
+            "code" => "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+            _ => "",
+        };
+        if !app.is_empty() && std::path::Path::new(app).exists() {
+            v.push(app.to_string());
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let p = match name {
+                "cursor" => format!("{local}\\Programs\\cursor\\resources\\app\\bin\\cursor.cmd"),
+                "code" => {
+                    format!("{local}\\Programs\\Microsoft VS Code\\bin\\code.cmd")
+                }
+                _ => String::new(),
+            };
+            if !p.is_empty() && std::path::Path::new(&p).exists() {
+                v.push(p);
+            }
+        }
+        // VS Code 还可能是系统级安装
+        if name == "code" {
+            for pf in ["ProgramFiles", "ProgramFiles(x86)"] {
+                if let Ok(dir) = std::env::var(pf) {
+                    let p = format!("{dir}\\Microsoft VS Code\\bin\\code.cmd");
+                    if std::path::Path::new(&p).exists() {
+                        v.push(p);
+                    }
+                }
+            }
+        }
+    }
+    v
+}
+
+/// 查已装的桥接扩展版本：对该编辑器的候选 CLI 逐个试，任一给出版本即返回。
+/// 取不到（编辑器未装 / CLI 都不可用）返回 None。
+fn installed_ext_version(name: &str) -> Option<String> {
+    editor_clis(name)
+        .iter()
+        .find_map(|cli| installed_ext_version_via(cli))
+}
+
+/// 单个 CLI 路径：`<cli> --list-extensions --show-versions` 里找
+/// `vitahsu.agent-monitor-bridge@x.y.z`。
+fn installed_ext_version_via(cli: &str) -> Option<String> {
+    #[cfg(windows)]
+    let out = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("cmd")
+            .args(["/C", cli, "--list-extensions", "--show-versions"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok()?
+    };
+    #[cfg(not(windows))]
+    let out = std::process::Command::new(cli)
+        .args(["--list-extensions", "--show-versions"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("vitahsu.agent-monitor-bridge@"))
+        .map(|v| v.trim().to_string())
+}
+
+/// 调 `<cli> --install-extension <vsix> --force`。CLI 不在 PATH / 未装编辑器 → 返回 false。
+#[cfg(windows)]
+fn install_vsix(cli: &str, vsix: &std::path::Path) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // cursor/code 是 .cmd 批处理，需经 cmd 调用；CREATE_NO_WINDOW 不闪黑窗
+    std::process::Command::new("cmd")
+        .args(["/C", cli, "--install-extension"])
+        .arg(vsix)
+        .arg("--force")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+#[cfg(not(windows))]
+fn install_vsix(cli: &str, vsix: &std::path::Path) -> bool {
+    std::process::Command::new(cli)
+        .arg("--install-extension")
+        .arg(vsix)
+        .arg("--force")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// 下载地址加一次性查询参数，绕开任何中间层缓存。
+/// mac / Windows 的自更新包与桥接扩展 vsix 都走它（后者在所有平台都会下载）。
+///
+/// 踩过的坑：域名挂在 Cloudflare 后面，`.zip`/`.exe` 属于它默认缓存的类型（TTL 4h）。
+/// 发新版后 CDN 仍分发上一版的包 —— 客户端日志一路「下载完成/解包完成/新版本已就位」，
+/// 重启后却还是旧版，且**所有设备一起中招**，看起来极像自更新代码坏了。
+/// 服务端已加 `Cache-Control: no-store`，这里再加一道：下载地址每次都不同，
+/// 就算哪天 CDN 配置被改回去也不会重演。
+fn cache_busted(hub: &str, name: &str) -> String {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{hub}/downloads/{name}?t={ts}")
+}
+
 #[cfg(target_os = "macos")]
 fn do_self_update(hub: &str) -> anyhow::Result<()> {
     // 定位自身 .app：exe 位于 <bundle>.app/Contents/MacOS/ 下
@@ -1173,7 +1819,12 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
     let zip = tmp.join("update.zip");
-    download_to(&format!("{hub}/downloads/agent-monitor-mac.zip"), &zip)?;
+    download_to(
+        &cache_busted(hub, "agent-monitor-mac.zip"),
+        &zip,
+        true,
+        1024 * 1024,
+    )?;
     ulog("[update] 下载完成");
     set_update_progress("installing", 0, 0);
 
@@ -1196,7 +1847,9 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
 
     // 原地替换：旧 .app 改名挪到同一父目录（同目录 rename 不跨卷、不受
     // 临时目录权限影响），放入新包后延迟重启，最后清掉旧包。
-    let parent = bundle.parent().ok_or_else(|| anyhow::anyhow!("bundle 无父目录"))?;
+    let parent = bundle
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("bundle 无父目录"))?;
     let old = parent.join(".终端任务监控.old.app");
     let _ = std::fs::remove_dir_all(&old);
     std::fs::rename(&bundle, &old).map_err(|e| anyhow::anyhow!("移出旧版本失败: {e}"))?;
@@ -1214,10 +1867,18 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     set_update_progress("restarting", 0, 0);
     let bundle_str = bundle.to_string_lossy().to_string();
     let old_str = old.to_string_lossy().to_string();
+    // 关键：必须**等旧进程完全退出**再拉起新实例，且用 `open -n` 强制开新实例。
+    // 否则旧进程还活着时 `open`（无 -n）只是把旧实例激活到前台、不启动新版本 —— 表现
+    // 就是「提示更新了、重启后还是旧版」。等自身 PID 消失（最多 ~15s）再 open -n。
+    let pid = std::process::id();
     std::process::Command::new("sh")
         .args([
             "-c",
-            &format!("sleep 1; AM_SELF_UPDATE=0 AM_TEST_UPDATE_CLICK=0 open \"{bundle_str}\"; sleep 3; rm -rf \"{old_str}\""),
+            &format!(
+                "for i in $(seq 1 60); do kill -0 {pid} 2>/dev/null || break; sleep 0.25; done; \
+                 AM_SELF_UPDATE=0 AM_TEST_UPDATE_CLICK=0 open -n \"{bundle_str}\"; \
+                 sleep 3; rm -rf \"{old_str}\""
+            ),
         ])
         .spawn()?;
     Ok(())
@@ -1229,17 +1890,32 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let tmp = std::env::temp_dir();
     let installer = tmp.join("agent-monitor-setup.exe");
-    download_to(&format!("{hub}/downloads/agent-monitor-setup.exe"), &installer)?;
+    download_to(
+        &cache_busted(hub, "agent-monitor-setup.exe"),
+        &installer,
+        true,
+        1024 * 1024,
+    )?;
     ulog("[update] 安装器下载完成，静默安装");
     set_update_progress("installing", 0, 0);
-    // 全静默更新，不出安装向导：NSIS /S 静默安装（沿用上次安装目录与组件选择，
-    // 安装器内部会先结束本进程再覆盖），装完从注册表定位新程序并自动重启。
-    // 整个流程放在独立的 bat 里执行 —— 本进程会被安装器 taskkill，
-    // cmd 宿主不受影响，能等安装结束再拉起新版本。
+    // 全静默更新，不出安装向导：NSIS /S 静默安装（沿用上次安装目录与组件选择），
+    // 装完从注册表定位新程序并自动重启。整个流程放在独立的 bat 里执行 ——
+    // 本进程随后就会退出，cmd 宿主不受影响，能等安装结束再拉起新版本。
+    //
+    // **开头必须先等旧实例退出**：调用方是在本函数返回之后才 app.exit()，而 bat 一被
+    // spawn 就跑起来了。那一刻主 exe 还被自己占着，NSIS 覆盖不了 —— 偏偏静默模式
+    // 覆盖失败也不报错，它照样写完 Uninstall.exe 正常收工，bat 再把「新版」拉起来，
+    // 其实还是旧的：新实例又看到有新版，于是反复下载安装、版本永远不变。
+    // （实测现场：AgentMonitor.exe 停在上一次的时间，Uninstall.exe 却是刚写的。）
+    //
+    // 等待用 ping 而非 timeout：CREATE_NO_WINDOW 下没有控制台，timeout 会直接失败。
+    // 也不要用 `for /l` 轮询 tasklist —— 从循环体里 `goto` 跳出在 cmd 下不可靠，实测整个
+    // bat 就此卡住，装都装不上。固定等几秒再 taskkill 兜底，行为可预测得多。
     let bat = tmp.join("agent-monitor-update.bat");
     let script = format!(
-        "@echo off\r\nchcp 65001 >nul\r\n\"{}\" /S\r\nset \"DIR=\"\r\nfor /f \"skip=2 tokens=2,*\" %%a in ('reg query \"HKCU\\Software\\AgentMonitor\" /v \"InstallDir\" 2^>nul') do set \"DIR=%%b\"\r\nif not defined DIR set \"DIR=%LOCALAPPDATA%\\AgentMonitor\"\r\nif exist \"%DIR%\\AgentMonitor.exe\" (start \"\" \"%DIR%\\AgentMonitor.exe\") else (start \"\" \"%DIR%\\终端任务监控.exe\")\r\ndel \"%~f0\"\r\n",
-        installer.display()
+        "@echo off\r\nchcp 65001 >nul\r\nping -n 4 127.0.0.1 >nul\r\ntaskkill /f /pid {pid} >nul 2>&1\r\nping -n 3 127.0.0.1 >nul\r\n\"{installer}\" /S\r\nset \"DIR=\"\r\nfor /f \"skip=2 tokens=2,*\" %%a in ('reg query \"HKCU\\Software\\AgentMonitor\" /v \"InstallDir\" 2^>nul') do set \"DIR=%%b\"\r\nif not defined DIR set \"DIR=%LOCALAPPDATA%\\AgentMonitor\"\r\nif exist \"%DIR%\\AgentMonitor.exe\" (start \"\" \"%DIR%\\AgentMonitor.exe\") else (start \"\" \"%DIR%\\终端任务监控.exe\")\r\ndel \"%~f0\"\r\n",
+        pid = std::process::id(),
+        installer = installer.display(),
     );
     std::fs::write(&bat, script.as_bytes())?;
     std::process::Command::new("cmd")
@@ -1269,7 +1945,12 @@ fn confirm_box(title: &str, text: &str, ok_label: &str, cancel_label: &str) -> b
         let wide = |x: &str| x.encode_utf16().chain([0]).collect::<Vec<u16>>();
         let (t, m) = (wide(title), wide(text));
         let r = unsafe {
-            MessageBoxW(std::ptr::null_mut(), m.as_ptr(), t.as_ptr(), MB_YESNO | MB_ICONQUESTION)
+            MessageBoxW(
+                std::ptr::null_mut(),
+                m.as_ptr(),
+                t.as_ptr(),
+                MB_YESNO | MB_ICONQUESTION,
+            )
         };
         r == IDYES
     }
@@ -1306,7 +1987,13 @@ pub(crate) fn spawn_update_watcher<R: tauri::Runtime>(
 ) {
     std::thread::spawn(move || {
         let local = env!("CARGO_PKG_VERSION");
-        let mut prompted: Option<String> = None;
+        // 已提示过的版本持久化到文件：`prompted` 只放内存的话，客户端一重启（自更新/
+        // 自启/崩溃恢复）就重置，同一个新版本会被反复推送。从盘上读初值即可跨重启去重。
+        let notified_path = state.config.data_dir.join("notified-version");
+        let mut prompted: Option<String> = std::fs::read_to_string(&notified_path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let mut forced_prompted = false;
         loop {
             std::thread::sleep(std::time::Duration::from_secs(3));
@@ -1319,7 +2006,10 @@ pub(crate) fn spawn_update_watcher<R: tauri::Runtime>(
 
             // 强制更新：本机低于下限 → 不更新就不能继续使用
             if !forced_prompted {
-                if let Some(min) = min.as_deref().filter(|m| crate::agent::version_newer(m, local)) {
+                if let Some(min) = min
+                    .as_deref()
+                    .filter(|m| crate::agent::version_newer(m, local))
+                {
                     forced_prompted = true;
                     let ok = confirm_box(
                         "终端任务监控 · 需要更新",
@@ -1344,6 +2034,7 @@ pub(crate) fn spawn_update_watcher<R: tauri::Runtime>(
             if let Some(v) = latest {
                 if prompted.as_deref() != Some(v.as_str()) {
                     prompted = Some(v.clone());
+                    let _ = std::fs::write(&notified_path, &v); // 跨重启去重
                     notify_new_version(&v);
                 }
             }
@@ -1354,11 +2045,17 @@ pub(crate) fn spawn_update_watcher<R: tauri::Runtime>(
 /// 自更新执行（forced=true 时失败即退出：强制更新不允许带病运行）
 fn spawn_self_update_inner<R: tauri::Runtime>(app: tauri::AppHandle<R>, hub: String, forced: bool) {
     std::thread::spawn(move || {
+        // 「装了没生效」的判定挪到了启动时的 settle_update_marker()：那里一次性告知并清标记。
+        // 这里**不再预先回绝**——用户明确点了「更新」，就该真的去下载重装一次（哪怕上次没生效，
+        // 服务器包也可能已修好）。老逻辑把标记一直留着、每次点更新都直接弹「请手动下载」、
+        // 根本不再尝试，才是「点更新只提示手动下载」的根因。
         ulog(&format!("[update] 开始自更新 forced={forced} hub={hub}"));
         set_update_progress("downloading", 0, 0);
         notify_progress("正在下载更新，完成后将自动重启…");
         match do_self_update(&hub) {
             Ok(()) => {
+                // 记下更新前的版本：新实例启动时 settle_update_marker() 一比对就知道装没装上
+                let _ = std::fs::write(update_attempt_path(), env!("CARGO_PKG_VERSION"));
                 ulog("[update] 自更新就绪，退出旧实例");
                 app.exit(0);
                 // app.exit 走事件循环代理，个别路径（窗口全隐藏时）可能不生效；

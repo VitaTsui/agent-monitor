@@ -62,7 +62,11 @@ pub fn collect(provider: &str, project_cwd: &str) -> Vec<SlashCommand> {
 
     // 项目级自定义命令
     if !project_cwd.is_empty() {
-        scan_commands(&Path::new(project_cwd).join(".claude").join("commands"), "project", &mut out);
+        scan_commands(
+            &Path::new(project_cwd).join(".claude").join("commands"),
+            "project",
+            &mut out,
+        );
     }
     // 用户级自定义命令
     if let Some(home) = dirs::home_dir() {
@@ -81,7 +85,9 @@ fn scan_commands(dir: &Path, source: &str, out: &mut Vec<SlashCommand>) {
 }
 
 fn scan_dir(root: &Path, dir: &Path, source: &str, out: &mut Vec<SlashCommand>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let path = e.path();
         if path.is_dir() {
@@ -96,7 +102,11 @@ fn scan_dir(root: &Path, dir: &Path, source: &str, out: &mut Vec<SlashCommand>) 
                 .collect();
             let name = format!("/{}", stem.join(":"));
             let desc = first_desc(&path).unwrap_or_else(|| "自定义命令".into());
-            out.push(SlashCommand { name, desc, source: source.into() });
+            out.push(SlashCommand {
+                name,
+                desc,
+                source: source.into(),
+            });
         }
     }
 }

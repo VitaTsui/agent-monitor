@@ -35,11 +35,11 @@ description: Use this skill when creating, modifying, reviewing, auditing, or sc
 ```
 src/pages/<category>/<ModuleName>/
 ├── index.tsx                    # 列表页入口（observer）
-├── index.module.less            # 模块级样式（通常只占位，.ModuleName {}）
+├── index.module.scss            # 模块级样式（通常只占位，.ModuleName {}）
 ├── <ModuleName>Store.ts         # 列表页 store，extends ListPanelStore
 └── <ModuleName>Form/            # 新增/编辑弹窗（如需表单）
     ├── index.tsx
-    ├── index.module.less
+    ├── index.module.scss
     └── <ModuleName>FormStore.ts # 表单 store，extends FormModalStore
 ```
 
@@ -66,8 +66,8 @@ src/pages/<category>/<ModuleName>/
 
 - **文件夹/模块名**：PascalCase，与业务名一一对应，例如 `ApiBlacklistManagement`、`MqQueueManagement`、`Dict`。
 - **Store 文件**：`<ModuleName>Store.ts`、`<ModuleName>FormStore.ts`。
-- **样式文件**：固定 `index.module.less`，外层类名用 PascalCase 与文件夹同名（`.ApiBlacklistManagement { }`），内部类名 camelCase。
-- **LESS 类命名**：`styles.ApiBlacklistManagement`（外层）、`styles.content`、`styles.formItemGroupTitle`（内层 camelCase）。
+- **样式文件**：固定 `index.module.scss`，外层类名用 PascalCase 与文件夹同名（`.ApiBlacklistManagement { }`），内部类名 camelCase。
+- **样式类命名**：`styles.ApiBlacklistManagement`（外层）、`styles.content`、`styles.formItemGroupTitle`（内层 camelCase）。
 - **props 类型**：`<ModuleName>FormProps`，放在组件文件顶部，不单独抽文件。
 
 ## 组件选用：@hsu-react/ui 优先（硬性规则）
@@ -77,6 +77,29 @@ src/pages/<category>/<ModuleName>/
 - **hsu-ui 已覆盖，必须用 hsu-ui 版**：`Button`、`Icon`、`Table`、`FormItem`、`Form`（含 `Form.Modal`）、`Panel`、`Search`、`Operate`、`Switch`、`Select`、`Input`、`Checkbox`、`DatePicker`、`Tree`、`Tags`、`Modal`、`Descriptions`、`TextEllipsis`、`Copy`、`Upload`、`TabBar`、`Slider`、`FlexFill`、`Chart`、`Markdown`、`CodeMirror`、`Editor`、`FilePreview`、`Spreadsheet`、`ChainGraph`、`Chat`、`SecondConf`、`FileCol`。
 - **antd 兜底（hsu-ui 无对应）**：`message`、`notification`、`Popover`、`Tooltip`、`Divider`、`Segmented`、`Spin`、`Empty`、`Row/Col` 栅格、`Space` 等。
 - 拿不准某组件 hsu-ui 有没有：先查 `node_modules/@hsu-react/ui/es/index.d.ts` 的导出（或文档站 <https://vitatsui.github.io/hsu-ui>），再决定 import 来源。
+
+**同名不等于同物——`Form` 是唯一的例外，别「顺手改正」**：hsu-ui 的 `Form` 只导出 `Modal` / `Drawer` / `Import` / `useForm` 四个成员（见 `Form/index.d.ts` 的 `FormType`），**它本身不是表单容器**。需要一个裸的 `<Form>` 包住若干 `FormItem`（登录页就是典型）时，容器只能从 antd 拿：
+
+```tsx
+// ✅ 正确：容器走 antd，FormItem / Button 仍走 hsu-ui
+import { Form } from "antd";
+import { Button, FormItem } from "@hsu-react/ui";
+```
+
+这类「看着违规、实则正确」的写法，在文件顶部留一行注释说明原因，免得下一轮审计又被当成违规改回去。
+
+反例：
+
+```tsx
+// ❌ hsu-ui 已有同名组件却从 antd 导入 —— 观感与行为都会偏离项目规范
+import { Table, Modal, Switch, Button } from "antd";
+```
+
+```tsx
+// ✅ 同名组件一律走 hsu-ui，antd 只补缺
+import { Table, Modal, Switch, Button } from "@hsu-react/ui";
+import { message, Tooltip } from "antd";
+```
 
 反例：
 
@@ -103,7 +126,7 @@ import { observer } from "mobx-react-lite";
 import XxxStore from "./XxxStore";
 import XxxForm from "./XxxForm";
 import XxxFormStore from "./XxxForm/XxxFormStore";
-import styles from "./index.module.less";
+import styles from "./index.module.scss";
 
 const Xxx: React.FC = observer(() => {
   const {
@@ -307,7 +330,7 @@ import { Form, FormItemProps } from "@hsu-react/ui";
 import { observer } from "mobx-react-lite";
 
 import XxxFormStore from "./XxxFormStore";
-import styles from "./index.module.less";
+import styles from "./index.module.scss";
 
 interface XxxFormProps {
   open?: boolean;
@@ -369,7 +392,7 @@ export default XxxForm;
 ```
 
 要点：
-- Props 固定四件套：`open`、`title`、`id`、`onCancel`、`onOk`（可加 `dataId`、`data` 等业务补充字段）。
+- Props 固定四件套：`open`、`title`、`id`、`onCancel`、`onOk`（可加父级 ID 等业务补充字段）。**回填数据靠 `getFormData(id)`，不要用 props 把整行传进来**——见「组件抽取与弹窗组织 · 缺详情接口时不要用 props 传整行」。
 - `useEffect` 中 `if (id && open)` 双重条件，避免弹窗未打开时空请求。
 - 依赖 `OptionsStore` 的字段，放到**另一个** `useEffect(() => getXxxType(), [getXxxType, open])`——按需拉一次。
 - **把 `onClose` 和 `handleOk` 提成命名常量**，不要在 JSX 里写多层内联箭头函数；`Form.Modal` 的 `onOk={handleOk}`、`onCancel={onClose}` 只接引用。`handleOk` 的 `data` 形参统一标 `Record<string, unknown>`。
@@ -746,6 +769,184 @@ public loadRoles = (fn?: (list: RoleItem[]) => void) => {
 - tsx 里**不要** `useState` 保存从 store 读来的数据副本。
 - 短命 UI 态（`open`、`title`、`editingId`）仍然用 `useState`——别把「store 数据不要 useState」误推广到「UI 态也不要 useState」。
 
+## 组件抽取与弹窗组织
+
+### 抽取判据：按复用面定归属，不看代码长度
+
+| 情形 | 去处 |
+|---|---|
+| ≥2 个页面用到 | `src/components/<Name>/` |
+| 只有本页用到 | 同级 `_components/<Name>/` |
+| 只被某个弹窗用到 | 该弹窗目录下再开 `_components/` |
+
+**触发抽取的硬条件**（满足任一就必须拆，不要按行数判断）：
+
+1. **同一段渲染逻辑在 ≥2 个页面出现**——哪怕只有类型名不同。写新页面前先搜有没有同构实现：最容易漏的是「一处已经抽成了组件，另一处又内联复制了一份」。
+2. **页面 `index.tsx` 里内联了 `<Modal>` / `<Form.Modal>`**——弹窗一律独立成目录。
+3. **该 UI 块自带接口调用**——见下条，优先级最高。
+
+### 弹窗里有接口调用 → 必须独立成组件 ＋ 自带 Store
+
+反模式：弹窗直接 `import { getXxx } from "@/services/apis/…"`、用 `useState` 存服务端数据、失败自己弹 `notification`。
+
+规范结构：
+
+```
+<Modal>/
+├── index.tsx              # observer 包裹，props 四件套
+├── index.module.scss
+└── <Modal>Store.ts        # 接口调用、加载态、错误提示都在这里
+```
+
+- props 固定 `open` / `title` / `id` / `onCancel` / `onOk`；父级 ID 另加具名字段
+- 组件内 `const [store] = useState(() => new XxxStore())`
+- 失败提示走 store（继承基类用 `_message(res)`，独立 store 用 `notification`），**组件里不出现 `notification.error`**
+- **例外**：纯前端校验提示（如「填的不是合法 JSON」）留在组件里——规范禁的是「接口失败提示」，不是所有提示
+
+### 弹窗 Store 与页面 Store 的分工
+
+弹窗 store 只管弹窗自己的状态；**页面要展示的数据归页面 store**。
+
+判据：这份数据在弹窗关闭后页面还要不要显示？要 → 放页面 store。
+
+```ts
+// ✅ 「分配角色」弹窗：可选清单/勾选草稿/保存 在弹窗 store；
+//    「本用户已分配哪些角色」页面列表要显示 → 收进页面 store
+// ❌ 若把它放弹窗 store，弹窗就得用回调把业务数据回传给页面——见「tsx 消费 store」一节的反模式
+```
+
+### 缺详情接口时不要用 props 传整行
+
+弹窗回填的正路是 `useEffect(if (id && open)) getFormData(id)`。
+
+后端只有列表接口、没有 `GET /xxx/{id}` 时：**推动后端补详情端点，不要退化成父页面把整行当 props 传下去**。后者绕开基类 `getFormData` 的 500ms 防抖与 `_formSeq` 失效保护，且列表刷新后 props 里的 `version` 是旧快照，提交会撞乐观锁。
+
+配套：**`useState` 只存 `id`，不存整行**（见「tsx 消费 store」的两条推论；真实风险就是过期 `version`）。
+
+### 弹窗产生、关闭后才展示的数据，连同展示弹窗收进同一模块
+
+上一条判据有个边界情形：**数据是弹窗动作的产物，但要在该弹窗关闭之后才展示**。典型是「新建后只给一次」的凭据/密钥/导出结果。
+
+放页面 store 就得让弹窗用回调把它回传给页面，那正是被点名的反模式。正解是**把展示弹窗也认成这条流程的后半段**，一起收进弹窗模块：
+
+```
+XxxForm/
+├── index.tsx          # 创建表单 Form.Modal ＋ 结果展示 Modal（两个都在这）
+├── index.module.scss  # 连同结果区的样式一起搬过来
+└── XxxFormStore.ts    # 一次性结果的状态在这里，页面完全不感知
+```
+
+页面只留 `onOk={loadList}` 刷新列表。判据补充为：**这份数据是页面自身的状态，还是某条流程的中间产物？**中间产物跟着流程走，不要为了「归页面」而制造回调。
+
+### 一套 formItems 服务两个弹窗时，合并成一个组件
+
+「新建」和「编辑」用同一组表单项、只是必填规则或附加区块不同时，不要开两个目录，**合并成一个组件，用 `id` 有无区分**：
+
+```tsx
+// id 有值＝编辑，无值＝新建
+required: !id || someCondition,
+outsideChildren={extra ? <附加区块 /> : undefined}
+```
+
+两个目录会让同一套字段定义分叉，改一处忘另一处。
+
+### 抽完弹窗，回头清页面 store 里的孤儿方法
+
+弹窗独立成目录后，提交逻辑搬进了弹窗 store，**页面 store 里原来的 `addXxx` / `editXxx` 就失去了全部调用点**。它们不会报错，但属于死代码，且下次有人照着它改会改到没人跑的分支上。
+
+抽取的最后一步固定是：
+
+```bash
+# 逐个确认外部调用数为 0，再删方法 + 清掉随之失效的 import
+grep -rn "\.addXxx(\|\.editXxx(" src/pages/ | grep -v XxxStore.ts
+```
+
+删完 `tsc` 会直接报出失效的 import，照着清即可。一轮抽 8 处弹窗，通常就能清出 8 组孤儿方法。
+
+### 跨页 import 私有 store 禁止
+
+`_components/` 与页面目录下的 store 都属页面私有。需要同一份数据时：
+
+- 数据属于父页面 → props 注入
+- 该组件本就该自己有 → 自建 store，API 按「Store 与 API 文件的一一对应」在自己的 API 文件里各留一份（接受 URL 重复）
+
+反例（真实踩过）：某表单 import 了另一个页面的私有 store 取下拉数据，单例被两处共写，表单里显示出**另一条主数据**下的选项。
+
+### 二次确认用 `SecondConf` 的触发器模式
+
+删除、回滚、软删这类动作的二次确认，**触发元素原地包一层 `SecondConf`**，不传 `open`——弹窗自持开关状态（需 `@hsu-react/ui` >= 0.0.18）：
+
+```tsx
+<SecondConf
+  contentTitle={`删除「${it.name}」`}
+  contentText="删除后无法恢复，请谨慎操作。"
+  okButtonProps={{ danger: true }}
+  onOk={() => onDelete(it)}
+>
+  <DeleteOutlined />
+</SecondConf>
+```
+
+- 渲染成「确认{contentTitle}吗？」，所以 `contentTitle` 写**动作**（`删除「张三」`），不是名词
+- 危险动作用 `okButtonProps={{ danger: true }}`；按钮文案不写死，跟 antd 中文默认的「确定/取消」走，除非语义特殊（如 `okText="回滚"`）
+- 触发元素自身的 `onClick` 照常先执行，且组件已 `stopPropagation`，嵌在可点击的卡片/行里不会连带触发整行
+
+**列表里必须用触发器模式**：`map()` 内部无法为每一行单独 `useState`，受控写法只能把「当前待确认的是哪一行」连同文案提到循环外，触发点和弹窗被拆到两个作用域，同页再多一种确认动作就再加一份 state。
+
+仍用受控（传 `open`）的**唯一场景**：触发点不是元素而是配置对象，例如 Dropdown 的 `menu.items`、`Operate` 的操作项——此时无处可包，只能自持 `open` 并在外层渲染 `SecondConf`。
+
+不要在项目内再包一层自己的确认组件。组件能力不够时改回 hsu-ui 仓库发版、本项目升依赖——曾经有项目自建过一个 `ConfirmAction`，后来触发器模式并进 `SecondConf` 本体，本地组件随即删除。
+
+## INPUTNUMBER 交出的是字符串（必踩，提交前必须转）
+
+hsu-ui 的 `type: "INPUTNUMBER"` 表单项，`handleOk` 拿到的是 **`"1"` 而不是 `1`**。后端若把该字段声明为整型（如 Rust 的 `Option<i32>`），直接提交会被反序列化拒掉（**422**），且报错里看不出是哪个字段；若后端宽松些不报错，则会把字符串存进库或 JSON 字段，之后排序、比较、查重全走字符串序（`"10" < "9"`）。
+
+凡是带 `INPUTNUMBER` 的表单，提交前一律过一个归一助手：
+
+```ts
+// src/utils/form.ts
+/**
+ * hsu-ui 的 INPUTNUMBER 交出的是字符串，提交前要把这些字段转成数字。
+ * 空串/undefined/null 一律转成 undefined（＝不提交该字段），而不是 0——
+ * 0 对「初登场章」「目标字数」这类字段是有含义的真实取值。
+ */
+export const toNumberFields = <T extends Record<string, unknown>>(
+  data: T,
+  keys: readonly string[]
+): T => {
+  const out = { ...data } as Record<string, unknown>;
+  for (const key of keys) {
+    const raw = out[key];
+    if (raw === "" || raw === null || raw === undefined) {
+      out[key] = undefined;
+      continue;
+    }
+    const n = Number(raw);
+    // 转不动就原样留着，让后端报出真正的问题，而不是在这里悄悄吞成 undefined
+    out[key] = Number.isNaN(n) ? raw : n;
+  }
+  return out as T;
+};
+```
+
+调用方式：
+
+```tsx
+import { toNumberFields } from "@/utils/form";
+
+/** hsu-ui 的 INPUTNUMBER 交出的是字符串，提交前要转成数字 */
+const NUMBER_FIELDS = ["seq", "priority"] as const;
+
+const handleOk = (raw: Record<string, unknown>) => {
+  const data = toNumberFields(raw, NUMBER_FIELDS);
+  // …照常提交
+};
+```
+
+**动态字段同理但更隐蔽**：由字段定义生成的表单项（用户自定义列），值往往落进 JSON 列，字符串不会报错但会造成类型漂移。这类要在**收口函数**里按字段定义的 `kind` 统一转，不要散落到各个 `handleOk`。
+
+搜索项里的 `INPUTNUMBER` 不用转——它进 query string，不影响存储。
+
 ## 静态内容页变体（`Panel.Default`）
 
 仪表盘、说明页、图表聚合页等**非列表、非表单**的内容型页面，用 `Panel.Default` 作为外壳，而不是 `Panel.List`。这类页面通常没有搜索/分页/增删改，只需要 Panel 给它一个统一的边距、标题和内容区样式。
@@ -755,7 +956,7 @@ import React from "react";
 
 import { Panel } from "@hsu-react/ui";
 import { observer } from "mobx-react-lite";
-import styles from "./index.module.less";
+import styles from "./index.module.scss";
 
 const Xxx: React.FC = observer(() => {
   return (
@@ -771,9 +972,26 @@ const Xxx: React.FC = observer(() => {
 export default Xxx;
 ```
 
-配套的 `index.module.less` 需要给**两个**选择器占位（外层 + 内容区）：
+**内容区要撑满时必须显式给高度**：`display:flex; flex-direction:column` 的容器若不写 `height: 100%`，整块只有内容高，子元素的 `flex: 1` 拿不到剩余空间（表现为「下半屏空着、内容挤在顶部」）。需要子区域吃掉剩余高度并独立滚动时：
 
-```less
+```scss
+.XxxContent {
+  display: flex;
+  flex-direction: column;
+  height: 100%;      // ← 少这行，下面的 flex:1 就不生效
+  min-height: 0;
+}
+
+.XxxScroll {         // 工具条吸顶，滚动交给这一块
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+```
+
+配套的 `index.module.scss` 需要给**两个**选择器占位（外层 + 内容区）：
+
+```scss
 .Xxx {
 }
 
@@ -814,7 +1032,7 @@ import { observer } from "mobx-react-lite";
 
 import XxxStore from "./XxxStore";
 import XxxForm from "./XxxForm";
-import styles from "./index.module.less";
+import styles from "./index.module.scss";
 
 interface XxxProps {
   open?: boolean;
@@ -1174,7 +1392,7 @@ onChange={(checked) => {
 2. 项目 `@/services/...` / `@/stores/...`
 3. `observer` from `mobx-react-lite`
 4. 同目录相对导入（`./XxxStore`、`./XxxForm`）
-6. `styles from "./index.module.less"` 放在靠后位置
+6. `styles from "./index.module.scss"` 放在靠后位置
 
 组内空行区分即可，不必强制分段。现有文件里 import 顺序有轻微差异，以**同目录最近的兄弟文件**为准。
 
@@ -1199,7 +1417,7 @@ import { getYyyList } from "@/services/apis/<category>/yyy";
 1. 用 Glob 扫当前项目 `src/pages/` 的子目录，确定归属大类（没有合适大类再新建）。
 2. 读取同大类下 **1 个** 结构最完整的既有模块作为模板（优先挑有 Form 子目录的，如 `ApiBlacklistManagement/`），以其为蓝本复制并改名，这样能捕获本项目特有的组件名/类型名差异。
 3. **确认对应 API**：按 api-creation skill 的路径镜像规则推导出 `src/services/apis/<category>/<modulename>.ts`（全小写连写）。若该 API 文件不存在或需要新增/修改函数，**通过 `Skill` 工具调起 `api-creation` skill**，由它驱动 API 层的落地，再回到页面侧接线。不要先写页面再事后补 API——这样能一次性把路径/命名对齐。
-4. 按骨架产出 4 个文件：`index.tsx`、`index.module.less`（放一个空的 `.ModuleName {}` 占位即可）、`<ModuleName>Store.ts`、`<ModuleName>Form/` 下的三件套（如本次需要表单）。
+4. 按骨架产出 4 个文件：`index.tsx`、`index.module.scss`（放一个空的 `.ModuleName {}` 占位即可）、`<ModuleName>Store.ts`、`<ModuleName>Form/` 下的三件套（如本次需要表单）。
 5. `hasPermi` 权限码从后端/产品给的清单里取，**不要**自己拼——若用户没给，显式在代码顶部留一条 `// TODO: 确认权限码` 问回去（这是唯一允许的 TODO 场景）。
 6. 别动路由注册文件——除非用户明确要求把新页面接到菜单/路由里。页面组件自身只负责渲染。
 7. 创建后**不要**运行 build/lint，除非用户要求。
@@ -1224,3 +1442,17 @@ import { getYyyList } from "@/services/apis/<category>/yyy";
 - ❌ 删除行后手动 splice `_dataSource` —— 直接 `getDataSource()` 重拉更简单也更不易出错
 - ❌ 在 `_components/`/`_contComps/` 之外复用页面私有组件 —— 需要复用就升级到 `src/components/`，不要跨页直接 import 下划线目录的内容
 - ❌ 从其它模块的 API 文件里 import 函数复用 —— 即使 URL 相同，也要在本 store 对应的 API 文件里各自新增一份，保持 store ↔ API 一一对应
+- ❌ 页面 `index.tsx` 里内联 `<Modal>` —— 弹窗一律独立成目录；带接口调用的还要配自己的 Store
+- ❌ 弹窗/组件里直接 `import { getXxx } from "@/services/apis/…"` —— 接口调用归 store
+- ❌ 同一段渲染逻辑在两个页面各写一遍 —— ≥2 页面复用就升到 `src/components/`
+- ❌ 用 antd `Popconfirm` / `Modal.confirm` 做二次确认 —— 用 hsu-ui 的 `SecondConf`
+- ❌ 列表 `map()` 里用受控 `SecondConf`，把「哪一行待确认」提到循环外 —— 用触发器模式，原地包住触发元素
+- ❌ 在项目内二次封装 hsu-ui 组件补能力 —— 改回 hsu-ui 发版，本项目升依赖
+- ❌ 后端没详情接口就用 props 把整行传给弹窗 —— 推动后端补 `GET /xxx/{id}`，否则会拿旧 `version` 撞乐观锁
+- ❌ 表格文本列裸 `String(value)` —— 截断后看不到全文，包 `TextEllipsis`
+- ❌ flex 列容器不给 `height: 100%` —— 子元素 `flex: 1` 不生效，下半屏空着
+- ❌ 带 `INPUTNUMBER` 的表单直接提交 —— 交出的是字符串 `"1"`，整型字段会被拒成 422，要过 `toNumberFields`
+- ❌ 弹窗抽成独立目录后不回头删页面 store 里的 `addXxx`/`editXxx` —— 失去调用点即死代码
+- ❌ 把「弹窗产生、关闭后才展示」的一次性结果放页面 store —— 会被迫用回调回传，应连同展示弹窗收进弹窗模块
+- ❌ 新建和编辑用同一套 formItems 却开两个弹窗目录 —— 字段定义会分叉，应合并成一个组件用 `id` 有无区分
+- ❌ 看到 `import { Form } from "antd"` 就当违规改成 hsu-ui —— hsu-ui 的 `Form` 不是容器，只有 `Modal`/`Drawer`/`Import`/`useForm`

@@ -1,19 +1,21 @@
-// Claude 网页版配色（浅色）
-$cream: #f4fafb; // 主内容背景
-$oat: #e6f1f3; // 侧栏背景
-$border: rgba(36, 61, 66, 0.09);
-$text: #243d42;
-$muted: #7c9096;
-$accent: #0f9bad; // Claude 珊瑚色
-$hover: rgba(36, 61, 66, 0.06);
-$active-bg: rgba(36, 61, 66, 0.09);
+// 页面的两层面。原值是 #f4fafb / #e6f1f3 —— 带一点品牌色倾向的米白，但语义上是
+// **画布与侧栏面**，不是品牌淡染。第一版迁移时错映射成了 --primary-subtle，
+// 浅色下看着差不多，暗色下那支是半透明青，整页糊成一片。
+$cream: var(--background); // 主内容背景
+$oat: var(--card); // 侧栏背景
+$border: color-mix(in srgb, var(--foreground) 9%, transparent);
+$text: var(--foreground);
+$muted: var(--muted-foreground);
+$accent: var(--primary); // Claude 珊瑚色
+$hover: color-mix(in srgb, var(--foreground) 6%, transparent);
+$active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
 
 .Portal {
   height: 100%;
-  // 键盘由 resize:none + JS 处理：webview 不动、整页不位移，底部让出
-  // max(键盘高, home 安全区) —— 键盘弹起时输入框贴键盘上方、收起时
-  // 让开 home 指示条；内容区收缩、顶栏纹丝不动。
-  padding-bottom: max(var(--kb-height, 0px), env(safe-area-inset-bottom));
+  // 底部只让出键盘高度（键盘由 resize:none + JS 处理，webview 不动、整页不位移）。
+  // home 指示条安全区不在这里让位 —— 否则内容区会缩上去、露出下方常驻的侧栏底色
+  // 形成「底部空隙 + 配色不一致」。安全区改由对话框(composerWrap)内部消化。
+  padding-bottom: var(--kb-height, 0px);
   box-sizing: border-box;
   display: flex;
   background: $cream;
@@ -56,17 +58,17 @@ $active-bg: rgba(36, 61, 66, 0.09);
           width: 28px;
           height: 28px;
           min-width: 28px;
-          border-radius: 8px;
+          border-radius: var(--radius);
           background: $accent;
-          color: #fff;
-          font-size: 15px;
+          color: var(--primary-foreground);
+          font-size: var(--text-md);
           display: flex;
           align-items: center;
           justify-content: center;
         }
 
         .brandName {
-          font-size: 14px;
+          font-size: var(--text-md);
           font-weight: 600;
           white-space: nowrap;
           overflow: hidden;
@@ -75,11 +77,11 @@ $active-bg: rgba(36, 61, 66, 0.09);
       }
 
       .foldBtn {
-        font-size: 14px;
+        font-size: var(--text-md);
         color: $muted;
         cursor: pointer;
         padding: 4px;
-        border-radius: 6px;
+        border-radius: var(--radius-sm);
 
         &:hover {
           background: $hover;
@@ -95,33 +97,33 @@ $active-bg: rgba(36, 61, 66, 0.09);
       .search {
         height: 32px;
         padding: 2px 10px;
-        font-size: 13px;
-        background: rgba(36, 61, 66, 0.05);
+        font-size: var(--text-base);
+        background: color-mix(in srgb, var(--foreground) 5%, transparent);
         border: 1px solid transparent;
-        border-radius: 10px;
+        border-radius: var(--radius);
         box-shadow: none;
         transition: background 0.15s, border-color 0.15s;
 
         &:hover {
-          background: rgba(36, 61, 66, 0.08);
+          background: color-mix(in srgb, var(--foreground) 8%, transparent);
         }
 
         &:focus-within {
-          background: #fff;
-          border-color: rgba(15, 155, 173, 0.4);
+          background: var(--card);
+          border-color: color-mix(in srgb, var(--primary) 40%, transparent);
         }
 
         :global(input.ant-input) {
           background: transparent;
-          font-size: 13px;
+          font-size: var(--text-base);
 
           &::placeholder {
-            color: rgba(36, 61, 66, 0.35);
+            color: color-mix(in srgb, var(--foreground) 35%, transparent);
           }
         }
 
         .searchIcon {
-          color: rgba(36, 61, 66, 0.35);
+          color: color-mix(in srgb, var(--foreground) 35%, transparent);
           margin-right: 2px;
         }
       }
@@ -134,7 +136,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
     }
 
     .sectionLabel {
-      font-size: 11px;
+      font-size: var(--text-xs);
       font-weight: 600;
       color: $muted;
       padding: 18px 8px 6px;
@@ -149,7 +151,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
       gap: 2px;
 
       .noDevice {
-        font-size: 12px;
+        font-size: var(--text-sm);
         color: $muted;
         padding: 8px;
         text-align: center;
@@ -160,9 +162,9 @@ $active-bg: rgba(36, 61, 66, 0.09);
         align-items: center;
         gap: 8px;
         padding: 7px 10px;
-        border-radius: 8px;
+        border-radius: var(--radius);
         cursor: pointer;
-        font-size: 13px;
+        font-size: var(--text-base);
         color: $text;
 
         &:hover {
@@ -187,17 +189,17 @@ $active-bg: rgba(36, 61, 66, 0.09);
           display: inline-block;
           margin-left: 6px;
           padding: 0 5px;
-          border-radius: 6px;
-          font-size: 10px;
+          border-radius: var(--radius-sm);
+          font-size: var(--text-xs);
           line-height: 16px;
-          color: #fff;
+          color: var(--primary-foreground);
           background: $accent;
           vertical-align: 1px;
         }
 
         .deviceTabStat {
           flex: none;
-          font-size: 11px;
+          font-size: var(--text-xs);
           color: $muted;
           white-space: nowrap;
         }
@@ -206,8 +208,8 @@ $active-bg: rgba(36, 61, 66, 0.09);
           width: 7px;
           height: 7px;
           border-radius: 50%;
-          background: #38b26a;
-          box-shadow: 0 0 0 3px rgba(56, 178, 106, 0.16);
+          background: var(--success);
+          box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 16%, transparent);
         }
       }
     }
@@ -224,12 +226,12 @@ $active-bg: rgba(36, 61, 66, 0.09);
         align-items: center;
         gap: 6px;
         padding: 6px 8px;
-        font-size: 11px;
+        font-size: var(--text-xs);
         color: $muted;
         user-select: none;
 
         .termCount {
-          color: rgba(36, 61, 66, 0.35);
+          color: color-mix(in srgb, var(--foreground) 35%, transparent);
         }
       }
     }
@@ -241,11 +243,14 @@ $active-bg: rgba(36, 61, 66, 0.09);
       align-items: center;
       gap: 8px;
       padding: 7px 10px;
-      border-radius: 8px;
+      border-radius: var(--radius);
       cursor: pointer;
-
-      &:hover {
-        background: $hover;
+      // 触摸屏不套 :hover —— 否则移动端首触只落 hover 态、需再点一次才触发 onClick
+      // （经典 sticky-hover），表现为「点两次才打开会话」。仅指针设备保留悬停反馈。
+      @media (hover: hover) {
+        &:hover {
+          background: $hover;
+        }
       }
 
       &.active {
@@ -257,21 +262,37 @@ $active-bg: rgba(36, 61, 66, 0.09);
         height: 7px;
         min-width: 7px;
         border-radius: 50%;
-        background: #bbb;
+        background: var(--subtle-foreground);
 
         &.running {
-          background: #38b26a;
-          box-shadow: 0 0 0 3px rgba(56, 178, 106, 0.16);
+          background: var(--success);
+          box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 16%, transparent);
         }
         &.idle {
-          background: #f2b234;
+          background: var(--warning);
         }
         &.paused {
-          background: #f56c6c;
+          background: var(--destructive);
         }
         &.finished {
-          background: #bbb;
+          background: var(--subtle-foreground);
         }
+      }
+
+      // 号位徽标：与钉钉「@N」是同一个编号。人在手机上看网页、用钉钉下发，
+      // 这个号是两端唯一的对照物，所以放在最显眼的行首（状态点之后）。
+      .sessSlot {
+        flex: none;
+        min-width: 18px;
+        height: 18px;
+        padding: 0 5px;
+        border-radius: var(--radius-sm);
+        background: color-mix(in srgb, var(--primary) 12%, transparent);
+        color: $accent;
+        font-family: "SF Mono", Menlo, Consolas, monospace;
+        font-size: 11.5px;
+        line-height: 18px;
+        text-align: center;
       }
 
       .sessBody {
@@ -288,7 +309,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
         .sessName {
           flex: 1;
           min-width: 0;
-          font-size: 13px;
+          font-size: var(--text-base);
           color: $text;
           overflow: hidden;
           text-overflow: ellipsis;
@@ -299,29 +320,29 @@ $active-bg: rgba(36, 61, 66, 0.09);
         .sessStatus {
           flex: none;
           padding: 0 7px;
-          border-radius: 999px;
-          font-size: 10px;
+          border-radius: var(--radius-full);
+          font-size: var(--text-xs);
           line-height: 17px;
-          background: rgba(36, 61, 66, 0.07);
+          background: color-mix(in srgb, var(--foreground) 7%, transparent);
           color: $muted;
 
           &.running {
-            background: rgba(56, 178, 106, 0.14);
-            color: #22794a;
+            background: color-mix(in srgb, var(--success) 14%, transparent);
+            color: var(--success);
           }
 
           &.idle {
-            background: rgba(242, 178, 52, 0.16);
-            color: #9a6d0b;
+            background: color-mix(in srgb, var(--warning) 16%, transparent);
+            color: var(--warning);
           }
 
           &.paused {
-            background: rgba(245, 108, 108, 0.14);
-            color: #c0392b;
+            background: color-mix(in srgb, var(--destructive) 14%, transparent);
+            color: var(--destructive);
           }
 
           &.finished {
-            background: rgba(36, 61, 66, 0.07);
+            background: color-mix(in srgb, var(--foreground) 7%, transparent);
             color: $muted;
           }
         }
@@ -344,17 +365,17 @@ $active-bg: rgba(36, 61, 66, 0.09);
         justify-content: center;
         width: 22px;
         height: 22px;
-        border-radius: 6px;
-        font-size: 12px;
-        color: #536b71;
+        border-radius: var(--radius-sm);
+        font-size: var(--text-sm);
+        color: var(--muted-foreground);
         // 必须不透明：按钮悬浮在状态徽标之上，半透明底会让下层文字
         // 透出来叠在图标上。取「行悬停底色叠在侧栏底色上」的实色近似值
-        background: #dbe7ea;
-        box-shadow: 0 1px 3px rgba(36, 61, 66, 0.15);
+        background: var(--muted);
+        box-shadow: 0 1px 3px color-mix(in srgb, var(--foreground) 15%, transparent);
 
         &:hover {
           color: $accent;
-          background: #c9e6ea;
+          background: var(--accent);
         }
       }
     }
@@ -363,7 +384,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
       padding: 40px 16px;
       text-align: center;
       color: $muted;
-      font-size: 12px;
+      font-size: var(--text-sm);
       line-height: 1.7;
     }
 
@@ -374,7 +395,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
       gap: 10px;
       margin: 8px;
       padding: 8px 10px;
-      border-radius: 10px;
+      border-radius: var(--radius);
       cursor: pointer;
       border-top: none;
 
@@ -388,8 +409,8 @@ $active-bg: rgba(36, 61, 66, 0.09);
         min-width: 30px;
         border-radius: 50%;
         background: $accent;
-        color: #fff;
-        font-size: 13px;
+        color: var(--primary-foreground);
+        font-size: var(--text-base);
         font-weight: 600;
         display: flex;
         align-items: center;
@@ -401,7 +422,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
         min-width: 0;
 
         .userName {
-          font-size: 13px;
+          font-size: var(--text-base);
           font-weight: 500;
           overflow: hidden;
           text-overflow: ellipsis;
@@ -409,13 +430,13 @@ $active-bg: rgba(36, 61, 66, 0.09);
         }
 
         .userPlan {
-          font-size: 11px;
+          font-size: var(--text-xs);
           color: $muted;
         }
       }
 
       .userChevron {
-        font-size: 10px;
+        font-size: var(--text-xs);
         color: $muted;
       }
     }
@@ -432,22 +453,113 @@ $active-bg: rgba(36, 61, 66, 0.09);
     background: $cream;
   }
 
+  // 放大模式：主区一格独大 + 右侧一列只读卡片。
+  // 右列给固定宽度而非百分比 —— 它的作用是「瞥一眼其余会话」，宽度需求跟总宽无关；
+  // 按比例分的话宽屏上会白占一大片。
+  .focusLayout {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    gap: 1px;
+    background: $border;
+  }
+
+  .focusMain {
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    overflow: hidden;
+
+    > * {
+      flex: 1;
+      min-width: 0;
+    }
+  }
+
+  // 右侧卡片列：整列滚动，卡片各自固定高度（等高才好扫视，内容多的那个
+  // 自己在卡片内滚，不去挤别人的地方）。列本身给内边距，卡片才有地方"浮"起来 ——
+  // 贴着边的话投影会被裁掉，圆角也显不出来。
+  .focusSide {
+    min-width: 0;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px;
+    box-sizing: border-box;
+    background: $oat;
+  }
+
+  .focusCard {
+    flex: none;
+    height: 248px;
+    overflow: hidden;
+    border-radius: var(--radius-lg);
+    background: var(--card);
+    border: 1px solid color-mix(in srgb, var(--foreground) 7%, transparent);
+    // 静止只给一层极淡的投影：一列卡片各自重投影会显脏，浮起来的事交给 hover
+    box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 4%, transparent);
+    transition: box-shadow 0.15s ease, transform 0.15s ease,
+      border-color 0.15s ease;
+
+    @media (hover: hover) {
+      &:hover {
+        // 上浮 + 加深投影：卡片整体可点，位移比换色更能说明「点我换到主区」
+        transform: translateY(-2px);
+        border-color: color-mix(in srgb, var(--primary) 30%, transparent);
+        box-shadow: 0 6px 16px color-mix(in srgb, var(--foreground) 10%, transparent);
+      }
+    }
+
+  }
+
+  // 有选择卡等着作答：整张卡描主色边并微微发光，让它在一列里跳出来。
+  // 这是「非看不可」的状态 —— 不作答那个终端就一直干等着。
+  //
+  // 类名由 Portal 自己挂（见 index.tsx），不能写成 `.focusCard:has(待选类)` ——
+  // 那个类属于 ChatPane 模块，CSS Modules 会把两边 hash 成不同名字，
+  // 选择器永远匹配不上，且编译不报错、静默失效。
+  .focusCardAlert {
+    border-color: color-mix(in srgb, var(--primary) 60%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 12%, transparent);
+
+    @media (hover: hover) {
+      &:hover {
+        border-color: color-mix(in srgb, var(--primary) 75%, transparent);
+      }
+    }
+  }
+
   .paneGrid {
     flex: 1;
     min-height: 0;
     display: grid;
     gap: 1px;
     background: $border;
-    grid-template-columns: 1fr;
+    // 行列数由 usePaneGrid 按容器实际宽高算出，经 --pane-cols/--pane-rows 传进来；
+    // 未测量前（首帧）退化成单格，不会闪出错误布局。
+    //
+    // 一律 minmax(0, 1fr)：grid 的 `1fr` 实为 `minmax(auto, 1fr)`，列的最小尺寸
+    // 会被内容的 min-content 顶开 —— 会话里一行长代码/宽表格就能把整个页面撑出
+    // 横向滚动条。行同理（长内容会顶开行高，把输入框挤出屏幕）。
+    grid-template-columns: repeat(var(--pane-cols, 1), minmax(0, 1fr));
+    grid-template-rows: repeat(var(--pane-rows, 1), minmax(0, 1fr));
 
-    &[data-count="2"] {
-      grid-template-columns: 1fr 1fr;
+    // 末行没排满时（如 3 格分 2 列），最后一格跨完剩余列，免得右边空一块。
+    // 列数上限就是 MAX_PANES，枚举到 4 即可。
+    &[data-last-span="2"] > *:last-child {
+      grid-column: span 2;
     }
 
-    &[data-count="3"],
-    &[data-count="4"] {
-      grid-template-columns: 1fr 1fr;
-      grid-template-rows: 1fr 1fr;
+    &[data-last-span="3"] > *:last-child {
+      grid-column: span 3;
+    }
+
+    &[data-last-span="4"] > *:last-child {
+      grid-column: span 4;
     }
   }
 
@@ -470,9 +582,9 @@ $active-bg: rgba(36, 61, 66, 0.09);
       .greetLogo {
         width: 40px;
         height: 40px;
-        border-radius: 12px;
+        border-radius: var(--radius-lg);
         background: $accent;
-        color: #fff;
+        color: var(--primary-foreground);
         font-size: 20px;
         display: flex;
         align-items: center;
@@ -481,13 +593,13 @@ $active-bg: rgba(36, 61, 66, 0.09);
     }
 
     .greetSub {
-      font-size: 14px;
+      font-size: var(--text-md);
       color: $muted;
     }
 
     .hint {
-      font-size: 12px;
-      color: rgba(36, 61, 66, 0.4);
+      font-size: var(--text-sm);
+      color: color-mix(in srgb, var(--foreground) 40%, transparent);
     }
   }
 }
@@ -502,7 +614,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
 
   .userMenuEmail {
     padding: 8px 10px 6px;
-    font-size: 12px;
+    font-size: var(--text-sm);
     line-height: 1.2;
     color: $muted;
     overflow: hidden;
@@ -515,7 +627,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
     align-items: center;
     gap: 9px;
     padding: 7px 10px;
-    border-radius: 8px;
+    border-radius: var(--radius);
 
     .userMenuAvatar {
       width: 28px;
@@ -523,8 +635,8 @@ $active-bg: rgba(36, 61, 66, 0.09);
       min-width: 28px;
       border-radius: 50%;
       background: $accent;
-      color: #fff;
-      font-size: 13px;
+      color: var(--primary-foreground);
+      font-size: var(--text-base);
       font-weight: 600;
       display: flex;
       align-items: center;
@@ -534,7 +646,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
     .userMenuName {
       flex: 1;
       min-width: 0;
-      font-size: 14px;
+      font-size: var(--text-md);
       line-height: 1.35;
       font-weight: 500;
       color: $text;
@@ -555,14 +667,14 @@ $active-bg: rgba(36, 61, 66, 0.09);
     align-items: center;
     gap: 10px;
     padding: 8px 10px;
-    border-radius: 8px;
+    border-radius: var(--radius);
     cursor: pointer;
-    font-size: 14px;
+    font-size: var(--text-md);
     line-height: 1.35;
     color: $text;
 
     :global(.anticon) {
-      font-size: 16px;
+      font-size: var(--text-lg);
       color: $muted;
     }
 
@@ -585,9 +697,9 @@ $active-bg: rgba(36, 61, 66, 0.09);
 .userMenuOverlay {
   :global(.ant-popover-inner) {
     padding: 4px;
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
     border: 1px solid $border;
-    box-shadow: 0 4px 24px rgba(36, 61, 66, 0.12);
+    box-shadow: 0 4px 24px color-mix(in srgb, var(--foreground) 12%, transparent);
   }
 }
 
@@ -628,15 +740,15 @@ $active-bg: rgba(36, 61, 66, 0.09);
       min-height: calc(48px + env(safe-area-inset-top));
       padding: env(safe-area-inset-top) calc(12px + env(safe-area-inset-right)) 0
         calc(12px + env(safe-area-inset-left));
-      background: rgba(244, 250, 251, 0.82);
+      background: color-mix(in srgb, var(--card) 82%, transparent);
       backdrop-filter: saturate(180%) blur(20px);
       -webkit-backdrop-filter: saturate(180%) blur(20px);
-      border-bottom: 0.5px solid rgba(36, 61, 66, 0.16);
+      border-bottom: 0.5px solid color-mix(in srgb, var(--foreground) 16%, transparent);
       z-index: 5;
 
       .mobileMenuBtn {
         font-size: 21px;
-        color: #0f9bad;
+        color: var(--primary);
         cursor: pointer;
         display: flex;
         align-items: center;
@@ -644,10 +756,10 @@ $active-bg: rgba(36, 61, 66, 0.09);
         width: 40px;
         height: 40px;
         margin-left: -8px;
-        border-radius: 10px;
+        border-radius: var(--radius);
 
         &:active {
-          background: rgba(36, 61, 66, 0.08);
+          background: color-mix(in srgb, var(--foreground) 8%, transparent);
         }
       }
 
@@ -661,12 +773,36 @@ $active-bg: rgba(36, 61, 66, 0.09);
         width: 40px;
         height: 40px;
         font-size: 22px;
-        color: #0f9bad;
-        border-radius: 10px;
+        color: var(--primary);
+        border-radius: var(--radius);
         cursor: pointer;
 
         &:active {
-          background: rgba(36, 61, 66, 0.08);
+          background: color-mix(in srgb, var(--foreground) 8%, transparent);
+        }
+      }
+
+      // 「中断」快捷键（仅执行中出现）：告警色，与旁边的 ⋯ 区分开，
+      // 手指目标同样 40px（iOS 可点下限）
+      .mobileStopBtn {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        font-size: 19px;
+        color: var(--destructive);
+        border-radius: var(--radius);
+        cursor: pointer;
+
+        &:active {
+          background: color-mix(in srgb, var(--destructive) 10%, transparent);
+        }
+
+        // 它已经把右侧空间占住了，后面的 ⋯ 不该再推一次
+        + .mobileMoreBtn {
+          margin-left: 0;
         }
       }
 
@@ -693,73 +829,82 @@ $active-bg: rgba(36, 61, 66, 0.09);
           border-radius: 50%;
           margin-right: 7px;
           vertical-align: middle;
-          background: #b9c4c7;
+          background: var(--border);
 
           &.running {
-            background: #22b06a;
+            background: var(--success);
             animation: mobilePulse 1.4s ease-in-out infinite;
           }
           &.idle {
-            background: #f2b234;
+            background: var(--warning);
           }
           &.paused {
-            background: #8a9ba0;
+            background: var(--subtle-foreground);
           }
         }
       }
     }
 
-    // 侧栏变滑入抽屉
+    // 抽屉宽度（供侧栏与内容推移量共用）
+    --drawer-w: min(84vw, 320px);
+
+    // 侧栏「推移内容」式（对标 Claude App）：侧栏常驻左侧，由内容整体右移露出，
+    // 而不是盖在内容之上。
     .sider {
       position: fixed;
       top: 0;
       left: 0;
       bottom: 0;
-      // 低于 antd 弹窗默认基线(1000)：弹窗自然叠在抽屉之上，且多层弹窗
-      // 保留 antd 的递增层级（父/子弹窗不再同层互相拦截点击）
-      z-index: 940;
-      width: calc(84vw + env(safe-area-inset-left));
-      max-width: calc(320px + env(safe-area-inset-left));
+      // 在内容之下：内容盖住它，右移时才露出
+      z-index: 1;
+      width: calc(var(--drawer-w) + env(safe-area-inset-left));
       min-width: 0;
+      // 移动端不要侧栏右侧描边：推开后它与内容之间会多出一条明显分界线
+      border-right: none;
       // 状态栏/灵动岛与左侧圆角让位，内容不被系统 UI 压住
       padding-top: env(safe-area-inset-top);
       padding-left: env(safe-area-inset-left);
-      // userRow 自带 8px 外边距，安全区扣掉这部分避免底部双份留白
       padding-bottom: max(0px, calc(env(safe-area-inset-bottom) - 8px));
-      transform: translateX(-100%);
-      transition: transform 0.25s ease;
-      box-shadow: 0 0 40px rgba(0, 0, 0, 0.18);
-
-      &.mobileOpen {
-        transform: translateX(0);
-      }
       // 移动端强制展开态（忽略桌面折叠）
       &.folded {
-        width: 84vw;
+        width: var(--drawer-w);
         min-width: 0;
       }
     }
 
+    // 主区全宽 + 单列；不透明以盖住侧栏，推开时右移露出侧栏
+    .main {
+      width: 100%;
+      position: relative;
+      z-index: 2;
+      background: $cream;
+      transition: transform 0.25s ease, border-radius 0.25s ease;
+      will-change: transform;
+
+      &.mainPushed {
+        transform: translateX(var(--drawer-w));
+        // 被推开后左侧两角保持设备圆角观感；不加描边/阴影，靠圆角与底色差自然区隔
+        border-top-left-radius: 26px;
+        border-bottom-left-radius: 26px;
+        overflow: hidden;
+      }
+    }
+
+    // 推开时盖在「露出的内容右侧」上，点它收起抽屉；不挡左侧侧栏
     .mobileBackdrop {
       display: block;
       position: fixed;
-      inset: 0;
-      z-index: 939;
-      background: rgba(0, 0, 0, 0.4);
+      top: 0;
+      bottom: 0;
+      left: var(--drawer-w);
+      right: 0;
+      z-index: 3;
+      background: transparent;
     }
-
-    // 主区全宽 + 单列
-    .main {
-      width: 100%;
-    }
-    .paneGrid,
-    .paneGrid[data-count="2"],
-    .paneGrid[data-count="3"],
-    .paneGrid[data-count="4"] {
-      grid-template-columns: minmax(0, 1fr);
-      // auto 行高会按内容撑开（iOS 整页滚动的根源之二），必须钉在容器高内
-      grid-template-rows: minmax(0, 1fr);
-    }
+    // 这里原先强制单列。现在行列数由 usePaneGrid 按实际宽高算：竖屏手机宽度不够
+    // 摆第二列，它自然会给出单列；横过来变成宽扁容器时，两格并排反而更好读 ——
+    // 这正是想要的。行高同样由 --pane-rows 钉在容器内（auto 行高被内容撑开是
+    // iOS 整页滚动的根源之二），不需要再覆盖一遍。
 
     .mainEmpty .greeting {
       font-size: 22px;
@@ -787,7 +932,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
       height: 46px;
       min-width: 46px;
       font-size: 18px;
-      box-shadow: 0 4px 14px rgba(15, 155, 173, 0.35);
+      box-shadow: 0 4px 14px color-mix(in srgb, var(--primary) 35%, transparent);
     }
 
     .userText,
@@ -811,7 +956,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
   .deviceTab:focus-visible {
     outline: 2px solid $accent;
     outline-offset: 2px;
-    border-radius: 8px;
+    border-radius: var(--radius);
   }
 }
 
@@ -821,7 +966,7 @@ $active-bg: rgba(36, 61, 66, 0.09);
 .mobileActsPop {
   :global(.ant-popover-inner) {
     padding: 4px;
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
   }
 }
 
@@ -835,25 +980,46 @@ $active-bg: rgba(36, 61, 66, 0.09);
     align-items: center;
     gap: 9px;
     padding: 9px 11px;
-    border-radius: 10px;
+    border-radius: var(--radius);
     font-size: 14.5px;
-    color: #243d42;
+    color: var(--foreground);
     cursor: pointer;
 
     &:active {
-      background: rgba(36, 61, 66, 0.07);
+      background: color-mix(in srgb, var(--foreground) 7%, transparent);
     }
 
     :global(.anticon) {
-      font-size: 16px;
-      color: #7c9096;
+      font-size: var(--text-lg);
+      color: var(--muted-foreground);
     }
 
     &.danger {
-      color: #d4380d;
+      color: var(--destructive);
 
       :global(.anticon) {
-        color: #d4380d;
+        color: var(--destructive);
+      }
+    }
+
+    // 不可用的缘由：跟在动作名后面的小字
+    .actWhy {
+      margin-left: auto;
+      font-size: 11.5px;
+      color: color-mix(in srgb, var(--foreground) 30%, transparent);
+    }
+
+    // 不可用（如空闲时的「中断」）：连按下反馈也去掉，免得看着像点了没生效
+    &.disabled {
+      color: color-mix(in srgb, var(--foreground) 32%, transparent);
+      cursor: default;
+
+      &:active {
+        background: transparent;
+      }
+
+      :global(.anticon) {
+        color: color-mix(in srgb, var(--foreground) 28%, transparent);
       }
     }
   }
@@ -866,4 +1032,11 @@ $active-bg: rgba(36, 61, 66, 0.09);
     .descDesktop { display: none; }
     .descMobile { display: inline; }
   }
+}
+
+// 无边框客户端：整页顶部让出标题栏高度，避免顶部内容被透明拖拽条挡住点击；
+// mac 交通灯落在左上这条里、windows 自绘按钮落在右上。box-sizing:border-box +
+// overflow:hidden 已保证不撑高溢出。浏览器里无此类名、不受影响。
+:global(html.desktop-client) .Portal {
+  padding-top: var(--titlebar-h, 30px);
 }

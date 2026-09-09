@@ -3,10 +3,17 @@
 #![cfg_attr(all(windows, feature = "desktop"), windows_subsystem = "windows")]
 
 mod agent;
-mod secrets;
-mod state;
+/// Cursor/VSCode 扩展桥接（文件 IPC）——全平台内嵌终端都靠它下发
+mod bridge;
+/// Claude Code / Codex 配置的跨设备同步（白名单扫描 + 备份原子写）
+mod configsync;
 #[cfg(feature = "desktop")]
 mod desktop;
+/// Claude Code hook 上报：让 agent 自报会话身份，取代猜配对
+mod hookrec;
+mod openfiles;
+mod secrets;
+mod state;
 
 use anyhow::Result;
 use state::{AppState, Config};
@@ -38,6 +45,13 @@ fn main() -> Result<()> {
     migrate_legacy_data_dir(&data_dir);
     let _ = std::fs::create_dir_all(&data_dir);
 
+    // `am-client hook`：Claude Code 的 hook 以子进程方式调它，从 stdin 收会话身份后立即退出。
+    // 必须抢在 GUI/托盘/上报循环之前分流 —— hook 是同步阻塞 claude 的，起一整个客户端就砸了。
+    if std::env::args().nth(1).as_deref() == Some("hook") {
+        hookrec::run_hook_cli(&data_dir);
+        return Ok(());
+    }
+
     // Windows GUI 子系统没有控制台：panic 会无声消失，用户只觉得「双击没反应」。
     // 落崩溃日志 + 弹系统对话框；另记启动阶段面包屑，出问题能定位到哪一步。
     #[cfg(all(windows, feature = "desktop"))]
@@ -46,8 +60,10 @@ fn main() -> Result<()> {
         std::panic::set_hook(Box::new(move |info| {
             let msg = format!("{info}");
             let _ = std::fs::write(&crash, &msg);
-            crate::desktop::message_box("终端任务监控 · 崩溃", &format!(
-                "程序遇到错误已退出：\n{msg}\n\n日志：{}", crash.display()));
+            crate::desktop::message_box(
+                "终端任务监控 · 崩溃",
+                &format!("程序遇到错误已退出：\n{msg}\n\n日志：{}", crash.display()),
+            );
         }));
     }
     let breadcrumb = {
@@ -65,7 +81,9 @@ fn main() -> Result<()> {
     // machine_id：AM_MACHINE_ID > 数据目录持久化（首次生成后不再变）
     let machine_id = std::env::var("AM_MACHINE_ID").unwrap_or_else(|_| {
         // machine_id 不是秘密，无需区分是否新生成
-        persisted_value(&data_dir.join("machine-id"), || new_machine_id(&raw_hostname))
+        persisted_value(&data_dir.join("machine-id"), || {
+            new_machine_id(&raw_hostname)
+        })
     });
 
     let config = Config {
@@ -122,11 +140,16 @@ fn main() -> Result<()> {
     // 服务线程会持续重试，托盘也会给出指引）。这样首窗即可带 ?pair= 引导绑定。
     #[cfg(feature = "desktop")]
     if state.device_token.blocking_read().is_none()
-        && std::env::var("AM_AGENT_TOKEN").ok().filter(|s| !s.is_empty()).is_none()
+        && std::env::var("AM_AGENT_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_none()
     {
         let st = state.clone();
         let hub = hub_url.clone();
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
         if let Ok(rt) = rt {
             rt.block_on(async {
                 let client = reqwest::Client::builder()
@@ -138,13 +161,17 @@ fn main() -> Result<()> {
                         "hostname": st.config.hostname,
                         "platform": st.config.platform,
                     });
-                    if let Ok(resp) =
-                        client.post(format!("{hub}/monitor/pair/start")).json(&body).send().await
+                    if let Ok(resp) = client
+                        .post(format!("{hub}/monitor/pair/start"))
+                        .json(&body)
+                        .send()
+                        .await
                     {
                         if let Ok(v) = resp.json::<serde_json::Value>().await {
                             if let (Some(code), Some(pt)) = (
                                 v.pointer("/data/code").and_then(serde_json::Value::as_str),
-                                v.pointer("/data/pairToken").and_then(serde_json::Value::as_str),
+                                v.pointer("/data/pairToken")
+                                    .and_then(serde_json::Value::as_str),
                             ) {
                                 *st.pair_info.write().await =
                                     Some((code.to_string(), pt.to_string()));
@@ -157,15 +184,22 @@ fn main() -> Result<()> {
     }
 
     // 主线程：Tauri 桌面窗口 + 托盘（AM_HEADLESS=1 关闭，用于无界面 agent）
-    let headless = std::env::var("AM_HEADLESS").map(|v| v == "1").unwrap_or(false)
-        || std::env::var("AM_NO_TRAY").map(|v| v == "1").unwrap_or(false);
+    let headless = std::env::var("AM_HEADLESS")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+        || std::env::var("AM_NO_TRAY")
+            .map(|v| v == "1")
+            .unwrap_or(false);
 
     #[cfg(feature = "desktop")]
     if !headless {
         breadcrumb("desktop::run");
         desktop::run(
             state.clone(),
-            desktop::DesktopConfig { web_base: hub_url, is_agent: true },
+            desktop::DesktopConfig {
+                web_base: hub_url,
+                is_agent: true,
+            },
         )?;
         return Ok(());
     }
@@ -273,7 +307,13 @@ fn load_config_file() {
 
 fn sanitize_id(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .to_lowercase()
 }

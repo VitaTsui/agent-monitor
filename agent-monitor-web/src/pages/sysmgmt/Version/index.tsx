@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 
-import { Popconfirm, Tag, message } from "antd";
+import { Popconfirm, Tag } from "antd";
+import { message } from "@hsu-react/ui";
 import { PlusOutlined } from "@ant-design/icons";
 
 import {
@@ -214,6 +215,7 @@ const Version: React.FC = () => {
         okText="保存"
         cancelText="取消"
         confirmLoading={adding}
+        centered
       >
         <div className={styles.formRow}>
           <div className={styles.formLabel}>版本号</div>

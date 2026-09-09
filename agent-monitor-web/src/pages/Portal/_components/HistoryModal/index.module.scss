@@ -1,0 +1,169 @@
+// 配色与 Composer 保持一致（同一屏内的组件，色板不该各写各的）
+$text: var(--foreground);
+$muted: var(--muted-foreground);
+$accent: var(--primary);
+$mono: "SF Mono", Menlo, Consolas, monospace;
+
+.hint {
+  font-size: var(--text-sm);
+  color: $muted;
+  padding-bottom: 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
+
+  // 说明文字可压缩，切换按钮不许被挤变形
+  > span {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  padding: 40px 0;
+}
+
+// 对话流：旧的在上、新的在下，与聊天记录读法一致。
+// 这里是唯一的滚动容器 —— 外面不能再套 Spin 之类会加 div 的组件，否则高度链断了滚不动。
+.stream {
+  height: 62vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 2px 0;
+}
+
+// 换会话的分隔条：多个终端的往来混在一起时，得看得出这段是谁的
+
+// 号位徽标：与钉钉「@N」同一个编号
+
+
+
+// 我发的靠右
+.rowUser {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  margin-bottom: 10px;
+}
+
+// 它回的靠左
+.rowAgent {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.bubbleUser {
+  max-width: 78%;
+  padding: 6px 12px;
+  border-radius: 12px 12px 2px 12px;
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  color: $text;
+  font-size: var(--text-base);
+  // 正文交给 Markdown.Views 渲染，这里只管容器：长串（URL/路径）要能断行
+  word-break: break-word;
+  overflow-wrap: anywhere;
+
+  // 压紧 markdown 在气泡里的默认间距 —— 它按文档排版，首尾留白在气泡里会显得很空
+  :global {
+    p,
+    ul,
+    ol,
+    pre,
+    blockquote,
+    table {
+      margin: 4px 0;
+    }
+    p:first-child,
+    ul:first-child,
+    ol:first-child,
+    pre:first-child {
+      margin-top: 0;
+    }
+    p:last-child,
+    ul:last-child,
+    ol:last-child,
+    pre:last-child {
+      margin-bottom: 0;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin: 6px 0 4px;
+      font-size: 13.5px;
+      font-weight: 600;
+    }
+    ul, ol {
+      padding-left: 18px;
+    }
+    // 代码块在气泡内自己横向滚动，不要把气泡撑破
+    pre {
+      max-width: 100%;
+      overflow-x: auto;
+      padding: 8px 10px;
+      border-radius: var(--radius-sm);
+      background: color-mix(in srgb, var(--foreground) 6%, transparent);
+      font-size: var(--text-sm);
+      line-height: 1.55;
+    }
+    code {
+      font-family: $mono;
+      font-size: var(--text-sm);
+    }
+    table {
+      display: block;
+      max-width: 100%;
+      overflow-x: auto;
+      font-size: var(--text-sm);
+    }
+    img {
+      max-width: 100%;
+    }
+  }
+}
+
+.bubbleAgent {
+  @extend .bubbleUser;
+  border-radius: 12px 12px 12px 2px;
+  background: color-mix(in srgb, var(--foreground) 5%, transparent);
+  color: color-mix(in srgb, var(--foreground) 85%, transparent);
+}
+
+.time {
+  margin-top: 3px;
+  font-size: var(--text-xs);
+  color: $muted;
+  font-family: $mono;
+}
+
+// 移动端（Capacitor 壳直接加载本页，所以这里就是手机上的样子）：
+// 720px 的弹窗在手机上会溢出，改为全屏 —— 且「人不在电脑前翻记录」正是这块的核心场景，
+// 值得占满整屏而不是挤在一个小卡片里。
+@media (max-width: 760px) {
+  :global(.ant-modal-container) {
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    border-radius: 0 !important;
+    padding-top: env(safe-area-inset-top) !important;
+  }
+
+  .hint {
+    // 窄屏放不下「一行说明 + 切换」，说明退居次行
+    flex-wrap: wrap;
+    gap: 8px;
+
+    > span {
+      flex: 1 1 100%;
+    }
+  }
+
+  .stream {
+    // 全屏后按视口算高度：减去标题、说明、切换与安全区
+    height: calc(100dvh - 200px);
+  }
+
+  // 手机屏窄，气泡放宽些才不至于一行没几个字
+  .bubbleUser {
+    max-width: 88%;
+    font-size: var(--text-md); // 移动端正文小于 14px 会偏吃力
+  }
+}

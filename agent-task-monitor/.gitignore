@@ -1,1 +1,3 @@
 /target
+# 交叉编译 Linux 版 hub 用的产物目录（docker + musl 目标）
+/target-musl

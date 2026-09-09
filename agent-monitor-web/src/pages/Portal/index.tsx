@@ -1,22 +1,20 @@
 import React, { useEffect, useState } from "react";
 
 import { Input } from "@hsu-react/ui";
-import { Badge, ConfigProvider, Popover, Tooltip } from "antd";
+import { Badge, ConfigProvider, Modal, Popover, Tooltip } from "antd";
 import { useNativeBack } from "./_hooks/useNativeBack";
 import { useApkUpdateCheck } from "./_hooks/useApkUpdateCheck";
 import { useClientUpdateToast } from "./_hooks/useClientUpdateToast";
-import { claimPairDevice } from "@/services/apis/portal";
-import { message as antdMessage } from "antd";
+import { usePaneGrid } from "./_hooks/usePaneGrid";
+import { claimPairDevice, getMe } from "@/services/apis/portal";
+import { message as antdMessage } from "@hsu-react/ui";
 import {
   CodeOutlined,
-  BranchesOutlined,
   ControlOutlined,
   DownOutlined,
   EllipsisOutlined,
   LaptopOutlined,
   LogoutOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
   SafetyOutlined,
@@ -29,16 +27,39 @@ import {
 } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
-import { getAccessToken, getUserInfo, removeToken } from "@/utils/auth";
-import { clientSilentLogin, inDesktopClient, localMachineId } from "@/utils/clientAuth";
+import { getAccessToken, getUserInfo, removeToken, setUserInfo } from "@/utils/auth";
+import {
+  clientSilentLogin,
+  inDesktopClient,
+  inNativeShell,
+  localMachineId,
+} from "@/utils/clientAuth";
 import PortalStore from "./PortalStore";
 import { ShareReceiveModal } from "./_hooks/useShareReceive";
-import GitDiffModal from "./_components/GitDiffModal";
 import ChatPane from "./_components/ChatPane";
 import ScrollText from "./_components/ScrollText";
 import SettingsModal from "./_components/SettingsModal";
 import type { SettingsTab } from "./_components/SettingsModal";
 import styles from "./index.module.scss";
+
+/** 侧栏折叠图标：面板 + 左栏分隔线（对标 VS Code / ChatGPT 的侧栏切换，
+ *  取代过于「后管菜单」的汉堡折叠图标）。折叠态把分隔线挪到更左，暗示会收窄。 */
+const SidebarIcon: React.FC<{ folded?: boolean }> = ({ folded }) => (
+  <svg
+    width="21"
+    height="21"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.9"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden
+  >
+    <rect x="3" y="4.5" width="18" height="15" rx="2.6" />
+    <line x1={folded ? "8" : "9.5"} y1="4.5" x2={folded ? "8" : "9.5"} y2="19.5" />
+  </svg>
+);
 
 const STATUS_LABEL: Record<string, string> = {
   running: "执行中",
@@ -66,6 +87,8 @@ const Portal: React.FC = observer(() => {
     control,
     syncMessages,
     splitOpen,
+    focusedId,
+    setFocused,
   } = PortalStore;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("account");
@@ -86,13 +109,16 @@ const Portal: React.FC = observer(() => {
   const [mobileNav, setMobileNav] = useState(false);
   // 移动端：顶栏「⋯」操作菜单与代码改动弹窗
   const [mobileActs, setMobileActs] = useState(false);
-  const [mobileGit, setMobileGit] = useState(false);
+  const [isMobile, setIsMobile] = useState(
+    () => window.matchMedia("(max-width: 760px)").matches,
+  );
 
   // 移动端强制展开侧栏内容：桌面折叠态下缩窄窗口时，
   // CSS 会把抽屉撑到 84vw，但折叠态 JSX 不渲染内容 → 空白抽屉，这里在 JS 层纠正
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 760px)");
     const sync = () => {
+      setIsMobile(mq.matches);
       if (mq.matches) {
         setSiderFolded(false);
       }
@@ -108,6 +134,13 @@ const Portal: React.FC = observer(() => {
     setMobileNav(false);
   };
 
+
+  // 本页完全响应式，豁免 index.scss 里给后管布局设的 min-width:960px
+  // （窗口拖窄到 960 以下时那条会造成整页横滚、右上角控制键被推出可视区）
+  useEffect(() => {
+    document.body.setAttribute("data-fluid", "");
+    return () => document.body.removeAttribute("data-fluid");
+  }, []);
 
   // 抽屉打开时：锁背景滚动 + Esc 关闭
   useEffect(() => {
@@ -142,6 +175,17 @@ const Portal: React.FC = observer(() => {
       return;
     }
     init();
+
+    // 刷新当前用户信息（含实时 isSuper）：改了权限无需重新登录，下次加载即生效
+    getMe()
+      .then((res) => {
+        if (res.code === 0 && res.data) {
+          setUserInfo(res.data);
+          setUser(res.data);
+        }
+      })
+      .catch(() => void 0);
+
 
     return () => {
       stopPolling();
@@ -217,11 +261,28 @@ const Portal: React.FC = observer(() => {
   }
 
   const paneCount = openTasks.length;
-  const user = (getUserInfo() as {
+  // 放大的那一格。两道门槛：
+  //   多格 —— 单格本来就占满，再「放大」没意义，还会渲染出「主区 + 空右列」；
+  //   非移动端 —— 手机上主区要跟 320px 的右列分一块 390px 的屏，主区只剩个缝；
+  //     更要命的是移动端把 paneHeader 整个隐藏了（见样式），进去就没有还原按钮，出不来。
+  const focusedTask =
+    paneCount > 1 && !isMobile
+      ? openTasks.find((t) => t.id === focusedId)
+      : undefined;
+  // 横向还是纵向拆分、一行摆几个，全按网格容器的实际宽高算（见 usePaneGrid）
+  const {
+    ref: paneGridRef,
+    cols: paneCols,
+    rows: paneRows,
+    lastSpan: paneLastSpan,
+  } = usePaneGrid(paneCount);
+  // 用 state 承载用户信息：每次加载调 /monitor/me 刷新（含实时 isSuper），
+  // 这样管理员改了别人的权限，对方不必重新登录、下次加载即生效。
+  const [user, setUser] = useState<{
     nickname?: string;
     username?: string;
     isSuper?: boolean;
-  }) ?? {};
+  }>(() => (getUserInfo() as { nickname?: string; username?: string; isSuper?: boolean }) ?? {});
   const nickname = user.nickname ?? user.username ?? "";
 
   const openSettings = (tab: SettingsTab) => {
@@ -258,7 +319,8 @@ const Portal: React.FC = observer(() => {
         <SafetyOutlined />
         <span>安全防护</span>
       </div>
-      {user.isSuper ? (
+      {/* 后台管理只在浏览器里显示：客户端 / 移动端原生壳内隐藏（那里开新标签打不开后管） */}
+      {user.isSuper && !inNativeShell() ? (
         <div
           className={styles.userMenuItem}
           onClick={() => {
@@ -279,9 +341,16 @@ const Portal: React.FC = observer(() => {
   );
 
   return (
-    // Portal 路由挂在全局 Theme 之外，自带品牌主色；
+    // Portal 路由挂在全局 Theme 之外，所以这里自己给一份主题；
     // ConfigProvider 走 React context，portal 出去的弹窗一样生效。
-    <ConfigProvider theme={{ token: { colorPrimary: "#0F9BAD" } }}>
+    //
+    // 主色与 styles/tokens.scss 的 --primary 保持一致（shadcn 默认的单色墨黑）。
+    // 必须是字面量：antd 要由它派生 10 级色板，给 var() 算不出来。
+    // colorLink 单独给：antd 的链接色不跟随 colorPrimary，不设的话「修改」「重置密码」
+    // 这类 link 按钮会留在默认蓝上，整站只剩它们是彩色。
+    <ConfigProvider
+      theme={{ token: { colorPrimary: "#18181b", colorLink: "#18181b" } }}
+    >
     <div className={styles.Portal}>
       {/* 移动端顶部栏（仅窄屏显示） */}
       <div className={styles.mobileBar}>
@@ -289,8 +358,8 @@ const Portal: React.FC = observer(() => {
           className={styles.mobileMenuBtn}
           role="button"
           tabIndex={0}
-          aria-label="打开会话列表"
-          onClick={() => setMobileNav(true)}
+          aria-label="打开/收起会话列表"
+          onClick={() => setMobileNav((v) => !v)}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
@@ -298,7 +367,7 @@ const Portal: React.FC = observer(() => {
             }
           }}
         >
-          <MenuUnfoldOutlined />
+          <SidebarIcon folded={!mobileNav} />
         </span>
         <span className={styles.mobileTitle}>
           {openTasks[0] ? (
@@ -313,6 +382,18 @@ const Portal: React.FC = observer(() => {
             openTasks[0]?.projectName ||
             "终端任务监控"}
         </span>
+        {/* 正在跑的时候「中断」提到一级：手机上想停一下是最急的操作，
+            埋在 ⋯ 里要点两次、还要在小菜单里瞄准。不跑时不占位。 */}
+        {openTasks[0] && openTasks[0].status === "running" && openTasks[0].pid ? (
+          <span
+            className={styles.mobileStopBtn}
+            role="button"
+            aria-label="中断当前任务"
+            onClick={() => control(openTasks[0]!.id ?? "", "interrupt")}
+          >
+            <ThunderboltOutlined />
+          </span>
+        ) : null}
         {openTasks[0] ? (
           <Popover
             open={mobileActs}
@@ -327,6 +408,9 @@ const Portal: React.FC = observer(() => {
                   const t0 = openTasks[0]!;
                   const id0 = t0.id ?? "";
                   const paused = t0.status === "paused";
+                  // 空闲时中断没有可断的东西，点了看不出任何变化，人会反复戳 ——
+                  // 等下一轮真跑起来时那几下反而把新任务打断了（同 ChatPane）
+                  const canInterrupt = !!t0.pid && t0.status === "running";
                   const act = (fn: () => void) => () => {
                     setMobileActs(false);
                     fn();
@@ -336,9 +420,6 @@ const Portal: React.FC = observer(() => {
                       <div className={styles.mobileActItem} onClick={act(() => syncMessages(id0))}>
                         <SyncOutlined /> 重新同步
                       </div>
-                      <div className={styles.mobileActItem} onClick={act(() => setMobileGit(true))}>
-                        <BranchesOutlined /> 代码改动
-                      </div>
                       <div
                         className={styles.mobileActItem}
                         onClick={act(() => control(id0, paused ? "resume" : "pause"))}
@@ -346,12 +427,33 @@ const Portal: React.FC = observer(() => {
                         {paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
                         {paused ? " 恢复" : " 暂停"}
                       </div>
-                      <div className={styles.mobileActItem} onClick={act(() => control(id0, "interrupt"))}>
+                      <div
+                        className={`${styles.mobileActItem} ${
+                          canInterrupt ? "" : styles.disabled
+                        }`}
+                        onClick={canInterrupt ? act(() => control(id0, "interrupt")) : undefined}
+                      >
                         <ThunderboltOutlined /> 中断
+                        {/* 条目名保持动作，不可用的缘由另起一行小字 ——
+                            把状态描述塞进名字里，读着就不像个能点的东西 */}
+                        {canInterrupt ? null : (
+                          <span className={styles.actWhy}>当前没在执行</span>
+                        )}
                       </div>
+                      {/* 终止 = 杀进程，这一轮的上下文就没了。桌面端一直有二次确认，
+                          移动端却是一点就执行 —— 而手指在紧挨着的菜单项上更容易滑错。 */}
                       <div
                         className={`${styles.mobileActItem} ${styles.danger}`}
-                        onClick={act(() => control(id0, "stop"))}
+                        onClick={act(() =>
+                          Modal.confirm({
+                            title: "确定终止该任务进程？",
+                            content: "终端里这一轮的上下文会一起结束，无法恢复。",
+                            okText: "终止",
+                            cancelText: "取消",
+                            okButtonProps: { danger: true },
+                            onOk: () => control(id0, "stop"),
+                          }),
+                        )}
                       >
                         <StopOutlined /> 终止进程
                       </div>
@@ -377,9 +479,7 @@ const Portal: React.FC = observer(() => {
       )}
 
       <aside
-        className={`${styles.sider} ${siderFolded ? styles.folded : ""} ${
-          mobileNav ? styles.mobileOpen : ""
-        }`}
+        className={`${styles.sider} ${siderFolded ? styles.folded : ""}`}
       >
         <div className={styles.siderHeader}>
           <div className={styles.brand}>
@@ -403,7 +503,7 @@ const Portal: React.FC = observer(() => {
                 }
               }}
             >
-              {siderFolded ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+              <SidebarIcon folded={siderFolded} />
             </span>
           </Tooltip>
         </div>
@@ -509,6 +609,12 @@ const Portal: React.FC = observer(() => {
                                   styles[t.status ?? ""] ?? ""
                                 }`}
                               />
+                              {/* 号位：与钉钉「@N」同一个编号，在手机上照着这个号下发 */}
+                              {t.slot != null && (
+                                <Tooltip title={`钉钉里发「@${t.slot} 内容」即下发到这个终端`}>
+                                  <span className={styles.sessSlot}>{t.slot}</span>
+                                </Tooltip>
+                              )}
                               <div className={styles.sessBody}>
                                 {/* 标题 + 右侧状态徽标同一行；来源等杂项不再展示 */}
                                 <div className={styles.sessRow}>
@@ -527,15 +633,18 @@ const Portal: React.FC = observer(() => {
                                   </span>
                                 </div>
                               </div>
-                              <Tooltip title="拆分显示">
-                                <SplitCellsOutlined
-                                  className={styles.splitBtn}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    splitOpen(t.id ?? "");
-                                  }}
-                                />
-                              </Tooltip>
+                              {/* 移动端窄屏不支持拆分并排，去掉拆分按钮，只单会话查看 */}
+                              {!isMobile && (
+                                <Tooltip title="拆分显示">
+                                  <SplitCellsOutlined
+                                    className={styles.splitBtn}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      splitOpen(t.id ?? "");
+                                    }}
+                                  />
+                                </Tooltip>
+                              )}
                             </div>
                           ))}
                       </div>
@@ -552,9 +661,10 @@ const Portal: React.FC = observer(() => {
         <Popover
           open={userMenuOpen}
           onOpenChange={(o) => {
-            // 移动端：不弹菜单，直接进整屏设置（Claude App 式头像入口）
+            // 移动端：不弹菜单，直接进整屏设置（Claude App 式头像入口）。
+            // 不再顺手收起侧栏——点头像只是开设置，设置浮在上层，关掉后侧栏仍在，
+            // 避免「点头像侧栏莫名收起」的观感。
             if (o && window.matchMedia("(max-width: 760px)").matches) {
-              setMobileNav(false);
               openSettings("account");
               return;
             }
@@ -600,7 +710,7 @@ const Portal: React.FC = observer(() => {
         </Popover>
       </aside>
 
-      <main className={styles.main}>
+      <main className={`${styles.main} ${mobileNav ? styles.mainPushed : ""}`}>
         {paneCount === 0 ? (
           <div className={styles.mainEmpty}>
             <div className={styles.greeting}>
@@ -617,8 +727,52 @@ const Portal: React.FC = observer(() => {
               点击会话右侧的 <SplitCellsOutlined /> 可并排显示多个任务
             </div>
           </div>
+        ) : focusedTask ? (
+          /* 放大模式：主区一格撑满，其余缩成右侧一列只读卡片。
+             不走自适应网格 —— 那套是在「几格平分」的前提下算的，这里的诉求正相反：
+             一格独大、其余只求瞥得见。 */
+          <div className={styles.focusLayout}>
+            <div className={styles.focusMain}>
+              <ChatPane
+                key={focusedTask.id}
+                task={focusedTask}
+                closable={paneCount > 1}
+              />
+            </div>
+            <div className={styles.focusSide}>
+              {openTasks
+                .filter((t) => t.id !== focusedTask.id)
+                .map((t) => (
+                  <div
+                    key={t.id}
+                    className={`${styles.focusCard} ${
+                      t.pendingSelect?.questions?.length
+                        ? styles.focusCardAlert
+                        : ""
+                    }`}
+                  >
+                    <ChatPane
+                      task={t}
+                      closable={paneCount > 1}
+                      compact
+                      onActivate={() => setFocused(t.id ?? "")}
+                    />
+                  </div>
+                ))}
+            </div>
+          </div>
         ) : (
-          <div className={styles.paneGrid} data-count={Math.min(paneCount, 4)}>
+          <div
+            ref={paneGridRef}
+            className={styles.paneGrid}
+            data-last-span={paneLastSpan}
+            style={
+              {
+                "--pane-cols": paneCols,
+                "--pane-rows": paneRows,
+              } as React.CSSProperties
+            }
+          >
             {openTasks.map((t) => (
               <ChatPane key={t.id} task={t} closable={paneCount > 1} />
             ))}
@@ -632,12 +786,6 @@ const Portal: React.FC = observer(() => {
         onClose={() => setSettingsOpen(false)}
       />
       <ShareReceiveModal />
-      <GitDiffModal
-        open={mobileGit}
-        taskId={openTasks[0]?.id ?? ""}
-        title={openTasks[0]?.projectName}
-        onClose={() => setMobileGit(false)}
-      />
     </div>
     </ConfigProvider>
   );

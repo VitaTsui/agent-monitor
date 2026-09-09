@@ -32,9 +32,12 @@ fn provider_cfg(provider: &str) -> Option<ProviderCfg> {
     let base = public_base()?;
     match provider {
         "google" => {
-            let client_id = std::env::var("AM_GOOGLE_CLIENT_ID").ok().filter(|s| !s.is_empty())?;
-            let client_secret =
-                std::env::var("AM_GOOGLE_CLIENT_SECRET").ok().filter(|s| !s.is_empty())?;
+            let client_id = std::env::var("AM_GOOGLE_CLIENT_ID")
+                .ok()
+                .filter(|s| !s.is_empty())?;
+            let client_secret = std::env::var("AM_GOOGLE_CLIENT_SECRET")
+                .ok()
+                .filter(|s| !s.is_empty())?;
             Some(ProviderCfg {
                 client_id,
                 client_secret,
@@ -47,11 +50,14 @@ fn provider_cfg(provider: &str) -> Option<ProviderCfg> {
             })
         }
         "apple" => {
-            let client_id = std::env::var("AM_APPLE_CLIENT_ID").ok().filter(|s| !s.is_empty())?;
+            let client_id = std::env::var("AM_APPLE_CLIENT_ID")
+                .ok()
+                .filter(|s| !s.is_empty())?;
             // Apple 的 client_secret 是一段 ES256 JWT（有效期最长 6 个月），
             // 由管理员离线用 .p8 私钥生成后放入环境变量，避免在服务内内置 ES256 签名。
-            let client_secret =
-                std::env::var("AM_APPLE_CLIENT_SECRET").ok().filter(|s| !s.is_empty())?;
+            let client_secret = std::env::var("AM_APPLE_CLIENT_SECRET")
+                .ok()
+                .filter(|s| !s.is_empty())?;
             Some(ProviderCfg {
                 client_id,
                 client_secret,
@@ -220,7 +226,11 @@ pub async fn oauth_login(
             if !claim_email_verified(&info) {
                 return err(400, "该 Google 账号的邮箱未验证，无法登录");
             }
-            let email = info.get("email").and_then(Value::as_str).unwrap_or("").to_string();
+            let email = info
+                .get("email")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let name = info
                 .get("name")
                 .and_then(Value::as_str)
@@ -261,12 +271,13 @@ pub async fn oauth_login(
     };
     let is_super = state.registry.read().await.is_super_user(&user.username);
     let token = uuid::Uuid::new_v4().to_string();
+    state.tokens.write().await.insert(
+        token.clone(),
+        crate::state::Session::new(user.username.clone()),
+    );
     state
-        .tokens
-        .write()
-        .await
-        .insert(token.clone(), crate::state::Session::new(user.username.clone()));
-    state.sessions_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        .sessions_dirty
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let nickname = if user.display.is_empty() {
         user.username.clone()
     } else {

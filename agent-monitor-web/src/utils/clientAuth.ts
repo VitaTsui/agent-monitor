@@ -11,6 +11,17 @@ interface TauriBridge {
 export const inDesktopClient = (): boolean =>
   !!(window as unknown as { __TAURI__?: TauriBridge }).__TAURI__?.core?.invoke;
 
+/** 是否运行在移动端原生壳（Capacitor）里；浏览器里无 Capacitor 桥 */
+export const inMobileApp = (): boolean =>
+  !!(
+    window as unknown as {
+      Capacitor?: { isNativePlatform?: () => boolean };
+    }
+  ).Capacitor?.isNativePlatform?.();
+
+/** 是否在原生壳（桌面客户端 或 移动端 App）内——用于隐藏只在浏览器里可用的入口（如后台管理） */
+export const inNativeShell = (): boolean => inDesktopClient() || inMobileApp();
+
 interface ClientCred {
   machineId?: string;
   deviceToken?: string;
@@ -91,6 +102,15 @@ async function doSilentLogin(): Promise<boolean> {
       deviceToken: cred.deviceToken,
     })) as SessionRes;
     if (res.code !== 0 || !res.data?.token) {
+      // 设备令牌被 hub 判无效（换服务器 / 设备被删 / 数据重建）→ 让客户端清掉本地令牌
+      // （含 device-token.dpapi），下轮 agent 循环自动重新配对，用户无需手动删文件。
+      if (res.code === 401) {
+        try {
+          await invoke("clear_device_token");
+        } catch {
+          /* 忽略：清理失败不影响回退登录页 */
+        }
+      }
       return false;
     }
     setToken(res.data.token);

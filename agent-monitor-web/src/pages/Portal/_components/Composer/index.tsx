@@ -1,25 +1,69 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import { Chat, Input, Modal } from "@hsu-react/ui";
-import { message } from "antd";
-import { PaperClipOutlined, WarningOutlined } from "@ant-design/icons";
+import { message } from "@hsu-react/ui";
+import { reaction } from "mobx";
+import {
+  DeleteOutlined,
+  EditOutlined,
+  FileSearchOutlined,
+  FolderAddOutlined,
+  HistoryOutlined,
+  PaperClipOutlined,
+  WarningOutlined,
+} from "@ant-design/icons";
 
 import {
   SlashCommand,
+  fsopTask,
+  getFsopResult,
   getPortalSlashCommands,
   getTaskDirs,
   uploadPortalFile,
 } from "@/services/apis/portal";
 import { CONFIRM_WORD, DangerHit, checkDanger } from "../../_utils/dangerCheck";
+import PortalStore from "../../PortalStore";
+import HistoryModal from "../HistoryModal";
 import styles from "./index.module.scss";
+
+/**
+ * 撞名就在扩展名前挂序号：`a.png` → `a (1).png` → `a (2).png`。
+ *
+ * 必须与客户端 `unique_target`（client/src/agent.rs）**同一套规则** —— 那边是最终落盘的
+ * 兜底，这边是为了让回填进输入框的路径与实际落盘名对得上。两边算法一致时，正常情况下
+ * 这边给的名字就是最终名，客户端那道兜底不会被触发。
+ *
+ * 扩展名按最后一个点切，与 Rust 的 file_stem/extension 一致：`a.tar.gz` → `a.tar (1).gz`；
+ * `.gitignore` 这类隐藏文件整体当主名（点在首位不算扩展名分隔）。
+ */
+const uniqueName = (name: string, taken: Set<string>): string => {
+  if (!taken.has(name)) {
+    return name;
+  }
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  for (let i = 1; i < 10000; i += 1) {
+    const cand = `${stem} (${i})${ext}`;
+    if (!taken.has(cand)) {
+      return cand;
+    }
+  }
+  return name;
+};
 
 interface ComposerProps {
   taskId: string;
   disabled?: boolean;
+  /**
+   * 禁用原因（占位符与拦截提示都用它）。不给就按「没有存活进程」说 ——
+   * 但禁用的理由不止这一个（比如已暂停），说错了会把人引到错误的排查方向。
+   */
+  disabledHint?: string;
   onSend: (text: string) => void;
   /** 会话所在设备（上传文件的目标） */
   machineId?: string;
-  /** 会话工作目录（上传落点；回填的相对路径以此为基准） */
+  /** 会话锚定目录（上传落点；回填的相对路径以此为基准） */
   cwd?: string;
 }
 
@@ -28,15 +72,38 @@ interface ComposerProps {
  * - 上方为该模型可用斜杠命令 chips，点击直接发布；
  * - 命中危险模式（类 Claude Code bypass 权限等）时走两步确认。
  */
+/**
+ * 目录清单的轮询节奏（毫秒）。总时长约 92 秒。
+ *
+ * 目录由 agent 在**下一轮上报**时带回，实测上报约 31 秒一轮，刚错过一轮就是 62 秒。
+ * 原先固定 1.2s × 8 ≈ 9.6 秒，比实际往返短 3～6 倍，于是几乎必然超时。
+ * 前几拍保持密集（缓存已热时秒回），随后退避，避免长时间空转刷请求。
+ */
+const DIR_POLL_DELAYS = [
+  1200, 1200, 1500, 2000, 3000, 4000, 5000, 6000, 8000, 10000, 12000, 15000, 22000,
+];
+
 const Composer: React.FC<ComposerProps> = (props) => {
-  const { taskId, disabled, onSend, machineId, cwd } = props;
+  const { taskId, disabled, disabledHint, onSend, machineId, cwd } = props;
+  const offHint = disabledHint || "该会话无存活进程，无法发布";
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   const [uploading, setUploading] = useState(false);
+  // 会话历史弹窗（与当前会话状态无关，任何时候都能翻）
+  const [historyOpen, setHistoryOpen] = useState(false);
   // 斜杠命令：仅当输入以「/」开头且未含空格时弹出（Claude Code 终端式），
   // null=不在命令模式，字符串=「/」之后已输入的过滤词
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
+  // 命令菜单里方向键高亮的项索引
+  const [slashActive, setSlashActive] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // 供原生 keydown 捕获处理器读取当前菜单项/高亮（避免闭包拿到旧值）
+  const slashItemsRef = useRef<Array<{ key: string; run: () => void }>>([]);
+  const slashActiveRef = useRef(0);
+  // 输入法是否正在组字。事件自带的 isComposing 不够：不少输入法（尤其 macOS）
+  // 在候选词上屏时是「先 compositionend、再补一个 Enter」的顺序，那个 Enter 上
+  // isComposing 已经是 false，看起来就是一次正常的回车。
+  const composingRef = useRef(false);
 
   /**
    * 把文本追加进 Chat.Input 的输入框。
@@ -57,18 +124,113 @@ const Composer: React.FC<ComposerProps> = (props) => {
     ta.focus();
   };
 
-  // 监听输入框内容：以「/xxx」（无空格）开头就进命令模式并按 xxx 过滤
+
+  // 撤回后把原文回填进本会话的对话框（PortalStore.composerRefill 命中自己的 taskId
+  // 才消费），方便改完再发。Composer 非 observer，用 reaction 订阅这一个字段即可。
+  useEffect(() => {
+    const dispose = reaction(
+      () => PortalStore.composerRefill,
+      (r) => {
+        if (r && r.taskId === taskId) {
+          appendToInput(r.text);
+          PortalStore.consumeComposerRefill();
+        }
+      },
+    );
+    return dispose;
+  }, [taskId]);
+
+  // 监听输入框内容：以「/xxx」（无空格）开头就进命令模式并按 xxx 过滤。
+  // 关键：setSlashQuery 必须延后一帧（rAF）再调用 —— 直接在原生 input 事件里 setState 会
+  // 触发重渲染，把 hsu-ui 受控 textarea 的值回滚成本次按键前的旧值（表现为「/ 和字母都要
+  // 按两次、连打两个不同字母只留第二个、输入框里根本不显示」）。延后到下一帧时，hsu-ui 的
+  // onChange 已把值落定，此时更新 slashQuery 不会再回滚当前按键。
   useEffect(() => {
     const ta = rootRef.current?.querySelector("textarea");
     if (!ta) return;
+    let raf = 0;
     const onInput = () => {
-      const v = ta.value;
-      const m = /^\/(\S*)$/.exec(v);
-      setSlashQuery(m ? m[1] : null);
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const v = ta.value;
+        const m = /^\/(\S*)$/.exec(v);
+        setSlashQuery(m ? m[1] : null);
+      });
     };
+    const onBlur = () => setTimeout(() => setSlashQuery(null), 150);
     ta.addEventListener("input", onInput);
-    ta.addEventListener("blur", () => setTimeout(() => setSlashQuery(null), 150));
-    return () => ta.removeEventListener("input", onInput);
+    ta.addEventListener("blur", onBlur);
+    return () => {
+      cancelAnimationFrame(raf);
+      ta.removeEventListener("input", onInput);
+      ta.removeEventListener("blur", onBlur);
+    };
+  }, [taskId]);
+
+  // 移动端：回车换行、不发送（发送用右下角发送按钮）。hsu-ui Chat.Input 默认回车即提交，
+  // 这里在捕获阶段拦住移动端的 Enter、stopPropagation 阻止它到达 Chat.Input 的提交处理，
+  // 不 preventDefault 让 textarea 自然插入换行。
+  //
+  // 同一处还要拦住**输入法上屏用的那个 Enter**：桌面端的提交在 Chat.Input 内部，
+  // 组字中的回车一旦漏过去就会把「刚上屏的半句话」当成一条消息发出去。发完输入框
+  // 被清空、输入法紧接着又把候选词补回来，于是越打越长、每次上屏都发一条 ——
+  // 表现就是同一句话被拆成「卷管理弹窗」「卷管理弹窗表格」这样的递增前缀连发。
+  useEffect(() => {
+    const ta = rootRef.current?.querySelector("textarea");
+    if (!ta) return;
+    const onCompStart = () => {
+      composingRef.current = true;
+    };
+    // 延后一个宏任务再解除：紧跟在 compositionend 之后补发的那个 Enter 仍要算组字期内
+    const onCompEnd = () => {
+      setTimeout(() => {
+        composingRef.current = false;
+      }, 0);
+    };
+    const onKeyDownCapture = (e: KeyboardEvent) => {
+      // keyCode 229 = 按键被输入法吃掉了，同样不能当回车用
+      const composing = composingRef.current || e.isComposing || e.keyCode === 229;
+      if (e.key === "Enter" && !e.shiftKey && composing) {
+        // 只拦提交，不 preventDefault —— 上屏动作要照常完成
+        e.stopPropagation();
+        return;
+      }
+      // 命令菜单开着时：↑↓ 移高亮、回车选中当前项（选中后自动聚焦回输入框）
+      const items = slashItemsRef.current;
+      if (items.length > 0 && !composing) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          e.stopPropagation();
+          setSlashActive((i) => (i + 1) % items.length);
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          e.stopPropagation();
+          setSlashActive((i) => (i - 1 + items.length) % items.length);
+          return;
+        }
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          e.stopPropagation();
+          items[slashActiveRef.current]?.run();
+          rootRef.current?.querySelector("textarea")?.focus();
+          return;
+        }
+      }
+      const isMobile = window.matchMedia("(max-width: 760px)").matches;
+      if (isMobile && e.key === "Enter" && !e.shiftKey && !composing) {
+        e.stopPropagation();
+      }
+    };
+    ta.addEventListener("compositionstart", onCompStart);
+    ta.addEventListener("compositionend", onCompEnd);
+    ta.addEventListener("keydown", onKeyDownCapture, true);
+    return () => {
+      ta.removeEventListener("compositionstart", onCompStart);
+      ta.removeEventListener("compositionend", onCompEnd);
+      ta.removeEventListener("keydown", onKeyDownCapture, true);
+    };
   }, [taskId]);
 
   // 把某条命令填进输入框（保留在输入框，用户可继续补参数或直接回车发布）
@@ -86,16 +248,43 @@ const Composer: React.FC<ComposerProps> = (props) => {
   };
 
   // 选中的待上传文件 + 目录树浏览（根 = 会话所在目录，只能往下走）
-  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  /** 待上传的文件（可多选）。空数组＝没有待传，用它控制上传弹窗开合 */
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  /** 批量上传进度：已完成数 / 总数，仅上传中有值 */
+  const [uploadDone, setUploadDone] = useState(0);
+  /** 当前这个文件的分片进度百分比（大文件切片上传时才有意义） */
+  const [uploadPct, setUploadPct] = useState(0);
   const [dirRel, setDirRel] = useState("");
+  /**
+   * agent 实际据以列举的**绝对根** —— 即会话此刻真正所在的目录，由它现读会话记录得出。
+   *
+   * 不要用 `cwd` prop 代替：那份来自定期扫描的快照，扫描循环在 macOS 后台被压到
+   * 一两分钟一轮，会话 `cd` 过之后就指向别处了。空 = 还没查过目录（或旧客户端没回报）。
+   */
+  const [dirRoot, setDirRoot] = useState("");
   const [dirList, setDirList] = useState<string[]>([]);
+  const [dirFiles, setDirFiles] = useState<string[]>([]);
   const [dirLoading, setDirLoading] = useState(false);
+  /**
+   * 轮询用尽仍没等到客户端回应。
+   *
+   * 必须与「目录真的是空的」分开：目录清单要等客户端下一轮上报才带回来（实测约 31 秒
+   * 一轮，刚错过一轮就是 62 秒），此前把 dirs/files 直接设成空数组，界面上「还没取到」
+   * 和「这里就是空的」长得一模一样，也没有重试入口 —— 用户看到的就是「上传/选择文件
+   * 显示的目录是空的」。
+   */
+  const [dirTimedOut, setDirTimedOut] = useState(false);
   const dirPollRef = useRef(0);
+  // 「选择文件回填相对路径」模态（与上传共用目录浏览，但只读、点文件即插入路径）
+  const [pickerOpen, setPickerOpen] = useState(false);
+  /** 文件选择器里已勾选的相对路径（可跨子目录累积） */
+  const [pickedRefs, setPickedRefs] = useState<string[]>([]);
 
   // 拉取 rel 下的子目录；agent 异步回带，pending 时 1.2s 后重试（最多 8 次）
   const loadDirs = (rel: string, attempt = 0) => {
     if (!taskId) return;
     const seq = ++dirPollRef.current;
+    if (attempt === 0) setDirTimedOut(false);
     setDirLoading(true);
     getTaskDirs(taskId, rel)
       .then((res) => {
@@ -105,16 +294,58 @@ const Composer: React.FC<ComposerProps> = (props) => {
           message.error(res.msg ?? "读取目录失败");
           return;
         }
-        if (res.data?.pending && attempt < 8) {
-          window.setTimeout(() => loadDirs(rel, attempt + 1), 1200);
+        // 窗口必须盖得住一轮上报（实测约 31s，刚错过一轮 62s）。1.2s 起步逐步退避、
+        // 总时长约 90s：前几次照顾「缓存已热、秒回」的情况，后面拉长避免空转。
+        if (res.data?.pending && attempt < DIR_POLL_DELAYS.length) {
+          window.setTimeout(() => loadDirs(rel, attempt + 1), DIR_POLL_DELAYS[attempt]);
           return;
         }
+        if (res.data?.pending) {
+          // 等不到就明说，别把它渲染成一个空目录
+          setDirTimedOut(true);
+          setDirLoading(false);
+          return;
+        }
+        setDirTimedOut(false);
         setDirList(res.data?.dirs ?? []);
+        setDirFiles(res.data?.files ?? []);
+        if (res.data?.cwd) setDirRoot(res.data.cwd);
         setDirLoading(false);
       })
       .catch(() => {
         if (seq === dirPollRef.current) setDirLoading(false);
       });
+  };
+
+  /**
+   * 查 rel 目录下已有的文件名，供上传前定最终名用（见 doUpload）。
+   *
+   * 与 loadDirs 同一个接口，但那个是往 state 里灌、给目录树用的，这里要的是「等到结果
+   * 再往下走」。目录清单由 agent 异步回带（hub 只是转发），pending 时同样要轮询。
+   * 任何异常都返回空集合 —— 拿不到清单顶多是回填名对不上，不该把整批上传挡在门外。
+   */
+  const fetchTakenNames = async (rel: string): Promise<Set<string>> => {
+    if (!taskId) {
+      return new Set();
+    }
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        const res = await getTaskDirs(taskId, rel);
+        if (res.code !== 0) {
+          break;
+        }
+        if (res.data?.pending) {
+          await new Promise((resolve) => {
+            window.setTimeout(resolve, 1200);
+          });
+          continue;
+        }
+        return new Set(res.data?.files ?? []);
+      } catch {
+        break;
+      }
+    }
+    return new Set();
   };
 
   const enterDir = (name: string) => {
@@ -131,15 +362,154 @@ const Composer: React.FC<ComposerProps> = (props) => {
     loadDirs(next);
   };
 
-  const onPickFile = (file: File) => {
+  // 文件夹操作忙标记（防连点）
+  const [fsBusy, setFsBusy] = useState(false);
+  // 新建/重命名文件夹弹窗（应用内居中 Modal，替代原生 window.prompt）
+  const [folderModal, setFolderModal] = useState<{ mode: "mkdir" | "rename"; orig: string } | null>(
+    null,
+  );
+  const [folderInput, setFolderInput] = useState("");
+  // 删除文件夹确认弹窗（替代原生 window.confirm）
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+
+  /** 执行文件夹操作：下发 → 轮询结果 → 提示 → 重拉当前目录 */
+  const runFsop = async (
+    op: "mkdir" | "delete" | "rename",
+    name: string,
+    newName?: string,
+  ) => {
+    if (!taskId || fsBusy) return;
+    setFsBusy(true);
+    const hide = message.loading(
+      op === "mkdir" ? "新建中…" : op === "delete" ? "删除中…" : "重命名中…",
+      0,
+    );
+    try {
+      const res = await fsopTask(taskId, { op, rel: dirRel, name, newName });
+      if (res.code !== 0 || !res.data?.opId) {
+        message.error(res.msg ?? "操作失败");
+        return;
+      }
+      const opId = res.data.opId;
+      // agent 下一轮上报（≤1.5s）才执行，轮询取结果（最多 ~12s）
+      let done = false;
+      for (let i = 0; i < 12 && !done; i++) {
+        await new Promise((r) => window.setTimeout(r, 1000));
+        const rr = await getFsopResult(taskId, opId);
+        if (rr.code === 0 && rr.data && !rr.data.pending) {
+          done = true;
+          if (rr.data.ok) message.success(rr.data.msg || "已完成");
+          else message.error(rr.data.msg || "操作失败");
+        }
+      }
+      if (!done) message.warning("操作已下发，稍后刷新目录查看");
+    } catch {
+      message.error("操作失败，请检查网络");
+    } finally {
+      hide();
+      setFsBusy(false);
+      loadDirs(dirRel); // 无论成败都重拉，反映最新目录
+    }
+  };
+
+  const newFolder = () => {
+    setFolderInput("");
+    setFolderModal({ mode: "mkdir", orig: "" });
+  };
+
+  const renameFolder = (name: string) => {
+    setFolderInput(name);
+    setFolderModal({ mode: "rename", orig: name });
+  };
+
+  const deleteFolder = (name: string) => setDeleteTarget(name);
+
+  // 新建/重命名弹窗的确定：校验后下发，成功即关弹窗
+  const submitFolder = () => {
+    if (!folderModal) return;
+    const next = folderInput.trim();
+    if (!next) {
+      message.warning("名称不能为空");
+      return;
+    }
+    if (/[\\/]/.test(next)) {
+      message.warning("名称不能包含斜杠");
+      return;
+    }
+    if (folderModal.mode === "rename") {
+      if (next !== folderModal.orig) runFsop("rename", folderModal.orig, next);
+    } else {
+      runFsop("mkdir", next);
+    }
+    setFolderModal(null);
+  };
+
+  const confirmDelete = () => {
+    if (deleteTarget) runFsop("delete", deleteTarget);
+    setDeleteTarget(null);
+  };
+
+  /**
+   * 收下一批待上传文件。
+   *
+   * 弹窗已开时**追加**而不是替换：选完一批又想起还有几个，不该把前面选的顶掉。
+   * 按「名字 + 大小」去重，挡住手滑重复选同一个文件。
+   */
+  const onPickFiles = (files: File[]) => {
+    if (!files.length) {
+      return;
+    }
     if (!machineId || !cwd) {
       message.warning("该会话缺少设备或目录信息，无法传文件");
       return;
     }
-    setPendingFile(file);
+    const first = pendingFiles.length === 0;
+    setPendingFiles((prev) => {
+      const seen = new Set(prev.map((f) => `${f.name}\u0000${f.size}`));
+      return [...prev, ...files.filter((f) => !seen.has(`${f.name}\u0000${f.size}`))];
+    });
+    // 目录浏览状态只在「首次打开弹窗」时重置：追加文件不该把已经选好的目标目录清掉
+    if (first) {
+      setDirRel("");
+      setDirList([]);
+      setDirFiles([]);
+      loadDirs("");
+    }
+  };
+
+  // 打开「选择文件」浏览器：根 = 会话所在目录
+  const openPicker = () => {
+    setPickerOpen(true);
     setDirRel("");
     setDirList([]);
+    setDirFiles([]);
     loadDirs("");
+  };
+
+  // 选中某个文件 → 把相对会话目录的路径（正斜杠通用）插入输入框
+  /**
+   * 勾选/取消一个条目（文件或文件夹都走这里 —— 对使用者而言都是「一个路径」）。
+   *
+   * 存的是**完整相对路径**而不是名字：选的时候可以来回进出子目录，只存名字的话
+   * 跨目录的同名条目会互相顶掉，插入时也无从知道它当初在哪一层。
+   */
+  const toggleFileRef = (name: string) => {
+    // 相对路径在这里是**准确的**：目录树的根就是 agent 现读会话记录得到的「会话此刻所在
+    // 目录」，与终端解析 `./x` 用的是同一个位置。之前要退绝对路径，是因为那时的根来自
+    // hub 的旧快照、会话 cd 过就对不上；现在这个前提没有了。
+    const rel = `./${dirRel ? `${dirRel}/` : ""}${name}`;
+    setPickedRefs((prev) =>
+      prev.includes(rel) ? prev.filter((x) => x !== rel) : [...prev, rel],
+    );
+  };
+
+  /** 把勾选的路径一次性插入输入框 */
+  const insertPickedRefs = () => {
+    if (pickedRefs.length) {
+      appendToInput(pickedRefs.join(" "));
+    }
+    setPickedRefs([]);
+    setPickerOpen(false);
   };
 
   // 拖拽中高亮
@@ -149,43 +519,126 @@ const Composer: React.FC<ComposerProps> = (props) => {
   const onPaste = (e: React.ClipboardEvent) => {
     if (disabled) return;
     const items = Array.from(e.clipboardData?.items ?? []);
-    const fileItem = items.find((it) => it.kind === "file");
-    if (!fileItem) return;
-    const f = fileItem.getAsFile();
-    if (!f) return;
+    // 剪贴板里可能一次带多个文件（比如在文件管理器里复制了几张图）
+    const files = items
+      .filter((it) => it.kind === "file")
+      .map((it) => it.getAsFile())
+      .filter((f): f is File => !!f);
+    if (!files.length) return;
     e.preventDefault();
-    const named =
+    // 截图粘贴出来的往往都叫 image.png，多个一起粘会重名互相覆盖 —— 加索引区分
+    const named = files.map((f, i) =>
       f.name && f.name !== "image.png"
         ? f
-        : new File([f], `粘贴-${Date.now()}.${(f.type.split("/")[1] || "png")}`, {
-            type: f.type,
-          });
-    onPickFile(named);
+        : new File(
+            [f],
+            `粘贴-${Date.now()}${files.length > 1 ? `-${i + 1}` : ""}.${
+              f.type.split("/")[1] || "png"
+            }`,
+            { type: f.type },
+          ),
+    );
+    onPickFiles(named);
   };
 
-  /** 确认上传到当前浏览目录，成功后把相对路径填入输入框 */
-  const doUpload = () => {
-    const file = pendingFile;
-    if (!file || !machineId || !cwd) {
+  /**
+   * 依次上传选中的文件，成功的把相对路径一并填进输入框。
+   *
+   * 串行而非并发：一次可能选十几个文件，并发全推出去既容易把设备侧的写入撑爆，
+   * 出错时也分不清是哪个失败的。串行慢一点，但每一步的成败都对得上号。
+   * 单个失败不中断整批 —— 已经传上去的那些不该因为最后一个出错就白费。
+   */
+  const doUpload = async () => {
+    const files = pendingFiles;
+    if (!files.length || !machineId || !cwd) {
       return;
     }
     // 设备侧绝对目录 = 会话目录 + 相对子路径（按设备的分隔符拼）
-    const sep = cwd.includes("\\") ? "\\" : "/";
-    const dir = dirRel ? `${cwd}${sep}${dirRel.split("/").join(sep)}` : cwd;
+    // 兜底用的绝对目录：优先 agent 回报的权威根（会话此刻真正所在），其次退回快照 cwd。
+    // 新客户端根本不看它 —— 落点由 agent 在写盘那一刻现算；它只为旧客户端保留。
+    const base = dirRoot || cwd;
+    const sep = base.includes("\\") ? "\\" : "/";
+    const dir = dirRel ? `${base}${sep}${dirRel.split("/").join(sep)}` : base;
     setUploading(true);
-    setPendingFile(null);
-    uploadPortalFile(machineId, dir, file)
-      .then((res) => {
-        if (res.code === 0) {
-          message.success(res.data?.result ?? "已上传");
-          // 回填相对路径（相对会话目录，正斜杠通用）
-          appendToInput(dirRel ? `./${dirRel}/${file.name}` : `./${file.name}`);
-        } else {
-          message.error(res.msg ?? "上传失败");
+    setUploadDone(0);
+    setPendingFiles([]);
+
+    const ok: string[] = [];
+    const failed: string[] = [];
+    // 整段包 try/finally：`uploading` 一旦卡在 true，发送就被永久挡住（见 blockReason），
+    // 那比转圈停不下来严重得多 —— 收尾动作必须在任何出口都跑到。
+    try {
+      // 先问一次目标目录里已有哪些文件，好在这边就把最终名定下来。
+      //
+      // 客户端撞名会自动改名（a.png → a (1).png，见 client 的 unique_target），而回填进
+      // 输入框的路径是这边拼的 —— 不先算出最终名，回填的就会指向目录里那个**旧文件**。
+      // 那比覆盖更隐蔽：agent 照着路径读到的是上一版内容，却没有任何迹象表明它拿错了。
+      // 查不到就退回原名（客户端仍会兜底改名，只是回填可能对不上），不因此挡住上传。
+      const taken = await fetchTakenNames(dirRel);
+      for (const file of files) {
+        // 本批内也要互相避让：一次选中两个同名文件时，后一个不能再叫同一个名字
+        const name = uniqueName(file.name, taken);
+        taken.add(name);
+        try {
+          const res = await uploadPortalFile(
+            machineId,
+            dir,
+            file,
+            (sent, total) => {
+              // 大文件单个就要传一会儿，只报「第几个文件」看着像卡住了，带上本文件的百分比
+              setUploadPct(total > 0 ? Math.round((sent / total) * 100) : 0);
+            },
+            name,
+            // 让 agent 在落盘那一刻按会话当前目录解析落点 —— 定位与终端永远同步
+            { taskId, relDir: dirRel },
+          );
+          if (res.code === 0) {
+            // 落盘名以客户端回报的为准：上面那个 name 只是预判，而**决定权在客户端手里**
+            // （撞名它会自己改名）。查目录到落盘之间目录又变了、或同一目录有别的写入抢先，
+            // 预判就会落空，回填的路径又指回那个同名旧文件。
+            // 够旧的客户端不回报（hub 不带 path），那就只能退回预判名。
+            const abs = res.data?.path ?? "";
+            const actual = abs.split(/[\\/]/).pop() || name;
+            // 本批后续文件要避让的是**实际**占用的名字
+            taken.add(actual);
+            // 回填相对路径（相对会话目录，正斜杠通用）——用最终名，不是本地文件名。
+            //
+            // 相对路径只在**能证明它对**的时候才用，否则退回绝对路径。判据变了：落点现在
+            // 由 agent 按会话**当前**目录解析（写盘那一刻现读会话记录），所以只要它回报的
+            // 绝对路径确实以我们要的子路径收尾，就说明 `./<子路径>` 从终端所在位置解析得到。
+            // 这比拿 hub 的旧快照去比对可靠得多，也不必再因为「会话漂移过」就一律退绝对
+            // 路径 —— 那恰恰是它最该用相对路径的时候。
+            const expected = dirRel ? `${dirRel}/${actual}` : actual;
+            const provenRelative =
+              !!abs && abs.replace(/\\/g, "/").endsWith(`/${expected}`);
+            ok.push(provenRelative ? `./${expected}` : abs || `${dir}${sep}${actual}`);
+          } else {
+            failed.push(file.name);
+          }
+        } catch {
+          failed.push(file.name);
         }
-      })
-      .catch(() => message.error("上传失败，请检查网络"))
-      .finally(() => setUploading(false));
+        setUploadDone((n) => n + 1);
+        setUploadPct(0);
+      }
+    } finally {
+      setUploading(false);
+      setUploadDone(0);
+      setUploadPct(0);
+    }
+    // 一次性回填：逐个 append 会在输入框里触发多次光标跳动
+    if (ok.length) {
+      appendToInput(ok.join(" "));
+    }
+    if (failed.length) {
+      message.error(
+        `${failed.length} 个失败：${failed.slice(0, 3).join("、")}${
+          failed.length > 3 ? " 等" : ""
+        }`,
+      );
+    } else {
+      message.success(ok.length > 1 ? `已上传 ${ok.length} 个文件` : "已上传");
+    }
   };
 
   // 会话切换时拉取该模型的可用命令（只读、不影响任务）
@@ -217,11 +670,24 @@ const Composer: React.FC<ComposerProps> = (props) => {
     setConfirmInput("");
   };
 
+  /**
+   * 此刻不能发布的原因（空串 = 可以发）。所有发送入口都要过这一关。
+   *
+   * 上传期间必须挡住：路径是**整批传完之后**才 `appendToInput` 的，这中间放行等于让
+   * 消息先走、路径后到 —— 终端收到的要么是没带路径的空任务，要么指向一个还没落盘的
+   * 文件，跟「上传成功但终端说文件不存在」是同一类现象，只是这次是我们自己抢跑。
+   */
+  const blockReason = disabled
+    ? offHint
+    : uploading
+      ? "文件上传中，传完才能发布"
+      : "";
+
   const guardedSend = (raw: string) => {
     const text = raw.trim();
     if (!text) return;
-    if (disabled) {
-      message.warning("该会话无存活进程，无法发布");
+    if (blockReason) {
+      message.warning(blockReason);
       return;
     }
 
@@ -241,6 +707,12 @@ const Composer: React.FC<ComposerProps> = (props) => {
       return;
     }
     if (confirmInput.trim() === CONFIRM_WORD) {
+      // 二次确认这条路绕过了 guardedSend，同一道闸要再过一次：
+      // 弹窗开着的这段时间里完全可能有一批文件正在传
+      if (blockReason) {
+        message.warning(blockReason);
+        return;
+      }
       onSend(dangerText);
       closeDanger();
     }
@@ -259,6 +731,45 @@ const Composer: React.FC<ComposerProps> = (props) => {
             );
           })
           .slice(0, 8);
+
+  // 允许输入不在列表里的自定义「/命令」：只要不是恰好命中某条命令，就在列表顶部给一个
+  // 「直接发送」项，点它把当前输入原样发出（列表只是建议、从不拦截自定义命令）。
+  const exactMatch =
+    slashQuery !== null &&
+    commands.some(
+      (c) => c.name.toLowerCase() === `/${slashQuery.toLowerCase()}`,
+    );
+  const showCustom = slashQuery !== null && slashQuery !== "" && !exactMatch;
+
+  const sendCustom = () => {
+    const ta = rootRef.current?.querySelector("textarea");
+    const v = ta?.value ?? "";
+    if (!v.trim()) return;
+    guardedSend(v);
+    if (ta) {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(ta, "");
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      ta.focus();
+    }
+    setSlashQuery(null);
+  };
+
+  // 命令菜单项（含顶部「发送自定义」项）：方向键/回车导航与渲染共用同一份顺序。
+  // 期间用 ref 暴露给原生 keydown 处理器，避免闭包读到旧值。
+  const slashItems: Array<{ key: string; run: () => void }> = [];
+  if (showCustom) slashItems.push({ key: "__custom", run: sendCustom });
+  matched.forEach((c) => slashItems.push({ key: c.name, run: () => fillCommand(c.name) }));
+  slashItemsRef.current = slashItems;
+  slashActiveRef.current = Math.min(slashActive, Math.max(0, slashItems.length - 1));
+
+  // 菜单重开 / 换过滤词 / 集合变化时，高亮回到第一项
+  useEffect(() => {
+    setSlashActive(0);
+  }, [slashQuery]);
 
   return (
     <div
@@ -280,8 +791,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
         e.preventDefault();
         setDragOver(false);
         if (disabled) return;
-        const f = e.dataTransfer?.files?.[0];
-        if (f) onPickFile(f);
+        onPickFiles(Array.from(e.dataTransfer?.files ?? []));
       }}
     >
       {dragOver ? (
@@ -289,51 +799,122 @@ const Composer: React.FC<ComposerProps> = (props) => {
       ) : null}
       {/* 斜杠命令下拉：仅在输入「/」时弹出（Claude Code 终端式），
           不再常驻一排命令 chip */}
-      {matched.length > 0 && !disabled && (
+      {(matched.length > 0 || showCustom) && !disabled && (
         <div className={styles.slashMenu}>
-          {matched.map((c) => (
+          {showCustom ? (
             <div
-              key={c.name}
-              className={styles.slashItem}
+              className={`${styles.slashItem} ${styles.slashCustom} ${
+                slashActive === 0 ? styles.slashActiveItem : ""
+              }`}
               role="button"
               tabIndex={0}
+              onMouseEnter={() => setSlashActive(0)}
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() => fillCommand(c.name)}
+              onClick={() => {
+                sendCustom();
+                rootRef.current?.querySelector("textarea")?.focus();
+              }}
             >
-              <span className={styles.slashName}>{c.name}</span>
-              {c.desc ? <span className={styles.slashDesc}>{c.desc}</span> : null}
+              <span className={styles.slashName}>发送 /{slashQuery}</span>
+              <span className={styles.slashDesc}>不在列表中的自定义命令，直接发出</span>
             </div>
-          ))}
+          ) : null}
+          {matched.map((c, i) => {
+            const idx = showCustom ? i + 1 : i;
+            return (
+              <div
+                key={c.name}
+                className={`${styles.slashItem} ${
+                  slashActive === idx ? styles.slashActiveItem : ""
+                }`}
+                role="button"
+                tabIndex={0}
+                onMouseEnter={() => setSlashActive(idx)}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  fillCommand(c.name);
+                  rootRef.current?.querySelector("textarea")?.focus();
+                }}
+              >
+                <span className={styles.slashName}>{c.name}</span>
+                {c.desc ? <span className={styles.slashDesc}>{c.desc}</span> : null}
+              </div>
+            );
+          })}
         </div>
       )}
 
       {/* 注意：不传 assistanting —— 本产品要向「执行中」的会话注入输入 */}
       <Chat.Input
         wrapperClassName={styles.chatInput}
-        placeholder={
-          disabled ? "该会话无存活进程，无法发布" : "输入任务，回车发布"
-        }
+        placeholder={blockReason || "输入任务，回车发布"}
+        // 发送按钮真的变灰、回车也不再提交（hsu-ui 2.4.8 起支持）。
+        // guardedSend 里那道闸留着不动：它负责给出「为什么发不出去」的提示，
+        // 而且危险指令二次确认那条路本来就绕过组件，仍要各自把关。
+        disabled={!!blockReason}
         onSend={guardedSend}
         uploadEnabled={false}
-        buttonGroup={
-          machineId && cwd && !disabled
+        buttonGroup={[
+          // 历史放最左：它跟当前会话状态无关（会话没进程、没 cwd 时照样要能翻记录），
+          // 所以不受下面那两个的 cwd && !disabled 条件限制
+          {
+            title: "查看会话历史（已结束会话的最终产出）",
+            icon: (
+              <HistoryOutlined
+                className={styles.uploadIcon}
+                style={{ fontSize: 17 }}
+              />
+            ),
+            type: "text" as const,
+            onClick: () => setHistoryOpen(true),
+          },
+          ...(cwd && !disabled
             ? [
                 {
-                  title: "传文件到会话目录（完成后自动填入路径）",
-                  icon: <PaperClipOutlined className={styles.uploadIcon} />,
-                  type: "text",
-                  loading: uploading,
-                  onClick: () => fileRef.current?.click(),
+                  title: "选择会话目录里的文件，插入相对路径",
+                  // FileSearchOutlined 字形本身偏小，略调大与旁边回形针视觉一致
+                  icon: (
+                    <FileSearchOutlined
+                      className={styles.uploadIcon}
+                      style={{ fontSize: 18 }}
+                    />
+                  ),
+                  type: "text" as const,
+                  onClick: openPicker,
                 },
+                ...(machineId
+                  ? [
+                      {
+                        // 批量上传是串行的，会持续一段时间 —— 标题里带上进度，
+                        // 否则用户只看到一个转圈的回形针，不知道传到第几个了
+                        title: uploading
+                          ? `正在上传… ${uploadDone} 个已完成${
+                              uploadPct > 0 && uploadPct < 100
+                                ? `，当前 ${uploadPct}%`
+                                : ""
+                            }`
+                          : "传文件到会话目录（可多选，大文件自动分片）",
+                        icon: <PaperClipOutlined className={styles.uploadIcon} />,
+                        type: "text" as const,
+                        loading: uploading,
+                        onClick: () => fileRef.current?.click(),
+                      },
+                    ]
+                  : []),
               ]
-            : undefined
-        }
+            : []),
+        ]}
       />
       {/* 上传目录确认：默认会话所在目录，可改成设备上任意目录 */}
       <Modal
-        title="传文件到设备"
-        open={!!pendingFile}
-        onCancel={() => setPendingFile(null)}
+        className={styles.dirModal}
+        title={
+          pendingFiles.length > 1
+            ? `传 ${pendingFiles.length} 个文件到设备`
+            : "传文件到设备"
+        }
+        open={pendingFiles.length > 0}
+        onCancel={() => setPendingFiles([])}
         onOk={doUpload}
         okText="上传"
         cancelText="取消"
@@ -342,9 +923,43 @@ const Composer: React.FC<ComposerProps> = (props) => {
       >
         <div className={styles.uploadForm}>
           <div className={styles.uploadFile}>
-            文件：<b>{pendingFile?.name}</b>
+            {pendingFiles.length > 1 ? (
+              // 多个时列出来并允许逐个剔除：多选常常手滑带上不想传的
+              <div className={styles.uploadList}>
+                {pendingFiles.map((f) => (
+                  <div key={`${f.name} ${f.size}`} className={styles.uploadItem}>
+                    <span className={styles.uploadItemName}>{f.name}</span>
+                    <span
+                      className={styles.uploadItemDel}
+                      role="button"
+                      tabIndex={0}
+                      title="不传这个"
+                      onClick={() =>
+                        setPendingFiles((prev) => prev.filter((x) => x !== f))
+                      }
+                    >
+                      ×
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <>
+                文件：<b>{pendingFiles[0]?.name}</b>
+              </>
+            )}
           </div>
-          <div className={styles.uploadLabel}>目标目录（会话目录内选择）</div>
+          <div className={styles.uploadLabel}>
+            <span>目标目录（会话目录内选择）</span>
+            <span
+              className={styles.dirNewBtn}
+              role="button"
+              tabIndex={0}
+              onClick={newFolder}
+            >
+              <FolderAddOutlined /> 新建文件夹
+            </span>
+          </div>
           <div className={styles.dirCrumb}>
             会话目录{dirRel ? ` / ${dirRel.split("/").join(" / ")}` : ""}
           </div>
@@ -356,24 +971,195 @@ const Composer: React.FC<ComposerProps> = (props) => {
             ) : null}
             {dirLoading ? (
               <div className={styles.dirEmpty}>读取目录中…</div>
+            ) : dirTimedOut ? (
+              <div className={styles.dirEmpty}>
+                客户端还没回应（约 30 秒一轮）
+                <span
+                  className={styles.dirNewBtn}
+                  role="button"
+                  tabIndex={0}
+                  style={{ marginLeft: 8 }}
+                  onClick={() => loadDirs(dirRel)}
+                >
+                  重试
+                </span>
+              </div>
             ) : dirList.length === 0 ? (
               <div className={styles.dirEmpty}>{dirRel ? "没有子目录" : "该目录下没有子目录"}</div>
             ) : (
               dirList.map((d) => (
-                <div
-                  key={d}
-                  className={styles.dirItem}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => enterDir(d)}
-                >
-                  <span className={styles.dirIcon}>📁</span> {d}
+                <div key={d} className={styles.dirItem}>
+                  <span
+                    className={styles.dirItemName}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => enterDir(d)}
+                  >
+                    <span className={styles.dirIcon}>📁</span> {d}
+                  </span>
+                  <span className={styles.dirItemOps}>
+                    <EditOutlined
+                      title="重命名"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        renameFolder(d);
+                      }}
+                    />
+                    <DeleteOutlined
+                      title="删除"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteFolder(d);
+                      }}
+                    />
+                  </span>
                 </div>
               ))
             )}
           </div>
           <div className={styles.uploadHint}>
-            将上传到：<b>./{dirRel ? `${dirRel}/` : ""}{pendingFile?.name}</b>
+            {pendingFiles.length > 1 ? (
+              <>
+                将上传到：<b>./{dirRel ? `${dirRel}/` : ""}</b>（{pendingFiles.length}{" "}
+                个文件），路径会一并填进输入框
+              </>
+            ) : (
+              <>
+                将上传到：<b>./{dirRel ? `${dirRel}/` : ""}{pendingFiles[0]?.name}</b>
+              </>
+            )}
+          </div>
+        </div>
+      </Modal>
+
+      {/* 选择文件：浏览会话目录，点文件即把相对路径插入输入框（不上传） */}
+      <Modal
+        className={styles.dirModal}
+        title={
+          pickedRefs.length
+            ? `选择文件（已选 ${pickedRefs.length} 个）`
+            : "选择文件（插入相对路径）"
+        }
+        open={pickerOpen}
+        onCancel={() => {
+          setPickedRefs([]);
+          setPickerOpen(false);
+        }}
+        // 多选要攒完再插，所以得有个确认出口 —— 原先点一下即插入并关闭，选不了第二个
+        onOk={insertPickedRefs}
+        okText={pickedRefs.length > 1 ? `插入 ${pickedRefs.length} 个路径` : "插入"}
+        cancelText="取消"
+        okButtonProps={{ disabled: pickedRefs.length === 0 }}
+        width={460}
+        centered
+      >
+        <div className={styles.uploadForm}>
+          <div className={styles.dirCrumb}>
+            会话目录{dirRel ? ` / ${dirRel.split("/").join(" / ")}` : ""}
+          </div>
+          <div className={styles.dirTree}>
+            {dirRel ? (
+              <div className={styles.dirItem} onClick={upDir} role="button" tabIndex={0}>
+                <span className={styles.dirIcon}>↩</span> 返回上级
+              </div>
+            ) : null}
+            {dirLoading ? (
+              <div className={styles.dirEmpty}>读取目录中…</div>
+            ) : dirTimedOut ? (
+              <div className={styles.dirEmpty}>
+                客户端还没回应（约 30 秒一轮）
+                <span
+                  className={styles.dirNewBtn}
+                  role="button"
+                  tabIndex={0}
+                  style={{ marginLeft: 8 }}
+                  onClick={() => loadDirs(dirRel)}
+                >
+                  重试
+                </span>
+              </div>
+            ) : dirList.length === 0 && dirFiles.length === 0 ? (
+              <div className={styles.dirEmpty}>该目录为空</div>
+            ) : (
+              <>
+                {dirList.map((d) => {
+                  const rel = `./${dirRel ? `${dirRel}/` : ""}${d}`;
+                  const picked = pickedRefs.includes(rel);
+                  return (
+                    <div
+                      key={`d-${d}`}
+                      className={`${styles.dirItem} ${
+                        picked ? styles.dirItemPicked : ""
+                      }`}
+                    >
+                      {/* 目录名点进去（继续往下浏览），右侧按钮才是「选中这个目录本身」。
+                          两个动作必须分开 —— 只给一个的话，想选中当前这层就得先进去、
+                          再回头找「选当前目录」，绕一大圈。 */}
+                      <span
+                        className={styles.dirItemName}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => enterDir(d)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            enterDir(d);
+                          }
+                        }}
+                      >
+                        <span className={styles.dirIcon}>
+                          {picked ? "✅" : "📁"}
+                        </span>{" "}
+                        {d}
+                      </span>
+                      <span
+                        className={styles.dirPickBtn}
+                        role="button"
+                        tabIndex={0}
+                        title={picked ? "取消选择该文件夹" : "选中该文件夹（回填其路径）"}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleFileRef(d);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            toggleFileRef(d);
+                          }
+                        }}
+                      >
+                        {picked ? "取消" : "选它"}
+                      </span>
+                    </div>
+                  );
+                })}
+                {dirFiles.map((f) => {
+                  const rel = `./${dirRel ? `${dirRel}/` : ""}${f}`;
+                  const picked = pickedRefs.includes(rel);
+                  return (
+                    <div
+                      key={`f-${f}`}
+                      className={`${styles.dirItem} ${picked ? styles.dirItemPicked : ""}`}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={picked}
+                      onClick={() => toggleFileRef(f)}
+                    >
+                      <span className={styles.dirIcon}>{picked ? "✅" : "📄"}</span> {f}
+                    </div>
+                  );
+                })}
+              </>
+            )}
+          </div>
+          <div className={styles.uploadHint}>
+            {pickedRefs.length ? (
+              // 已选的列出来：可以进出多个子目录累积勾选，不显示的话就记不住选过哪些了
+              <>已选：<b>{pickedRefs.join(" ")}</b></>
+            ) : (
+              <>点文件勾选，文件夹点「选它」，可跨目录多选，选完点「插入」</>
+            )}
           </div>
         </div>
       </Modal>
@@ -382,14 +1168,51 @@ const Composer: React.FC<ComposerProps> = (props) => {
       <input
         ref={fileRef}
         type="file"
+        multiple
         hidden
         onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) onPickFile(f);
+          onPickFiles(Array.from(e.target.files ?? []));
           // 允许连续选同一个文件
           e.target.value = "";
         }}
       />
+
+      {/* 新建 / 重命名文件夹（应用内居中弹窗，替代原生 window.prompt） */}
+      <Modal
+        title={folderModal?.mode === "rename" ? "重命名文件夹" : "新建文件夹"}
+        open={!!folderModal}
+        onCancel={() => setFolderModal(null)}
+        onOk={submitFolder}
+        okText="确定"
+        cancelText="取消"
+        okButtonProps={{ disabled: !folderInput.trim() }}
+        width={400}
+        centered
+      >
+        <Input
+          value={folderInput}
+          onChange={(value) => setFolderInput(value)}
+          placeholder="文件夹名称"
+          onPressEnter={submitFolder}
+        />
+      </Modal>
+
+      {/* 删除文件夹确认（应用内居中弹窗，替代原生 window.confirm） */}
+      <Modal
+        title="删除文件夹"
+        open={!!deleteTarget}
+        onCancel={() => setDeleteTarget(null)}
+        onOk={confirmDelete}
+        okText="删除"
+        cancelText="取消"
+        okButtonProps={{ danger: true }}
+        width={400}
+        centered
+      >
+        <div>
+          删除文件夹「{deleteTarget}」及其全部内容？此操作不可恢复。
+        </div>
+      </Modal>
 
       {/* 危险输入多重确认（类 Claude Code bypass 权限等需特别管理） */}
       <Modal
@@ -409,6 +1232,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
           disabled: dangerStep === 2 && confirmInput.trim() !== CONFIRM_WORD,
         }}
         width={480}
+        centered
       >
         <div className={styles.dangerBody}>
           <div className={styles.dangerText}>
@@ -437,6 +1261,13 @@ const Composer: React.FC<ComposerProps> = (props) => {
           )}
         </div>
       </Modal>
+
+      {/* 会话历史：已结束会话的最终产出 */}
+      <HistoryModal
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        taskId={taskId}
+      />
     </div>
   );
 };

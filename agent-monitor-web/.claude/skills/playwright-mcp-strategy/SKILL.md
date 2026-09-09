@@ -61,6 +61,74 @@ description: Use this skill whenever the task will — or even might — end up 
 - ❌ 只截图不做 snapshot 就声称"操作成功"——视觉上的变化不代表 DOM 状态/数据真的更新了。
 - ❌ snapshot 找不到元素时，反复换关键词重试——优先转去截图看清楚页面长什么样，再决定是等待加载、滚动、还是元素根本不存在。
 
+## 与真实表单交互：不要用 DOM setter 塞值
+
+受控表单（antd Form / hsu-ui `Form.Modal`）的值由 React 状态持有，DOM 上的 `value` 只是投影。用
+
+```js
+Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(el, "1");
+el.dispatchEvent(new Event("input", { bubbles: true }));
+```
+
+去塞值**会制造出真实代码里并不存在的失败**，这一轮连踩三次：
+
+- **绕过组件的值解析**：`INPUTNUMBER` 正常输入会交出 `null` 或数字，DOM 塞值留下的是字符串 `""` / `"1"`，提交直接 422 —— 看起来像业务 bug，实际是测试手法的产物。
+- **被表单重置覆盖**：`Form.Modal` 有 `useEffect([form, value, open]) → resetFields() + setFieldsValue(value)`。塞值之后只要 `value` 引用变一次（比如 store 里 `resetFormData()` 赋了个新 `{}`），刚塞的值就被清空，表现为「必填项没填」。
+
+**正确做法**：用 `browser_type` / `browser_fill_form`。拿不到 `ref` 时给 `browser_fill_form` 传 `selector`：
+
+```js
+selector: '.ant-modal-wrap:not([style*="display: none"]) input#title'
+```
+
+只有在**读取**页面状态、或触发按钮点击时才用 `browser_evaluate`。
+
+## 判断弹窗是否关闭：看 wrap 的 computed display，别数节点
+
+antd 的 Modal 关闭后 **DOM 节点仍在**，所以下面两种判据都会给出错误结论：
+
+```js
+// ❌ 关闭后 .ant-modal-content 依然存在，永远数得到
+document.querySelectorAll(".ant-modal-content").length
+
+// ❌ 缓存住的节点被移除后成了游离节点，computed display 仍是 block
+const w = document.querySelector(".ant-modal-wrap");
+/* …点击关闭… */ getComputedStyle(w).display   // 仍然 "block"
+```
+
+```js
+// ✅ 每次重新查询，同时看 display 与 isConnected
+const visible = () =>
+  [...document.querySelectorAll(".ant-modal-wrap")]
+    .filter((w) => getComputedStyle(w).display !== "none" && w.isConnected)
+    .map((w) => w.querySelector(".ant-modal-title")?.textContent);
+```
+
+同理，**页面上同时存在多个弹窗时不要用 `document.querySelector(".ant-modal xxx")`**——它会命中第一个（往往是已关闭的那个）。先定位到目标 wrap，再在其内部查。关闭动画有几百毫秒，判定前留足等待（1.5s 起）。
+
+## 「按钮点了没反应」先分三种情况
+
+依次排除，不要直接猜是业务 bug：
+
+1. **按钮本身 `disabled`**：`btn.disabled` —— 例如素材页的「新建自设数据」要先选中左侧条目才可用。
+2. **被表单校验拦住，请求根本没发出**：查 `.ant-form-item-explain-error` 的文案，比翻 network 快。
+3. **请求发了但被后端拒**：挂 XHR 钩子看请求体与状态码，尤其确认**字段类型**（`"1"` 还是 `1`）：
+
+```js
+const os = XMLHttpRequest.prototype.send, oo = XMLHttpRequest.prototype.open;
+XMLHttpRequest.prototype.open = function (m, u) { this.__u = u; return oo.apply(this, arguments); };
+XMLHttpRequest.prototype.send = function (b) {
+  this.addEventListener("load", () => console.log(this.__u, String(b), this.status));
+  return os.apply(this, arguments);
+};
+```
+
+项目用 axios（XHR），**钩 `window.fetch` 抓不到任何请求**。
+
+## hsu-ui Table 的列隐藏不移除节点
+
+列显隐用 `width: 0.01` ＋ `.hidden`（`width: 0 !important`、内层 `display: none`）实现，**`<th>` 始终留在 DOM 里**。判断某列是否隐藏要量 `getBoundingClientRect().width`（隐藏后约 `0.0078px`），用「节点还在不在」判断会得出「列显隐不生效」的错误结论。
+
 ## 截图文件路径
 
 调用 `browser_take_screenshot` 时，**必须显式传入 `filename`，把图片落到项目根下的 `tmp/` 目录**（例如 `filename: "tmp/binding-list.png"`）。原因：

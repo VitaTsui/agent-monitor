@@ -1,86 +1,16 @@
-//! 机器人指令网关：每个用户自助接入自己的企业微信自建应用 / 钉钉企业应用，
+//! 机器人指令网关：每个用户在前台自助接入自己的钉钉企业应用，
 //! 用文字指令遥控自己的会话（查看/暂停/恢复/中断/终止/发布输入）。
 //!
-//! 路由靠回调 URL 里的 channel：`/monitor/int/{wecom|dingtalk}/<channel>`。
+//! 路由靠回调 URL 里的 channel：`/monitor/int/dingtalk/<channel>`。
 //! channel 反查到配置所属用户 → 指令即以该用户身份执行（URL 即绑定，无需绑定码）。
 
-use crate::state::SharedState;
-use crate::{dingtalk, wecom};
+use crate::dingtalk;
+use crate::state::{BotBatch, SharedState};
 use am_core::model::{ControlAction, ControlCmd, TaskStatus};
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use axum::Json;
-use serde::Deserialize;
 use serde_json::{json, Value};
-
-// ---------- 企业微信自建应用回调（每用户 channel） ----------
-
-#[derive(Deserialize)]
-pub struct WecomCbQuery {
-    msg_signature: String,
-    timestamp: String,
-    nonce: String,
-    #[serde(default)]
-    echostr: String,
-}
-
-/// GET /monitor/int/wecom/:channel —— 企业微信「接收消息」URL 验证
-pub async fn wecom_verify(
-    State(state): State<SharedState>,
-    Path(channel): Path<String>,
-    Query(q): Query<WecomCbQuery>,
-) -> impl IntoResponse {
-    let Some((_, app)) = state.registry.read().await.wecom_app_by_channel(&channel) else {
-        return (StatusCode::NOT_FOUND, "无效的回调地址".to_string());
-    };
-    let Some(cfg) = wecom::WecomConfig::from_parts(&app.token, &app.aes_key, &app.corp_id) else {
-        return (StatusCode::BAD_REQUEST, "配置的 EncodingAESKey 非法".to_string());
-    };
-    let sig = wecom::msg_signature(&cfg.token, &q.timestamp, &q.nonce, &q.echostr);
-    if sig != q.msg_signature {
-        return (StatusCode::FORBIDDEN, "签名校验失败".to_string());
-    }
-    match wecom::decrypt(&cfg, &q.echostr) {
-        Ok(plain) => (StatusCode::OK, plain),
-        Err(e) => (StatusCode::BAD_REQUEST, e),
-    }
-}
-
-/// POST /monitor/int/wecom/:channel —— 企业微信收消息 + 被动回复（加密）
-pub async fn wecom_message(
-    State(state): State<SharedState>,
-    Path(channel): Path<String>,
-    Query(q): Query<WecomCbQuery>,
-    body: String,
-) -> impl IntoResponse {
-    let Some((owner, app)) = state.registry.read().await.wecom_app_by_channel(&channel) else {
-        return (StatusCode::NOT_FOUND, String::new());
-    };
-    let Some(cfg) = wecom::WecomConfig::from_parts(&app.token, &app.aes_key, &app.corp_id) else {
-        return (StatusCode::BAD_REQUEST, String::new());
-    };
-    let Some(encrypt) = wecom::xml_field(&body, "Encrypt") else {
-        return (StatusCode::BAD_REQUEST, String::new());
-    };
-    if wecom::msg_signature(&cfg.token, &q.timestamp, &q.nonce, &encrypt) != q.msg_signature {
-        return (StatusCode::FORBIDDEN, String::new());
-    }
-    let inner = match wecom::decrypt(&cfg, &encrypt) {
-        Ok(x) => x,
-        Err(_) => return (StatusCode::BAD_REQUEST, String::new()),
-    };
-    let msg_type = wecom::xml_field(&inner, "MsgType").unwrap_or_default();
-    let content = wecom::xml_field(&inner, "Content").unwrap_or_default();
-    let reply = if msg_type == "text" {
-        dispatch(&state, &owner, content.trim()).await
-    } else {
-        "只认文字指令，发「帮助」看用法。".to_string()
-    };
-    let rand16 = rand16();
-    let xml = wecom::build_reply(&cfg, &reply, &q.timestamp, &q.nonce, &rand16);
-    (StatusCode::OK, xml)
-}
 
 // ---------- 钉钉企业应用回调（每用户 channel，同步回复） ----------
 
@@ -91,12 +21,23 @@ pub async fn dingtalk_message(
     headers: HeaderMap,
     body: String,
 ) -> Json<Value> {
-    let Some((owner, app)) = state.registry.read().await.dingtalk_app_by_channel(&channel) else {
+    let Some((app_owner, app)) = state
+        .registry
+        .read()
+        .await
+        .dingtalk_app_by_channel(&channel)
+    else {
         return Json(json!({}));
     };
     // 验签：header timestamp + sign
-    let ts = headers.get("timestamp").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let sign = headers.get("sign").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let ts = headers
+        .get("timestamp")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let sign = headers
+        .get("sign")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     if !dingtalk::verify_app_sign(&app.app_secret, ts, sign) {
         return Json(json!({}));
     }
@@ -107,34 +48,775 @@ pub async fn dingtalk_message(
         .unwrap_or("")
         .trim()
         .to_string();
-    let reply = dispatch(&state, &owner, &content).await;
-    // 同步回复：钉钉直接把响应体当作机器人回复消息
-    Json(json!({ "msgtype": "text", "text": { "content": reply } }))
-}
-
-fn rand16() -> [u8; 16] {
-    let b = uuid::Uuid::new_v4().into_bytes();
-    let mut r = [0u8; 16];
-    r.copy_from_slice(&b[..16]);
-    r
+    // HTTP 模式的 sessionWebhook 也可用于「监控」持续推送
+    let ctx = ReplyCtx {
+        webhook: payload
+            .get("sessionWebhook")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        expiry_ms: payload
+            .get("sessionWebhookExpiredTime")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        staff_id: payload
+            .get("senderStaffId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        robot_code: payload
+            .get("robotCode")
+            .or_else(|| payload.get("chatbotUserId"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    };
+    let nick = payload
+        .get("senderNick")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    // 绑定指令要抢在认人之前：需要它的人正是还认不出来的那个
+    let reply = if let Some(r) = try_bind_command(&state, &ctx.staff_id, nick, &content).await {
+        r
+    } else {
+        match resolve_account(&state, &app_owner, &ctx.staff_id, &ctx.robot_code, nick).await {
+            Ok(account) => dispatch(&state, &account, &content, Some(&ctx)).await,
+            Err(guide) => guide,
+        }
+    };
+    // 同步回复：钉钉直接把响应体当作机器人回复消息（同 push_webhook，走 markdown）
+    Json(dingtalk_text_payload(&reply))
 }
 
 // ---------- 指令调度（渠道无关，以账号身份执行） ----------
 
 /// 指令分发，返回给用户的文字回复。username 已由回调 URL 的 channel 确定。
-async fn dispatch(state: &SharedState, username: &str, text: &str) -> String {
+/// 回复上下文：钉钉会话 webhook + 失效时间，供「监控」注册持续推送用
+pub(crate) struct ReplyCtx {
+    pub webhook: String,
+    pub expiry_ms: u64,
+    /// 发信人 staffId / 机器人 robotCode（Stream 渠道带；HTTP 回调可能为空）——「绑定」指令用
+    #[allow(dead_code)]
+    pub staff_id: String,
+    #[allow(dead_code)]
+    pub robot_code: String,
+}
+
+/// 会话级指令（吃一个会话号位 N）：`@x` 速记与多目标都只对这些指令 + 「内容(=发)」生效。
+const SESSION_CMDS: &[&str] = &[
+    "暂停", "恢复", "中断", "终止", "停止", "撤回", "监控", "watch", "排队", "队列", "queue",
+];
+
+/// 解析「@N …」速记为一组 (cmd, arg)。支持多目标：`@1 @2 xxx`、`@1 @2 暂停`、`@x 排队`。
+/// - 非 @ 开头 → None（交常规分发）。
+/// - @ 开头但没解析出有效目标/内容 → Some(空) → 提示用法。
+/// - rest 首词是会话级指令 → 每个目标一条「指令 N …」；否则整段当内容 → 每个目标一条「发 N …」。
+fn parse_at_commands(text: &str) -> Option<Vec<(String, String)>> {
+    let mut rest = text.trim();
+    if !rest.starts_with('@') {
+        return None;
+    }
+    let mut targets: Vec<String> = Vec::new();
+    loop {
+        rest = rest.trim_start();
+        let Some(r) = rest.strip_prefix('@') else {
+            break;
+        };
+        let digits: String = r.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            break; // 「@abc」不是会话号
+        }
+        if !targets.contains(&digits) {
+            targets.push(digits.clone());
+        }
+        rest = &r[digits.len()..];
+    }
+    if targets.is_empty() {
+        return Some(vec![]);
+    }
+    let rest = rest.trim();
+    // 只发「@9」不带内容 = 把连续对话切到 9 号（之后不带 @ 的文本都投给它）。
+    // 多目标时没有「当前会话」可言，退回用法提示。
+    if rest.is_empty() {
+        return match targets.as_slice() {
+            [n] => Some(vec![("锁定".to_string(), n.clone())]),
+            _ => Some(vec![]),
+        };
+    }
+    let (first, tail) = split_cmd(rest);
+    // 首词是会话指令、**且后面没有别的内容**时才当指令。这些指令都不吃额外参数（序号已经由
+    // `@N` 给出），所以「@3 暂停」是暂停会话，而「@3 暂停一下再继续」是发一条任务 ——
+    // 「暂停 / 停止」这类词也是很自然的任务开头，只看首词会把正文整条吞掉。
+    // （注：「继续」已不作指令 —— 它是最常见的「让 agent 接着做」输入，一律当内容发。）
+    let cmds = if SESSION_CMDS.contains(&first.as_str()) && tail.is_empty() {
+        targets.iter().map(|n| (first.clone(), n.clone())).collect()
+    } else {
+        targets
+            .iter()
+            .map(|n| ("发".to_string(), format!("{n} {rest}")))
+            .collect()
+    };
+    Some(cmds)
+}
+
+/// `run_command` 认识的全部一级指令词（含别名）。**在 run_command 里新增指令时必须同步这里。**
+///
+/// 只服务于钉钉合并窗口的豁免判断（[`is_immediate`]）：命中的消息立即执行、不进窗口。
+/// 漏加一个词的后果是那条指令可能被并进同批内容里、当成正文发进终端 —— 宁可多列，别漏。
+/// 刻意没有复用 run_command 的 match：那边靠「不认识就返回 None 且无副作用」来试探，
+/// 试探本身会把认识的指令执行掉，没法用来做「要不要攒着」的前置判断。
+const ALL_CMDS: &[&str] = &[
+    "帮助",
+    "help",
+    "?",
+    "？",
+    "菜单",
+    "会话",
+    "列表",
+    "ls",
+    "任务",
+    "设备",
+    "devices",
+    "暂停",
+    "恢复",
+    "中断",
+    "终止",
+    "停止",
+    "发",
+    "发送",
+    "回复",
+    "输入",
+    "排队",
+    "队列",
+    "queue",
+    "监控",
+    "watch",
+    "停止监控",
+    "取消监控",
+    "结束监控",
+    "unwatch",
+    "撤回",
+    "recall",
+    "锁定",
+    "历史",
+    "history",
+    "文件",
+    "附件",
+    "files",
+    "清空文件",
+    "清空附件",
+    "清空",
+    "删除文件",
+    "删文件",
+    "删附件",
+    "删除附件",
+];
+
+/// 连续对话冷却后的确认词（见 [`sticky_send`]）：同样必须立即执行 ——
+/// 被并进内容里，那句「回『确认』即发出」就永远等不到确认了。
+const CONFIRM_WORDS: &[&str] = &["确认", "确定", "是", "y", "Y", "ok", "OK"];
+
+/// 这条钉钉消息该立即执行，还是先进合并窗口攒着？
+///
+/// 判据只有一条：**它是不是指令**。指令的语义依赖「单独成条」——「@2 暂停」跟后面一条内容
+/// 拼在一起，`parse_at_commands` 见 tail 非空就整段当内容，暂停指令当场消失。内容则相反：
+/// 逐条转发的那几条本就该拼成一段，agent 才能一次看全（否则第一条就带着它开跑了）。
+pub(crate) fn is_immediate(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() || CONFIRM_WORDS.contains(&t) {
+        return true;
+    }
+    // 「@N …」：解析成会话级指令（暂停/撤回/锁定…）才算指令；
+    // 「@N 正文」解析出来的是「发」，那是内容，要参与合并。
+    if let Some(cmds) = parse_at_commands(t) {
+        // 空 = @ 用法错误，立即回提示，别攒
+        return cmds.is_empty() || cmds.iter().any(|(c, _)| c != "发");
+    }
+    let (cmd, _) = split_cmd(t);
+    ALL_CMDS.contains(&cmd.as_str())
+}
+
+/// 这条钉钉消息要不要进合并窗口。
+///
+/// 纯文件（没带一句话）**也要进**：它不占正文的一行，但要把窗口往后推。钉钉转发过来的
+///「图片→文字→图片→文字」是几次完全独立的回调，图片若不刷新窗口就只是白白占掉时间 ——
+/// 两条文字被图片隔开超过一个窗口，前一条自己到期先发了，一次转发被拆成好几条任务下发。
+///
+/// 指令不进：它的语义依赖单独成条（见 [`is_immediate`]）。带着文件发指令也一样立即执行，
+/// 文件继续挂着等下一条任务。
+pub(crate) fn should_batch(has_files: bool, content: &str) -> bool {
+    if content.trim().is_empty() {
+        // content 为空时 is_immediate 恒为 true，走不到下面，得在这里单独放行
+        return has_files;
+    }
+    !is_immediate(content)
+}
+
+/// 只收到文件、没带正文时的回执。窗口到期仍没等来文字就回它（见 [`batch_flush`]）。
+pub(crate) const FILE_ONLY_REPLY: &str =
+    "📎 已收到文件，随下一条任务一起发出（如「@2 处理这个文件」），\
+                                          会存到该会话目录的 tmp/ 下并把路径拼到任务开头。";
+
+/// 把一条内容消息投进钉钉合并窗口，返回本次的世代号（交给 [`batch_flush`] 比对）。
+///
+/// 为什么要攒：钉钉逐条转发给机器人的是几次**完全独立**的回调，payload 里没有转发标记、
+/// 没有批次号、也没有「共 N 条」—— hub 无从知道一批有几条，只能拿「消息是连着到的」当判据。
+///
+/// **必须在收帧循环里按到达顺序同步调用，不能挪进 spawn 的任务里。** 任务的启动顺序由
+/// tokio 调度决定，与消息到达顺序无关。入队一旦放进任务里，就会出现这种局面：一批四条
+/// 转发，第三条的任务起晚了一步，1/2/4 先攒齐、窗口到期、合并下发，它才 push 进来自成
+/// 一批单独发出 —— 用户看到的是「明明一起转发的，却有一条被单独下发」，而且顺序还是跳的。
+/// 线上抓到过一次（合并 3 条 + 「一起显示」单独一条）。
+pub(crate) async fn batch_push(
+    state: &SharedState,
+    username: &str,
+    text: &str,
+    ctx: &ReplyCtx,
+) -> u64 {
+    {
+        let mut map = state.bot_pending_batch.write().await;
+        let b = map.entry(username.to_string()).or_insert_with(|| BotBatch {
+            lines: Vec::new(),
+            webhook: String::new(),
+            expiry_ms: 0,
+            staff_id: String::new(),
+            robot_code: String::new(),
+            gen: 0,
+        });
+        // 空文本 = 纯图片/文件那一条：它只**刷新窗口**，不占正文的一行。
+        // 转发过来的「图片→文字→图片→文字」，图片若不刷新窗口，就只是白白占掉时间 ——
+        // 两条文字被图片隔开超过一个窗口，前一条自己到期先发了，一次转发被拆成好几条任务。
+        if !text.trim().is_empty() {
+            b.lines.push(text.to_string());
+        }
+        // 回执地址取最新的一条：窗口 3s 远短于 sessionWebhook 的有效期，用哪条都行，
+        // 用最新的最稳妥（前面几条离过期更近）。
+        b.webhook = ctx.webhook.clone();
+        b.expiry_ms = ctx.expiry_ms;
+        b.staff_id = ctx.staff_id.clone();
+        b.robot_code = ctx.robot_code.clone();
+        b.gen += 1;
+        b.gen
+    }
+}
+
+/// 等满 [`BOT_BATCH_WINDOW_MS`] 后把这一批合并成一段、一次性下发。
+///
+/// 返回 `Some(回执)` = 这一批已到期并发出，由本次调用负责回复；
+/// 返回 `None` = 窗口被后来的消息重置了，本次静默退场，改由最后那条负责回。
+pub(crate) async fn batch_flush(
+    state: &SharedState,
+    username: &str,
+    my_gen: u64,
+) -> Option<String> {
+    tokio::time::sleep(std::time::Duration::from_millis(
+        crate::state::BOT_BATCH_WINDOW_MS,
+    ))
+    .await;
+
+    let batch = {
+        let mut map = state.bot_pending_batch.write().await;
+        // 世代号变了 = 睡着的这 3s 里又来了消息，窗口被它重置 —— 那批由它 flush
+        match map.get(username) {
+            Some(b) if b.gen == my_gen => map.remove(username)?,
+            _ => return None,
+        }
+    };
+
+    let n = batch.lines.len();
+    if n == 0 {
+        // 整批只有图片/文件、一句话都没有：文件继续挂着等下一条任务，别下发一条空任务。
+        //（回执要等满窗口才发，比从前晚几秒 —— 换来的是后面跟着的文字能并进同一批。）
+        return Some(FILE_ONLY_REPLY.to_string());
+    }
+    let merged = batch.lines.join("\n");
+    let ctx = ReplyCtx {
+        webhook: batch.webhook,
+        expiry_ms: batch.expiry_ms,
+        staff_id: batch.staff_id,
+        robot_code: batch.robot_code,
+    };
+    let reply = dispatch(state, username, &merged, Some(&ctx)).await;
+    // 单条时行为与合并前完全一致（只是晚了一个窗口），不必多嘴
+    Some(if n > 1 {
+        format!("✅ 已合并 {n} 条\n{reply}")
+    } else {
+        reply
+    })
+}
+
+pub(crate) async fn dispatch(
+    state: &SharedState,
+    username: &str,
+    text: &str,
+    reply: Option<&ReplyCtx>,
+) -> String {
+    // 「@N …」速记（多目标 + 全部会话级指令）：逐条 run_command，回复拼接
+    if let Some(cmds) = parse_at_commands(text) {
+        if cmds.is_empty() {
+            return "用法：@号位 接内容或会话指令，可多个。\n\
+                    例：@1 @2 重启服务 / @1 排队 / @2 暂停 / @1 撤回"
+                .to_string();
+        }
+        let mut out = Vec::new();
+        for (cmd, arg) in cmds {
+            let r = run_command(state, username, &cmd, &arg, reply).await;
+            out.push(r.unwrap_or_else(|| format!("未知指令「{cmd}」。发「帮助」看用法。")));
+        }
+        return out.join("\n\n");
+    }
     let (cmd, arg) = split_cmd(text);
-    match cmd.as_str() {
+    // 先当指令试 —— 不认识时 run_command 返回 None 且不产生任何副作用。
+    // 指令照常执行**且不解除锁定**：中途查个「会话」「排队」不该打断对话。
+    if let Some(out) = run_command(state, username, &cmd, &arg, reply).await {
+        return out;
+    }
+    // 不是指令 → 连续对话：投给锁定的会话，不用每条都带 @
+    sticky_send(state, username, text, reply).await
+}
+
+/// 把一条普通文本投给「连续对话」锁定的会话。
+///
+/// 锁定冷却（久未对话）时不直接下发：先回一句「当前锁的是 N 号」并把内容暂存，用户回
+/// 「确认」即发出 —— 隔了小半天随手发一句，很容易忘了当前锁着哪个终端。
+async fn sticky_send(
+    state: &SharedState,
+    username: &str,
+    text: &str,
+    reply: Option<&ReplyCtx>,
+) -> String {
+    let Some(n) = crate::slots::sticky_of(state, username).await else {
+        return "未知指令。发「帮助」看用法，或用「@号位 内容」下发任务。".to_string();
+    };
+    // 冷却后的第一条：确认流程
+    if crate::slots::sticky_cooled(state, username).await {
+        let confirming = matches!(
+            text.trim(),
+            "确认" | "确定" | "是" | "y" | "Y" | "ok" | "OK"
+        );
+        let pending = state.bot_sticky_pending.write().await.remove(username);
+        match (confirming, pending) {
+            // 回「确认」→ 发暂存的那条（20 分钟内有效），省得重打一遍
+            (true, Some((held, at))) if crate::state::now_secs().saturating_sub(at) < 20 * 60 => {
+                return send_input(state, username, &format!("{n} {held}"), reply).await;
+            }
+            // 回「确认」但没有有效暂存 → 只解除冷却，等下一条内容
+            (true, _) => {
+                crate::slots::set_sticky(state, username, n).await;
+                return format!("好的，继续对话会话 {n}，直接发内容即可。");
+            }
+            // 其它内容：说明用户已看过提示、知道在跟谁说话 → 直接发（不再要求确认）
+            (false, Some(_)) => {
+                return send_input(state, username, &format!("{n} {text}"), reply).await;
+            }
+            // 冷却后的第一条内容 → 暂存 + 提示确认
+            (false, None) => {}
+        }
+        let now = crate::state::now_secs();
+        state
+            .bot_sticky_pending
+            .write()
+            .await
+            .insert(username.to_string(), (text.to_string(), now));
+        let label = sticky_label(state, username, n).await;
+        let preview = one_line(text, 40);
+        return format!(
+            "⏸ 距上次对话已有一段时间，先确认下目标会话：\n\
+             当前锁定 {label}\n\
+             待发内容：{preview}\n\n\
+             确认无误回「确认」即发出；要换会话发「@号位」；发「会话」看列表。"
+        );
+    }
+    send_input(state, username, &format!("{n} {text}"), reply).await
+}
+
+/// 「N 号（项目 · 标题）」——冷却确认时用，让人一眼认出是哪个终端
+async fn sticky_label(state: &SharedState, username: &str, no: u32) -> String {
+    let Ok(task_id) = resolve_task(state, username, &no.to_string()).await else {
+        return format!("{no} 号（该会话可能已结束）");
+    };
+    state
+        .tasks_for(username)
+        .await
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .map(|t| {
+            let s = if t.title.is_empty() {
+                t.provider_dsr.clone()
+            } else {
+                t.title.clone()
+            };
+            format!("{no} 号（{} · {}）", t.project_name, one_line(&s, 24))
+        })
+        .unwrap_or_else(|| format!("{no} 号"))
+}
+
+/// 单条指令分发（@N 速记逐条走这里，常规消息也走这里）。
+///
+/// 返回 `None` = 这个词不是指令 —— 由调用方决定拿它怎么办（连续对话时当内容发给锁定的
+/// 会话，否则回「未知指令」）。**不认识时不产生任何副作用**，所以可以先试着当指令跑。
+/// 刻意用返回值而不是另维护一份「已知指令清单」：清单和 match 分支迟早会不同步，届时新加的
+/// 指令会被当成聊天内容直接发进终端。
+async fn run_command(
+    state: &SharedState,
+    username: &str,
+    cmd: &str,
+    arg: &str,
+    reply: Option<&ReplyCtx>,
+) -> Option<String> {
+    Some(match cmd {
         "帮助" | "help" | "?" | "？" | "菜单" | "" => help_text(),
         "会话" | "列表" | "ls" | "任务" => list_sessions(state, username).await,
         "设备" | "devices" => list_devices(state, username).await,
-        "暂停" => control(state, username, &arg, ControlAction::Pause, "已暂停").await,
-        "恢复" | "继续" => control(state, username, &arg, ControlAction::Resume, "已恢复").await,
-        "中断" => control(state, username, &arg, ControlAction::Interrupt, "已中断").await,
-        "终止" | "停止" => control(state, username, &arg, ControlAction::Stop, "已终止").await,
-        "发" | "发送" | "回复" | "输入" => send_input(state, username, &arg).await,
-        _ => format!("未知指令「{cmd}」。发「帮助」看用法。"),
+        "暂停" => control(state, username, arg, ControlAction::Pause, "已暂停").await,
+        "恢复" => control(state, username, arg, ControlAction::Resume, "已恢复").await,
+        "中断" => control(state, username, arg, ControlAction::Interrupt, "已中断").await,
+        "终止" | "停止" => control(state, username, arg, ControlAction::Stop, "已终止").await,
+        "发" | "发送" | "回复" | "输入" => send_input(state, username, arg, reply).await,
+        "排队" | "队列" | "queue" => list_queued(state, username, arg).await,
+        "监控" | "watch" => monitor_start(state, username, arg, reply).await,
+        "停止监控" | "取消监控" | "结束监控" | "unwatch" => {
+            monitor_stop(state, username, arg).await
+        }
+        "撤回" | "recall" => recall_last(state, username, arg).await,
+        "锁定" => lock_session(state, username, arg).await,
+        "历史" | "history" => list_history(state, username, arg).await,
+        "文件" | "附件" | "files" => list_pending_files(state, username).await,
+        "清空文件" | "清空附件" | "清空" => clear_pending_files(state, username).await,
+        "删除文件" | "删文件" | "删附件" | "删除附件" => {
+            remove_pending_file(state, username, arg).await
+        }
+        _ => return None,
+    })
+}
+
+/// 待绑定链接 / 绑定码的有效期：30 分钟够走完「收到链接 → 登录 → 绑定」。
+pub const BIND_TOKEN_TTL_SECS: u64 = 30 * 60;
+
+/// 「绑定 <码>」：把发消息的这个钉钉号，绑到取码的那个账号。
+///
+/// **必须在认人之前拦下**：需要它的人恰恰是还没绑定、认不出来的那个 ——
+/// 走到 resolve_account 只会拿回一句「你还没关联账号」，指令永远没机会执行。
+///
+/// 返回 Some(回复) 表示这条消息是绑定指令、已处理完；None 表示不是，继续正常流程。
+pub(crate) async fn try_bind_command(
+    state: &SharedState,
+    staff_id: &str,
+    nick: &str,
+    text: &str,
+) -> Option<String> {
+    let t = text.trim();
+    let code = ["绑定", "bind", "綁定"]
+        .iter()
+        .find_map(|p| t.strip_prefix(*p))?
+        .trim()
+        .to_uppercase();
+    if code.is_empty() {
+        return Some(
+            "用法：绑定 <码>\n码在网页或客户端的「机器人管理」里取（也可扫码直接得到这条指令）。"
+                .to_string(),
+        );
     }
+    if staff_id.is_empty() {
+        return Some("拿不到你的钉钉身份，无法绑定。".to_string());
+    }
+    let now = crate::state::now_secs();
+    // 取码即用掉：成功与否都移除，避免一个码被反复试
+    let entry = state.dingtalk_bind_codes.write().await.remove(&code);
+    let Some(pending) = entry else {
+        return Some("绑定码无效或已过期，请在「机器人管理」里重新取一个。".to_string());
+    };
+    if now.saturating_sub(pending.at) >= BIND_TOKEN_TTL_SECS {
+        return Some("绑定码已过期，请在「机器人管理」里重新取一个。".to_string());
+    }
+    state
+        .registry
+        .write()
+        .await
+        .bind_dingtalk_id(staff_id, &pending.user, nick);
+    Some(format!(
+        "✅ 已绑定到账号「{}」。\n之后任务完成 / 需要你决定时会私聊推给你，也能在这直接发指令遥控会话。\n发「帮助」看用法。",
+        pending.user
+    ))
+}
+
+/// 消息归属：两种机器人，两套认人方式。
+///
+/// - **个人机器人**（用户自己在前台配的）：谁配的就归谁，不看发信人是谁。
+/// - **全局机器人**（管理员配的那一个，服务所有人）：只能靠发信人的 staffId
+///   认出他是谁；没绑过就回一段引导（登录链接 / 绑定码两条路都给）。
+///
+/// 顺带记下 robotCode 与「对面是谁」，主动推送要用。
+pub(crate) async fn resolve_account(
+    state: &SharedState,
+    app_owner: &str,
+    staff_id: &str,
+    robot_code: &str,
+    nick: &str,
+) -> Result<String, String> {
+    if staff_id.is_empty() {
+        return Err("拿不到你的钉钉身份（senderStaffId 为空），无法关联账号。".to_string());
+    }
+    let is_global = state
+        .registry
+        .read()
+        .await
+        .is_global_dingtalk_app(app_owner);
+    if !is_global {
+        // 个人机器人：记下对面是谁（推送要用），消息直接归应用主人
+        state
+            .registry
+            .write()
+            .await
+            .capture_dingtalk_peer(app_owner, robot_code, staff_id);
+        return Ok(app_owner.to_string());
+    }
+    // 全局机器人：robotCode 仍要记（推送用），但收件人由各自的绑定决定
+    state
+        .registry
+        .write()
+        .await
+        .capture_dingtalk_peer(app_owner, robot_code, "");
+    if let Some(account) = state.registry.read().await.dingtalk_user_of(staff_id) {
+        return Ok(account);
+    }
+    // 全局机器人也是**它主人自己的**机器人：他没道理还要先给自己绑一次钉钉号。
+    // staff_id 对得上（或还没认过主人，即他刚配好第一次说话）就直接归他。
+    {
+        let mut reg = state.registry.write().await;
+        let owner_staff = reg
+            .dingtalk_app_of(app_owner)
+            .map(|a| a.staff_id)
+            .unwrap_or_default();
+        if owner_staff.is_empty() || owner_staff == staff_id {
+            reg.capture_dingtalk_peer(app_owner, robot_code, staff_id);
+            return Ok(app_owner.to_string());
+        }
+    }
+    // 未绑定 → 回引导。**同一个人反复发消息要给同一个链接**：否则他每说一句就收到
+    // 一个新链接，不知道该点哪个；待绑定表里也会堆一串等价项。
+    let now = crate::state::now_secs();
+    let existing = state
+        .dingtalk_binds
+        .read()
+        .await
+        .iter()
+        .find(|(_, p)| p.staff_id == staff_id && now.saturating_sub(p.at) < BIND_TOKEN_TTL_SECS)
+        .map(|(t, _)| t.clone());
+    let token = match existing {
+        Some(t) => t,
+        None => {
+            let t = crate::state::new_bind_token();
+            state.dingtalk_binds.write().await.insert(
+                t.clone(),
+                crate::state::PendingDingtalkBind {
+                    staff_id: staff_id.to_string(),
+                    nick: nick.to_string(),
+                    at: now,
+                },
+            );
+            t
+        }
+    };
+    let link = format!("{}/?dtbind={token}", crate::server::public_base());
+    Err(format!(
+        "👋 你的钉钉还没关联 agent-monitor 账号，两种方式任选：
+
+         ① 点链接登录即绑定（30 分钟内有效）：
+{link}
+
+         ② 在网页/客户端「机器人管理」里取一个绑定码，回来发「绑定 <码>」
+
+         绑定后：任务完成 / 需要你决定时会私聊推给你，也能在这直接发指令遥控会话。"
+    ))
+}
+
+/// 「监控 N」：注册对第 N 个会话的持续监控，新内容由后台循环推到当前钉钉会话
+async fn monitor_start(
+    state: &SharedState,
+    username: &str,
+    arg: &str,
+    reply: Option<&ReplyCtx>,
+) -> String {
+    let Some(ctx) = reply else {
+        return "当前渠道暂不支持持续监控。".to_string();
+    };
+    if ctx.webhook.is_empty() {
+        return "拿不到本会话的推送地址，无法监控。".to_string();
+    }
+    let id = match resolve_task(state, username, arg).await {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    // 起点定在「当前最后一条」，避免一上来把历史全推一遍；之后只推新增
+    let msgs = state.bot_task_messages(&id).await;
+    let last_ts = msgs.last().map(|m| m.timestamp.clone()).unwrap_or_default();
+    {
+        let mut map = state.bot_monitors.write().await;
+        let list = map.entry(username.to_string()).or_default();
+        // 同一会话重复「监控」→ 覆盖旧的（刷新 webhook/起点），不叠加
+        list.retain(|m| m.task_id != id);
+        list.push(crate::state::BotMonitor {
+            task_id: id.clone(),
+            webhook: ctx.webhook.clone(),
+            expiry_ms: ctx.expiry_ms,
+            last_ts,
+        });
+    }
+    let label = session_label(state, username, &id).await;
+    format!(
+        "已开始监控{label}，有新内容会自动推到这里（约每 20s，仅推对话内容、跳过执行过程）。\n\
+         可同时监控多个；发「停止监控 N」停某个、「停止监控」停全部。\n\
+         注：受钉钉会话地址时效/条数限制，长时间监控可能中断，届时再发「监控 N」即可。"
+    )
+}
+
+/// 把一个会话描述成「会话 N（标题）」，用于监控开始/停止的回执。
+async fn session_label(state: &SharedState, username: &str, task_id: &str) -> String {
+    let n = session_number(state, username, task_id).await;
+    let title = state
+        .tasks_for(username)
+        .await
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .map(|t| {
+            if !t.title.is_empty() {
+                t.title
+            } else if !t.prompt.is_empty() {
+                t.prompt
+            } else {
+                t.project_name
+            }
+        })
+        .unwrap_or_default();
+    let title = one_line(&title, 20);
+    match (n, title.is_empty()) {
+        (Some(n), false) => format!("会话 {n}（{title}）"),
+        (Some(n), true) => format!("会话 {n}"),
+        (None, false) => format!("会话「{title}」"),
+        (None, true) => "该会话".to_string(),
+    }
+}
+
+/// 「撤回 N」：撤回第 N 个会话最近一条排队中的任务。还在 hub 队列就直接出队；
+/// 已进终端原生队列就注入 ↑ 让终端撤回（与网页「撤回」同一套语义）。
+async fn recall_last(state: &SharedState, username: &str, arg: &str) -> String {
+    let task_id = match resolve_task(state, username, arg).await {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    match recall_input(state, username, &task_id).await {
+        Ok(Recalled::FromHubQueue) => format!("已撤回排队中的任务（会话 {arg}）。"),
+        Ok(Recalled::InjectedUpKey) => {
+            format!("已注入撤回 ↑（会话 {arg}）。Terminal.app 需在终端手动按 ↑。")
+        }
+        Err(e) => e,
+    }
+}
+
+/// 撤回结果：撤的是 hub 队列里还没下发的，还是已进终端、只能注入 ↑
+pub(crate) enum Recalled {
+    FromHubQueue,
+    InjectedUpKey,
+}
+
+/// 撤回该会话最近一条排队中的输入。
+///
+/// 两级：**先撤 hub 队列里还没被客户端取走的**（直接删掉即可，干净），撤不到才说明它已经进了
+/// 终端原生队列，只能注入 ↑ 让终端自己退。顺序不能反 —— 若 hub 侧还压着一条却去按 ↑，
+/// 动到的是终端里**另一条**已排队的输入，等于撤错了人。
+pub(crate) async fn recall_input(
+    state: &SharedState,
+    username: &str,
+    task_id: &str,
+) -> Result<Recalled, String> {
+    let task = state
+        .tasks_for(username)
+        .await
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .ok_or("会话不存在（可能已结束）。")?;
+    let mut machines = state.machines.write().await;
+    let entry = machines
+        .get_mut(&task.machine_id)
+        .ok_or("会话所属设备已离线。")?;
+    let pos = entry.pending.iter().rposition(|c| {
+        c.task_id == task_id && matches!(c.action, am_core::model::ControlAction::Input)
+    });
+    if let Some(i) = pos {
+        entry.pending.remove(i);
+        return Ok(Recalled::FromHubQueue);
+    }
+    entry.pending.push_back(ControlCmd {
+        task_id: task_id.to_string(),
+        pid: task.pid,
+        action: am_core::model::ControlAction::TermKey,
+        text: Some("up:1".to_string()),
+        id: None,
+        from_select: false,
+    });
+    Ok(Recalled::InjectedUpKey)
+}
+
+/// 「停止监控 [N]」：带号位停某个会话；不带号位停该用户全部监控。
+async fn monitor_stop(state: &SharedState, username: &str, arg: &str) -> String {
+    // 不带号位 → 停全部
+    if arg.trim().is_empty() {
+        let n = state
+            .bot_monitors
+            .write()
+            .await
+            .remove(username)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        return if n > 0 {
+            format!("已停止监控全部 {n} 个会话。")
+        } else {
+            "当前没有在监控的会话。".to_string()
+        };
+    }
+    // 带号位 → 只停该会话
+    let id = match resolve_task(state, username, arg).await {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    let removed = remove_monitor(state, username, &id).await;
+    let label = session_label(state, username, &id).await;
+    if removed {
+        format!("已停止监控{label}。")
+    } else {
+        format!("{label}当前未在监控。")
+    }
+}
+
+/// 移除某用户对某会话的监控；用户名下监控清空则连键一起删。返回是否真的移除了一条。
+async fn remove_monitor(state: &SharedState, username: &str, task_id: &str) -> bool {
+    let mut map = state.bot_monitors.write().await;
+    let Some(list) = map.get_mut(username) else {
+        return false;
+    };
+    let before = list.len();
+    list.retain(|m| m.task_id != task_id);
+    let removed = list.len() != before;
+    if list.is_empty() {
+        map.remove(username);
+    }
+    removed
+}
+
+/// 推进某会话监控的增量游标（已推送到的最后时间戳）。
+async fn advance_monitor_ts(state: &SharedState, username: &str, task_id: &str, ts: &str) {
+    if let Some(list) = state.bot_monitors.write().await.get_mut(username) {
+        if let Some(m) = list.iter_mut().find(|m| m.task_id == task_id) {
+            m.last_ts = ts.to_string();
+        }
+    }
+}
+
+/// 监控推送只保留「对话内容」：用户提示、助手回复、方案、待选择；过滤掉执行过程
+/// （工具调用/结果、todos、后台任务）——用户要的是对话，不是一屏工具执行流水。
+fn is_monitor_content(role: &str) -> bool {
+    matches!(role, "user" | "assistant" | "plan" | "select")
 }
 
 fn split_cmd(text: &str) -> (String, String) {
@@ -146,37 +828,287 @@ fn split_cmd(text: &str) -> (String, String) {
 }
 
 fn help_text() -> String {
-    "终端监控机器人 · 指令：\n\
-     • 会话 —— 列出当前会话（带序号）\n\
+    "终端监控机器人 · 指令（N = 会话号位，发「会话」看）\n\
+     号位跟着终端窗口固定：终端不关，号就一直是它，可能不连号。\n\
+     \n\
+     【查看】\n\
+     • 会话 —— 列出当前会话（带号位）\n\
      • 设备 —— 列出名下设备\n\
-     • 暂停 N / 恢复 N / 中断 N / 终止 N —— 控制第 N 个会话\n\
-     • 发 N 内容 —— 向第 N 个会话发布一条输入\n\
-     • 帮助 —— 显示本说明\n\
-     （序号以最近一次「会话」列出的为准）"
+     • 排队 [N] —— 查看排队中的任务（不带 N 汇总全部）\n\
+     • 历史 [N] —— 回看最近结束的会话及其结果（默认 5 条）\n\
+     • 文件 —— 查看挂起待发的文件\n\
+     \n\
+     【控制会话】\n\
+     • 暂停 N / 恢复 N / 中断 N / 终止 N —— 控制 N 号会话\n\
+     • 发 N 内容 —— 向 N 号会话发一条输入（排队则回队列，执行后通知）\n\
+     • 撤回 N —— 撤回 N 号会话最近一条排队中的任务\n\
+     \n\
+     【监控】\n\
+     • 监控 N —— 把 N 号会话的对话内容持续推到这里（可多个，跳过执行过程）\n\
+     • 停止监控 [N] —— 停某个会话；不带号位停全部\n\
+     \n\
+     【文件】\n\
+     • 直接发文件/图片给我 → 暂存，随下一条任务（如「@2 处理这些文件」）落到会话 tmp/ 并把路径拼到开头\n\
+     • 删除文件 N —— 删某个；清空文件 —— 全部丢弃\n\
+     \n\
+     【速记 / 连续对话】\n\
+     • @N 接内容或任意会话指令 —— @2 重启服务 / @2 暂停 / @2 排队\n\
+     • 发过一次 @N 后，直接发内容就一直发给它，不用再带 @\n\
+     • @N（单独发）—— 切换到 N 号继续对话\n\
+     • 查指令（帮助/会话/排队…）不会打断对话，之后继续直接发即可\n\
+     • @1 @2 内容 —— 同一任务发给多个会话\n\
+     \n\
+     • 帮助 —— 显示本说明"
         .to_string()
 }
 
-async fn list_sessions(state: &SharedState, username: &str) -> String {
+/// 机器人监控推送循环：每 20s 把各监控会话的新增消息推到其钉钉会话 webhook。
+/// 只推「起点之后」的增量、批量合一条；webhook 失效或推送被钉钉拒（限流/过期）就停掉该监控。
+pub async fn monitor_loop(state: SharedState) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        let now = crate::state::now_secs() * 1000;
+        // 拍平成 (user, 单个监控) —— 每用户可监控多个会话
+        let monitors: Vec<(String, crate::state::BotMonitor)> = state
+            .bot_monitors
+            .read()
+            .await
+            .iter()
+            .flat_map(|(u, ms)| {
+                ms.iter()
+                    .map(|m| (u.clone(), m.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (user, mon) in monitors {
+            if mon.expiry_ms > 0 && now >= mon.expiry_ms {
+                remove_monitor(&state, &user, &mon.task_id).await;
+                let _ = push_webhook(
+                    &mon.webhook,
+                    "监控已到期（钉钉会话地址时效结束）。如需继续，请再发「监控 N」。",
+                )
+                .await;
+                continue;
+            }
+            let msgs = state.bot_task_messages(&mon.task_id).await;
+            let all_new: Vec<&am_core::model::MessageBrief> = msgs
+                .iter()
+                .filter(|m| m.timestamp.as_str() > mon.last_ts.as_str())
+                .collect();
+            if all_new.is_empty() {
+                continue;
+            }
+            // 游标推进到「本轮见到的最后一条」，含被过滤的执行过程 —— 否则下轮反复重扫
+            let new_last = all_new
+                .last()
+                .map(|x| x.timestamp.clone())
+                .unwrap_or_default();
+            // 只推对话内容，跳过执行过程（工具/todos/后台任务）
+            let content: Vec<&am_core::model::MessageBrief> = all_new
+                .iter()
+                .copied()
+                .filter(|m| is_monitor_content(&m.role))
+                .collect();
+            if content.is_empty() {
+                // 本轮全是执行过程：不推送，但推进游标
+                advance_monitor_ts(&state, &user, &mon.task_id, &new_last).await;
+                continue;
+            }
+            let text = render_monitor_push(&content);
+            match push_webhook(&mon.webhook, &text).await {
+                Ok(true) => advance_monitor_ts(&state, &user, &mon.task_id, &new_last).await,
+                // 钉钉返回错误（多为会话地址限流/过期）：停掉该会话监控，避免空转刷错误
+                Ok(false) => {
+                    remove_monitor(&state, &user, &mon.task_id).await;
+                }
+                Err(_) => { /* 网络抖动：留着下轮重试 */ }
+            }
+        }
+    }
+}
+
+/// 钉钉消息体：回执与回调回复共用，**必须是 text**。
+///
+/// 别再改成 markdown。试过一次，「会话」列表当场散架：钉钉的 markdown 里**普通段落之间
+/// 的单个 `\n` 不换行**，于是「共 N 个活跃会话：」、`—— 设备名 ——` 分组行与列表项被并成
+/// 一段，序号跟着错乱、分组标题被吸进上一条里。
+///
+/// 当时的误判是拿 OTO 那条路的排队列表当证据 —— 那份内容**只有列表项**，列表项之间的换行
+/// 在 markdown 里本来就正确；回执这些文案却是混合的（标题行 + 分组行 + 列表 + 说明行），
+/// 且全靠 `\n` 分行、靠空格对齐，纯文本才排得住。
+///
+/// 主动推送（OTO 的 sampleMarkdown）是另一回事：那儿的正文是 agent 产出的 markdown，
+/// 本来就该渲染，两者不要混为一谈。
+pub(crate) fn dingtalk_text_payload(content: &str) -> Value {
+    json!({ "msgtype": "text", "text": { "content": content } })
+}
+
+/// 推到钉钉会话 webhook。返回 Ok(true)=成功、Ok(false)=钉钉判失败(errcode≠0)、Err=网络错。
+async fn push_webhook(webhook: &str, content: &str) -> Result<bool, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(webhook)
+        .json(&dingtalk_text_payload(content))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    Ok(body.get("errcode").and_then(Value::as_i64).unwrap_or(0) == 0)
+}
+
+/// 把一批新消息渲染成一条推送文本（限长，避免超钉钉单条上限）
+fn render_monitor_push(msgs: &[&am_core::model::MessageBrief]) -> String {
+    let mut lines = vec!["🔔 会话新动态：".to_string()];
+    for m in msgs.iter().rev().take(6).rev() {
+        let who = match m.role.as_str() {
+            "user" => "🧑 ",
+            "assistant" => "🤖 ",
+            _ => "• ",
+        };
+        let c: String = m.content.chars().take(280).collect();
+        lines.push(format!("{who}{c}"));
+    }
+    let mut out = lines.join("\n");
+    if out.chars().count() > 1800 {
+        out = out.chars().take(1800).collect::<String>() + "…";
+    }
+    out
+}
+
+/// 会话的号位（「发 N / 暂停 N」里的 N），用于钉钉推送里带上号让人「@N」回应。
+///
+/// 按**终端锚**反查而不是 task_id：同一个终端窗口在 /clear、--resume 前后是不同的会话 id，
+/// 却该报出同一个号。锚下的代表会话被去重掉时也照样能拿到号。
+pub(crate) async fn session_number(
+    state: &SharedState,
+    username: &str,
+    task_id: &str,
+) -> Option<usize> {
+    let list = sorted_active_tasks(state, username).await;
+    // 常见路径：会话本身就在列表里
+    if let Some((_, no)) = list.iter().find(|(t, _)| t.id == task_id) {
+        return Some(*no as usize);
+    }
+    // 没命中 = 它被同锚去重掉了（/clear 前后两条会话短暂并存）：报它所在终端的号
+    let anchor = state
+        .tasks_for(username)
+        .await
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .map(|t| crate::slots::anchor_of(&t))?;
+    list.into_iter()
+        .find(|(t, _)| crate::slots::anchor_of(t) == anchor)
+        .map(|(_, no)| no as usize)
+}
+
+/// 单行化 + 截断。**会话标题来自用户的首条提示词，很可能是多行的**，直接嵌进
+/// 一行文案会把那行撕成两段：漏出去的第二段在「单换行被当软换行」的渲染里
+/// 还会黏到下一行标题上 —— 实际见过「二级弹 —— 📱 MacBook Pro ——」这种。
+///
+/// 先压平再截断，顺序不能反：否则 24 字的额度会被换行和多余空白吃掉，
+/// 看得见的内容不足 24 字。
+fn one_line(s: &str, limit: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat.chars().take(limit).collect()
+}
+
+/// 活跃会话 + 各自号位，按「设备名 → 终端 → 项目 → 号位」排序。「会话」列表、「@N / 发 N /
+/// 暂停 N」、推送里的 `#N` 全部以它为准。
+///
+/// 号位来自 [`crate::slots`]：绑定终端窗口（shell pid + start）并落盘，所以它既不随
+/// title/prompt 变化漂移，也不随会话增减、hub 重启重排 —— 位置序号那套正是「@2 打到列表
+/// 第 5 位」错位的根因。排序也直接用号位，于是同组内号是递增的、好扫视。
+///
+/// 同一终端锚下若有多个活跃会话（罕见：/clear 后旧会话短暂并存），只留最近活动的那条：
+/// 一个终端窗口一个号，否则同号出现两行、用户没法指名。
+pub(crate) async fn sorted_active_tasks(
+    state: &SharedState,
+    username: &str,
+) -> Vec<(am_core::model::Task, u32)> {
     let mut tasks = state.tasks_for(username).await;
-    tasks.sort_by_key(|t| match t.status {
-        TaskStatus::Running => 0,
-        TaskStatus::Paused => 1,
-        TaskStatus::Idle => 2,
-        TaskStatus::Finished => 3,
+    // 已结束的会话不列出——机器人只关心还能操作的活跃会话
+    tasks.retain(|t| t.status != TaskStatus::Finished);
+    // 同锚去重：先按活动时间降序，再按锚首见保留 → 留下的是每个终端最近活动的会话
+    tasks.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms).then(a.id.cmp(&b.id)));
+    let mut seen = std::collections::HashSet::new();
+    tasks.retain(|t| seen.insert(crate::slots::anchor_of(t)));
+    // 号位首次分配的顺序 = 用户在列表里看到的分组顺序（全用不随运行时变化的字段），
+    // 这样同一分组里新终端拿到的号也是从小到大接着来的
+    tasks.sort_by(|a, b| {
+        a.hostname
+            .cmp(&b.hostname)
+            .then(a.provider_dsr.cmp(&b.provider_dsr))
+            .then(a.project_name.cmp(&b.project_name))
+            .then(a.id.cmp(&b.id))
     });
+    let nos = crate::slots::ensure(state, username, &tasks).await;
+    // ensure 一定给了号（锚就是从这批会话来的）；真没拿到就宁可不列出，也不显示一个
+    // 解析不到的「0.」让用户去发「@0」。
+    let mut out: Vec<(am_core::model::Task, u32)> = tasks
+        .into_iter()
+        .filter_map(|t| {
+            nos.get(&crate::slots::anchor_of(&t))
+                .copied()
+                .map(|no| (t, no))
+        })
+        .collect();
+    out.sort_by(|(a, na), (b, nb)| {
+        a.hostname
+            .cmp(&b.hostname)
+            .then(a.provider_dsr.cmp(&b.provider_dsr))
+            .then(a.project_name.cmp(&b.project_name))
+            .then(na.cmp(nb))
+    });
+    out
+}
+
+async fn list_sessions(state: &SharedState, username: &str) -> String {
+    let tasks = sorted_active_tasks(state, username).await;
     if tasks.is_empty() {
-        return "当前没有会话。".to_string();
+        return "当前没有活跃会话。".to_string();
     }
-    let mut ids = Vec::with_capacity(tasks.len());
-    let mut lines = vec![format!("共 {} 个会话：", tasks.len())];
-    for (i, t) in tasks.iter().enumerate() {
-        ids.push(t.id.clone());
-        let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
-        let title: String = title.chars().take(24).collect();
-        lines.push(format!("{}. [{}] {} · {}", i + 1, status_zh(t.status), title, t.project_name));
+    // 当前连续对话锁定的号位：列表里标出来，免得「不带 @ 直接发」时不知道会进哪个终端
+    let sticky = crate::slots::sticky_of(state, username).await;
+    let mut lines = vec![format!("共 {} 个活跃会话：", tasks.len())];
+    let mut cur_dev = String::new();
+    let mut cur_group = String::new(); // 终端·项目 子分组
+    for (t, no) in &tasks {
+        if t.hostname != cur_dev {
+            cur_dev = t.hostname.clone();
+            cur_group.clear(); // 换设备后子分组重置，第一条必出子标题
+            lines.push(format!("—— 📱 {} ——", cur_dev));
+        }
+        let group = format!("{} · {}", t.provider_dsr, t.project_name);
+        if group != cur_group {
+            cur_group = group.clone();
+            lines.push(format!("  〔{group}〕"));
+        }
+        // 子标题里已带终端·项目，行内只留状态 + 会话标题
+        let title = if t.title.is_empty() {
+            t.provider_dsr.clone()
+        } else {
+            t.title.clone()
+        };
+        let title = one_line(&title, 24);
+        // 同排队列表：标记紧跟序号，不挂行尾。标题被 one_line 截到 24 字，长短仍不一，
+        // 行尾的「← 当前」位置飘忽、扫不出来；序号后的位置固定，emoji 自带颜色。
+        let mark = if sticky == Some(*no) { "👉 " } else { "" };
+        lines.push(format!(
+            "  {}. {}[{}] {}",
+            no,
+            mark,
+            status_zh(t.status),
+            title
+        ));
     }
-    state.bot_last_list.write().await.insert(username.to_string(), ids);
-    lines.push("\n操作示例：暂停 1 / 发 1 继续".to_string());
+    // 号位绑终端窗口、不随列表刷新重排，所以中间可能有空号（终端关掉了）——那是正常的
+    lines.push("\n号位跟着终端窗口固定不变，可能不连号。".to_string());
+    match sticky {
+        Some(n) => lines.push(format!(
+            "当前对话：{n} 号 —— 直接发内容即可，不用带 @；发「@其它号」可切换。"
+        )),
+        None => lines.push("发「@2 内容」下发任务，之后直接发内容就一直发给 2 号。".to_string()),
+    }
     lines.join("\n")
 }
 
@@ -206,16 +1138,31 @@ fn status_zh(s: TaskStatus) -> &'static str {
     }
 }
 
-async fn resolve_task(state: &SharedState, username: &str, arg: &str) -> Result<String, String> {
-    let n: usize = arg
+pub(crate) async fn resolve_task(
+    state: &SharedState,
+    username: &str,
+    arg: &str,
+) -> Result<String, String> {
+    let n: u32 = arg
         .trim()
         .parse()
-        .map_err(|_| "请给会话序号，如「暂停 1」。先发「会话」看序号。".to_string())?;
-    let list = state.bot_last_list.read().await;
-    let ids = list.get(username).ok_or("请先发「会话」列出序号。".to_string())?;
-    ids.get(n.wrapping_sub(1))
-        .cloned()
-        .ok_or(format!("没有第 {n} 个会话，先发「会话」看最新列表。"))
+        .map_err(|_| "请给会话号位，如「暂停 2」。发「会话」看号位。".to_string())?;
+    if n == 0 {
+        return Err("号位从 1 开始。发「会话」看号位。".to_string());
+    }
+    // 号位由终端锚决定并已落盘，这里直接按号反查即可 —— 不再依赖「上次列过什么」，
+    // 所以不必先发「会话」，hub 重启也不会让号位改指向。
+    let tasks = sorted_active_tasks(state, username).await;
+    if tasks.is_empty() {
+        return Err("当前没有活跃会话。".to_string());
+    }
+    tasks
+        .into_iter()
+        .find(|(_, no)| *no == n)
+        .map(|(t, _)| t.id)
+        .ok_or(format!(
+            "没有 {n} 号会话（终端可能已关）。发「会话」看当前号位。"
+        ))
 }
 
 async fn control(
@@ -229,33 +1176,972 @@ async fn control(
         Ok(id) => id,
         Err(e) => return e,
     };
-    match queue_command(state, username, &task_id, action, None).await {
+    match queue_command(state, username, &task_id, action, None, "dingtalk").await {
         Ok(_) => format!("{ok_word}（会话 {arg}）。"),
         Err(e) => e,
     }
 }
 
-async fn send_input(state: &SharedState, username: &str, arg: &str) -> String {
-    let (idx, text) = split_cmd(arg);
+/// 归一化文本用于队列比对（折叠空白、去首尾）
+fn norm(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 读某会话当前的排队状态：(hub 待下发队列文本, 终端原生队列文本)。
+/// hub 待下发 = 还没被客户端取走的输入；终端原生 = 已注入终端、claude 排队中。
+pub(crate) async fn read_queue(
+    state: &SharedState,
+    username: &str,
+    task_id: &str,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let task = state
+        .tasks_for(username)
+        .await
+        .into_iter()
+        .find(|t| t.id == task_id)?;
+    let terminal_q = task.queued_inputs.clone();
+    let machines = state.machines.read().await;
+    let hub_pending: Vec<String> = machines
+        .get(&task.machine_id)
+        .map(|e| {
+            e.pending
+                .iter()
+                .filter(|c| c.task_id == task_id && matches!(c.action, ControlAction::Input))
+                .filter_map(|c| c.text.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((hub_pending, terminal_q))
+}
+
+/// 下载挂起的钉钉文件并下发到会话项目目录的 tmp/ 下，返回回填用的相对路径 `./tmp/<name>`。
+/// 撞名就在扩展名前挂序号：`a.png` → `a-2.png`。
+///
+/// 序号**不用**资源管理器那种 `a (1).png` 风格：这个名字要拼进任务正文，多个文件用空格
+/// 隔开，名字里再带空格，agent 就分不清路径到哪儿结束了（会话标题的路径缩短也会被拆坏）。
+/// 客户端落盘时的兜底 `unique_target` 仍是括号风格，但只要这里算出的名字不撞，那边就不会
+/// 触发 —— 而它一旦触发，改后的名字传不回来，拼进任务的路径就指向了旧文件。
+/// 扩展名按最后一个点切，`.gitignore` 这类整体当主名。
+fn unique_against(name: &str, taken: &[String]) -> String {
+    if !taken.iter().any(|t| t == name) {
+        return name.to_string();
+    }
+    let (stem, ext) = split_ext(name);
+    for i in 2..10_000 {
+        let cand = format!("{stem}-{i}{ext}");
+        if !taken.iter().any(|t| t == &cand) {
+            return cand;
+        }
+    }
+    name.to_string()
+}
+
+/// 按**最后一个**点切出 (主名, 含点的扩展名)；点在首位不算扩展名（`.gitignore`）
+fn split_ext(name: &str) -> (&str, &str) {
+    match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    }
+}
+
+/// 问不到目录清单时的保底名：主名后缀一个秒级时间戳。
+///
+/// 名字长一点无所谓，**指向错的文件才是灾难** —— 钉钉的图片一律叫「图片.jpg / 图片N.jpg」，
+/// 目录里几乎必有同名旧图；此时若原样下发，客户端落盘会自己改名（`图片1 (4).jpg`），而拼进
+/// 任务的路径仍是 `./tmp/图片1.jpg`，agent 照着读到的是**上一次那张图**，且毫无迹象。
+fn stamped_name(name: &str) -> String {
+    let (stem, ext) = split_ext(name);
+    format!("{stem}-{}{ext}", crate::state::now_secs())
+}
+
+/// 目标目录里已被占用的文件名。
+enum Taken {
+    /// agent 回报了清单，可据此精确避让
+    Known(Vec<String>),
+    /// 问不到（agent 没回报 / 目录在会话目录之外）：只能靠时间戳保底，
+    /// 里面记的是本批已发的名字，供同批文件彼此避让
+    Unknown(Vec<String>),
+}
+
+/// 问一次 agent：会话目录下 `rel` 里现在有哪些文件。
+///
+/// 走网页目录浏览那套通道（pending_dir → agent 回报 → dir_cache），但这里要的是**新鲜**
+/// 结果：先把该目录的缓存清掉再下发查询，否则可能读到上一次的旧清单，算出来的名字照样撞。
+///
+/// 返回 `None` 表示**没问到**（设备离线或没在窗口内回报），与「问到了、目录是空的」
+/// 是两回事：前者对目录一无所知，绝不能当成「不撞名」。
+async fn dir_files_fresh(
+    state: &SharedState,
+    machine_id: &str,
+    task_id: &str,
+    cwd: &str,
+    rel: &str,
+) -> Option<Vec<String>> {
+    let key = (task_id.to_string(), rel.to_string());
+    {
+        let mut machines = state.machines.write().await;
+        let Some(entry) = machines.get_mut(machine_id) else {
+            tracing::warn!("查目录清单：设备 {machine_id} 不在线，落盘名改用时间戳兜底");
+            return None;
+        };
+        entry.dir_cache.remove(&key);
+        if !entry
+            .pending_dir
+            .iter()
+            .any(|q| q.task_id == task_id && q.rel == rel)
+        {
+            entry.pending_dir.push_back(am_core::model::DirQuery {
+                // 钉钉这条**不按会话解析**：接收目录是按项目配的（见下面的 recv_dir），
+                // 落点就该钉在项目根。若这里按会话当前目录解析，「问到的目录」与
+                // 「文件实际落的目录」就成了两个，重名避让会全部落空。
+                by_session: false,
+                task_id: task_id.to_string(),
+                cwd: cwd.to_string(),
+                rel: rel.to_string(),
+            });
+        }
+    }
+    // 一次往返要两轮上报：这轮取走查询、下轮才带回结果，agent 又是 1.5s 一轮，
+    // 所以至少 3s。原来只等 4.8s，扫描一慢就超时（超时后名字必然对不上，正是本函数
+    // 要避免的），给到 8s 更稳；等不到也不再干等，走时间戳兜底。
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let hit = state
+            .machines
+            .read()
+            .await
+            .get(machine_id)
+            .and_then(|e| e.dir_cache.get(&key).cloned());
+        if let Some((_, files, _)) = hit {
+            tracing::debug!("查目录清单：{rel} 下 {} 个文件", files.len());
+            return Some(files);
+        }
+    }
+    tracing::warn!("查目录清单超时（设备 {machine_id}，目录 {rel}），落盘名改用时间戳兜底");
+    None
+}
+
+/// 已进下发队列、等着认领落盘结果的一个文件。
+struct QueuedFile {
+    machine_id: String,
+    /// 空 = 该客户端不会回报，直接用 `target`
+    transfer_id: String,
+    /// hub 预判的落盘绝对路径（回报到不了时的退路）
+    target: String,
+    cwd: String,
+    sep: char,
+}
+
+impl QueuedFile {
+    /// 拼进任务正文的路径：目标在项目目录内 → 相对 `./子路径`，否则用绝对路径（Claude 才找得到）。
+    fn to_rel(&self, abs: String) -> String {
+        abs.strip_prefix(&format!("{}{}", self.cwd, self.sep))
+            .map(|r| format!("./{}", r.replace('\\', "/")))
+            .unwrap_or(abs)
+    }
+}
+
+/// 把一个待发文件放进下发队列，**不等**它落盘。
+///
+/// 入队与认领结果分成两步，是为了让同一批文件共用一次往返：客户端一轮就会把队列里的文件
+/// 全部取走、全部落盘，下一轮一起回报。若在这里就等，三个附件就是三次串行等待（最坏 24s），
+/// 而钉钉那头的人一直看着「已下发…」。
+///
+/// `taken` 是本次下发的「已占用文件名」缓存：`None` 表示还没问过目标目录，本函数会问一次
+/// 并填上（问不到就记成 [`Taken::Unknown`]，不会一个文件重问一次）。同一批多个文件共用它，
+/// 既省掉重复往返，也让它们彼此避让 —— 落盘是异步的，第二个文件查目录时根本看不到第一个。
+async fn queue_pending_file(
+    state: &SharedState,
+    username: &str,
+    task_id: &str,
+    pf: &crate::state::BotPendingFile,
+    taken: &mut Option<Taken>,
+) -> Result<QueuedFile, String> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    // 字节必须已经取好。**这里不再自己下载** —— 下载归 `fetch_attach_bytes` 一家管，
+    // 它才拿得到整批共享的截止时刻；这里再留一条下载路，整批预算就形同虚设，
+    // 而且同一件事有两套判断，下次一定有人只改其中一套。
+    let bytes = pf.bytes.clone().ok_or("文件内容未取到")?;
+    let task = state
+        .tasks_for(username)
+        .await
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .ok_or("会话不存在")?;
+    let cwd = task.project.trim_end_matches(['/', '\\']).to_string();
+    if cwd.is_empty() {
+        return Err("会话无项目目录".into());
+    }
+    let sep = if cwd.contains('\\') { '\\' } else { '/' };
+    // 接收目录仍以**项目根**为准（那是用户按项目配的，不该随会话 cd 漂移），但拼进任务
+    // 正文的路径要以**会话此刻所在目录**为基准算相对 —— 终端就是按它解析 `./x` 的。
+    // 两者不一致时 `to_rel` 的 strip_prefix 会落空，自动退回绝对路径，照样找得到。
+    let rel_base = crate::server::session_root(&task)
+        .trim_end_matches(['/', '\\'])
+        .to_string();
+    let rel_base = if rel_base.is_empty() {
+        cwd.clone()
+    } else {
+        rel_base
+    };
+    // 该项目配置的接收目录；未配置则默认 `<cwd>/tmp`。配置值可为绝对路径或相对(相对项目)。
+    let configured = state
+        .registry
+        .read()
+        .await
+        .dingtalk_recv_dir(username, &cwd);
+    let dir = match configured {
+        Some(d) if d.starts_with('/') || d.contains(":\\") => d, // 绝对路径直接用
+        Some(d) => format!("{cwd}{sep}{}", d.trim_matches(['/', '\\'])), // 相对项目
+        None => format!("{cwd}{sep}tmp"),
+    };
+    // 只留 basename，防路径穿越
+    let safe = std::path::Path::new(&pf.file_name)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "file.bin".into());
+    // 撞名必须在这里避开。客户端落盘时也会兜底改名，但那时改的名字传不回来 —— 拼进任务的
+    // 路径还是原名，指向目录里那个**旧文件**。比覆盖更隐蔽：agent 照着路径读到的是上一版
+    // 内容，却没有任何迹象表明它拿错了。（钉钉的图片一律叫「图片.jpg」，必然撞。）
+    //
+    // 只在目标目录位于会话目录内时问得到 —— DirQuery 以 cwd 为根，配置成绝对路径的接收
+    // 目录越出了它的范围。问不到（越界 / 设备没在窗口内回报）就一律走时间戳保底名，
+    // **不能退回原名**：原名正是上面那个「读到旧图」的坑。
+    let dir_trimmed = dir.trim_end_matches(['/', '\\']).to_string();
+    let rel_dir = if dir_trimmed == cwd {
+        Some(String::new())
+    } else {
+        dir_trimmed
+            .strip_prefix(&format!("{cwd}{sep}"))
+            .map(|r| r.replace('\\', "/"))
+    };
+    if taken.is_none() {
+        *taken = Some(match &rel_dir {
+            Some(rd) => match dir_files_fresh(state, &task.machine_id, task_id, &cwd, rd).await {
+                Some(files) => Taken::Known(files),
+                None => Taken::Unknown(Vec::new()),
+            },
+            None => {
+                tracing::warn!(
+                    "接收目录 {dir} 在会话目录之外，问不到已有文件，落盘名改用时间戳兜底"
+                );
+                Taken::Unknown(Vec::new())
+            }
+        });
+    }
+    let safe = match taken.as_mut().expect("刚填过") {
+        Taken::Known(names) => {
+            let picked = unique_against(&safe, names);
+            names.push(picked.clone());
+            picked
+        }
+        // 时间戳保底名彼此也可能撞（同一批里两张都叫「图片.jpg」），照样过一遍避让
+        Taken::Unknown(used) => {
+            let picked = unique_against(&stamped_name(&safe), used);
+            used.push(picked.clone());
+            picked
+        }
+    };
+    let target = format!("{}{sep}{safe}", dir.trim_end_matches(['/', '\\']));
+    // 落盘名的最终决定权在客户端手里（撞名它会改成 `图片 (1).jpg`，见 client 的 unique_target）。
+    // 上面的预判只是让名字好看、并给旧客户端兜底；够新的客户端会把**实际落盘路径**回报回来，
+    // 那份才是权威 —— 预判再准也架不住清单过时或落盘瞬间被别的写入抢了名字。
+    let transfer_id = uuid::Uuid::new_v4().to_string();
+    let mut machines = state.machines.write().await;
+    let entry = machines
+        .get_mut(&task.machine_id)
+        .ok_or("会话所属设备已离线")?;
+    let wants_result = crate::server::agent_reports_file_path(&entry.version);
+    entry.pending_files.push_back(am_core::model::FileTransfer {
+        dir,
+        // 同上：钉钉的落点按项目根算，不随会话 cd 走
+        task_id: String::new(),
+        rel_dir: String::new(),
+        by_session: false,
+        filename: safe.clone(),
+        content_b64: B64.encode(&bytes),
+        // 钉钉转发的附件一律整份下发：走的是钉钉自己的下载接口，文件已完整落在 hub 内存里，
+        // 再切片没有意义（切片是为了让**上行**的大文件不必一次性穿过 hub）。
+        chunk_index: 0,
+        chunk_total: 0,
+        // 空 = 不要求回报（旧客户端反序列化时本就取默认空串，发了也没人回）
+        transfer_id: if wants_result {
+            transfer_id.clone()
+        } else {
+            String::new()
+        },
+    });
+    Ok(QueuedFile {
+        machine_id: task.machine_id,
+        transfer_id: if wants_result {
+            transfer_id
+        } else {
+            String::new()
+        },
+        target,
+        cwd: rel_base,
+        sep,
+    })
+}
+
+/// 一批附件「从钉钉取字节」的**整批**总预算。
+///
+/// 为什么必须是整批的：单个文件的预算是 180s（见 `dingtalk::download_client`），串行下来
+/// N 个附件就是 N×180s —— 三个文件能让人对着「已下发…」等九分钟，而钉钉那头根本看不出
+/// 是卡在哪。下面改成并发取，整批耗时 = 最慢的那一个，这个预算才封得住。
+///
+/// 为什么是 90s 而不是 60s：单个文件的**失败**路径是「连不上 8s / 读卡住 20s」再换新连接
+/// 重来一次（见 `dingtalk::download_bot_file`），最坏约 56s 才见分晓。预算若压到 60s，
+/// 第二次尝试常常刚起头就被自己砍掉，重试等于白加。90s = 56s 的失败路径 + 第二次真的
+/// 下起来的余量（线上成功那次只用了 0.5s）。再往上没有意义：人已经干等一分半了。
+const ATTACH_DOWNLOAD_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// 并发把这一批待发文件的字节取回来，**共用一个截止时刻**。
+///
+/// 拆出来是因为「下载」和「入队」的约束正好相反：下载是跨境的、慢的、彼此无关的，
+/// 该并发；入队要严格按顺序（同一批文件靠 `taken` 互相避让落盘名，见 `queue_pending_file`）。
+/// 原来两件事挤在一个串行循环里，于是只能按最慢的那个假设去叠预算。
+///
+/// 并发上限 4：钉钉对 `messageFiles/download` 有 QPS 限制，一口气糊上去十几个请求可能撞
+/// 限流（那会变成 429，反倒更慢）；4 条已经足够把串行的叠加消掉。
+///
+/// 截止时刻整批共享，不是每个文件各给 90s —— 排在后面的文件不会重新开始计时。
+///
+/// 返回 `Err(点名)` = 有文件没取到。
+async fn fetch_attach_bytes(
+    state: &SharedState,
+    files: Vec<crate::state::BotPendingFile>,
+) -> Result<Vec<crate::state::BotPendingFile>, Vec<String>> {
+    use futures_util::StreamExt;
+    let deadline = tokio::time::Instant::now() + ATTACH_DOWNLOAD_BUDGET;
+    let results: Vec<Result<crate::state::BotPendingFile, String>> =
+        futures_util::stream::iter(files.into_iter().map(|mut pf| async move {
+            // 微信那条在收帧时就把字节带来了，只有钉钉是延后下载
+            if pf.bytes.is_some() {
+                return Ok(pf);
+            }
+            // 下载要用「收到该文件的那个应用」的凭据（多租户下 app_user 可能 != 归属账号）
+            let app = match state.registry.read().await.dingtalk_app_of(&pf.app_user) {
+                Some(a) => a,
+                None => return Err(format!("{}：未配置钉钉应用", pf.file_name)),
+            };
+            let now_ms = crate::state::now_secs() * 1000;
+            let dl = crate::dingtalk::download_bot_file(&app, &pf.download_code, now_ms);
+            match tokio::time::timeout_at(deadline, dl).await {
+                Ok(Ok(b)) => {
+                    pf.bytes = Some(b);
+                    Ok(pf)
+                }
+                Ok(Err(e)) => Err(format!("{}：{e}", pf.file_name)),
+                Err(_) => Err(format!(
+                    "{}：整批下载超过 {}s 预算，没等到",
+                    pf.file_name,
+                    ATTACH_DOWNLOAD_BUDGET.as_secs()
+                )),
+            }
+        }))
+        // buffered 保序：入队顺序 = 用户发文件的顺序，拼进任务正文的路径顺序也跟着它
+        .buffered(4)
+        .collect()
+        .await;
+    let mut ok = Vec::new();
+    let mut bad = Vec::new();
+    for r in results {
+        match r {
+            Ok(pf) => ok.push(pf),
+            Err(e) => bad.push(e),
+        }
+    }
+    if bad.is_empty() {
+        Ok(ok)
+    } else {
+        Err(bad)
+    }
+}
+
+/// 认领一个已入队文件的落盘结果，返回拼进任务正文的路径。
+///
+/// 一批文件依次调用即可：它们是同一轮下发、同一轮回报的，第一个等到之后其余的结果早已
+/// 躺在缓存里，后面几个立即返回 —— 总耗时仍是一次往返。
+///
+/// 返回的 `bool` = **要了落盘回报却没等到**（不含「这个客户端本来就不回报」那种）。
+/// 它意味着 hub 这边其实不知道文件到底有没有落地 —— `pending_files` 是「响应一发出就从
+/// 队列里没了」的（见 server::report 的 drain），客户端没收到就无从重来。此前这里一律
+/// 返回 Ok，回执照样是「📤 已下发」，人拿着一条指向空气的路径去问 agent 为什么读不到。
+/// 所以要把这份「不确定」原样带回给调用方，由它写进回执。
+async fn resolve_queued(state: &SharedState, q: &QueuedFile) -> Result<(String, bool), String> {
+    if q.transfer_id.is_empty() {
+        // 这个客户端版本就不回报 —— 是已知的能力缺口，不是这次出了岔子。
+        // 当成异常提示的话，老客户端每发一个文件都要挨一句警告，人很快就学会无视它。
+        return Ok((q.to_rel(q.target.clone()), false));
+    }
+    // 等客户端回报真实落盘路径。等到 = 路径必定对得上；等不到就退回预判名 —— 那是入队时
+    // 算的、已尽力避开撞名的名字，不是原样的「图片.jpg」。
+    match crate::server::wait_file_result(state, &q.machine_id, &q.transfer_id).await {
+        Some(Ok(path)) => {
+            if path != q.target {
+                tracing::info!("下发文件落盘改名：预判 {} → 实际 {path}", q.target);
+            }
+            Ok((q.to_rel(path), false))
+        }
+        Some(Err(e)) => Err(format!("客户端写入失败：{e}")),
+        None => {
+            tracing::warn!(
+                "等不到落盘回报（设备 {}），回填路径改用预判名 {}",
+                q.machine_id,
+                q.target
+            );
+            Ok((q.to_rel(q.target.clone()), true))
+        }
+    }
+}
+
+/// 「文件」：列出当前挂起待发的文件（随下一条任务一起落到会话目录）。
+async fn list_pending_files(state: &SharedState, username: &str) -> String {
+    let files = state
+        .bot_pending_files
+        .read()
+        .await
+        .get(username)
+        .cloned()
+        .unwrap_or_default();
+    if files.is_empty() {
+        return "当前没有挂起待发的文件。发文件/图片给我即可暂存，随下一条任务一起发出。"
+            .to_string();
+    }
+    let mut lines = vec![format!(
+        "📎 待发文件（{} 个，随下一条任务发出）：",
+        files.len()
+    )];
+    for (i, f) in files.iter().enumerate() {
+        lines.push(format!("{}. {}", i + 1, f.file_name));
+    }
+    lines.push("发「删除文件 N」删某个、「清空文件」清空。".to_string());
+    lines.join("\n")
+}
+
+/// 「清空文件」：丢弃全部挂起待发文件。
+async fn clear_pending_files(state: &SharedState, username: &str) -> String {
+    let n = state
+        .bot_pending_files
+        .write()
+        .await
+        .remove(username)
+        .map(|v| v.len())
+        .unwrap_or(0);
+    if n > 0 {
+        format!("已清空 {n} 个待发文件。")
+    } else {
+        "当前没有挂起待发的文件。".to_string()
+    }
+}
+
+/// 「删除文件 N」：删掉第 N 个挂起待发文件（序号以「文件」列出的为准）。
+async fn remove_pending_file(state: &SharedState, username: &str, arg: &str) -> String {
+    let n: usize = match arg.trim().parse() {
+        Ok(n) if n >= 1 => n,
+        _ => return "用法：删除文件 <序号>，如「删除文件 2」。发「文件」看序号。".to_string(),
+    };
+    let mut map = state.bot_pending_files.write().await;
+    let Some(list) = map.get_mut(username) else {
+        return "当前没有挂起待发的文件。".to_string();
+    };
+    if n > list.len() {
+        return format!("没有第 {n} 个文件，发「文件」看列表。");
+    }
+    let removed = list.remove(n - 1);
+    let remaining = list.len();
+    if list.is_empty() {
+        map.remove(username);
+    }
+    format!(
+        "已删除「{}」。剩 {remaining} 个待发文件。",
+        removed.file_name
+    )
+}
+
+/// 「历史 [N]」：回看最近的远程往来，按时间正序排成对话流。
+///
+/// 参数是**号位**（与 `@N` 同源）时只看那个会话；不带参数看全部。
+/// 「@9 历史」经速记展开成「历史 9」，落到这里也是只看 9 号 —— 与「在某个会话里点历史」
+/// 的直觉一致。
+async fn list_history(state: &SharedState, username: &str, arg: &str) -> String {
+    let arg = arg.trim();
+    // 号位 → 该会话；解析不出号位就当「看全部」，条数仍支持（历史 20）
+    let (session, n) = if arg.is_empty() {
+        (None, 10)
+    } else if let Ok(id) = resolve_task(state, username, arg).await {
+        (Some(id), 30)
+    } else {
+        (None, arg.parse::<usize>().unwrap_or(10).clamp(1, 30))
+    };
+    let list = crate::history::list_for(state, username, session.as_deref(), n).await;
+    if list.is_empty() {
+        return if session.is_some() {
+            "这个会话还没有远程往来记录。".to_string()
+        } else {
+            "还没有远程往来记录。从这里或网页下发任务后，一问一答都会记进来。".to_string()
+        };
+    }
+    let mut lines = vec![format!("最近 {} 条往来（旧 → 新）：", list.len())];
+    let mut last_session = String::new();
+    for e in &list {
+        // 换会话时插一行分隔，否则多个终端的往来混在一起读不出是谁说的
+        if e.session_id != last_session {
+            last_session = e.session_id.clone();
+            let slot = e.slot.map(|n| format!("{n} 号 · ")).unwrap_or_default();
+            let title: String = if e.title.is_empty() {
+                e.provider.clone()
+            } else {
+                e.title.clone()
+            };
+            lines.push(format!(
+                "\n—— {slot}{} · {} ——",
+                e.project,
+                one_line(&title, 24)
+            ));
+        }
+        let when = chrono::DateTime::from_timestamp(e.at as i64, 0)
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let who = if e.role == "user" { "🧑 我" } else { "🤖" };
+        // 每条只给前 3 行，钉钉里堆全文没法翻；完整内容去网页看
+        let body: String = e
+            .content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("\n");
+        lines.push(format!("{who}（{when}）\n{body}"));
+    }
+    lines.push("\n完整内容可在网页输入框旁的「历史」里查看。".to_string());
+    lines.join("\n")
+}
+
+/// 「@N」（不带内容）：把连续对话切到 N 号，之后不带 @ 的文本都投给它。
+async fn lock_session(state: &SharedState, username: &str, arg: &str) -> String {
+    // 先解析一次，确认这个号确实有会话 —— 免得锁到一个空号上，后面每条消息都报错
+    let task_id = match resolve_task(state, username, arg).await {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    let Ok(n) = arg.trim().parse::<u32>() else {
+        return "请给会话号位，如「@2」。发「会话」看号位。".to_string();
+    };
+    crate::slots::set_sticky(state, username, n).await;
+    let title = state
+        .tasks_for(username)
+        .await
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .map(|t| {
+            let s = if t.title.is_empty() {
+                t.provider_dsr.clone()
+            } else {
+                t.title.clone()
+            };
+            format!("（{} · {}）", t.project_name, one_line(&s, 20))
+        })
+        .unwrap_or_default();
+    format!("✅ 已锁定会话 {n}{title}\n之后直接发内容即可，不用带 @。发「@其它号」可切换。")
+}
+
+async fn send_input(
+    state: &SharedState,
+    username: &str,
+    arg: &str,
+    reply: Option<&ReplyCtx>,
+) -> String {
+    let (idx, mut text) = split_cmd(arg);
     if text.is_empty() {
-        return "用法：发 <序号> <内容>，如「发 1 继续」。".to_string();
+        return "用法：发 <号位> <内容>，如「发 2 继续」。发「会话」看号位。".to_string();
     }
     let task_id = match resolve_task(state, username, &idx).await {
         Ok(id) => id,
         Err(e) => return e,
     };
-    match queue_command(state, username, &task_id, ControlAction::Input, Some(text.clone())).await {
-        Ok(_) => format!("已发送到会话 {idx}：{text}"),
-        Err(e) => e,
+    // 下发成功即锁定该会话：后续不带 @ 的文本都投给它（连续对话）
+    if let Ok(n) = idx.trim().parse::<u32>() {
+        crate::slots::set_sticky(state, username, n).await;
+    }
+    // 挂起待发文件（可多个）：随本条任务落到会话目录，相对路径按序拼到任务开头（空格隔开）。
+    // 超 20 分钟没跟任务的挂起文件视为过期，丢弃不附。
+    // 只读一份，**先不摘**：下面任何一步失败都会 return，那时若已经 remove，待发文件就
+    // 永久没了 —— 用户重发一遍指令也带不上，只能重新上传。落盘全部成功后再摘（见下方）。
+    let pending = state
+        .bot_pending_files
+        .read()
+        .await
+        .get(username)
+        .cloned()
+        .unwrap_or_default();
+    let mut rels: Vec<String> = Vec::new();
+    // 目标目录的已用文件名，问一次即可；同批文件靠它彼此避让（见 queue_pending_file）
+    let mut taken: Option<Taken> = None;
+    // 先把整批都塞进下发队列，再统一认领落盘结果 —— 客户端一轮就会全部取走并落盘，
+    // 下一轮一起回报。逐个「下发→等回报」则是几次串行往返，附件多时能拖到半分钟。
+    let mut queued: Vec<QueuedFile> = Vec::new();
+    // 过期被跳过的文件名。**不能像原来那样直接 continue 了事**：下面会把整个待发列表摘掉，
+    // 于是文件既没跟着任务走、也不在列表里了，而回执还是「📤 已下发到会话 N」——
+    // 人在目录里扑空，从两头都查不出它是什么时候没的。丢可以，但必须说出来。
+    let mut expired: Vec<String> = Vec::new();
+    let mut fresh: Vec<crate::state::BotPendingFile> = Vec::new();
+    for pf in &pending {
+        if crate::state::now_secs().saturating_sub(pf.at) > 20 * 60 {
+            expired.push(pf.file_name.clone());
+            continue;
+        }
+        fresh.push(pf.clone());
+    }
+    // 先并发把字节都取回来（整批封顶 90s），再逐个入队。合在一个串行循环里的话，
+    // 超时预算会按附件个数叠加 —— 见 fetch_attach_bytes 的注释。
+    let fresh = match fetch_attach_bytes(state, fresh).await {
+        Ok(v) => v,
+        // 取不到字节 → **整条不发**，待发列表原样留着。
+        //
+        // 这里刻意不走「过期文件那样点名跳过、任务照发」：过期文件是 20 分钟前的旧东西，
+        // 跟眼下这句指令多半无关，丢了就丢了；而这一批正是用户此刻要 agent 看的东西，
+        // 少了它任务就是在错误前提上跑。何况下面 1560 行会把整个待发列表摘掉 —— 跳过
+        // 等于文件**永久没了**，用户得重新上传；中止则只需把指令重发一遍，文件还在。
+        Err(bad) => {
+            return format!(
+                "附带文件下发失败：\n{}\n任务未下发，文件仍挂着，重发一遍这条指令即可再试。",
+                bad.iter()
+                    .map(|s| format!("· {s}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        }
+    };
+    for pf in &fresh {
+        match queue_pending_file(state, username, &task_id, pf, &mut taken).await {
+            Ok(q) => queued.push(q),
+            // 文件没成，任务正文也跟着不发了（这个 return 就在正文入队之前）——
+            // 得说清楚，否则用户以为只是「文件没带上、话已经说出去了」。
+            Err(e) => {
+                return format!(
+                    "附带文件下发失败：{e}\n任务未下发，文件仍挂着，重发一遍这条指令即可再试。"
+                )
+            }
+        }
+    }
+    // 要了落盘回报却没等到的文件数 —— hub 并不知道它们到底有没有落地
+    let mut unconfirmed = 0usize;
+    for q in &queued {
+        match resolve_queued(state, q).await {
+            Ok((rel, lost_ack)) => {
+                if lost_ack {
+                    unconfirmed += 1;
+                }
+                rels.push(rel);
+            }
+            Err(e) => {
+                return format!(
+                    "附带文件下发失败：{e}\n任务未下发，文件仍挂着，重发一遍这条指令即可再试。"
+                )
+            }
+        }
+    }
+    // 全部落定了才摘。中途失败时上面已经 return，待发列表原样留着，重发一遍指令即可再试。
+    if !pending.is_empty() {
+        state.bot_pending_files.write().await.remove(username);
+    }
+    if !rels.is_empty() {
+        text = format!("{} {text}", rels.join(" "));
+    }
+    // 回执上要补的话：这两种都是「任务照发了，但文件这边有问题」，不说就等于静默。
+    let mut notes = String::new();
+    if !expired.is_empty() {
+        notes.push_str(&format!(
+            // 回执走的是 msgtype=text（见 dingtalk_text_payload），markdown 不生效 ——
+            // 写 `**没有**` 用户看到的就是两个星号，别用。
+            "\n⚠️ {} 个文件挂了超过 20 分钟已过期，没有附带（{}）。请重新发一遍文件。",
+            expired.len(),
+            expired.join("、")
+        ));
+    }
+    if unconfirmed > 0 {
+        notes.push_str(&format!(
+            "\n⚠️ 有 {unconfirmed} 个文件没等到落盘确认，路径是预判的 —— \
+             若 agent 说找不到文件，请重发一遍。"
+        ));
+    }
+    if let Err(e) = queue_command(
+        state,
+        username,
+        &task_id,
+        ControlAction::Input,
+        Some(text.clone()),
+        "dingtalk",
+    )
+    .await
+    {
+        return e;
+    }
+
+    // 即时回执，不阻塞用户；是否排队/已执行由后台判定后经 sessionWebhook 再推一条。
+    // 没有 webhook（罕见）时退回一句简单确认。
+    match reply {
+        Some(ctx) if !ctx.webhook.is_empty() => {
+            let st = state.clone();
+            let (wh, exp, user, tid, txt, i) = (
+                ctx.webhook.clone(),
+                ctx.expiry_ms,
+                username.to_string(),
+                task_id.clone(),
+                text.clone(),
+                idx.clone(),
+            );
+            tokio::spawn(async move { confirm_and_watch(st, wh, exp, user, tid, txt, i).await });
+            format!("📤 已下发到会话 {idx}：{text}\n确认排队/执行中，稍后通知…{notes}")
+        }
+        _ => format!("已发送到会话 {idx}：{text}{notes}"),
     }
 }
 
-async fn queue_command(
+/// 后台判定「排队 or 已执行」并经 sessionWebhook 推结果；若排队，继续监控到执行为止再推一条。
+async fn confirm_and_watch(
+    state: SharedState,
+    webhook: String,
+    expiry_ms: u64,
+    username: String,
+    task_id: String,
+    text: String,
+    idx: String,
+) {
+    let tn = norm(&text);
+    // 判定阶段：轮询最多 ~6s，等客户端取走并上报回队列状态（活跃机约 1.5s 一轮，留 ~4 轮
+    // 足够可靠地判出「排队」；判出排队会提前 break，只有「已执行」才等满窗口）。检到排队即推。
+    let mut queued_list: Option<Vec<String>> = None;
+    for _ in 0..4 {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        if expiry_ms > 0 && crate::state::now_secs() * 1000 >= expiry_ms {
+            return;
+        }
+        let Some((hub_pending, term_q)) = read_queue(&state, &username, &task_id).await else {
+            continue;
+        };
+        if term_q.iter().any(|t| norm(t) == tn) || hub_pending.iter().any(|t| norm(t) == tn) {
+            let mut list = term_q.clone();
+            list.extend(hub_pending);
+            queued_list = Some(list);
+            break;
+        }
+    }
+    match queued_list {
+        None => {
+            let _ = push_webhook(&webhook, &format!("✅ 已执行（会话 {idx}）：{text}")).await;
+        }
+        Some(list) => {
+            let mut lines = vec![format!("⏳ 已排队（会话 {idx}），暂未执行。当前排队：")];
+            for (n, t) in list.iter().enumerate() {
+                // 标记放在**序号之后、内容之前**：行尾的「← 本条」会随中文行长短飘忽，
+                // 扫一眼根本对不齐；紧跟序号的位置是固定的，emoji 又自带颜色，一眼就找得到。
+                let mark = if norm(t) == tn { "👉 " } else { "" };
+                lines.push(format!("{}. {}{}", n + 1, mark, t));
+            }
+            lines.push("被终端接收执行后会再通知你。发「排队 N」可随时查看。".to_string());
+            let _ = push_webhook(&webhook, &lines.join("\n")).await;
+            // 继续监控到它被纳入执行
+            watch_dequeue(state, webhook, expiry_ms, username, task_id, text, idx).await;
+        }
+    }
+}
+
+/// OTO 主动私聊给账号本人（网页/客户端下发的状态推送用；无 sessionWebhook 可回）。
+/// 机器人一对一：用他自己的应用，发给跟这个机器人说过话的那个钉钉号。
+async fn push_oto_owner(state: &SharedState, owner: &str, text: &str) {
+    let now_ms = crate::state::now_secs() * 1000;
+    let target = state.registry.read().await.dingtalk_push_target(owner);
+    let Some((app, staff_id)) = target else {
+        return;
+    };
+    if app.app_secret.is_empty() {
+        return;
+    }
+    let _ = crate::dingtalk::push_oto(&app, &staff_id, text, None, now_ms, &[]).await;
+}
+
+/// 网页/客户端（非钉钉）下发任务后，把「排队中 / 执行中」状态主动推到钉钉（OTO 私聊）。
+/// 判定同 confirm_and_watch，但用 OTO 而非 sessionWebhook；排队的还会盯到执行后再推一条。
+pub(crate) async fn notify_web_dispatch(
+    state: SharedState,
+    owner: String,
+    task_id: String,
+    text: String,
+) {
+    let tn = norm(&text);
+    let snippet: String = text.chars().take(200).collect();
+    // 判定阶段：轮询 ~9s，等客户端取走并上报回队列状态
+    let mut queued_list: Option<Vec<String>> = None;
+    for _ in 0..6 {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let Some((hub_pending, term_q)) = read_queue(&state, &owner, &task_id).await else {
+            continue;
+        };
+        if term_q.iter().any(|t| norm(t) == tn) || hub_pending.iter().any(|t| norm(t) == tn) {
+            let mut list = term_q.clone();
+            list.extend(hub_pending);
+            queued_list = Some(list);
+            break;
+        }
+    }
+    let no = session_number(&state, &owner, &task_id)
+        .await
+        .map(|x| format!("#{x} "))
+        .unwrap_or_default();
+    match queued_list {
+        None => {
+            push_oto_owner(
+                &state,
+                &owner,
+                &format!("**▶️ 任务执行中**（网页下发 · 会话 {no}）\n\n{snippet}"),
+            )
+            .await;
+        }
+        Some(list) => {
+            let mut lines = vec![format!(
+                "**⏳ 任务已排队**（网页下发 · 会话 {no}）\n\n{snippet}\n\n当前排队："
+            )];
+            for (n, t) in list.iter().enumerate() {
+                // 同 confirm_and_watch：标记紧跟序号，别挂在行尾（见那处注释）
+                let mark = if norm(t) == tn { "👉 " } else { "" };
+                lines.push(format!("{}. {}{}", n + 1, mark, t));
+            }
+            push_oto_owner(&state, &owner, &lines.join("\n")).await;
+            // 盯到它被纳入执行
+            for _ in 0..360 {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let Some((hub_pending, term_q)) = read_queue(&state, &owner, &task_id).await else {
+                    return;
+                };
+                let still = term_q.iter().any(|t| norm(t) == tn)
+                    || hub_pending.iter().any(|t| norm(t) == tn);
+                if !still {
+                    push_oto_owner(
+                        &state,
+                        &owner,
+                        &format!("**▶️ 排队任务已开始执行**（网页下发 · 会话 {no}）\n\n{snippet}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// 监控某条排队输入，等它离开队列（被终端纳入执行）后经 sessionWebhook 主动推一条。
+async fn watch_dequeue(
+    state: SharedState,
+    webhook: String,
+    expiry_ms: u64,
+    username: String,
+    task_id: String,
+    text: String,
+    idx: String,
+) {
+    let tn = norm(&text);
+    // 最多盯 30 分钟；webhook 过期就停
+    for _ in 0..360 {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        if expiry_ms > 0 && crate::state::now_secs() * 1000 >= expiry_ms {
+            return;
+        }
+        let Some((hub_pending, term_q)) = read_queue(&state, &username, &task_id).await else {
+            // 会话消失（结束）：别再盯
+            return;
+        };
+        let still =
+            term_q.iter().any(|t| norm(t) == tn) || hub_pending.iter().any(|t| norm(t) == tn);
+        if !still {
+            let _ = push_webhook(
+                &webhook,
+                &format!("▶️ 排队任务已开始执行（会话 {idx}）：{text}"),
+            )
+            .await;
+            return;
+        }
+    }
+}
+
+/// 「排队 [N]」：查看排队中的任务。给了 N 看该会话；没给就汇总所有有排队的会话。
+async fn list_queued(state: &SharedState, username: &str, arg: &str) -> String {
+    let arg = arg.trim();
+    if !arg.is_empty() {
+        let task_id = match resolve_task(state, username, arg).await {
+            Ok(id) => id,
+            Err(e) => return e,
+        };
+        let Some((hub_pending, term_q)) = read_queue(state, username, &task_id).await else {
+            return "会话不存在。".to_string();
+        };
+        let mut list = term_q.clone();
+        list.extend(hub_pending);
+        if list.is_empty() {
+            return format!("会话 {arg} 当前没有排队中的任务。");
+        }
+        let mut lines = vec![format!("会话 {arg} 排队中（{} 条）：", list.len())];
+        for (n, t) in list.iter().enumerate() {
+            lines.push(format!("{}. {}", n + 1, t));
+        }
+        return lines.join("\n");
+    }
+    // 汇总：按「会话」号位遍历，列出各会话的排队
+    let tasks = sorted_active_tasks(state, username).await;
+    let mut out: Vec<String> = Vec::new();
+    for (t, no) in tasks.iter() {
+        if let Some((hub_pending, term_q)) = read_queue(state, username, &t.id).await {
+            let mut list = term_q.clone();
+            list.extend(hub_pending);
+            if !list.is_empty() {
+                let title = if t.title.is_empty() {
+                    t.provider_dsr.clone()
+                } else {
+                    t.title.clone()
+                };
+                let title = one_line(&title, 20);
+                out.push(format!("【{}. {}】{} 条：", no, title, list.len()));
+                for (n, x) in list.iter().enumerate() {
+                    out.push(format!("  {}. {}", n + 1, x));
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        "当前没有任何排队中的任务。".to_string()
+    } else {
+        format!("排队中的任务：\n{}", out.join("\n"))
+    }
+}
+
+/// 给会话排一条命令。`source` 标记下发来源（dingtalk / web / mcp），只用于历史记录的展示，
+/// 让你回看时知道「这条是我在手机上发的还是在网页发的」。
+/// 这条下发是不是「选择卡的作答」—— 会话此刻正等着选（`pending_select` 有货）时，
+/// 任何输入都会被终端的选项界面吃掉，那就是作答，而不是一条新任务。
+///
+/// 关系重大：客户端拿这个标志决定**要不要补提交回车**（见 client 里 `from_select`）。
+/// 单选按一个序号即落定并翻到下一题，多补的回车会落在下一题上、把它按默认高亮项答掉。
+/// 线上现场：三题的卡片只回了第 1 题的「1」，第 2、3 题被替人选了默认项，最后反倒没提交。
+/// 此前这里恒为 false —— 注释还写着「钉钉侧没有选择卡的作答入口」，可推送文案分明就是
+/// 「回复『发 N 序号』作答」，MCP 也有 answer_select，两条入口都汇到这个函数。
+fn answering_select(action: ControlAction, pending_select: Option<&serde_json::Value>) -> bool {
+    matches!(action, ControlAction::Input) && pending_select.is_some_and(|v| !v.is_null())
+}
+
+pub(crate) async fn queue_command(
     state: &SharedState,
     username: &str,
     task_id: &str,
     action: ControlAction,
     text: Option<String>,
+    source: &str,
 ) -> Result<(), String> {
     let task = {
         let tasks = state.tasks_for(username).await;
@@ -271,24 +2157,261 @@ async fn queue_command(
     if entry.last_report.elapsed().as_secs() >= crate::state::OFFLINE_AFTER_SECS {
         return Err("会话所属设备已离线。".into());
     }
-    entry.pending.push_back(ControlCmd {
+    // 会话正卡在选择卡上 ⇒ 这条输入就是作答，客户端据此**不补提交回车**
+    let is_answer = answering_select(action, task.pending_select.as_ref());
+    let mk = |action: ControlAction, text: Option<String>| ControlCmd {
         task_id: task_id.to_string(),
         pid: task.pid,
         action,
         text,
         id: Some(uuid::Uuid::new_v4().to_string()),
-    });
+        from_select: is_answer,
+    };
+    match (is_answer, task.pending_select.as_ref(), text.as_deref()) {
+        // 作答要按题型翻译成一串动作：多选的 Submit 不在选项列表里、多题答完还压着
+        // 一层 Review，只发数字是提交不掉的（详见 server::plan_select_answer）。
+        // 三条入口都汇到这里，所以翻译只在此处做一次。
+        (true, Some(card), Some(ans)) => {
+            for step in crate::server::plan_select_answer(card, ans) {
+                let cmd = match step {
+                    crate::server::SelectStep::Text(t) => mk(ControlAction::Input, Some(t)),
+                    crate::server::SelectStep::Keys(k) => mk(ControlAction::TermKey, Some(k)),
+                };
+                entry.pending.push_back(cmd);
+            }
+        }
+        _ => entry.pending.push_back(mk(action, text.clone())),
+    }
+    drop(machines); // 记历史要拿别的锁，先放掉
+
+    // 下发的任务进「远程交互历史」的 user 侧。钉钉 / 网页 / MCP 三个入口都汇到这里，
+    // 所以只需在此记一次；控制类指令（暂停/中断…）不入流，它们不是对话内容。
+    //
+    // 作答除外：孤零零一个「1」脱离问题本身毫无意义，网页端下发早就靠 fromSelect
+    // 把它挡在历史外了，钉钉与 MCP 这两条却一直照记不误 —— 同一件事该是同一个口径。
+    if matches!(action, ControlAction::Input) && !is_answer {
+        if let Some(content) = text {
+            let slot =
+                crate::slots::slot_of(state, username, &crate::slots::anchor_of(&task)).await;
+            crate::history::append(
+                state,
+                crate::history::HistoryEntry {
+                    id: crate::history::new_id(),
+                    owner: username.to_string(),
+                    session_id: task_id.to_string(),
+                    role: "user".into(),
+                    content,
+                    at: crate::state::now_secs(),
+                    source: source.to_string(),
+                    slot,
+                    hostname: task.hostname.clone(),
+                    project: task.project_name.clone(),
+                    title: task.title.clone(),
+                    provider: task.provider_dsr.clone(),
+                },
+            )
+            .await;
+        }
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::split_cmd;
+    #[test]
+    fn one_line_flattens_multiline_titles() {
+        use super::one_line;
+        // 就是「二级弹」那条：多行提示词嵌进列表行，换行必须被压掉
+        assert_eq!(
+            one_line(
+                "报文大小和报文分析的请求体响应体切换删除\n二级弹要看清楚",
+                24
+            ),
+            "报文大小和报文分析的请求体响应体切换删除 二级弹" // 20 字 + 空格 + 3 字 = 24
+        );
+        // 先压平再截断：额度不该被换行/多余空白吃掉
+        assert_eq!(one_line("甲\n\n  乙   丙", 5), "甲 乙 丙");
+        assert_eq!(one_line("abcdefgh", 3), "abc");
+    }
+
+    /// 纯图片那一条也要进窗口。
+    ///
+    /// 钉钉转发过来的「图片→文字→图片→文字」是几次完全独立的回调。图片若不刷新窗口，
+    /// 就只是白白占掉时间 —— 两条文字被它隔开超过一个窗口，前一条自己到期先发了，
+    /// 一次转发被拆成好几条任务下发。
+    #[test]
+    fn lone_file_still_extends_the_window() {
+        use super::should_batch;
+        assert!(should_batch(true, ""), "纯图片要把窗口往后推");
+        assert!(should_batch(true, "   "), "只有空白也算没带正文");
+        // 没文件又没正文：没什么可攒的
+        assert!(!should_batch(false, ""));
+        // 正文照常攒，带不带文件都一样
+        assert!(should_batch(false, "把这个改一下"));
+        assert!(should_batch(true, "把这个改一下"));
+        // 指令不攒：语义依赖单独成条。带着文件发指令也一样立即执行，文件继续挂着
+        assert!(!should_batch(false, "暂停"));
+        assert!(!should_batch(true, "暂停"));
+        assert!(!should_batch(true, "@2 撤回"));
+        // 「@N 正文」解析出来是「发」，那是内容，要攒
+        assert!(should_batch(true, "@2 处理这个文件"));
+    }
+
+    use super::{
+        answering_select, is_immediate, parse_at_commands, split_cmd, split_ext, stamped_name,
+        unique_against,
+    };
+
+    /// 判错的代价是「替人把后面几道题答了」：正等着选时的输入一律算作答，
+    /// 没在等选（含 hook 写回的 null）的照常按新任务下发。
+    #[test]
+    fn select_answer_is_recognized() {
+        use am_core::model::ControlAction as A;
+        let card = serde_json::json!({ "questions": [{ "question": "去掉哪个?" }] });
+        assert!(answering_select(A::Input, Some(&card)));
+        // 作答完 hook 会把 pending_select 整份写成 null —— 那时的输入是新任务，要补回车
+        assert!(!answering_select(A::Input, Some(&serde_json::Value::Null)));
+        assert!(!answering_select(A::Input, None));
+        // 控制类命令与作答无关（按键注入自带语义，别被这个标志带偏）
+        assert!(!answering_select(A::TermKey, Some(&card)));
+        assert!(!answering_select(A::Interrupt, Some(&card)));
+    }
 
     #[test]
     fn split_command() {
         assert_eq!(split_cmd("会话"), ("会话".into(), "".into()));
         assert_eq!(split_cmd("暂停 3"), ("暂停".into(), "3".into()));
-        assert_eq!(split_cmd("发 2 继续执行"), ("发".into(), "2 继续执行".into()));
+        assert_eq!(
+            split_cmd("发 2 继续执行"),
+            ("发".into(), "2 继续执行".into())
+        );
+    }
+
+    #[test]
+    fn at_commands() {
+        let c = |s: &str| parse_at_commands(s);
+        // @N + 内容 → 发 N 内容
+        assert_eq!(
+            c("@2 重启服务"),
+            Some(vec![("发".into(), "2 重启服务".into())])
+        );
+        assert_eq!(
+            c("@2重启服务"),
+            Some(vec![("发".into(), "2 重启服务".into())])
+        );
+        // @N + 会话级指令（含排队）→ 指令 N
+        assert_eq!(c("@2 暂停"), Some(vec![("暂停".into(), "2".into())]));
+        assert_eq!(c("@2 排队"), Some(vec![("排队".into(), "2".into())]));
+        assert_eq!(c("@2 撤回"), Some(vec![("撤回".into(), "2".into())]));
+        // 多目标：同一内容/指令下发到多个会话
+        assert_eq!(
+            c("@1 @2 重启服务"),
+            Some(vec![
+                ("发".into(), "1 重启服务".into()),
+                ("发".into(), "2 重启服务".into())
+            ])
+        );
+        assert_eq!(
+            c("@1 @2 暂停"),
+            Some(vec![
+                ("暂停".into(), "1".into()),
+                ("暂停".into(), "2".into())
+            ])
+        );
+        // 指令词开头、但后面还有正文 → 是任务内容，不是指令（实测踩过：「@3 继续…」
+        // 被当成「恢复 3」，任务整条丢失）
+        assert_eq!(
+            c("@3 继续修复登录 bug"),
+            Some(vec![("发".into(), "3 继续修复登录 bug".into())])
+        );
+        assert_eq!(
+            c("@3 暂停一下再说"),
+            Some(vec![("发".into(), "3 暂停一下再说".into())])
+        );
+        assert_eq!(
+            c("@3 停止服务后重启"),
+            Some(vec![("发".into(), "3 停止服务后重启".into())])
+        );
+        // 「继续」已彻底不作会话指令：单独发也当内容 —— 它几乎总是「让 claude 接着干活」，
+        // 真要解除暂停有「恢复」。其余指令词单独出现时仍是指令（见上面的 @2 暂停/排队/撤回）。
+        assert_eq!(c("@3 继续"), Some(vec![("发".into(), "3 继续".into())]));
+        // 去重目标
+        assert_eq!(c("@1 @1 x"), Some(vec![("发".into(), "1 x".into())]));
+        // 非 @ → None（走常规分发）；无效目标 → Some(空)（提示用法）
+        assert_eq!(c("发 2 继续"), None);
+        assert_eq!(c("@abc"), Some(vec![]));
+        // 单发「@N」= 切到 N 号继续对话；多目标时没有「当前会话」可言，退回用法提示
+        assert_eq!(c("@2"), Some(vec![("锁定".into(), "2".into())]));
+        assert_eq!(c("@1 @2"), Some(vec![]));
+    }
+
+    /// 撞名避让必须与客户端 unique_target 用同一套规则：不一致的话，这里算出的名字客户端
+    /// 不认、落盘时它会自己再改一次，拼进任务的路径又对不上了（等于没修）。
+    #[test]
+    fn unique_against_avoids_spaces() {
+        let taken = vec!["a.png".to_string()];
+        assert_eq!(unique_against("a.png", &taken), "a-2.png");
+        assert_eq!(unique_against("b.png", &taken), "b.png", "不撞名就原样用");
+        // 连着撞就逐个后退（钉钉的图片一律叫「图片.jpg」，这是常态）
+        let taken2 = vec!["图片.jpg".to_string(), "图片-2.jpg".to_string()];
+        assert_eq!(unique_against("图片.jpg", &taken2), "图片-3.jpg");
+        // 客户端兜底改出来的括号名也在目录里，一样要避开
+        let taken3 = vec!["图片1.jpg".to_string(), "图片1 (1).jpg".to_string()];
+        assert_eq!(unique_against("图片1.jpg", &taken3), "图片1-2.jpg");
+        // 多重扩展名按**最后一个**点切，同 Rust 的 file_stem/extension
+        let taken4 = vec!["a.tar.gz".to_string()];
+        assert_eq!(unique_against("a.tar.gz", &taken4), "a.tar-2.gz");
+        // 隐藏文件整体当主名：点在首位不是扩展名分隔符
+        let taken5 = vec![".gitignore".to_string()];
+        assert_eq!(unique_against(".gitignore", &taken5), ".gitignore-2");
+        // 名字里不能出现空格 —— 拼进任务正文后 agent 靠空格分路径
+        assert!(!unique_against("图片.jpg", &taken2).contains(' '));
+    }
+
+    /// 问不到目录清单时的保底名：必须变过名，且扩展名留在末尾（agent 要按扩展名认图）
+    #[test]
+    fn stamped_name_is_unique_and_keeps_ext() {
+        let a = stamped_name("图片1.jpg");
+        assert!(
+            a.starts_with("图片1-") && a.ends_with(".jpg"),
+            "保底名形态不对：{a}"
+        );
+        assert_ne!(a, "图片1.jpg", "保底名必须与原名不同，否则照样指向旧文件");
+        assert_eq!(split_ext(&stamped_name("a.tar.gz")).1, ".gz");
+        // 没有扩展名的照样能加
+        assert!(stamped_name("Makefile").starts_with("Makefile-"));
+        // 同一批里两个同名文件：保底名一样，再靠 unique_against 岔开
+        let used = vec![a.clone()];
+        assert_eq!(
+            unique_against(&a, &used),
+            format!("{}-2.jpg", &a[..a.len() - 4])
+        );
+        // 保底名同样不能带空格
+        assert!(!a.contains(' '));
+    }
+
+    /// 钉钉合并窗口的豁免判断：指令必须单独成条立即执行，内容才攒着合并。
+    /// 判错的代价不对称 —— 指令被误判成内容，会原样发进终端当正文。
+    #[test]
+    fn immediate_vs_batched() {
+        // —— 立即执行：指令 ——
+        assert!(is_immediate("会话"));
+        assert!(is_immediate("暂停 3"));
+        assert!(is_immediate("发 2 继续执行"));
+        assert!(is_immediate("清空文件"));
+        assert!(is_immediate("@2 暂停")); // 会话级指令
+        assert!(is_immediate("@2")); // = 锁定 2 号
+        assert!(is_immediate("@abc")); // @ 用法错误 → 立即回提示
+        assert!(is_immediate("确认")); // sticky 冷却确认，攒了就等不到了
+        assert!(is_immediate("OK"));
+
+        // —— 进合并窗口：内容 ——
+        assert!(!is_immediate("@2 帮我看这段日志")); // @N + 正文 = 发内容
+        assert!(!is_immediate("重启一下服务"));
+        assert!(!is_immediate("[转发] 昨天那个报错又出现了"));
+        // 「继续」不是指令（见 at_commands），自然也该参与合并
+        assert!(!is_immediate("@3 继续"));
+        // 指令词开头但后面还有正文 → 是内容
+        assert!(!is_immediate("@3 暂停一下再说"));
     }
 }

@@ -1,52 +1,31 @@
 import "./App.scss";
 
-import { Avatar, Layout, Popover, Segmented, Space } from "antd";
-import {
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
-  UserOutlined,
-} from "@ant-design/icons";
+import { Layout } from "antd";
 import { Outlet, useNavigate } from "react-router-dom";
 import React, { useEffect, useState } from "react";
 import { getUserInfo } from "./utils/auth";
 
-import Breadcrumb from "./layout/Breadcrumb";
-import { Button, Icon } from "@hsu-react/ui";
-import Menu, { MenuType } from "./layout/Menu";
+// 布局来自组件库。这几个组件此前是本项目的 src/layout/，2.0 起已收进 @hsu-react/ui，
+// 本项目不再自己维护一份。走子路径引入：它们依赖 react-router / react-intl，而这两个
+// 在组件库里是**可选** peerDependency，所以刻意没从包根导出。
+import HsuLayout from "@hsu-react/ui/es/layout";
+import type { AccountAction, MenuType } from "@hsu-react/ui/es/layout";
 import PwdChange from "./pages/PwdChange";
 import RouterService from "./router/RouterService";
 import { ADMIN_HOME } from "./router/router.config";
 import { clearAllCookie } from "./services/Axios";
 import { observer } from "mobx-react-lite";
 import wsCache from "./utils/wsCache";
-import NavTabBar from "./layout/NavTabBar";
 import LoginStore from "./pages/Login/LoginStore";
-import ThemeStore from "./layout/Theme/ThemeStore";
-import classNames from "classnames";
-import Theme from "./layout/Theme";
-import I18nStore from "./layout/I18n/I18nStore";
-import usePermissions from "@/hooks/usePermissions";
+import { usePermissions } from "@hsu-react/ui";
 
-const { Header, Sider, Content } = Layout;
+const { Sider, Content } = Layout;
 
 const App: React.FC = observer(() => {
   const { logout } = LoginStore;
   const { router } = RouterService;
 
-  const { layout, headerTheme, appearance, setAppearance } = ThemeStore;
-  const { locale, setLocale } = I18nStore;
-
-  // CF 做法：外观 + 语言放进用户下拉，跟随当前语言显示双语标签
-  const isEn = locale === "en-US";
-  const appearanceOptions = [
-    { label: isEn ? "Light" : "浅色", value: "light" },
-    { label: isEn ? "Dark" : "深色", value: "dark" },
-    { label: isEn ? "System" : "跟随", value: "system" },
-  ];
-  const languageOptions = [
-    { label: "中文", value: "zh-CN" },
-    { label: "English", value: "en-US" },
-  ];
+  const { layout, headerTheme } = HsuLayout.ThemeStore;
 
   // 导航(顶栏/侧边)明暗：亮色 -> light，暗色/主题色 -> dark
   const navTheme: "light" | "dark" =
@@ -81,7 +60,7 @@ const App: React.FC = observer(() => {
     navigate(`/login`);
   };
 
-  const menu = [
+  const menu = ([
     {
       title: "修改密码",
       icon: "fa-regular:edit",
@@ -93,116 +72,26 @@ const App: React.FC = observer(() => {
       icon: "ep:switch-button",
       onclick: () => logout(quit),
     },
-  ].filter((item) => checkPermission(item.hasPermi));
+  ] as (AccountAction & { hasPermi?: string[] })[]).filter((item) =>
+    checkPermission(item.hasPermi)
+  );
 
   return (
-    <Theme>
+    <HsuLayout.Theme>
       <Layout id="App" className={headerTheme}>
-        <Header className={classNames("header", headerTheme)}>
-          <div className="header-left">
-            {/* 标题 */}
-            {["left", "mixed"].includes(layout) ? (
-              <div
-                className={classNames("title", { titleCollapsed: collapsed })}
-              >
-                {collapsed ? Config.smallTitle : Config.title}
-              </div>
-            ) : (
-              <div className={classNames("title", "titleTop")}>
-                {Config.title}
-              </div>
-            )}
-
-            {/* 折叠按钮 */}
-            {["left", "mixed"].includes(layout) && (
-              <Button
-                className="collapsed"
-                type="text"
-                icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-                onClick={() => setCollapsed(!collapsed)}
-                style={{
-                  fontSize: "16px",
-                  width: 64,
-                  height: 64,
-                }}
-              />
-            )}
-
-            {/* 面包屑 */}
-            {["left"].includes(layout) && (
-              <Breadcrumb router={router} className={"breadcrumb"} />
-            )}
-
-            {/* 顶部菜单 */}
-            {["top", "mixed"].includes(layout) && (
-              <Menu
-                router={router}
-                mode="horizontal"
-                theme={navTheme}
-                onlyLvOneMenu={layout === "mixed"}
-                getCurrChildItems={setChildrenItems}
-              />
-            )}
-          </div>
-          <div className="header-right">
-            {/* 用户信息（外观 + 语言 + 账号操作，CF 做法集中在此下拉） */}
-            <Popover
-              overlayClassName="userPopover"
-              placement="bottomRight"
-              content={
-                <div className="userMenuPanel">
-                  <div className="settingRow">
-                    <span className="settingLabel">
-                      {isEn ? "Appearance" : "外观"}
-                    </span>
-                    <Segmented
-                      size="small"
-                      value={appearance}
-                      options={appearanceOptions}
-                      onChange={(v) => setAppearance(v as typeof appearance)}
-                    />
-                  </div>
-                  <div className="settingRow">
-                    <span className="settingLabel">
-                      {isEn ? "Language" : "语言"}
-                    </span>
-                    <Segmented
-                      size="small"
-                      value={locale}
-                      options={languageOptions}
-                      onChange={(v) => setLocale(v as string)}
-                    />
-                  </div>
-
-                  <div className="settingDivider" />
-
-                  <div className="menu">
-                    {menu?.map((item, index) => (
-                      <Button
-                        key={index}
-                        icon={<Icon icon={item.icon} />}
-                        onClick={item.onclick}
-                        type="text"
-                      >
-                        {item.title}
-                      </Button>
-                    ))}
-                  </div>
-                </div>
-              }
-            >
-              <Space className="user">
-                <Avatar
-                  style={{ backgroundColor: "#1677ff", verticalAlign: "middle" }}
-                  icon={nickname ? undefined : <UserOutlined />}
-                >
-                  {nickname?.[0]?.toUpperCase()}
-                </Avatar>
-                {nickname}
-              </Space>
-            </Popover>
-          </div>
-        </Header>
+        {/* 站点标题与用户信息原本由本项目的 Header 自己去读全局 Config 与 @/utils/auth，
+            组件收进库之后不再认识这两样，改由这里注入。
+            外观 / 语言 / 账号操作那套下拉也一并由 Header 提供，不用再自绘 */}
+        <HsuLayout.Header
+          router={router}
+          collapsed={collapsed}
+          onToggleCollapsed={() => setCollapsed(!collapsed)}
+          onChildItems={setChildrenItems}
+          menu={menu}
+          user={{ nickname }}
+          title={Config.title}
+          smallTitle={Config.smallTitle}
+        />
         <Layout className="body">
           {/* 左侧菜单 */}
           {["left", "mixed"].includes(layout) && (
@@ -213,7 +102,7 @@ const App: React.FC = observer(() => {
               width={230}
               theme={navTheme}
             >
-              <Menu
+              <HsuLayout.Menu
                 router={router}
                 collapsed={collapsed}
                 theme={navTheme}
@@ -224,7 +113,7 @@ const App: React.FC = observer(() => {
 
           <Layout className="content">
             {/* 内容标签栏 */}
-            <NavTabBar
+            <HsuLayout.NavTabBar
               router={router}
               affixRouter={[ADMIN_HOME]}
               basePath={ADMIN_HOME}
@@ -243,7 +132,7 @@ const App: React.FC = observer(() => {
         onCancel={() => setPwdOpen(false)}
         onOk={() => logout(quit)}
       />
-    </Theme>
+    </HsuLayout.Theme>
   );
 });
 

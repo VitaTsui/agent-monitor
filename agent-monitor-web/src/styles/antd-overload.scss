@@ -35,7 +35,7 @@
 
   // 遮罩：压暗 + 轻微模糊（原生 sheet 质感）
   .ant-modal-root .ant-modal-mask {
-    background: rgba(20, 30, 33, 0.42);
+    background: color-mix(in srgb, var(--foreground) 42%, transparent);
     backdrop-filter: blur(3px);
     -webkit-backdrop-filter: blur(3px);
   }
@@ -46,39 +46,23 @@
     margin-bottom: 14px;
 
     .ant-modal-title {
-      font-size: 17px;
+      font-size: var(--text-lg);
       font-weight: 600;
     }
   }
 
-  // 关闭钮：iOS 风格灰底圆钮，右上角，加大触控区。
-  // content 是 flex 列，后面的 body 会形成层叠上下文盖住绝对定位的
-  // close —— 必须给 z-index 抬到 body 之上，否则真实触摸打在 body 上、
-  // ✕ 点不动（编程 click 能过是因绕过了命中检测）。
+  // 移动端不显示右上角关闭钮，改为「下滑收起」（见 utils/sheetSwipe）。仍保留在 DOM 里，
+  // 供下滑关闭时编程 click 触发 onCancel。display:none 不影响 .click()。
   .ant-modal-root .ant-modal .ant-modal-close {
-    top: 12px;
-    inset-inline-end: 12px;
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    background: rgba(36, 61, 66, 0.08);
-    z-index: 20;
-
-    .ant-modal-close-x {
-      width: 40px;
-      height: 40px;
-      line-height: 40px;
-      font-size: 14px;
-      color: rgba(36, 61, 66, 0.65);
-    }
+    display: none;
   }
 
   // 弹窗内控件：44px 触控高度 + 大圆角（Apple HIG）
   .ant-modal-root .ant-modal .ant-btn {
     min-height: 42px;
     padding-inline: 18px;
-    border-radius: 12px;
-    font-size: 15px;
+    border-radius: var(--radius-lg);
+    font-size: var(--text-md);
   }
 
   .ant-modal-root .ant-modal .ant-input,
@@ -86,11 +70,11 @@
   .ant-modal-root .ant-modal input[type="password"],
   .ant-modal-root .ant-modal .hsu-input input {
     min-height: 42px;
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
     font-size: 15.5px;
   }
 
-  .ant-modal-root .ant-modal .ant-modal-content {
+  .ant-modal-root .ant-modal .ant-modal-container {
     border-radius: 18px 18px 0 0;
     max-height: 92dvh;
     min-height: 40dvh;
@@ -108,7 +92,7 @@
       width: 38px;
       height: 4.5px;
       border-radius: 3px;
-      background: rgba(36, 61, 66, 0.18);
+      background: color-mix(in srgb, var(--foreground) 18%, transparent);
       margin: 2px auto 10px;
     }
   }

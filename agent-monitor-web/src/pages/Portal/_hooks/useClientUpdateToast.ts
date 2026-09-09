@@ -1,6 +1,8 @@
 import { useEffect } from "react";
 
-import { Button, notification } from "antd";
+import { notification } from "@hsu-react/ui";
+
+import { Button } from "@hsu-react/ui";
 import React from "react";
 
 import { inDesktopClient } from "@/utils/clientAuth";
@@ -48,7 +50,7 @@ export function useClientUpdateToast() {
           toastedVersion = s.latest;
           notification.open({
             key,
-            message: `新版本 v${s.latest} 可用`,
+            title: `新版本 v${s.latest} 可用`,
             description: `当前版本 v${s.current}，更新将自动完成并重启客户端。`,
             placement: "bottomRight",
             duration: 0,
@@ -70,7 +72,9 @@ export function useClientUpdateToast() {
     };
 
     check();
-    const timer = window.setInterval(check, 60_000);
+    // 10s 轮询：与系统通知（update-watcher 3s）尽量同步，避免 GUI 提示晚一大截。
+    // update_status 只是读内存里的 hub_latest_version，开销可忽略。
+    const timer = window.setInterval(check, 10_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);

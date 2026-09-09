@@ -1,5 +1,5 @@
 import { ResType } from "@/services/Axios";
-import { message, notification } from "antd";
+import { message, notification } from "@hsu-react/ui";
 import { computed, makeObservable, observable } from "mobx";
 
 /**
@@ -91,14 +91,14 @@ class FormModalStore<F = Record<string, unknown>> {
     if (res?.code === 0) {
       if (typeof res?.data === "string") {
         notification.success({
-          message: res.data,
+          title: res.data,
         });
       } else {
         message.success(res?.msg ?? "成功");
       }
     } else {
       notification.error({
-        message: res?.msg ?? "失败",
+        title: res?.msg ?? "失败",
       });
     }
   };

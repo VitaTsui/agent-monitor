@@ -1,0 +1,122 @@
+// =============================================================================
+// 设计令牌：shadcn/ui 的语义层 + deepseek-harness 的密度
+//
+// ## 为什么中性色阶几乎全是 var(--vita-*)
+//
+// 组件库 @hsu-react/ui 的默认中性色阶**本身就是 zinc**（shadcn 的默认基色）：
+// #fafafa / #f4f4f5 / #e4e4e7 / #a1a1aa / #71717a / #27272a / #18181b / #09090b
+// 正是 zinc-50/100/200/400/500/800/900/950。所以这里不再另抄一份色值，直接指过去——
+// 一处改动两边同步，也不会出现「组件库是冷灰、页面是别的灰」这种半吊子状态。
+//
+// 本项目此前把这一层盖成了一套青灰（#243d42 / #7c9096 / #9aa7ad …），那是 shadcn 之外
+// 的第三套色，去掉。
+//
+// 主色也完整照搬 shadcn 默认：单色墨黑（浅色 zinc-900 / 暗色 zinc-50），不引入色相。
+// 于是整站只剩两类颜色 —— 中性灰阶，加上语义色（destructive / success / warning）。
+// 唯一的例外是终端面板那组 --term-*，见下面的说明。
+//
+// 产品原来的品牌青（#0f9bad）不再出现在 UI 里，只留在 logo 等图形资产内。
+//
+// ## 命名为什么用 shadcn 的原名
+//
+// --background / --foreground / --card / --muted / --border 这套名字是 shadcn 的既定
+// 词汇表，照抄能让「这块该用哪个变量」有唯一答案；自造一套只会多一层翻译。
+// =============================================================================
+
+:root {
+  // ---- 面 ----
+  --background: var(--vita-background);
+  --foreground: var(--vita-foreground);
+  --card: var(--vita-surface);
+  --card-foreground: var(--vita-foreground);
+  --popover: var(--vita-surface);
+  --popover-foreground: var(--vita-foreground);
+
+  // ---- 主色：完整照搬 shadcn 默认（单色墨黑，不是品牌青）----
+  // shadcn 默认主题的 primary 就是中性阶的最深一档（zinc-900），配近白的前景。
+  // 它不引入新色相——强调靠明度对比而不是彩度，所以整站只有中性灰 + 语义色两类颜色。
+  // ramp 沿 zinc 阶往下走，悬浮/按下各深一档。
+  --primary: #18181b; // zinc-900
+  --primary-hover: #27272a; // zinc-800
+  --primary-active: #3f3f46; // zinc-700
+  --primary-foreground: #fafafa; // zinc-50
+  --primary-subtle: #f4f4f5; // 淡染底（zinc-100）：选中行、标签、提示条
+  --primary-subtle-foreground: #18181b;
+
+  // ---- 次级 / 弱化 ----
+  --secondary: var(--vita-muted);
+  --secondary-foreground: var(--vita-foreground);
+  --muted: var(--vita-muted);
+  --muted-foreground: var(--vita-muted-foreground);
+  --subtle-foreground: var(--vita-subtle-foreground);
+  --accent: var(--vita-hover);
+  --accent-foreground: var(--vita-foreground);
+
+  // ---- 语义色（取 shadcn 的 destructive，其余对齐 tailwind 同级）----
+  --destructive: #ef4444;
+  --destructive-foreground: #fafafa;
+  --destructive-subtle: #fef2f2;
+  --success: var(--vita-success);
+  --success-subtle: #f0fdf4;
+  --warning: var(--vita-warning);
+  --warning-subtle: #fffbeb;
+
+  // ---- 描边 / 聚焦 ----
+  --border: var(--vita-border);
+  --border-weak: var(--vita-border-weak);
+  --input: var(--vita-border);
+  --ring: var(--vita-primary);
+
+  // ---- 圆角：deepseek-harness 的档位（6 / 8 / 12，胶囊 999）----
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --radius-full: 999px;
+
+  // ---- 字号：以 12 / 13 / 14 为主，比 antd 默认更紧 ----
+  --text-xs: 11px; // 元信息、角标
+  --text-sm: 12px; // 次级说明、表格密集态
+  --text-base: 13px; // 正文默认
+  --text-md: 14px; // 强调正文、表单控件
+  --text-lg: 16px; // 小标题
+
+  // ---- 终端面板 ----
+  // 单开一组，**不跟随主题**：它模拟的是终端，浅色模式下也该是深底，
+  // 硬塞进中性阶会让浅色下变成白底终端，那不是这块 UI 的语义。
+  // 前景是纯白加透明度（终端惯例），所以只给一支 --term-fg，深浅由 color-mix 调。
+  --term-bg: #102a30;
+  --term-fg: #ffffff;
+  --term-text: #ddedef;
+  --term-dim: #84979c;
+  --term-accent: #3cc4d6; // 高亮/链接
+  --term-amber: #f0c674; // 警告、待输入
+  --term-green: #67a579; // 成功、已完成
+
+  // ---- 间距：4px 网格 ----
+  --space-1: 4px;
+  --space-2: 6px;
+  --space-3: 8px;
+  --space-4: 12px;
+  --space-5: 16px;
+  --space-6: 24px;
+}
+
+// 暗色只覆盖会变的那些。--card / --popover 在 shadcn 暗色下比 background 亮一档，
+// 组件库的 surface(#18181b) 相对 background(#09090b) 正好是这个关系，继续指过去即可。
+html[data-theme="dark"],
+html[data-prefers-color="dark"],
+html[data-prefers-color-scheme="dark"] {
+  // shadcn 暗色主题把 primary 翻到中性阶的最浅一档，前景反过来取最深
+  --primary: #fafafa; // zinc-50
+  --primary-hover: #e4e4e7; // zinc-200
+  --primary-active: #d4d4d8; // zinc-300
+  --primary-foreground: #18181b; // zinc-900
+  --primary-subtle: #27272a; // zinc-800
+  --primary-subtle-foreground: #fafafa;
+
+  --destructive: #f87171;
+  --destructive-foreground: #18181b;
+  --destructive-subtle: rgba(248, 113, 113, 0.16);
+  --success-subtle: rgba(34, 197, 94, 0.16);
+  --warning-subtle: rgba(245, 158, 11, 0.16);
+}

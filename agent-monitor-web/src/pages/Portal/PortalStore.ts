@@ -1,6 +1,7 @@
 import {
   getQueuedInputs,
   recallPortalInput,
+  termKeyTask,
   PortalControlAction,
   PortalDevice,
   PortalMessage,
@@ -15,8 +16,11 @@ import {
   untrustPortalDevice,
 } from "@/services/apis/portal";
 
+import { isSlashCommand } from "./_utils/slashCommand";
+import { isStateSnapshot } from "./_utils/sessionState";
+
 import { makeAutoObservable } from "mobx";
-import { message as antdMessage } from "antd";
+import { message as antdMessage } from "@hsu-react/ui";
 import { getAccessToken } from "@/utils/auth";
 
 /** 拆分视图最多同时打开的会话数 */
@@ -61,16 +65,41 @@ const MAX_MESSAGES_PER_TASK = 500;
  */
 const EMPTY_MESSAGES: PortalMessage[] = [];
 
+/** 同 EMPTY_MESSAGES：无队列时统一返回这一个空数组，别每次新建 */
+const EMPTY_HUB_QUEUED: { cmdId: string; text: string }[] = [];
+
 class PortalStore {
   private _tasks: PortalTaskData[] = [];
   private _devices: PortalDevice[] = [];
   /** 顶部选中的设备 */
   private _selectedMachineId = "";
-  /** 拆分视图中打开的会话（有序） */
+  /** 拆分视图中打开的会话（有序，全局跨设备） */
   private _openIds: string[] = [];
+  /**
+   * 「放大」模式下占据主区的那个会话。为空＝普通网格模式。
+   *
+   * 会话多了以后网格里每格都不够看，尤其在看某一个的长输出时。放大模式把它撑满主区，
+   * 其余缩成右侧一列只读卡片 —— 仍能瞥见它们的动静，又不抢地方。
+   */
+  private _focusedId = "";
   private _messagesById: Record<string, PortalMessage[]> = {};
+  /**
+   * hub 队列里待下发的输入（会话 id → 条目）。
+   *
+   * 这是**跨端可见**的那一份：本地回显只活在发起方自己的浏览器里，别的端无从知道。
+   * 手机上发一条任务，桌面客户端得靠这份数据才看得见「有条任务正排着队」，
+   * 而不是干等到终端执行完、真实消息回来才突然冒出来。
+   */
+  private _hubQueuedById: Record<string, { cmdId: string; text: string }[]> = {};
   private _loadingIds: string[] = [];
   private _keyword = "";
+  /**
+   * 撤回后把原文回填给对应会话的对话框：Composer 用 reaction 监听，命中自己的
+   * taskId 就把 text 填进输入框再消费掉。带 nonce 是为了「撤回同一段文本」也能
+   * 重新触发（否则相同对象引用不变、reaction 不响应）。
+   */
+  composerRefill: { taskId: string; text: string; nonce: number } | null = null;
+  private _refillNonce = 0;
 
   constructor() {
     // 连接管理字段是命令式状态（WS 句柄、定时器句柄、世代号、关闭标志），
@@ -147,7 +176,9 @@ class PortalStore {
   };
 
   get selectedMachineId() {
-    // 未手动选择或所选设备已消失时：客户端窗口优先回退到本机，其次第一个设备
+    // 选中优先级：手动选择 > 本机（仅客户端窗口注入了本机 id 时）。
+    // 非本机端（浏览器/远程）进来不自动选任何设备 —— 展示设备列表让用户自己挑，
+    // 不再回退到「第一个设备」。
     const list = this.deviceList;
     if (this._selectedMachineId && list.some((d) => d.machineId === this._selectedMachineId)) {
       return this._selectedMachineId;
@@ -155,21 +186,17 @@ class PortalStore {
     if (this._localMachineId && list.some((d) => d.machineId === this._localMachineId)) {
       return this._localMachineId;
     }
-    return list[0]?.machineId ?? "";
+    return "";
   }
 
   public selectMachine = (id: string) => {
     if (id === this.selectedMachineId) {
       return;
     }
+    // 切设备只改左侧列表的筛选，不动已打开的会话：打开的会话是全局的（可跨多设备），
+    // 配合拆分可同时查看多设备的多个会话；也不默认选中任何会话。各会话属于哪台设备由
+    // 内容区标题下方的设备名标识（见 ChatPane）。
     this._selectedMachineId = id;
-    // 切换设备：右侧重置 —— 关掉原设备的格子，落到新设备的首个会话（没有则空态）
-    const first = this._tasks.find((t) => t.machineId === id);
-    this._openIds = first?.id ? [first.id] : [];
-    this.dropMessageCache();
-    if (first?.id) {
-      this.fetchMessages(first.id, true);
-    }
   };
 
   /**
@@ -180,14 +207,30 @@ class PortalStore {
   get selectedGroups(): TermGroup[] {
     const mid = this.selectedMachineId;
     const list = this.filtered.filter(
-      (t) => (t.machineId || t.hostname || "unknown") === mid
+      (t) =>
+        (t.machineId || t.hostname || "unknown") === mid &&
+        // 隐藏已结束会话，避免旧会话堆积；但只隐藏「很久没活动」的 ——
+        // 配对偶有误判时，最近活动过的会话即使被判 finished 也保留显示，
+        // 免得把正在用的终端会话误藏掉。
+        (t.status !== "finished" ||
+          Date.now() - (t.mtimeMs ?? 0) < 2 * 3600 * 1000)
     );
+    // 归一化目录键：与后端 encode_path（core/scanner）逐字对齐 —— 去尾随分隔符后，
+    // 把每个非字母数字字符一律替换成 '-'，再小写。同一目录下的空会话（占位任务用进程
+    // cwd）与真实会话（用 jsonl 里的 cwd），以及 cursor / 非 cursor 终端，其 cwd 字符串
+    // 常在分隔符、盘符冒号、标点等处有细微差异；只做「斜杠/大小写」归一挡不住，必须与
+    // 配对键同规则，才能保证「后端认作同一目录、就分进同一个分组」。
+    const normProj = (p: string | undefined) =>
+      (p ?? "")
+        .replace(/[/\\]+$/, "")
+        .replace(/[^a-zA-Z0-9]/g, "-")
+        .toLowerCase();
     const byProject = new Map<string, TermGroup>();
     for (const t of list) {
       // 组标题只显示文件夹名，不要完整路径
       const dirName = (t.project ?? "").split(/[\\/]/).filter(Boolean).pop() ?? "";
       const title = t.projectName || dirName || "未知项目";
-      const key = `proj-${t.project || title}`;
+      const key = `proj-${normProj(t.project) || title.toLowerCase()}`;
       const group = byProject.get(key);
       if (group) {
         group.tasks.push(t);
@@ -195,7 +238,23 @@ class PortalStore {
         byProject.set(key, { key, title, tasks: [t] });
       }
     }
-    return [...byProject.values()];
+    // 固定字母序：分组按标题、组内会话按标题(再退 id)稳定排序 —— 之前顺序跟随
+    // filtered 的活跃度，活跃会话一变就整列上下跳；改成字母序后位置钉死不乱跳。
+    const groups = [...byProject.values()];
+    const taskKey = (t: PortalTaskData) =>
+      t.title || t.prompt || t.projectName || t.id || "";
+    // 有真实内容（标题/提示词）= 真正在用的会话，排在「刚开还没输入的空占位」前
+    const hasContent = (t: PortalTaskData) => !!(t.title || t.prompt);
+    groups.sort((a, b) => a.title.localeCompare(b.title, "zh"));
+    for (const g of groups) {
+      g.tasks.sort((a, b) => {
+        const hc = Number(hasContent(b)) - Number(hasContent(a));
+        if (hc !== 0) return hc; // 有内容的在前
+        const c = taskKey(a).localeCompare(taskKey(b), "zh");
+        return c !== 0 ? c : (a.id ?? "").localeCompare(b.id ?? "");
+      });
+    }
+    return groups;
   }
 
   get devices() {
@@ -214,6 +273,23 @@ class PortalStore {
   get openIds() {
     return this._openIds;
   }
+
+  /**
+   * 当前放大的会话 id；为空表示普通网格。
+   *
+   * 取值时兜一道「它还开着吗」：会话被关掉或从列表消失时，若不校验就会卡在一个空的
+   * 放大态里 —— 主区什么都没有、右侧却列着其余几个，看着像坏了。
+   */
+  get focusedId() {
+    return this._focusedId && this._openIds.includes(this._focusedId)
+      ? this._focusedId
+      : "";
+  }
+
+  /** 放大某个会话；传空串或再点一次当前放大的那个＝还原成网格 */
+  public setFocused = (id: string) => {
+    this._focusedId = this._focusedId === id ? "" : id;
+  };
 
   get openTasks() {
     return this._openIds
@@ -376,21 +452,67 @@ class PortalStore {
    * 落地一份会话列表快照。WS 推送与兜底轮询共用，保证两条通路行为一致。
    */
   private applyTasks = (list: PortalTaskData[]) => {
+    // 同一个终端进程换新会话（新 id/jsonl）时，pid 会从旧会话挪到新会话 —— /clear、
+    // compact 如此，占位任务头一回落盘配上会话文件也如此。先记下旧表里各会话的 pid，
+    // 换表后据此把打开的格子跟过去：否则要么卡在已失联（无 pid）的旧会话上「下发失败、
+    // 终端没这个任务」，要么整个格子被清掉退回空态。
+    const prevPidById = new Map<string, number | null | undefined>();
+    for (const t of this._tasks) prevPidById.set(t.id ?? "", t.pid);
+
     // 内容没变就不换引用，否则整棵会话树白重渲染一遍。
     if (JSON.stringify(list) !== JSON.stringify(this._tasks)) {
       this._tasks = list;
     }
 
-    if (!this._openIds.length && this._tasks.length) {
-      // 默认选中限定在当前设备内，不跨设备乱跳
-      const first = this._tasks.find(
-        (t) => t.machineId === this.selectedMachineId,
-      );
-      if (first?.id) {
-        this.select(first.id);
+    // pid 跟随：打开的格子原地跟到继任会话，靠 pid 认人（前后是同一个 agent 进程）。
+    // 两种换 id 的场景：
+    //   ① /clear、compact —— 旧会话还留在列表里，只是把 pid 让给了新会话；
+    //   ② 进程占位任务（只扫到进程、还没配上 jsonl，id 形如 `<machine>-pid-<pid>`）收到
+    //      第一条输入后落了盘、配上真会话 —— 旧任务整条从列表消失，换成真会话 id。
+    // ② 不跟随的话，刚给空终端下发完任务，格子就被下面的存活清理踢掉、退回空态，
+    // 用户还得再点一次新冒出来的会话才能接着看。
+    const carried: Array<[string, string]> = [];
+    const followed = this._openIds.map((id) => {
+      const prevPid = prevPidById.get(id);
+      if (!prevPid) {
+        return id;
       }
-      return;
+      // 还持有原 pid 就没换人（会话仍在，绝大多数刷新走这条）
+      if (this._tasks.find((t) => t.id === id)?.pid) {
+        return id;
+      }
+      const succ = this._tasks.find((t) => t.pid === prevPid && t.id !== id);
+      if (!succ?.id) {
+        return id;
+      }
+      carried.push([id, succ.id]);
+      return succ.id;
+    });
+    // 本地回显（刚发出、终端还没同步回来的那条）跟着搬家，否则存活清理连它一起丢，
+    // 看着就像「刚发的消息凭空没了」。继任者已有内容时不覆盖，只清掉旧账。
+    //
+    // **只搬本地回显，绝不搬旧会话的历史**：继任会话是另一份 jsonl，内容由它自己
+    // 说了算。把旧账整份倒过去，配上 fetchMessages 的「累积合并（只增不减）」，
+    // 旧内容就再也退不掉了 —— 现象是下发 `/clear` 后终端已经清空，网页对话流却
+    // 还挂着清空前的全部内容，要切走再切回（走 dropMessageCache 清缓存）才正常。
+    if (carried.length) {
+      const next = { ...this._messagesById };
+      carried.forEach(([from, to]) => {
+        const echoes = (next[from] ?? []).filter((m) => m.local);
+        if (echoes.length && !next[to]?.length) {
+          next[to] = echoes;
+        }
+        delete next[from];
+      });
+      this._messagesById = next;
     }
+    // 跟随后可能与已打开的会话撞车，去重保序
+    const deduped = Array.from(new Set(followed));
+    if (deduped.join("\u0000") !== this._openIds.join("\u0000")) {
+      this._openIds = deduped;
+    }
+
+    // 仅做存活清理：已消失的会话从打开列表里剔除。
     const alive = this._openIds.filter((id) =>
       this._tasks.some((t) => t.id === id)
     );
@@ -398,7 +520,7 @@ class PortalStore {
       this._openIds = alive;
       this.dropMessageCache();
     }
-    // 对话内容不走推送（推送只含会话列表），仍按需拉取
+    // 对话内容不走推送（推送只含会话列表），仍按需拉取（跟随后的新会话首拉即有内容）
     this._openIds.forEach((id) => this.fetchMessages(id, false));
   };
 
@@ -523,18 +645,32 @@ class PortalStore {
     this.fetchMessages(id, true);
   };
 
-  /** 刷新「仍在排队」状态：排队中的回显被客户端取走后去掉排队标记 */
+  /** 会话在 hub 队列里待下发的输入（任何端发的都在这，供跨端显示） */
+  public hubQueuedOf = (id: string) => this._hubQueuedById[id] ?? EMPTY_HUB_QUEUED;
+
+  /**
+   * 拉取 hub 队列：既用来去掉本地回显的排队标记，也用来同步**别的端**发的任务。
+   *
+   * 这里原先有个短路 —— 本端没有 `local && queued` 的回显就直接返回、连请求都不发。
+   * 那样一来「手机发、电脑看」永远看不到：别的端发的任务在本端没有任何本地回显，
+   * 短路条件恒不成立。接口本来就把 text 一起返回了，白白丢掉。
+   */
   private refreshQueued = (id: string) => {
-    const msgs = this._messagesById[id] ?? [];
-    if (!msgs.some((m) => m.local && m.queued)) {
-      return;
-    }
     getQueuedInputs(id)
       .then((res) => {
         if (res.code !== 0) {
           return;
         }
-        const still = new Set((res.data?.list ?? []).map((x) => x.cmdId));
+        const list = (res.data?.list ?? []).map((x) => ({
+          cmdId: x.cmdId ?? "",
+          text: x.text ?? "",
+        }));
+        // 内容没变就不换引用，避免每轮轮询都触发重渲染
+        const prev = this._hubQueuedById[id] ?? EMPTY_HUB_QUEUED;
+        if (JSON.stringify(list) !== JSON.stringify(prev)) {
+          this._hubQueuedById = { ...this._hubQueuedById, [id]: list };
+        }
+        const still = new Set(list.map((x) => x.cmdId));
         const cur = this._messagesById[id] ?? [];
         if (cur.some((m) => m.local && m.queued && !still.has(m.cmdId ?? ""))) {
           this._messagesById = {
@@ -550,17 +686,99 @@ class PortalStore {
       .catch(() => void 0);
   };
 
-  /** 撤回还在排队的输入（已被终端接收则提示失败并去掉排队标记） */
-  public recallInput = (id: string, cmdId: string) => {
+  /** 撤回后把原文回填给对应会话的对话框（供 Composer 监听消费） */
+  public consumeComposerRefill = () => {
+    this.composerRefill = null;
+  };
+
+  /**
+   * 向终端注入按键：撤回终端原生排队（up，按 count 次）/ 插入排队到会话（esc）。
+   * 仅 iTerm2(mac) 与 Windows 控制台可干净注入；Terminal.app 会失败并提示手动按键。
+   */
+  public termKey = (id: string, key: "up" | "esc", count = 1) => {
+    termKeyTask(id, key, count)
+      .then((res) => {
+        if (res.code === 0) {
+          antdMessage.success(key === "up" ? "已撤回终端排队" : "已插入排队到会话");
+          // 撤回后把「已送达终端、尚未执行」的本地回显一并清掉。
+          //
+          // 不清的话排队条看着像「撤回了却还在」：那一条其实由两份数据接力显示 ——
+          // 排队条优先铺 queuedInputs，同内容的本地回显被去重挡在后面；撤回让
+          // queuedInputs 随下一轮扫描清空，而本地回显此刻多半还在 stillQueued 的
+          // 6 秒宽限里，于是立刻顶替上来占住同一个位置。
+          //
+          // 判据 `local && !queued`：queued 为真的还在 hub 队列、压根没到终端，
+          // 归 recallAllQueued 按 cmdId 精确撤，不能在这里一并抹掉。
+          if (key === "up") {
+            const cur = this._messagesById[id] ?? [];
+            const kept = cur.filter((m) => !(m.local && !m.queued));
+            if (kept.length !== cur.length) {
+              this._messagesById = { ...this._messagesById, [id]: kept };
+            }
+          }
+        } else {
+          antdMessage.warning(res.msg ?? "按键注入失败");
+        }
+      })
+      .catch(() => antdMessage.error("操作失败，请检查网络"));
+  };
+
+  /**
+   * 一起撤回底部挂载的多条排队任务，并把它们的原文合并回填进对话框。
+   * 只有仍在 hub 队列（带 cmdId、还没被终端取走）的能真正撤回；已进终端原生队列的
+   * 撤不回（claude 不开放出队），这里只负责把可撤的撤掉、并把全部文本回填供改后再发。
+   */
+  public recallAllQueued = (id: string, cmdIds: string[], allText: string) => {
+    cmdIds.forEach((cmdId) =>
+      recallPortalInput(id, cmdId)
+        .then((res) => {
+          if (res.code === 0) {
+            const cur = this._messagesById[id] ?? [];
+            this._messagesById = {
+              ...this._messagesById,
+              [id]: cur.filter((m) => !(m.local && m.cmdId === cmdId)),
+            };
+          }
+        })
+        .catch(() => void 0),
+    );
+    if (allText.trim()) {
+      this.composerRefill = {
+        taskId: id,
+        text: allText,
+        nonce: ++this._refillNonce,
+      };
+    }
+    antdMessage.success("已撤回排队任务");
+  };
+
+  /**
+   * 撤回还在排队的输入（已被终端接收则提示失败并去掉排队标记）。
+   *
+   * `fallbackText` = 排队条那一行显示的原文。原文优先取本地回显，但**不是每条排队
+   * 都有回显**：斜杠命令一开始就不建回显（见 sendInput），别的端发来的任务在本端
+   * 也只有 hub 队列这一份。缺了它，撤回就只是撤回，对话框空着，想改完再发得重打。
+   */
+  public recallInput = (id: string, cmdId: string, fallbackText?: string) => {
     recallPortalInput(id, cmdId)
       .then((res) => {
         const cur = this._messagesById[id] ?? [];
         if (res.code === 0) {
           antdMessage.success("已撤回");
+          // 撤下排队回显，同时把原文回填进该会话的对话框，方便改完再发
+          const recalled = cur.find((m) => m.local && m.cmdId === cmdId);
           this._messagesById = {
             ...this._messagesById,
             [id]: cur.filter((m) => !(m.local && m.cmdId === cmdId)),
           };
+          const refill = recalled?.content || fallbackText;
+          if (refill) {
+            this.composerRefill = {
+              taskId: id,
+              text: refill,
+              nonce: ++this._refillNonce,
+            };
+          }
         } else {
           antdMessage.warning(res.msg ?? "已被终端接收，无法撤回");
           this._messagesById = {
@@ -589,38 +807,34 @@ class PortalStore {
           return;
         }
         if (res.code === 0) {
-          const incoming = res.data?.list ?? [];
+          const list = res.data?.list ?? [];
+          // 「当前状态」快照（todos / bgtasks）**不能走下面那套累积去重**：
+          // 它们是每轮重算的当前状态，新的一份必须整个顶掉旧的。
+          //
+          // 混进去会被静默丢掉：去重键是 `时间戳|role|全文长度|前 60 字`，而快照的时间戳
+          // 取自最后一条对话消息 —— 父会话闲着时它一动不动；`running` 与 `stopped` 又
+          // 恰好都是 7 个字符，全文长度分毫不差；前 60 字则止步于第一条任务的 status 之前
+          // —— `[{"id":"<17 位>","label":"` 固定占 36 字，首条 label 满 12 字时，status 的值
+          // 就落到下标 60 开外切不进来了（实测 11 字还切得到、12 字起切不到；线上那两条
+          // 是 13、14 字）；若翻转的不是首条，那更是与首条 label 长短无关，必撞。三段全撞，
+          // 新旧快照的键完全一样。实测线上会话 7d4a7af0 那份 2371 字节的快照，把两条
+          // running 改成 stopped 之后键逐字节相同 —— 于是「子会话已经不在跑了」这个更新
+          // 永远递不到界面上，胶囊一直挂着。
+          // （`completed` 是 9 个字符、长度会变，所以只有 stopped 这条路被吞，更阴。）
+          const incoming = list.filter((m) => !isStateSnapshot(m.role));
+          const snapshots = list.filter((m) => isStateSnapshot(m.role));
           // 累积合并：拉取是滑动窗口会丢老消息，这里按 key 去重后只增不减，
           // 保证对话流稳定增长、不因窗口滑动丢历史。
-          let prev = this._messagesById[id] ?? [];
-          // 终端同步回了同内容的 user 消息 → 撤下对应的本地乐观回显，
-          // 让真实消息（带终端时间戳）接管，避免同一条显示两遍。
-          // 归一化比对：空白差异（换行/缩进/首尾）一律视为同一条
-          const norm = (s: string) => s.replace(/\s+/g, " ").trim();
-          const incomingUser = new Set(
-            incoming.filter((m) => m.role === "user").map((m) => norm(m.content)),
+          const prevSnapshots = (this._messagesById[id] ?? []).filter((m) =>
+            isStateSnapshot(m.role),
           );
-          const now = Date.now();
-          const withoutEcho = prev.filter((m) => {
-            if (!m.local) {
-              return true;
-            }
-            if (incomingUser.has(norm(m.content))) {
-              return false;
-            }
-            // 自愈兜底：已送达终端超 5 分钟仍没等来同步替换（内容被终端改写等
-            // 罕见情况），回显转为普通消息幻影没意义，直接撤下防止重复观感
-            const age = now - new Date(m.timestamp).getTime();
-            if (m.delivered && age > 5 * 60_000) {
-              return false;
-            }
-            return true;
-          });
-          const echoReplaced = withoutEcho.length !== prev.length;
-          prev = withoutEcho;
+          let prev = (this._messagesById[id] ?? []).filter(
+            (m) => !isStateSnapshot(m.role),
+          );
           // key 带上全文长度，降低同时间戳+同前缀不同消息被误判重复的概率
           const mkey = (m: PortalMessage) =>
             `${m.timestamp}|${m.role}|${m.content.length}|${m.content.slice(0, 60)}`;
+          // 先算「这一轮新出现的消息」，回显接管只认它们（理由见 echoTakenOver）。
           const seen = new Set(prev.map(mkey));
           const fresh = incoming.filter((m) => {
             const k = mkey(m);
@@ -630,16 +844,77 @@ class PortalStore {
             seen.add(k);
             return true;
           });
+          // 终端同步回了同内容的 user 消息 → 撤下对应的本地乐观回显，
+          // 让真实消息（带终端时间戳）接管，避免同一条显示两遍。
+          // 归一化比对：空白差异（换行/缩进/首尾）一律视为同一条
+          const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+          // 回显能否被某条同步回来的 user 消息接管：
+          // 除了完全相等，还接受「同步内容包含回显全文」——终端把注入的文本
+          // 记进 jsonl 时常会带上结构化前后文（工具结果、上下文块等），导致内容
+          // 比原始输入更长，只做全等比对会漏判、两条并存。长度阈值挡掉过短回显
+          // （如 “ok”）被任意长消息命中的误伤。
+          //
+          // **只认这一轮新出现的消息（fresh），不比时间戳**。
+          // 需要「只认新的」是因为 incoming 是整个滑动窗口、里头全是历史：不加约束的话，
+          // 会话里任何一条旧消息只要含这段文本，就会把刚发出去的回显判成「已被接管」
+          // 而撤下，正文里根本看不到自己刚发的内容。
+          // 但这个约束**不能拿时间戳来做**：回显的时间戳是**看的这台机器**的浏览器时钟，
+          // 同步回来的消息的时间戳是**跑终端那台机器**写进 jsonl 的时钟，两者毫无关系。
+          // 原先的 `u.at >= echoAt - 5000` 等于假设两台机器的钟差不超过 5s——只要看的
+          // 这端快一点，接管就**永久**失效：回显一直留着，真实消息又照常进流，
+          // 于是排队清掉的那一刻同一句话在对话流里冒出两条一模一样的气泡。
+          // 「新出现」本身就是顺序事实（回显先于本轮响应被处理），不需要任何时钟。
+          const freshUserTexts = fresh
+            .filter((m) => m.role === "user")
+            .map((m) => norm(m.content));
+          const echoTakenOver = (echoNorm: string) => {
+            if (!echoNorm) {
+              return false;
+            }
+            return freshUserTexts.some(
+              (t) =>
+                t === echoNorm ||
+                (echoNorm.length >= 4 && t.includes(echoNorm)),
+            );
+          };
+          const withoutEcho = prev.filter((m) => {
+            if (!m.local) {
+              return true;
+            }
+            if (echoTakenOver(norm(m.content))) {
+              return false;
+            }
+            // 回显一旦送达终端就**永久保留**，直到被同步回来的真实消息接管。
+            //
+            // 这里原先有条「超 5 分钟就撤下」的自愈：那是为了避免它和真实消息
+            // 一起显示出重复观感。但注入终端的输入在 jsonl 里常常压根不写 user
+            // 记录（只留一条 queue-operation，而那类记录不进对话流），于是永远
+            // 等不到接管 —— 撤下就是永久消失。执行中下发的任务要在队列里排上
+            // 好几分钟，正好撞线，表现就是「下发的任务有概率被吞掉」。
+            //
+            // 现在对话流里的回显就是条普通用户气泡（排队状态与撤回已归排队条），
+            // 留着它不会造成任何重复观感；真来了同名消息也有 echoTakenOver 兜着。
+            return true;
+          });
+          const echoReplaced = withoutEcho.length !== prev.length;
+          prev = withoutEcho;
+          // 状态快照按内容比，变了就整份换掉（它是替换语义，不是追加语义）
+          const sameSnapshots =
+            prevSnapshots.length === snapshots.length &&
+            prevSnapshots.every((m, i) => m.content === snapshots[i].content);
           // 无新消息就不换引用：轮询每 2s 一次，无条件替换会让整条对话流
           // 每 2s 白重渲染一遍（长会话下明显掉帧）。
-          if (fresh.length || echoReplaced) {
+          if (fresh.length || echoReplaced || !sameSnapshots) {
             // 单会话上限：只增不减的合并会随长会话无限涨，超出后丢最老的。
             const merged = [...prev, ...fresh];
+            const kept =
+              merged.length > MAX_MESSAGES_PER_TASK
+                ? merged.slice(-MAX_MESSAGES_PER_TASK)
+                : merged;
+            // 快照挂在末尾：parseLast 从后往前找，取到的就是最新这份
             this._messagesById = {
               ...this._messagesById,
-              [id]: merged.length > MAX_MESSAGES_PER_TASK
-                ? merged.slice(-MAX_MESSAGES_PER_TASK)
-                : merged,
+              [id]: [...kept, ...snapshots],
             };
           }
         }
@@ -668,30 +943,47 @@ class PortalStore {
   };
 
   /** 向会话发布任务（注入一行输入） */
-  public sendInput = (id: string, text: string) => {
+  /**
+   * 向会话发一行输入。
+   *
+   * `fromSelect` = 这是在回答终端弹出的选择卡（选项序号或自定义答案）。
+   * 那类内容对着对话流念出来毫无意义 —— 孤零零一个「1」「2」，看不出在答什么，
+   * 问题本身又不在流里（选择卡挂在输入框上方）。标记出来，让它不入流。
+   */
+  public sendInput = (id: string, text: string, opts?: { fromSelect?: boolean }) => {
     const task = this._tasks.find((t) => t.id === id);
     const content = text.trim();
     if (!task?.id || !content) {
       return Promise.resolve(false);
     }
 
-    return sendPortalInput(task.id, content, task.pid).then((res) => {
+    return sendPortalInput(task.id, content, task.pid, opts?.fromSelect).then((res) => {
       if (res.code === 0) {
         antdMessage.success(res.data?.result ?? "已发送");
         // 乐观回显：发出的内容立即上屏为 user 气泡，
         // 不等终端收到再同步回来（那要好几秒，体感像没发出去）。
-        const echo = {
-          role: "user",
-          content,
-          timestamp: new Date().toISOString(),
-          local: true,
-          cmdId: res.data?.cmdId,
-          queued: !!res.data?.cmdId,
-        };
-        this._messagesById = {
-          ...this._messagesById,
-          [id]: [...(this._messagesById[id] ?? []), echo],
-        };
+        //
+        // 斜杠命令除外，**一条回显都不建**：CLI 自己把它吃掉，既不写 jsonl 的 user
+        // 记录、也不进 queued_inputs，于是回显唯一的退场路径（被同步回来的真实消息
+        // 接管）永远不会发生 —— 留下的就是撤不掉的孤儿气泡（`/clear` 之后新会话里
+        // 那条孤零零的「/clear」）。判据见 _utils/slashCommand。
+        // 反馈不靠回显：上面的 toast 已经确认发出，若排上了 hub 队列，下一轮
+        // getQueuedInputs 就把它铺进底部排队条（带 cmdId，撤回照常可用）。
+        if (!isSlashCommand(content)) {
+          const echo = {
+            role: "user",
+            content,
+            timestamp: new Date().toISOString(),
+            local: true,
+            cmdId: res.data?.cmdId,
+            queued: !!res.data?.cmdId,
+            fromSelect: opts?.fromSelect,
+          };
+          this._messagesById = {
+            ...this._messagesById,
+            [id]: [...(this._messagesById[id] ?? []), echo],
+          };
+        }
         setTimeout(() => this.fetchMessages(id, false), 1200);
         return true;
       }

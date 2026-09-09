@@ -1,5 +1,6 @@
 // antd Form 仅作表单容器（hsu-ui Form 只含 Modal/Drawer/Import/useForm，无普通容器）
-import { Divider, Form, message, Segmented } from "antd";
+import { Divider, Form, Segmented } from "antd";
+import { message } from "@hsu-react/ui";
 import {
   AppleFilled,
   CodeOutlined,

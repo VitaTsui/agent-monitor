@@ -20,7 +20,7 @@ import { getUUID } from "@/utils";
 import { makeAutoObservable } from "mobx";
 
 import RouterService from "@/router/RouterService";
-import { notification } from "antd";
+import { notification } from "@hsu-react/ui";
 import Cookies from "js-cookie";
 
 const dev = process.env.NODE_ENV === "development";
@@ -62,7 +62,7 @@ class LoginStore {
       await this.getCryptoKey().catch(() => void 0);
     }
     if (!this._cryptoKey) {
-      notification.error({ message: "安全连接未就绪，请检查网络后重试" });
+      notification.error({ title: "安全连接未就绪，请检查网络后重试" });
       return false;
     }
     return true;
@@ -121,7 +121,7 @@ class LoginStore {
       fn?.();
     } else {
       notification.error({
-        message: res?.msg ?? "失败",
+        title: res?.msg ?? "失败",
       });
 
       this.checkIsNeedLoginCaptcha();
@@ -169,7 +169,7 @@ class LoginStore {
       fn?.();
     } else {
       notification.error({
-        message: res?.msg ?? "注册失败",
+        title: res?.msg ?? "注册失败",
       });
 
       this.checkIsNeedLoginCaptcha();
@@ -215,7 +215,7 @@ class LoginStore {
       fn?.();
     } else {
       notification.error({
-        message: res?.msg ?? "钉钉登录失败",
+        title: res?.msg ?? "钉钉登录失败",
       });
     }
   };
@@ -270,7 +270,7 @@ class LoginStore {
       fn?.();
     } else {
       notification.error({
-        message: res?.msg ?? "第三方登录失败",
+        title: res?.msg ?? "第三方登录失败",
       });
     }
   };
@@ -290,7 +290,7 @@ class LoginStore {
           fn?.();
         } else {
           notification.error({
-            message: res.msg,
+            title: res.msg,
           });
         }
       })
@@ -298,7 +298,7 @@ class LoginStore {
       // 把用户困在「点了退出却毫无反应」的页面上更糟。改密码后的强制重登也走这条路。
       .catch(() => {
         notification.warning({
-          message: "退出登录请求失败，已在本地清除登录状态",
+          title: "退出登录请求失败，已在本地清除登录状态",
         });
         fn?.();
       });

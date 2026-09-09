@@ -22,18 +22,18 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(90, 90, 90, 0.7);
+  background: color-mix(in srgb, var(--foreground) 70%, transparent);
   border: 3px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--radius);
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(64, 64, 64, 0.85);
+  background: color-mix(in srgb, var(--foreground) 85%, transparent);
   border: 3px solid transparent;
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:active {
-  background: rgba(90, 90, 90, 0.9);
+  background: color-mix(in srgb, var(--foreground) 90%, transparent);
   border: 3px solid transparent;
   background-clip: padding-box;
 }
@@ -52,10 +52,10 @@
   background-repeat: no-repeat;
   background-position: center;
   background-size: 12px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius);
 }
 ::-webkit-scrollbar-button:single-button:hover {
-  background-color: rgba(0, 0, 0, 0.1);
+  background-color: color-mix(in srgb, var(--foreground) 10%, transparent);
 }
 ::-webkit-scrollbar-button:single-button:vertical:decrement {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 7.5 L6 4 L9 7.5' fill='none' stroke='%23606060' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
@@ -81,18 +81,27 @@ body,
   // 布局严丝跟随（100dvh 在部分 iOS 版本不随原生 resize 收缩，会留空隙）
   height: 100%;
   // 底色兜底：键盘 resize 缩放时若透明会透出 WKWebView 黑色默认背景
-  background: #f4fafb;
+  background: var(--background);
   overflow: hidden;
+  // 关掉 iOS 自动放大文字：选中会话用 ScrollText 渲染成宽滚动块时，iOS 会判定为
+  // 「宽文本」把字号自动放大，导致「选中的终端字变大」。固定 100% 即禁用该行为。
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 // 极窄窗口布局保护：后管等桌面布局窗口过窄时横向滚动而非挤碎；
 // 移动端（<=760px）改为自适应，前台 Portal / 官网 / 登录页已做响应式。
+//
+// 例外 —— 完全响应式的页面（Portal）在挂载时打 `data-fluid` 标记豁免这条：
+// 桌面客户端窗口可以拖到 960 以下，那时这条 min-width 会让整页横向滚动，
+// 把右上角的暂停/中断等控制键推出可视区（拖窄到 929px 实测复现）。
+// 用属性标记而不是 `:has()`，是为了兼容 Capacitor 安卓壳里较老的 WebView。
 @media (min-width: 761px) {
-  body {
+  body:not([data-fluid]) {
     overflow-x: auto;
   }
 
-  #root {
+  body:not([data-fluid]) #root {
     min-width: 960px;
   }
 }
@@ -116,7 +125,7 @@ canvas {
 hr {
   border: none;
 
-  background: rgba(230, 235, 233, 1);
+  background: var(--muted);
 }
 
 ul,
@@ -134,3 +143,34 @@ ol {
   src: url("./assets/fonts/DINAlternateBold.ttf") format("opentype");
 }
 
+
+// iOS 灵动岛/刘海让位：顶部弹出的全局提示(antd message)默认贴到 top:8px，
+// 会被灵动岛挡住。整体下移一个状态栏安全区高度。notification 同理。
+// 落到与移动端顶栏胶囊/按钮同一高度：安全区 + 顶栏按钮的垂直居中位置
+.ant-message {
+  top: calc(env(safe-area-inset-top) + 40px) !important;
+}
+.ant-notification.ant-notification-top,
+.ant-notification.ant-notification-topLeft,
+.ant-notification.ant-notification-topRight {
+  top: calc(env(safe-area-inset-top) + 40px) !important;
+}
+
+// 底部通知：只让开移动端的 home 指示条，别的不用躲。
+//
+// 曾经在这里额外加过一整个输入区的高度（--composer-height），起因是「更新提醒被挡住」
+// —— 但那是误判：真相是 antd 对所有 placement 都设了 top（实测 50px），只覆盖 bottom
+// 而不解开 top，两端同时钉死，容器被拉成整屏高，通知贴着容器底排、直接掉出视口。
+// top: auto 修好之后，那层让位就成了纯粹的抬高，通知浮在半空。
+.ant-notification.ant-notification-bottom,
+.ant-notification.ant-notification-bottomLeft,
+.ant-notification.ant-notification-bottomRight {
+  top: auto !important;
+  bottom: calc(env(safe-area-inset-bottom) + 24px) !important;
+}
+
+// iOS Safari 点击可聚焦元素(输入框/按钮)时会闪一层半透明黑色高亮(tap highlight)，
+// 表现为「点输入框闪一下深色背景」。全局关掉，交互反馈用各自的 :active/:focus。
+* {
+  -webkit-tap-highlight-color: transparent;
+}

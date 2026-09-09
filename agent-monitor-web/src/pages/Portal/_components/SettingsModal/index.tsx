@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from "react";
 
 import { Button, Input, Modal, Switch } from "@hsu-react/ui";
-import { Badge, Empty, Modal as AntModal, Popconfirm, Progress, Tag, message } from "antd";
+import { Badge, Empty, Modal as AntModal, Popconfirm, Progress, Tag } from "antd";
+import { message } from "@hsu-react/ui";
 import {
   CloseOutlined,
+  CloudSyncOutlined,
   CodeOutlined,
   InfoCircleOutlined,
   LaptopOutlined,
@@ -27,6 +29,7 @@ import { localMachineId } from "@/utils/clientAuth";
 import PortalStore from "../../PortalStore";
 import ShareModal from "../ShareModal";
 import IntegrationsPanel from "../IntegrationsPanel";
+import ConfigSyncPanel from "../ConfigSyncPanel";
 import {
   BUILTIN_DANGER_PATTERNS,
   loadGuardConfig,
@@ -34,7 +37,13 @@ import {
 } from "../../_utils/dangerCheck";
 import styles from "./index.module.scss";
 
-export type SettingsTab = "account" | "devices" | "bots" | "security" | "about";
+export type SettingsTab =
+  | "account"
+  | "devices"
+  | "configs"
+  | "bots"
+  | "security"
+  | "about";
 
 interface SettingsModalProps {
   open?: boolean;
@@ -97,6 +106,12 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
     progress?: UpdateProgress | null;
   } | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  // 桥接插件（Cursor/VSCode 扩展）版本与更新（仅客户端窗口内；旧客户端无此 IPC → 保持 null 不渲染）
+  const [pluginVer, setPluginVer] = useState<{
+    installed: string | null;
+    latest: string;
+  } | null>(null);
+  const [checkingPlugin, setCheckingPlugin] = useState(false);
 
   const loadClientVersion = () => {
     tauriInvoke?.("update_status")
@@ -107,7 +122,49 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
       )
       .catch(() => setClientVer(null));
   };
-  const updating = !!clientVer?.progress;
+
+  const loadPluginVersion = () => {
+    tauriInvoke?.("plugin_status")
+      .then((v) => setPluginVer(v as { installed: string | null; latest: string }))
+      .catch(() => setPluginVer(null));
+  };
+
+  // 强制重装插件（从 hub 拉最新 vsix）；用于「安装 / 更新到 vX」
+  const updatePlugin = () => {
+    setCheckingPlugin(true);
+    tauriInvoke?.("plugin_update")
+      .then((v) => {
+        const r = v as { installed: number; version: string | null };
+        setPluginVer((p) => (p ? { ...p, installed: r.version } : p));
+        if (r.installed > 0) {
+          message.success(`已安装桥接插件 v${r.version ?? ""} 到 ${r.installed} 个编辑器，重载编辑器窗口即生效`);
+        } else {
+          message.warning("未检测到 Cursor/VSCode 命令行（在编辑器里执行「Shell Command: Install 'code'/'cursor' command in PATH」后重试）");
+        }
+      })
+      .catch(() => message.error("插件安装失败"))
+      .finally(() => setCheckingPlugin(false));
+  };
+
+  // 检查插件更新：重新读状态，已是最新给提示，有更新则按钮切成「更新到 vX」
+  const checkPluginUpdate = () => {
+    setCheckingPlugin(true);
+    tauriInvoke?.("plugin_status")
+      .then((v) => {
+        const s = v as { installed: string | null; latest: string };
+        setPluginVer(s);
+        if (!s.installed) {
+          message.info("未检测到已安装的桥接插件，点「安装插件」装上");
+        } else if (s.installed === s.latest) {
+          message.success(`桥接插件已是最新（v${s.installed}）`);
+        }
+      })
+      .catch(() => message.error("检查失败"))
+      .finally(() => setCheckingPlugin(false));
+  };
+  // 「更新中」必须是「确有新版本 + 有进度」才算——否则辅助下载（如桥接扩展 vsix）
+  // 遗留的进度状态会把按钮卡在「更新中」不可点（客户端已是最新却显示更新中）。
+  const updating = !!clientVer?.progress && !!clientVer?.latest;
 
   // 打开设置期间轮询版本/进度（更新中每 1.5s 刷新进度条）
   useEffect(() => {
@@ -127,6 +184,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
         setClientVer(s);
         if (s.latest) {
           AntModal.confirm({
+            centered: true,
             title: `发现新版本 v${s.latest}`,
             content: `当前版本 v${s.current}。更新将自动完成并重启客户端。`,
             okText: "立即更新",
@@ -191,6 +249,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
         .catch(() => setAutostart(null));
       loadTerminals();
       loadClientVersion();
+      loadPluginVersion();
     }
     // tauriInvoke 是宿主环境常量，不会在会话中途变化
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -264,9 +323,10 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
     color: string;
     badge?: number;
   }[] = [
-    { key: "account", label: "账户", icon: <UserOutlined />, color: "#0f9bad" },
+    { key: "account", label: "账户", icon: <UserOutlined />, color: "var(--primary)" },
     { key: "devices", label: "设备管理", icon: <LaptopOutlined />, color: "#3a8cff", badge: pendingCount },
-    { key: "bots", label: "机器人接入", icon: <RobotOutlined />, color: "#21b34a" },
+    { key: "configs", label: "配置同步", icon: <CloudSyncOutlined />, color: "var(--primary)" },
+    { key: "bots", label: "机器人管理", icon: <RobotOutlined />, color: "#21b34a" },
     { key: "security", label: "安全防护", icon: <SafetyOutlined />, color: "#f2933c" },
     { key: "about", label: "关于", icon: <InfoCircleOutlined />, color: "#8a94a6" },
   ];
@@ -368,6 +428,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
       width={920}
       title={null}
       closable={false}
+      centered
     >
       <div
         className={`${styles.layout} ${
@@ -406,6 +467,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
           role="button"
           tabIndex={0}
           aria-label="关闭设置"
+          data-sheet-close
           onClick={onClose}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
@@ -418,6 +480,31 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
         </span>
         <aside className={styles.nav}>
           <div className={styles.navTitle}>设置</div>
+          {/* Claude sheet 顶部的身份 pill（仅移动端，见 scss）：点按进账户 */}
+          <div
+            className={styles.identityPill}
+            role="button"
+            tabIndex={0}
+            onClick={() => {
+              setTab("account");
+              setMobileView("content");
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setTab("account");
+                setMobileView("content");
+              }
+            }}
+          >
+            <span className={styles.identityAvatar}>
+              {(user.nickname ?? user.username ?? "U").slice(0, 1)}
+            </span>
+            <span className={styles.identityName}>
+              {user.nickname ?? user.username}
+            </span>
+            <RightOutlined className={styles.identityArrow} />
+          </div>
           <div className={styles.navList} role="tablist" aria-label="设置分类">
             {navItems.map((n) => (
               <div
@@ -499,21 +586,12 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                     <div className={styles.devInfo}>
                       <div className={styles.devName}>
                         客户端版本
+                        {/* 版本标签固定显示当前版本，更新中也不切成「正在下载/安装」——
+                            更新进度由下方的进度条单独呈现，标签只作版本标识 */}
                         {clientVer ? (
-                          updating ? (
-                            <Tag color="processing">
-                              {clientVer.progress?.phase === "installing"
-                                ? "正在安装…"
-                                : clientVer.progress?.phase === "restarting"
-                                  ? "即将重启…"
-                                  : "正在下载更新…"}
-                            </Tag>
-                          ) : (
-                            <Tag color={clientVer.latest ? "warning" : "green"}>
-                              v{clientVer.current}
-                              {clientVer.latest ? ` → v${clientVer.latest} 可用` : " · 最新"}
-                            </Tag>
-                          )
+                          <Tag color={clientVer.latest ? "warning" : "green"}>
+                            v{clientVer.current}
+                          </Tag>
                         ) : null}
                       </div>
                       {updating && clientVer?.progress ? (
@@ -529,7 +607,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                                   ),
                                 )}
                                 size="small"
-                                strokeColor="#0f9bad"
+                                strokeColor="var(--primary)"
                               />
                               <span className={styles.updateProgressText}>
                                 {(clientVer.progress.received / 1024 / 1024).toFixed(1)} /{" "}
@@ -548,18 +626,77 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                         </div>
                       )}
                     </div>
-                    <Button
-                      size="small"
-                      className={styles.checkUpdateBtn}
-                      loading={checkingUpdate || updating}
-                      disabled={updating}
-                      onClick={checkUpdate}
-                    >
-                      {updating ? "更新中" : "检查更新"}
-                    </Button>
+                    {clientVer?.latest && !updating ? (
+                      // 有新版本且尚未在更新：给「更新到 vX」按钮。更新中则落到下面显示
+                      // 「更新中」+进度（updating 已排除了「已是最新却有遗留进度」的误判）。
+                      <Button
+                        size="small"
+                        className={styles.updateNowBtn}
+                        onClick={() =>
+                          tauriInvoke
+                            ?.("update_start")
+                            .catch(() => message.error("启动更新失败"))
+                        }
+                      >
+                        更新到 v{clientVer.latest}
+                      </Button>
+                    ) : (
+                      <Button
+                        size="small"
+                        className={styles.checkUpdateBtn}
+                        loading={checkingUpdate || updating}
+                        disabled={updating}
+                        onClick={checkUpdate}
+                      >
+                        {updating ? "更新中" : "检查更新"}
+                      </Button>
+                    )}
                   </div>
+                  {/* 插件版本（Cursor/VSCode 桥接扩展）：旧客户端无 plugin_status IPC → pluginVer 为 null，整行不渲染 */}
+                  {pluginVer ? (
+                    <div className={styles.device}>
+                      <div className={styles.devInfo}>
+                        <div className={styles.devName}>
+                          插件版本
+                          <Tag
+                            color={
+                              pluginVer.installed === pluginVer.latest
+                                ? "green"
+                                : pluginVer.installed
+                                  ? "warning"
+                                  : "default"
+                            }
+                          >
+                            {pluginVer.installed ? `v${pluginVer.installed}` : "未安装"}
+                          </Tag>
+                        </div>
+                        <div className={styles.devMeta}>
+                          Cursor/VSCode 桥接扩展，内嵌终端下发靠它
+                        </div>
+                      </div>
+                      {pluginVer.installed !== pluginVer.latest ? (
+                        <Button
+                          size="small"
+                          className={styles.updateNowBtn}
+                          loading={checkingPlugin}
+                          onClick={updatePlugin}
+                        >
+                          {pluginVer.installed ? `更新到 v${pluginVer.latest}` : "安装插件"}
+                        </Button>
+                      ) : (
+                        <Button
+                          size="small"
+                          className={styles.checkUpdateBtn}
+                          loading={checkingPlugin}
+                          onClick={checkPluginUpdate}
+                        >
+                          检查更新
+                        </Button>
+                      )}
+                    </div>
+                  ) : null}
                   <div className={styles.termScope}>
-                    <div className={styles.termScopeTitle}>监控范围</div>
+                    <div className={styles.sectionTitle}>监控范围</div>
                     {terminals.length === 0 ? (
                       <div className={styles.termScopeEmpty}>
                         暂未检测到本机终端会话
@@ -628,12 +765,24 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
             </div>
           )}
 
+          {tab === "configs" && (
+            <div className={styles.pane}>
+              <div className={styles.paneTitle}>配置同步</div>
+              <div className={styles.hint}>
+                让多台电脑共用同一套 Claude Code / Codex 配置：选一台设备作为
+                <strong>配置源</strong>，其余设备自动向它看齐。改动几十秒内送达，
+                设备离线时等它上线继续。
+              </div>
+              <ConfigSyncPanel />
+            </div>
+          )}
+
           {tab === "bots" && (
             <div className={styles.pane}>
-              <div className={styles.paneTitle}>机器人接入</div>
+              <div className={styles.paneTitle}>机器人管理</div>
               <div className={styles.hint}>
-                每种渠道都由你自己接入：钉钉群机器人做主动推送，企业微信自建应用 /
-                钉钉企业应用做双向遥控（把生成的回调地址填进各自后台）。
+                配置你自己的钉钉机器人：一个账号一个，它收到的消息就归你、推送也只发给你。
+                配好后在钉钉里发指令就能遥控会话，任务完成/需要你决定时也会私聊提醒。
               </div>
               <IntegrationsPanel />
             </div>
@@ -711,7 +860,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
 
       <ShareModal device={shareDevice} onClose={() => setShareDevice(null)} />
 
-      <AntModal
+      <Modal
         title="接入他人设备"
         open={connectOpen}
         onCancel={() => setConnectOpen(false)}
@@ -736,7 +885,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
           value={connPwd}
           onChange={(v) => setConnPwd(v)}
         />
-      </AntModal>
+      </Modal>
     </Modal>
   );
 });

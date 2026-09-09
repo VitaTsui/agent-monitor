@@ -1,4 +1,9 @@
 const path = require("path");
+// node_modules 一律排除、但放行组件库自带的 scss 与图片。判定由组件库导出——
+// 手写正则在 pnpm 的嵌套路径下会失效（详见 @hsu-react/ui 的 guide）
+const {
+  excludeNodeModulesExceptHsuUi,
+} = require("@hsu-react/ui/lib/build/webpack");
 const MiniCssExtractPlugin = require("mini-css-extract-plugin");
 const HtmlWebpackPlugin = require("html-webpack-plugin");
 
@@ -6,6 +11,7 @@ const envPath = path.resolve(__dirname, `../.env/.env.common`);
 const envConfig = require("dotenv").config({ path: envPath }).parsed;
 
 const PASS_CLS = JSON.parse(envConfig.PASS_CLS);
+
 
 const config = {
   entry: {
@@ -32,7 +38,7 @@ const config = {
       {
         test: /\.(png|jpe?g|gif|webp|svg)$/i,
         // 排除 node_modules，但放行 @hsu-react/ui 自带的图片资源
-        exclude: /node_modules\/(?!@hsu-react\/ui\/)/,
+        exclude: excludeNodeModulesExceptHsuUi,
         type: "asset/resource",
       },
       {
@@ -87,7 +93,7 @@ const config = {
       {
         test: /\.scss$/,
         // 放行 @hsu-react/ui 的 es 产物 scss（组件库发布未编译的 .module.scss，需本项目编译），排除其余 node_modules
-        exclude: /node_modules\/(?!@hsu-react\/ui\/)/,
+        exclude: excludeNodeModulesExceptHsuUi,
         use: [
           MiniCssExtractPlugin.loader,
           {

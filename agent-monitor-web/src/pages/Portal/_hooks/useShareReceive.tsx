@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 
-import { message } from "antd";
+import { message } from "@hsu-react/ui";
 import { observer } from "mobx-react-lite";
 
 import { Button, Input, Modal, Select } from "@hsu-react/ui";
@@ -91,7 +91,8 @@ export const ShareReceiveModal: React.FC = observer(() => {
 
   useEffect(() => {
     const t = tasks.find((x) => x.id === taskId);
-    setDir(t?.process?.cwd ?? "");
+    // 与 Composer 同一个根：会话 cd 过之后，进程 cwd 已不是「会话此刻在哪」
+    setDir(t?.liveCwd || t?.process?.cwd || "");
   }, [taskId, tasks]);
 
   const doUpload = () => {

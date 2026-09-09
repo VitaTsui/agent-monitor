@@ -1,0 +1,95 @@
+$text: var(--foreground);
+$muted: var(--muted-foreground);
+$accent: var(--primary);
+
+// 头部那一行的胶囊：与 ChatPane 的 tokenChip / deviceChip 同一档尺寸，
+// 只是可点（点开列出运行中的子会话）。
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  line-height: 18px;
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--primary-active);
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+
+  &:hover {
+    background: color-mix(in srgb, var(--primary) 20%, transparent);
+  }
+}
+
+.pop {
+  :global(.ant-popover-inner-content) {
+    padding: 6px 4px;
+  }
+}
+
+.list {
+  min-width: 220px;
+  max-width: 340px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+
+  .dot {
+    flex: none;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: $muted;
+
+    // 执行中用呼吸态标出来，与等待中区分
+    &.running {
+      background: $accent;
+      animation: chipPulse 1.6s ease-in-out infinite;
+    }
+  }
+
+  .name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: $text;
+  }
+
+  .status {
+    flex: none;
+    font-size: 10.5px;
+    color: $muted;
+  }
+
+  // 耗时用等宽，秒数每跳一格不会把整行推来推去
+  .elapsed {
+    flex: none;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 10.5px;
+    color: $muted;
+  }
+}
+
+@keyframes chipPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.35;
+  }
+}

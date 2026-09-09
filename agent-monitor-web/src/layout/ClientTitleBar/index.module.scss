@@ -1,0 +1,12 @@
+// macOS Overlay 窗口的顶部拖拽条：透明、叠在最上层，供拖动窗口
+.bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--titlebar-h, 30px);
+  z-index: 3000;
+  background: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+}

@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+      - "[0-9]+.x"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-monitor-web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # pnpm 版本由 package.json 的 packageManager 固定，不在这里另写一遍。
+      - name: 启用 Corepack
+        run: corepack enable
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: 构建
+        run: pnpm build
+
+      # dist 不入库，但桌面客户端编译期就要读它（见下面 rust job 的说明），
+      # 所以在这里把产物传下去，而不是让每个平台各自再装一遍前端依赖。
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: agent-monitor-web/dist
+          retention-days: 1
+
+  rust:
+    name: Rust (${{ matrix.os }})
+    needs: web
+    runs-on: ${{ matrix.os }}
+    # 卡住的一步应该花几分钟，而不是 GitHub 默认放行的六小时。
+    timeout-minutes: 60
+    strategy:
+      # 三个平台各自可用，一个挂了不该埋掉另外两个的结论。
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: agent-task-monitor
+    steps:
+      - uses: actions/checkout@v4
+
+      # client/src/desktop.rs 的 tauri::generate_context! 在**编译期**读
+      # tauri.conf.json 的 frontendDist（../../agent-monitor-web/dist）。
+      # 目录不存在就编不过，所以先把 web job 的产物放回原位。
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: agent-monitor-web/dist
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent-task-monitor
+
+      # Tauri 在 Linux 上要 webkit2gtk 才编得动。
+      # `-y` 只回答「要不要装」，回答不了 dpkg 装到一半弹出的配置问题——
+      # 那些问题在没有终端的 runner 上永远等不到答案，noninteractive 让它们走默认值。
+      - name: Linux 构建依赖
+        if: startsWith(matrix.os, 'ubuntu')
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get update
+          sudo -E apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf
+
+      # 格式与平台无关，跑一遍就够。
+      - name: 格式检查
+        if: startsWith(matrix.os, 'ubuntu')
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: 测试
+        run: cargo test --workspace

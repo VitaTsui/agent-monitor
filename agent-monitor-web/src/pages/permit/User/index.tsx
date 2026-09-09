@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { observer } from "mobx-react-lite";
 import { PlusOutlined } from "@ant-design/icons";
-import { Tag, message } from "antd";
+import { Tag } from "antd";
+import { message } from "@hsu-react/ui";
 
 import {
   ChakraButtonProps,
@@ -49,7 +50,9 @@ const User: React.FC = observer(() => {
   const beforeButtonGroup: ChakraButtonProps[] = [
     {
       title: "新增",
-      colorPalette: "blue",
+      // 不要写 colorPalette —— 那是 chakra 时期留下的写法，2.x 里映射到 antd 的预设色，
+      // 会把按钮钉死在蓝色上，不跟随 ConfigProvider 的主色。不写即跟随主题。
+      type: "primary",
       icon: <PlusOutlined />,
       onClick: () => {
         setTitle("新增");

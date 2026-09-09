@@ -29,6 +29,10 @@ rand.workspace = true
 uuid.workspace = true
 reqwest.workspace = true
 base64 = "0.22"
+# 配置同步：算文件指纹（与 hub 同一版本，差异判定只认哈希不认 mtime）
+sha2 = "0.10"
+# 监听会话目录：文件一变（用户发了任务）立即扫描上报，不必等被系统节流的轮询定时器
+notify = "6"
 tauri = { version = "2", features = ["tray-icon"] }
 
 [build-dependencies]
@@ -40,4 +44,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
     "Win32_Security_Cryptography",
+    "Win32_System_RestartManager",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# NSProcessInfo.beginActivity 关掉 App Nap（后台托盘态定时器不被系统压到 ~60s）
+objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString"] }

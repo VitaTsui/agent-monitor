@@ -2,25 +2,28 @@
 //! 聚合各机上报、托管网页与下载、用户/设备/配对管理。纯服务端：不含扫描/托盘/上报。
 
 mod admin;
+mod bot;
 mod commands;
+/// 配置同步：各账号的配置基线与差异计算
+mod configsync;
 mod crypto;
 mod dingtalk;
+mod dingtalk_stream;
+mod history;
+mod mcp;
+mod mdfmt;
 mod oauth;
 mod registry;
 mod server;
+mod slots;
 mod state;
-mod bot;
-mod wecom;
 
 use anyhow::{Context, Result};
-use rsa::pkcs8::DecodePrivateKey;
-use rsa::RsaPrivateKey;
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
+use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey, LineEnding};
+use rsa::{RsaPrivateKey, RsaPublicKey};
 use state::{AppState, Config, SharedState};
-
-/// 开发默认私钥（与前端 .env 中 RSA_PUB_KEY 配对）。
-/// 生产使用请通过 AM_RSA_KEY_PATH 指定自己的密钥。
-const DEV_PRIVATE_KEY: &str = include_str!("../../keys/rsa_private.pem");
-const DEV_CRYPTO_KEY: &str = "VitaClaudeMonitorAesKey123456789";
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -37,15 +40,6 @@ fn main() -> Result<()> {
         .unwrap_or(8383);
     let username = std::env::var("AM_USERNAME").unwrap_or_else(|_| "admin".into());
     let password = std::env::var("AM_PASSWORD").unwrap_or_else(|_| "admin123".into());
-    let crypto_key = std::env::var("AM_CRYPTO_KEY").unwrap_or_else(|_| DEV_CRYPTO_KEY.into());
-
-    let private_key = match std::env::var("AM_RSA_KEY_PATH") {
-        Ok(path) => {
-            let pem = std::fs::read_to_string(&path).with_context(|| format!("读取私钥 {path}"))?;
-            RsaPrivateKey::from_pkcs8_pem(&pem).context("解析 RSA 私钥（须为 PKCS#8 PEM）")?
-        }
-        Err(_) => RsaPrivateKey::from_pkcs8_pem(DEV_PRIVATE_KEY).context("解析内置私钥")?,
-    };
 
     let data_dir = std::env::var("AM_DATA_DIR")
         .map(std::path::PathBuf::from)
@@ -55,6 +49,38 @@ fn main() -> Result<()> {
                 .join(".agent-monitor")
         });
     let _ = std::fs::create_dir_all(&data_dir);
+
+    // 登录加密的 AES 密钥：与前端 .env 的 CRYPTO_KEY 必须逐字节相同，
+    // 不同则登录在浏览器里就失败、连请求都发不出去。不设则首启随机生成并持久化。
+    let crypto_key = match std::env::var("AM_CRYPTO_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+    {
+        Some(k) => k,
+        None => {
+            let (k, fresh) = persisted_value(&data_dir.join("crypto-key"), random_token);
+            if fresh {
+                tracing::info!(
+                    "已生成登录加密 AES 密钥: {k}\n请填入前端 .env 的 CRYPTO_KEY 后重新构建前端，否则登录会「无请求即失败」。（持久化于 {}/crypto-key）",
+                    data_dir.display()
+                );
+            } else {
+                tracing::info!(
+                    "登录加密 AES 密钥已就绪（读取自 {}/crypto-key）",
+                    data_dir.display()
+                );
+            }
+            k
+        }
+    };
+
+    // 登录用的 RSA 私钥：**运行时**读文件，绝不编译期嵌入 ——
+    // 嵌进二进制的私钥会随任何一份产物外泄（构建产物误提交即等于私钥公开）。
+    // 未指定 AM_RSA_KEY_PATH 时落在数据目录；文件不存在就现生成一对并以 0600 落盘。
+    let key_path = std::env::var("AM_RSA_KEY_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| data_dir.join("rsa_private.pem"));
+    let private_key = load_or_create_rsa_key(&key_path)?;
 
     let reg = registry::Registry::load(data_dir.clone(), &username, &password);
 
@@ -129,6 +155,10 @@ fn main() -> Result<()> {
 async fn run_hub(state: SharedState) -> Result<()> {
     let port = state.config.port;
     tokio::spawn(state::tick_loop(state.clone()));
+    // 钉钉 Stream 长连接管理器：为配了 AppKey+AppSecret 的用户维持收消息长连接
+    tokio::spawn(dingtalk_stream::run(state.clone()));
+    // 机器人「监控 N」推送循环：把被监控会话的新内容推到钉钉会话
+    tokio::spawn(bot::monitor_loop(state.clone()));
 
     let app = server::router(state);
     let addr = format!("0.0.0.0:{port}");
@@ -179,6 +209,44 @@ fn load_config_file() {
             std::env::set_var(key, val);
         }
     }
+}
+
+/// 读取 PKCS#8 PEM 私钥；文件不存在则现生成一对 2048 位密钥并落盘（unix 下 0600），
+/// 同时打印配对公钥的 base64 —— 那正是前端 `.env` 里 `RSA_PUB_KEY` 要填的值。
+fn load_or_create_rsa_key(path: &std::path::Path) -> Result<RsaPrivateKey> {
+    if path.exists() {
+        let pem = std::fs::read_to_string(path)
+            .with_context(|| format!("读取 RSA 私钥 {}", path.display()))?;
+        return RsaPrivateKey::from_pkcs8_pem(&pem)
+            .with_context(|| format!("解析 RSA 私钥 {}（须为 PKCS#8 PEM）", path.display()));
+    }
+
+    let key = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).context("生成 RSA 私钥")?;
+    let pem = key
+        .to_pkcs8_pem(LineEnding::LF)
+        .context("序列化 RSA 私钥为 PKCS#8 PEM")?;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(path, pem.as_bytes())
+        .with_context(|| format!("写入 RSA 私钥 {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    let pub_b64 = B64.encode(
+        RsaPublicKey::from(&key)
+            .to_public_key_der()
+            .context("序列化 RSA 公钥")?
+            .as_bytes(),
+    );
+    tracing::info!(
+        "已生成 RSA 密钥对（{}）。配对公钥（填入前端 .env 的 RSA_PUB_KEY 后重新构建前端）：\n{pub_b64}",
+        path.display()
+    );
+    Ok(key)
 }
 
 /// 生成 32 位随机令牌

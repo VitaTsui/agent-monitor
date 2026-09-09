@@ -10,7 +10,9 @@ const NoFoundPage: React.FC = () => {
   const navigate = useNavigate();
 
   return (
-    <ConfigProvider theme={{ token: { colorPrimary: "#0F9BAD" } }}>
+    <ConfigProvider
+      theme={{ token: { colorPrimary: "#18181b", colorLink: "#18181b" } }}
+    >
       <div
         style={{
           minHeight: "100vh",
