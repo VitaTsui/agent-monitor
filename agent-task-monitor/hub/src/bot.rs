@@ -940,7 +940,14 @@ pub async fn monitor_loop(state: SharedState) {
 /// 主动推送（OTO 的 sampleMarkdown）是另一回事：那儿的正文是 agent 产出的 markdown，
 /// 本来就该渲染，两者不要混为一谈。
 pub(crate) fn dingtalk_text_payload(content: &str) -> Value {
-    json!({ "msgtype": "text", "text": { "content": content } })
+    // **出网前的最后一道**：正文里成形的私钥/令牌在这里清掉（判据见 crate::redact，
+    // 与入库脱敏共用同一套，不另立第二套判据）。
+    //
+    // 接在这儿而不是各个调用点：`msgtype=text` 的三条出口——同步回复（本文件上方
+    // `Json(dingtalk_text_payload(&reply))`）、会话 webhook（push_webhook）、Stream
+    // 异步回执（dingtalk_stream.rs）——全都在这里汇成同一个 payload。散着接就会漏，
+    // 而且将来多一条出口又得记着补一遍。
+    json!({ "msgtype": "text", "text": { "content": crate::redact::redact_secrets(content) } })
 }
 
 /// 推到钉钉会话 webhook。返回 Ok(true)=成功、Ok(false)=钉钉判失败(errcode≠0)、Err=网络错。
@@ -2413,5 +2420,47 @@ mod tests {
         assert!(!is_immediate("@3 继续"));
         // 指令词开头但后面还有正文 → 是内容
         assert!(!is_immediate("@3 暂停一下再说"));
+    }
+
+    /// `msgtype=text` 的三条出口（同步回复 / 会话 webhook / Stream 异步回执）都过这里，
+    /// 所以脱敏必须在这层生效：成形的私钥、令牌一个都不许发出去。
+    #[test]
+    fn text_payload_redacts_secrets() {
+        use super::dingtalk_text_payload;
+        let body = (0..3)
+            .map(|i| format!("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC{i:015}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = format!(
+            "结果：\n-----BEGIN RSA PRIVATE KEY-----\n{body}\n-----END RSA PRIVATE KEY-----\nkey=sk-ant-api03-{}",
+            "x9Y8z7W6".repeat(4)
+        );
+        let got = dingtalk_text_payload(&content);
+        let out = got["text"]["content"].as_str().unwrap();
+        assert_eq!(
+            out,
+            "结果：\n[REDACTED:private-key]\nkey=[REDACTED:anthropic-key]"
+        );
+    }
+
+    /// **硬要求**：谈论密钥的正常回复一个字节都不许改。
+    /// 机器人回复里这类句子极常见，误伤了就是把正确信息改错。
+    #[test]
+    fn text_payload_never_touches_text_that_merely_talks_about_keys() {
+        use super::dingtalk_text_payload;
+        for c in [
+            "核验：`BEGIN PRIVATE KEY` 0 命中",
+            "报告里不许出现 -----BEGIN PRIVATE KEY----- 这种东西",
+            "已核对 sk-ant- 开头的 key 未泄露；ghp_ 前缀的令牌也没有。",
+            "✅ 已执行（会话 2）：把私钥换成环境变量",
+        ] {
+            assert_eq!(
+                dingtalk_text_payload(c)["text"]["content"]
+                    .as_str()
+                    .unwrap(),
+                c,
+                "误伤了正常回复：{c}"
+            );
+        }
     }
 }

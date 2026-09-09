@@ -242,14 +242,14 @@ async fn connect_once(
                 // 「绑定 <码>」抢在认人之前：需要它的人正是还认不出来的那个。
                 // 处理完直接回执，不进后面的文件暂存/dispatch。
                 let bind_reply =
-                    crate::bot::try_bind_command(&state, &staff_id, &sender_nick, &content).await;
+                    crate::bot::try_bind_command(state, &staff_id, &sender_nick, &content).await;
 
                 // 认归属账号；未绑定 → 回引导（不落文件、不 dispatch）
                 let account = match &bind_reply {
                     Some(_) => Err(String::new()), // 绑定指令：账号无关，下面按 bind_reply 回
                     None => {
                         crate::bot::resolve_account(
-                            &state,
+                            state,
                             user,
                             &staff_id,
                             &robot_code,
@@ -309,7 +309,7 @@ async fn connect_once(
                             if bind_reply.is_none()
                                 && crate::bot::should_batch(has_files, &content) =>
                         {
-                            Some(crate::bot::batch_push(&state, acct, &content, &ctx).await)
+                            Some(crate::bot::batch_push(state, acct, &content, &ctx).await)
                         }
                         _ => None,
                     };

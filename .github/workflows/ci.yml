@@ -116,8 +116,10 @@ jobs:
         if: startsWith(matrix.os, 'ubuntu')
         run: cargo fmt --all -- --check
 
+      # `-D warnings` 把告警升级成错误。不带它的时候 clippy 永远退 0，告警只是滚过日志、
+      # 谁也不会去看 —— 这就是为什么曾经一声不吭地攒到 27 条。
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: 测试
         run: cargo test --workspace

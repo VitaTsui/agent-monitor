@@ -391,13 +391,13 @@ mod tests {
         // 过了保留期：b 的号位回收，最小空闲号重新可用
         let late = 1000 + 2 * SLOT_KEEP_SECS + 1;
         assert_eq!(
-            t.assign(&[a.clone()], late).0[&a],
+            t.assign(std::slice::from_ref(&a), late).0[&a],
             1,
             "还在的终端号位不受回收影响"
         );
         let newcomer = "m|sh:7@7".to_string();
         assert_eq!(
-            t.assign(&[newcomer.clone()], late).0[&newcomer],
+            t.assign(std::slice::from_ref(&newcomer), late).0[&newcomer],
             2,
             "回收后 2 号重新可分配"
         );
@@ -408,12 +408,15 @@ mod tests {
     fn placeholder_slot_recycles_fast() {
         let ghost = "m|task:aaa".to_string();
         let mut t = SlotTable::default();
-        assert_eq!(t.assign(&[ghost.clone()], 1000).0[&ghost], 1);
+        assert_eq!(t.assign(std::slice::from_ref(&ghost), 1000).0[&ghost], 1);
         // 会话配对上进程后换成终端锚，占位锚成孤儿 —— 保留期内还占着 1 号
         let real = "m|sh:5@5".to_string();
         assert_eq!(
-            t.assign(&[real.clone()], 1000 + PLACEHOLDER_KEEP_SECS - 1)
-                .0[&real],
+            t.assign(
+                std::slice::from_ref(&real),
+                1000 + PLACEHOLDER_KEEP_SECS - 1
+            )
+            .0[&real],
             2
         );
         // 过了这 10 分钟，1 号就该让出来（终端锚同期还远没到回收线）
@@ -424,7 +427,7 @@ mod tests {
             1
         );
         assert_eq!(
-            t.assign(&[real.clone()], late).0[&real],
+            t.assign(std::slice::from_ref(&real), late).0[&real],
             2,
             "终端锚的号不受占位回收影响"
         );
@@ -520,7 +523,7 @@ mod tests {
         // m1 整台离线（一个锚都不在本批），只剩 m2 在上报，且早已过了静默期
         let now = 1000 + SLOT_MIN_IDLE_SECS + 1;
         let m2 = "m2|sh:1@1".to_string();
-        let out = t.assign(&[m2.clone()], now).0;
+        let out = t.assign(std::slice::from_ref(&m2), now).0;
         for k in &m1 {
             assert!(t.slots.contains_key(k), "离线设备的锚 {k} 不该被回收");
         }
@@ -538,7 +541,7 @@ mod tests {
         let out = t.assign(&[a.clone(), b.clone()], 1000).0;
         t.sticky = Some(out[&b]); // 锁定 b
                                   // b 的终端关了（不在本批），但 b 所属设备 m 仍在上报（a 还在）
-        t.assign(&[a.clone()], 1100);
+        t.assign(std::slice::from_ref(&a), 1100);
         assert_eq!(t.sticky, None, "锁定的终端已关，锁必须放开");
         assert!(
             t.slots.contains_key(&b),
@@ -556,7 +559,7 @@ mod tests {
         let no = out[&b];
         t.sticky = Some(no);
         // m2 整台离线，只有 m1 在上报
-        t.assign(&[a.clone()], 1100);
+        t.assign(std::slice::from_ref(&a), 1100);
         assert_eq!(t.sticky, Some(no), "设备离线不该解锁");
     }
 
@@ -581,11 +584,15 @@ mod tests {
     fn dirty_only_on_real_change() {
         let a = "m|sh:1@1".to_string();
         let mut t = SlotTable::default();
-        assert!(t.assign(&[a.clone()], 1000).1, "首次分配应标脏");
-        assert!(!t.assign(&[a.clone()], 1010).1, "紧接着再刷不该标脏");
+        assert!(t.assign(std::slice::from_ref(&a), 1000).1, "首次分配应标脏");
+        assert!(
+            !t.assign(std::slice::from_ref(&a), 1010).1,
+            "紧接着再刷不该标脏"
+        );
         // 阈值从上一次续期（1010）起算，不是从首次分配起算
         assert!(
-            t.assign(&[a.clone()], 1010 + SEEN_FLUSH_SECS + 1).1,
+            t.assign(std::slice::from_ref(&a), 1010 + SEEN_FLUSH_SECS + 1)
+                .1,
             "续期跨阈值应标脏"
         );
     }

@@ -579,7 +579,7 @@ fn ready_desktop_version(downloads_dir: &std::path::Path) -> String {
                 .and_then(|s| s.strip_suffix("-setup.exe"))
             {
                 if let Some(t) = parse(v) {
-                    if best.as_ref().map_or(true, |(bt, _)| t > *bt) {
+                    if best.as_ref().is_none_or(|(bt, _)| t > *bt) {
                         best = Some((t, v.to_string()));
                     }
                 }
@@ -912,13 +912,13 @@ fn sort_tasks(tasks: &mut [Task], key: &str, desc: bool) {
     match key {
         // crtTm（基类默认排序键）映射到最近活动时间
         "crtTm" | "mtimeMs" | "lastActiveAt" | "updTm" => {
-            tasks.sort_by(|a, b| a.mtime_ms.cmp(&b.mtime_ms));
+            tasks.sort_by_key(|a| a.mtime_ms);
         }
         "startedAt" => tasks.sort_by(|a, b| a.started_at.cmp(&b.started_at)),
         "hostname" => tasks.sort_by(|a, b| a.hostname.cmp(&b.hostname)),
         "projectName" => tasks.sort_by(|a, b| a.project_name.cmp(&b.project_name)),
         "status" => tasks.sort_by_key(|t| status_key(t.status)),
-        _ => tasks.sort_by(|a, b| a.mtime_ms.cmp(&b.mtime_ms)),
+        _ => tasks.sort_by_key(|a| a.mtime_ms),
     }
     if desc {
         tasks.reverse();
@@ -1675,9 +1675,7 @@ pub(crate) async fn fetch_session_file(
     for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         let mut machines = state.machines.write().await;
-        let Some(entry) = machines.get_mut(&task.machine_id) else {
-            return None;
-        };
+        let entry = machines.get_mut(&task.machine_id)?;
         if let Some((r, _)) = entry.file_fetch_results.remove(&fetch_id) {
             if !r.err.is_empty() {
                 tracing::debug!("现取文件失败 {rel}: {}", r.err);
@@ -2081,6 +2079,12 @@ pub(crate) fn public_base() -> String {
         .to_string()
 }
 
+/// 一个项目在「设备 → 项目」表里的一行：(代表 cwd, 项目名, 活跃会话 taskId)。
+type ProjectEntry = (String, String, Option<String>);
+/// machine_id → (hostname, 项目 key → 项目行)。分组规则见 integrations_get 里的注释。
+type DeviceProjects =
+    std::collections::BTreeMap<String, (String, std::collections::BTreeMap<String, ProjectEntry>)>;
+
 /// GET /monitor/integrations —— 当前用户的三种渠道配置 + 专属回调地址。
 /// 密钥类字段不回传，只回「是否已设置」。
 async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
@@ -2094,13 +2098,7 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
     // 分组键用 encode_path（项目 key），与侧栏 selectedGroups / 配对 project_key 同规则：
     // 同一目录的不同 cwd 形态（占位任务用进程 cwd vs 真实会话用 jsonl cwd、cursor/非
     // cursor，分隔符/盘符/标点常有细微差异）归并为一项，避免像 sub-centers 那样冒重复行。
-    let mut devs: std::collections::BTreeMap<
-        String,
-        (
-            String,
-            std::collections::BTreeMap<String, (String, String, Option<String>)>,
-        ),
-    > = std::collections::BTreeMap::new();
+    let mut devs: DeviceProjects = std::collections::BTreeMap::new();
     let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     for t in state.tasks_for(&user).await {
         if t.project.is_empty() {
