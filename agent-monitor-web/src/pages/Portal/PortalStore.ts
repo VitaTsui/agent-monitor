@@ -114,7 +114,6 @@ class PortalStore {
    */
   private _hubQueuedById: Record<string, { cmdId: string; text: string }[]> = {};
   private _loadingIds: string[] = [];
-  private _keyword = "";
   /**
    * 撤回后把原文回填给对应会话的对话框：Composer 用 reaction 监听，命中自己的
    * taskId 就把 text 填进输入框再消费掉。带 nonce 是为了「撤回同一段文本」也能
@@ -146,22 +145,6 @@ class PortalStore {
       _wsClosing: false,
       _wsGen: false,
     });
-  }
-
-  private get filtered() {
-    const k = this._keyword.trim().toLowerCase();
-    if (!k) {
-      return this._tasks;
-    }
-
-    return this._tasks.filter(
-      (t) =>
-        // 备注也参与匹配：用户起完名字后，第一反应就是按那个名字搜
-        (t.note ?? "").toLowerCase().includes(k) ||
-        (t.projectName ?? "").toLowerCase().includes(k) ||
-        (t.prompt ?? "").toLowerCase().includes(k) ||
-        (t.hostname ?? "").toLowerCase().includes(k)
-    );
   }
 
   /** 顶部设备选择器的设备列表（有会话的设备，去重） */
@@ -230,7 +213,7 @@ class PortalStore {
    */
   get selectedGroups(): TermGroup[] {
     const mid = this.selectedMachineId;
-    const list = this.filtered.filter(
+    const list = this._tasks.filter(
       (t) =>
         (t.machineId || t.hostname || "unknown") === mid &&
         // 隐藏已结束会话，避免旧会话堆积；但只隐藏「很久没活动」的 ——
@@ -263,7 +246,7 @@ class PortalStore {
       }
     }
     // 固定字母序：分组按标题、组内会话按标题(再退 id)稳定排序 —— 之前顺序跟随
-    // filtered 的活跃度，活跃会话一变就整列上下跳；改成字母序后位置钉死不乱跳。
+    // 拉取顺序的活跃度，活跃会话一变就整列上下跳；改成字母序后位置钉死不乱跳。
     const groups = [...byProject.values()];
     // 排序按**显示出来的那个名字**：起了备注就按备注排，否则列表里看着是 A 在 B 前，
     // 排序却还照着被盖掉的旧标题走
@@ -336,17 +319,9 @@ class PortalStore {
       .filter(Boolean) as PortalTaskData[];
   }
 
-  get keyword() {
-    return this._keyword;
-  }
-
   messagesOf = (id: string): PortalMessage[] => this._messagesById[id] ?? EMPTY_MESSAGES;
 
   isLoadingMessages = (id: string): boolean => this._loadingIds.includes(id);
-
-  setKeyword = (k: string) => {
-    this._keyword = k;
-  };
 
   public init = () => {
     this.refresh();

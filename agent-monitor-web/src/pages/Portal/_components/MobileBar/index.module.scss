@@ -56,6 +56,30 @@
       }
     }
 
+    /* 搜索（命令面板）：与汉堡钮同规格，紧挨着它。
+       放这儿是因为侧栏头部那颗被本栏盖住了 —— 手机上没有 ⌘K，
+       不在这儿开一个口子，命令面板在手机上就根本进不去。 */
+    .mobileSearchBtn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      font-size: 19px;
+      color: var(--primary);
+      cursor: pointer;
+      border-radius: var(--radius);
+
+      &:active {
+        background: color-mix(in srgb, var(--foreground) 8%, transparent);
+      }
+
+      &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: 2px;
+      }
+    }
+
     // 右上角「⋯」操作按钮（与汉堡钮同规格）
     .mobileMoreBtn {
       margin-left: auto;

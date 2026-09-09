@@ -24,6 +24,7 @@ import { useNativeBack } from "./_hooks/useNativeBack";
 import { ShareReceiveModal } from "./_hooks/useShareReceive";
 import MobileBar from "./_components/MobileBar";
 import RightPane from "./_components/RightPane";
+import SearchPalette from "./_components/SearchPalette";
 import SessionStatePane from "./_components/SessionStatePane";
 import Sidebar from "./_components/Sidebar";
 import { PortalUserContext, PortalUserInfo } from "./_context/portalUser";
@@ -65,6 +66,9 @@ const Portal: React.FC = observer(() => {
   const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
   // 首次打开后就不再卸载：卸载会掐掉 antd 的关闭动画（移动端是底部 sheet，更明显）
   const [settingsMounted, setSettingsMounted] = useState(false);
+  // 命令面板（⌘K）。开合放在壳上而不是面板里 —— 面板没开的时候它自己不在树上，
+  // 监听不到任何键；侧栏那颗搜索按钮也要能开它。
+  const [searchOpen, setSearchOpen] = useState(false);
   // 用 state 承载用户信息：每次加载调 /monitor/me 刷新（含实时 isSuper），
   // 这样管理员改了别人的权限，对方不必重新登录、下次加载即生效。
   const [user, setUser] = useState<PortalUserInfo>(
@@ -166,6 +170,22 @@ const Portal: React.FC = observer(() => {
   useApkUpdateCheck();
   // 客户端窗口内右下角的新版本提醒（浏览器里空转）
   useClientUpdateToast();
+  /* 全局命令面板：⌘K / Ctrl+K 开，Esc 关（Esc 由 Modal 自己接）。
+   *
+   * 带修饰键，所以在输入框（对话框、备注、搜索行）里聚焦时也不会被当成正常输入误触发；
+   * `preventDefault` 挡掉浏览器自己的 ⌘K（Chrome 聚焦地址栏搜索）。
+   * 挂 window 上是因为入口有两个：这个键，和侧栏头部那颗按钮。 */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // 客户端窗口内：Cmd/Ctrl+R 刷新页面（webview 默认不绑，站点发新版可手动拉最新）
   useEffect(() => {
     if (!inDesktopClient()) return;
@@ -221,6 +241,10 @@ const Portal: React.FC = observer(() => {
   // 历史里没有上一条，`canGoBack` 为 false，系统语义会直接退出整个 App。
   // 按地址算目标（portalBackTarget）才是确定的一层。浏览器里此钩子空转。
   useNativeBack(() => {
+    if (searchOpen) {
+      setSearchOpen(false);
+      return true;
+    }
     if (mobileNav) {
       setMobileNav(false);
       return true;
@@ -283,6 +307,7 @@ const Portal: React.FC = observer(() => {
           <MobileBar
             navOpen={mobileNav}
             onToggleNav={() => setMobileNav((v) => !v)}
+            onOpenSearch={() => setSearchOpen(true)}
           />
         )}
 
@@ -304,7 +329,18 @@ const Portal: React.FC = observer(() => {
           onUserMenuOpenChange={setUserMenuOpen}
           onSelectSession={selectSession}
           onOpenSettings={openSettings}
+          onOpenSearch={() => setSearchOpen(true)}
           onLogout={onLogout}
+        />
+
+        {/* 命令面板。它只是**现有入口的另一种打开方式**：会话、设备、
+            「查看全部会话」、设置各分栏、外观三态，逐条都能在界面上找到对应的地方。
+            侧栏原来那个筛当前设备的搜索框已经撤掉，不留两套搜索。 */}
+        <SearchPalette
+          open={searchOpen}
+          onClose={() => setSearchOpen(false)}
+          onSelectSession={selectSession}
+          onOpenSettings={openSettings}
         />
 
         {/* 正文 ＋ 右栏并排的那一行。右栏给的条件有三条：

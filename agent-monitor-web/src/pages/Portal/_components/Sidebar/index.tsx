@@ -1,6 +1,5 @@
 import React from "react";
 
-import { Input } from "@hsu-react/ui";
 import { Badge, Popover, Tooltip } from "antd";
 import {
   CodeOutlined,
@@ -51,10 +50,12 @@ interface SidebarProps {
   onSelectSession: (id: string) => void;
   /** 进设置的某个分栏 */
   onOpenSettings: (tab: SettingsTab) => void;
+  /** 打开命令面板（⌘K）。快捷键挂在壳上，这里只是那颗按钮 */
+  onOpenSearch: () => void;
   onLogout: () => void;
 }
 
-/** 前台左侧栏：品牌 ＋ 搜索 ＋ 设备 ＋ 会话 ＋ 底部账户。 */
+/** 前台左侧栏：品牌 ＋ 搜索按钮 ＋ 设备 ＋ 会话 ＋ 底部账户。 */
 const Sidebar: React.FC<SidebarProps> = observer((props) => {
   const {
     folded,
@@ -66,9 +67,10 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
     onUserMenuOpenChange,
     onSelectSession,
     onOpenSettings,
+    onOpenSearch,
     onLogout,
   } = props;
-  const { pendingCount, keyword, setKeyword } = PortalStore;
+  const { pendingCount } = PortalStore;
   const navigate = useNavigate();
 
   const nickname = user.nickname ?? user.username ?? "";
@@ -82,6 +84,23 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
           </span>
           {!folded && <span className={styles.brandName}>终端任务监控</span>}
         </div>
+        <Tooltip title="搜索（⌘K）" placement="right">
+          <span
+            className={styles.headBtn}
+            role="button"
+            tabIndex={0}
+            aria-label="搜索"
+            onClick={onOpenSearch}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onOpenSearch();
+              }
+            }}
+          >
+            <SearchOutlined />
+          </span>
+        </Tooltip>
         <Tooltip title={folded ? "展开侧栏" : "收起侧栏"} placement="right">
           <span
             className={styles.foldBtn}
@@ -102,19 +121,12 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
         </Tooltip>
       </div>
 
+      {/* 这里原来是一个「搜索会话 / 项目」的输入框。撤掉了：它只筛得动**当前选中
+          设备**下的那一列，而顶部那颗搜索按钮（⌘K 也是它）开的命令面板搜的是
+          全部设备的全部会话，还能搜到设备与设置项。两个搜索摆在一起，用户会以为
+          它们搜的是同一份东西，实际结果却对不上 —— 只留强的那个。 */}
       {!folded && (
         <>
-          <div className={styles.siderSearch}>
-            <Input
-              className={styles.search}
-              placeholder="搜索会话 / 项目"
-              prefix={<SearchOutlined className={styles.searchIcon} />}
-              allowClear
-              value={keyword}
-              onChange={(value) => setKeyword(value)}
-            />
-          </div>
-
           <div className={styles.siderScroll}>
             <div className={styles.sectionLabel}>设备</div>
             <DeviceList localId={localId} />

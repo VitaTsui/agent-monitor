@@ -2,7 +2,7 @@
 // 颜色一律直接写 styles/tokens.scss 的令牌：侧栏面 --card、描边与按下底 --overlay-2、
 // hover 底 --overlay-1。
 //
-// 本文件只管侧栏这个框：品牌头、搜索框、滚动区、底部账户行、移动端抽屉形态。
+// 本文件只管侧栏这个框：品牌头（含搜索/收起两颗）、滚动区、底部账户行、移动端抽屉形态。
 // 设备行与会话行各自成组件（_components/DeviceList、_components/SessionList），
 // 样式跟着组件走 —— 原来这三块连同用户菜单、移动端顶栏一起挤在 Portal 那份
 // 1036 行的巨石里。
@@ -67,7 +67,12 @@
       }
     }
 
-    .foldBtn {
+    /* 头部右侧那两颗（搜索、收起）：同一档方按钮。
+       它们都是**对整个侧栏**的操作 —— 找东西、把它收起来，摆在与品牌同一行。 */
+    .headBtn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       font-size: var(--text-md);
       color: var(--muted-foreground);
       cursor: pointer;
@@ -79,49 +84,14 @@
         color: var(--foreground);
       }
     }
-  }
 
-  .siderSearch {
-    padding: 4px 14px 6px;
-
-    // 紧凑、融入背景的搜索框（Claude 式）
-    .search {
-      height: 32px;
-      padding: 2px 10px;
-      font-size: var(--text-base);
-      background: color-mix(in srgb, var(--foreground) 5%, transparent);
-      border: 1px solid transparent;
-      border-radius: var(--radius);
-      box-shadow: none;
-      transition: background 0.15s, border-color 0.15s;
-
-      &:hover {
-        background: color-mix(in srgb, var(--foreground) 8%, transparent);
-      }
-
-      &:focus-within {
-        background: var(--card);
-        border-color: color-mix(in srgb, var(--primary) 40%, transparent);
-      }
-
-      :global(input.ant-input) {
-        background: transparent;
-        font-size: var(--text-base);
-
-        &::placeholder {
-          color: color-mix(in srgb, var(--foreground) 35%, transparent);
-        }
-      }
-
-      .searchIcon {
-        color: color-mix(in srgb, var(--foreground) 35%, transparent);
-        margin-right: 2px;
-      }
+    .foldBtn {
+      @extend .headBtn;
     }
   }
 
-  // 左右 14：与上面的品牌头、搜索框同一条竖线。原来是 8，
-  // 于是侧栏里三块内容有两个不同的左缘
+  // 左右 14：与上面的品牌头同一条竖线。原来是 8，
+  // 于是侧栏里两块内容有两个不同的左缘
   .siderScroll {
     flex: 1;
     overflow-y: auto;
@@ -225,7 +195,7 @@
 
   // 键盘可达元素的焦点可见性（role=button 的 span/div）。
   // 设备行 / 会话行的同款规则跟着各自的组件走（_components/*）。
-  .foldBtn:focus-visible {
+  .headBtn:focus-visible {
     outline: 2px solid var(--primary);
     outline-offset: 2px;
     border-radius: var(--radius);

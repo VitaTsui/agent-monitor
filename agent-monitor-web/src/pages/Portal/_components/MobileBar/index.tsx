@@ -5,6 +5,7 @@ import {
   EllipsisOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
+  SearchOutlined,
   StopOutlined,
   SyncOutlined,
   ThunderboltOutlined,
@@ -21,6 +22,9 @@ interface MobileBarProps {
   /** 抽屉是否展开（决定汉堡图标形态） */
   navOpen: boolean;
   onToggleNav: () => void;
+  /** 打开命令面板。**移动端唯一的入口**：侧栏头部那颗搜索按钮被本栏盖住
+   *  （侧栏 position:fixed/z-index:1，本栏 z-index:5），手机上也没有 ⌘K 可按。 */
+  onOpenSearch: () => void;
 }
 
 /**
@@ -28,7 +32,7 @@ interface MobileBarProps {
  * （设置 / 历史）自带固定头部，两个头叠在一起就成了双层导航栏。
  */
 const MobileBar: React.FC<MobileBarProps> = observer((props) => {
-  const { navOpen, onToggleNav } = props;
+  const { navOpen, onToggleNav, onOpenSearch } = props;
   const { openTasks, control, syncMessages } = PortalStore;
   const [actsOpen, setActsOpen] = useState(false);
 
@@ -50,6 +54,21 @@ const MobileBar: React.FC<MobileBarProps> = observer((props) => {
         }}
       >
         <SidebarIcon folded={!navOpen} />
+      </span>
+      <span
+        className={styles.mobileSearchBtn}
+        role="button"
+        tabIndex={0}
+        aria-label="搜索"
+        onClick={onOpenSearch}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onOpenSearch();
+          }
+        }}
+      >
+        <SearchOutlined />
       </span>
       <span className={styles.mobileTitle}>
         {t0 ? (
