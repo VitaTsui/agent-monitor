@@ -851,7 +851,7 @@ public class AmSusp {
 Add-Type -TypeDefinition $code -Language CSharp
 if([AmSusp]::Run([uint32]$TargetPid,[bool]$Suspend)){ exit 0 } else { exit 2 }
 "#;
-    write_ps1(&ps_path, &script)?;
+    write_ps1(&ps_path, script)?;
     let out = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
@@ -902,44 +902,42 @@ fn windows_send_key(pid: u32, key: &str, count: usize) -> Result<&'static str> {
     }
     let dir = std::env::temp_dir();
     let ps_path = dir.join(format!("am-key-{pid}-{}.ps1", std::process::id()));
-    let script = format!(
-        r#"param([int]$TargetPid,[int]$Vk,[int]$Uch,[int]$Count)
+    let script = r#"param([int]$TargetPid,[int]$Vk,[int]$Uch,[int]$Count)
 $ErrorActionPreference='Stop'
 $code=@'
 using System;
 using System.Runtime.InteropServices;
 using System.Collections.Generic;
-public class AmKey {{
+public class AmKey {
   [DllImport("kernel32.dll",SetLastError=true)] public static extern bool AttachConsole(uint pid);
   [DllImport("kernel32.dll",SetLastError=true)] public static extern bool FreeConsole();
   [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode)] public static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
-  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct KEY_EVENT_RECORD {{ public int bKeyDown; public ushort wRepeatCount; public ushort wVirtualKeyCode; public ushort wVirtualScanCode; public char UnicodeChar; public uint dwControlKeyState; }}
-  [StructLayout(LayoutKind.Explicit)] public struct INPUT_RECORD {{ [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public KEY_EVENT_RECORD Key; }}
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct KEY_EVENT_RECORD { public int bKeyDown; public ushort wRepeatCount; public ushort wVirtualKeyCode; public ushort wVirtualScanCode; public char UnicodeChar; public uint dwControlKeyState; }
+  [StructLayout(LayoutKind.Explicit)] public struct INPUT_RECORD { [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public KEY_EVENT_RECORD Key; }
   [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode,EntryPoint="WriteConsoleInputW")] public static extern bool WriteConsoleInput(IntPtr h, INPUT_RECORD[] buf, uint len, out uint written);
-  static INPUT_RECORD Mk(ushort vk, char uc, bool down){{ var r=new INPUT_RECORD(); r.EventType=1; var k=new KEY_EVENT_RECORD(); k.bKeyDown=down?1:0; k.wRepeatCount=1; k.wVirtualKeyCode=vk; k.wVirtualScanCode=0; k.UnicodeChar=uc; k.dwControlKeyState=0; r.Key=k; return r; }}
-  static bool WriteAll(IntPtr h, List<INPUT_RECORD> recs){{
+  static INPUT_RECORD Mk(ushort vk, char uc, bool down){ var r=new INPUT_RECORD(); r.EventType=1; var k=new KEY_EVENT_RECORD(); k.bKeyDown=down?1:0; k.wRepeatCount=1; k.wVirtualKeyCode=vk; k.wVirtualScanCode=0; k.UnicodeChar=uc; k.dwControlKeyState=0; r.Key=k; return r; }
+  static bool WriteAll(IntPtr h, List<INPUT_RECORD> recs){
     int i=0; var arr=recs.ToArray();
-    while(i<arr.Length){{ int n=Math.Min(8, arr.Length-i); var chunk=new INPUT_RECORD[n]; Array.Copy(arr,i,chunk,0,n); uint w; if(!WriteConsoleInput(h, chunk, (uint)n, out w) || w==0) return false; i+=(int)w; }}
+    while(i<arr.Length){ int n=Math.Min(8, arr.Length-i); var chunk=new INPUT_RECORD[n]; Array.Copy(arr,i,chunk,0,n); uint w; if(!WriteConsoleInput(h, chunk, (uint)n, out w) || w==0) return false; i+=(int)w; }
     return true;
-  }}
-  public static bool Send(uint pid, ushort vk, char uc, int count){{
+  }
+  public static bool Send(uint pid, ushort vk, char uc, int count){
     FreeConsole();
     if(!AttachConsole(pid)) return false;
-    try {{
+    try {
       IntPtr h=CreateFileW("CONIN$",0xC0000000u,3u,IntPtr.Zero,3u,0u,IntPtr.Zero);
       if(h==(IntPtr)(-1)) return false;
       var recs=new List<INPUT_RECORD>();
-      for(int i=0;i<count;i++){{ recs.Add(Mk(vk,uc,true)); recs.Add(Mk(vk,uc,false)); }}
+      for(int i=0;i<count;i++){ recs.Add(Mk(vk,uc,true)); recs.Add(Mk(vk,uc,false)); }
       return WriteAll(h, recs);
-    }} finally {{ FreeConsole(); }}
-  }}
-}}
+    } finally { FreeConsole(); }
+  }
+}
 '@
 Add-Type -TypeDefinition $code -Language CSharp
-if([AmKey]::Send([uint32]$TargetPid,[uint16]$Vk,[char]$Uch,$Count)){{ exit 0 }} else {{ exit 2 }}
-"#
-    );
-    write_ps1(&ps_path, &script)?;
+if([AmKey]::Send([uint32]$TargetPid,[uint16]$Vk,[char]$Uch,$Count)){ exit 0 } else { exit 2 }
+"#;
+    write_ps1(&ps_path, script)?;
     let out = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
@@ -1070,7 +1068,7 @@ Add-Type -TypeDefinition $code -Language CSharp
 $t=[System.IO.File]::ReadAllText($TextFile,[System.Text.Encoding]::UTF8)
 if([AmConIn]::Send([uint32]$TargetPid,$t,($Submit -ne 0))){ exit 0 } else { exit 2 }
 "#;
-    write_ps1(&ps_path, &script)?;
+    write_ps1(&ps_path, script)?;
 
     let out = std::process::Command::new("powershell")
         .args([
@@ -1239,7 +1237,7 @@ public class AmFKey {
 Add-Type -TypeDefinition $code -Language CSharp
 if([AmFKey]::Run([uint32]$WtPid,[byte]$Vk,$Count)){ exit 0 } else { exit 4 }
 "#;
-    write_ps1(&ps_path, &script)?;
+    write_ps1(&ps_path, script)?;
 
     let out = std::process::Command::new("powershell")
         .args([
@@ -1335,7 +1333,7 @@ Start-Sleep -Milliseconds 250
 try { if($old -ne $null){ Set-Clipboard -Value $old } } catch {}
 if($ok){ exit 0 } else { exit 4 }
 "#;
-    write_ps1(&ps_path, &script)?;
+    write_ps1(&ps_path, script)?;
 
     let out = std::process::Command::new("powershell")
         .args([
