@@ -1747,7 +1747,10 @@ struct BgTask {
 ///
 /// 同样是跨记录的状态：
 /// - 启动：tool_use 只给得出展示名，任务号与种类都要等它的 tool_result 才成形；
-/// - 结束：后续某条 user 记录里的 <task-notification> 带 <task-id> 与 <status>。
+/// - 结束：两条互斥的信号，缺一条就有一整类任务永远停在「执行中」——
+///   - 跑到自己结束 → 某条记录里的 `<task-notification>` 带 `<task-id>` 与 `<status>`
+///     （**不保证排在起跑记录之后**，见 [`Self::early`]）；
+///   - 被主动停掉 → `TaskStop` 那次调用的结果，见 [`stopped_task_id`]，此后没有通知。
 ///
 /// **种类判定只认 `toolUseResult` 里的结构化字段**（`agentId` / `backgroundTaskId`），
 /// 不看工具名、也不看入参：工具名是会变的（`Task` 早已改叫 `Agent`），
@@ -1757,6 +1760,15 @@ struct BgTask {
 struct BgTracker {
     /// tool_use_id -> (展示名, 起跑时刻)（等 tool_result 定种类、回填任务号）
     pending: HashMap<String, (String, String)>,
+    /// 早到的完成通知：tool_use_id -> (任务号, 终态, 通知时刻)。
+    ///
+    /// **记录文件不是按时间戳排的**：完成通知是一条 `queue-operation`，落盘时机与
+    /// 那次工具调用的 `tool_result` 记录彼此独立，后者常常晚好几行才补上。
+    /// 实测本机 4 例（`brbmfiatf` 通知在 :3971、起跑记录在 :3975；`b02t05203`
+    /// 通知在 :5414、起跑记录在 :5573，两者时间戳还差 4.5 分钟），通知先到时
+    /// [`Self::on_notification`] 找不到条目就把它丢了，条目随后建出来永远停在「执行中」。
+    /// 故先按 `<tool-use-id>` 存着，等配对的 `tool_result` 到达时补上。
+    early: HashMap<String, (String, String, u64)>,
     items: Vec<BgTask>,
 }
 
@@ -1819,6 +1831,14 @@ impl BgTracker {
             return;
         };
         let started = self.pending.remove(use_id);
+        // 主动停止（TaskStop）不发完成通知，收尾信号只有这条结果本身
+        if let Some(id) = stopped_task_id(meta) {
+            if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
+                t.status = "stopped".into();
+                t.ended_ms = iso_to_ms(ts).unwrap_or(0);
+            }
+            return;
+        }
         // 只有 toolUseResult 交出任务号的，才是「还在后台跑着」的任务：
         //   agentId          → 异步子代理
         //   backgroundTaskId → 后台命令
@@ -1826,6 +1846,13 @@ impl BgTracker {
         let Some((id, kind)) = bg_identity(meta) else {
             return;
         };
+        // 这次起跑的完成通知先落盘了？（见 [`Self::early`]）任务号对得上才认，
+        // 免得把上一轮同号任务的终态套到复活的这条上。
+        let done = self
+            .early
+            .remove(use_id)
+            .filter(|(task_id, _, _)| *task_id == id)
+            .map(|(_, status, ended_ms)| (status, ended_ms));
         let (label, started_at) = match started {
             Some((l, t)) => (l, t),
             // tool_use 落在重放窗口之外（极少见）：退回结果里的说明，时间用当前这条
@@ -1837,21 +1864,22 @@ impl BgTracker {
                 ts.to_string(),
             ),
         };
+        let (status, ended_ms) = done.unwrap_or_else(|| ("running".to_string(), 0));
         // 同一个子代理被唤醒续跑时会再来一条结果：原地复活，别堆重复条目
         if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
             t.label = label;
-            t.status = "running".into();
+            t.status = status;
             t.started_at = started_at;
-            t.ended_ms = 0;
+            t.ended_ms = ended_ms;
             return;
         }
         self.items.push(BgTask {
             id,
             label,
-            status: "running".into(),
+            status,
             kind: kind.to_string(),
             started_at,
-            ended_ms: 0,
+            ended_ms,
         });
     }
 
@@ -1875,6 +1903,9 @@ impl BgTracker {
         // 实测：c7d3a592-…jsonl:88 的通知只报了 af93b9ce77aec80b3，正文里引用到本段
         // 源码，结果把并行跑着的 a33f6420ca1247a8d 一并抹成 completed。
         let ended_ms = iso_to_ms(ts).unwrap_or(0);
+        // 通知里的 `<tool-use-id>` 就是起跑那次调用的 tool_use_id —— 起跑记录还没轮到时
+        // 靠它把终态存下来（见 [`Self::early`]）。孤儿汇总没有这个标签，也不需要。
+        let use_id = tag_value(text, "tool-use-id");
         let mut is_orphan_summary = false;
         let mut rest = text;
         while let Some(id) = tag_value(rest, "task-id") {
@@ -1885,6 +1916,9 @@ impl BgTracker {
                 if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
                     t.status = status.clone();
                     t.ended_ms = ended_ms;
+                } else if let Some(u) = &use_id {
+                    self.early
+                        .insert(u.clone(), (id.clone(), status.clone(), ended_ms));
                 }
             }
             let Some(pos) = rest.find("</task-id>") else {
@@ -1908,7 +1942,9 @@ impl BgTracker {
     /// （父进程被打断/退出、机器重启时就没了）——一旦缺席，条目会永远停在「执行中」。
     /// 而子会话自己那份记录是硬事实，收尾形态还是固定的，见 [`SubAgentTail`]。
     ///
-    /// 两种对齐，都只针对子代理（`kind == "agent"`），后台命令没有这份记录：
+    /// 两种对齐，都只针对子代理（`kind == "agent"`），后台命令没有这份记录 ——
+    /// 也不需要：后台命令的两条收尾信号（完成通知、`TaskStop` 结果）都在父记录里，
+    /// 只要两条都认全就没有无上界的条目（实测详见 [`BgTracker`] 与 [`stopped_task_id`]）。
     /// - 清单说在跑、它自己却早已收尾 → 落终态（父记录漏了那条通知）；
     /// - 清单说已结束、它却在通知很久之后还在写 → 那条通知过期了（子会话被唤醒续跑，
     ///   通知正文自己写着 "the same task-id may notify more than once"），改按记录判。
@@ -1991,6 +2027,23 @@ fn bg_identity(meta: Option<&Value>) -> Option<(String, &'static str)> {
         }
     }
     None
+}
+
+/// 从 `toolUseResult` 认出「这次调用是主动停掉了一个后台任务」，返回被停的任务号。
+///
+/// **`TaskStop` 停掉的任务不会再发 `<task-notification>`** —— 这条结果就是它唯一的
+/// 收尾信号。实测本机 17 条永远停在「执行中」的后台命令里，13 条正是这么来的
+/// （`83fd6036…jsonl:3414` 停掉 `bwqopavu5`、`460884c8…jsonl:27790` 停掉
+/// `b19cm04gi`，等等），全文再无第二处提到它们。
+///
+/// 判据同样只取结构化字段：`task_id` + `task_type` 这一对只有停止结果才给
+/// （实测 20 条，形态清一色 `command,message,task_id,task_type`），
+/// 不去正文里匹配 "Successfully stopped" 那句话 —— 那句话是会改的。
+fn stopped_task_id(meta: Option<&Value>) -> Option<String> {
+    let m = meta?;
+    m.get("task_type").and_then(Value::as_str)?;
+    let id = m.get("task_id").and_then(Value::as_str)?;
+    (!id.is_empty()).then(|| id.to_string())
 }
 
 /// 「已交回结果」的静置窗口：收尾形态还要静这么久才作数。
@@ -2797,6 +2850,96 @@ mod bg_tests {
         ));
         assert_eq!(t.items.len(), 1, "应是原地更新而非追加一条");
         assert_eq!(t.items[0].status, "completed");
+    }
+
+    /// TaskStop 的结果（`task_id` + `task_type`）
+    fn stop_result(use_id: &str, task_id: &str, task_type: &str) -> Value {
+        result_with(
+            use_id,
+            "{\"message\":\"Successfully stopped task\"}",
+            serde_json::json!({
+                "message": format!("Successfully stopped task: {task_id} (yarn start)"),
+                "task_id": task_id, "task_type": task_type, "command": "yarn start"
+            }),
+        )
+    }
+
+    /// 主动停掉的后台命令此后不会再发通知 —— 停止结果就是它的收尾信号。
+    /// 实测本机 13 条永远停在「执行中」的后台命令就是这么来的
+    /// （如 `83fd6036…jsonl:3414` 停掉 `bwqopavu5`）。
+    #[test]
+    fn task_stop_ends_background_command() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "起 dev server"));
+        t.observe(&bg_result("u1", "b1"));
+        assert_eq!(t.items[0].status, "running");
+
+        t.observe(&bg_use("u2", "TaskStop", "停掉它"));
+        t.observe(&stop_result("u2", "b1", "local_bash"));
+        assert_eq!(t.items.len(), 1, "停止结果不该新建条目");
+        assert_eq!(t.items[0].status, "stopped");
+        assert!(t.items[0].ended_ms > 0, "收尾时刻要落下来，否则复活判定会误翻");
+    }
+
+    /// 子代理同样可以被主动停掉（实测 20 条停止结果里 5 条是 `local_agent`）
+    #[test]
+    fn task_stop_ends_async_agent() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Agent", "审查后端"));
+        t.observe(&agent_result("u1", "a1"));
+        t.observe(&stop_result("u2", "a1", "local_agent"));
+        assert_eq!(t.items[0].status, "stopped");
+    }
+
+    /// 停的不是清单里的任务时，不许凭空造条目
+    #[test]
+    fn task_stop_of_unknown_task_adds_nothing() {
+        let mut t = BgTracker::default();
+        t.observe(&stop_result("u1", "bzzz", "local_bash"));
+        assert!(t.items.is_empty());
+    }
+
+    /// 记录文件不按时间戳排：完成通知那行常常落在起跑那行之前。
+    /// 实测 `83fd6036…jsonl` 通知在 :3971、起跑记录在 :3975，
+    /// `383ed76b…jsonl` 更是差了 159 行、时间戳差 4.5 分钟。
+    /// 通知先到时必须按 `<tool-use-id>` 存着，等起跑记录到了补上。
+    #[test]
+    fn notification_ahead_of_launch_still_ends_task() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "起 dev server"));
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>u1</tool-use-id>\n<status>completed</status>\n</task-notification>",
+        ));
+        assert!(t.items.is_empty(), "此刻条目还没成形");
+
+        t.observe(&bg_result("u1", "b1"));
+        assert_eq!(t.items.len(), 1);
+        assert_eq!(t.items[0].status, "completed", "早到的通知要补回来");
+        assert!(t.items[0].ended_ms > 0);
+    }
+
+    /// 早到的通知只认任务号对得上的那次起跑 —— 同号任务再起一次时不许套用旧终态
+    #[test]
+    fn early_notification_only_applies_to_its_own_task() {
+        let mut t = BgTracker::default();
+        t.observe(&notification(
+            "<task-notification>\n<task-id>bold</task-id>\n<tool-use-id>u1</tool-use-id>\n<status>failed</status>\n</task-notification>",
+        ));
+        t.observe(&bg_use("u1", "Bash", "起 dev server"));
+        t.observe(&bg_result("u1", "bnew"));
+        assert_eq!(t.items[0].status, "running", "任务号对不上就别套");
+    }
+
+    /// 通知没带 tool-use-id（孤儿汇总、MCP 任务）时维持原样：只作用于已成形的条目
+    #[test]
+    fn notification_without_tool_use_id_is_not_buffered() {
+        let mut t = BgTracker::default();
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>",
+        ));
+        t.observe(&bg_use("u1", "Bash", "起 dev server"));
+        t.observe(&bg_result("u1", "b1"));
+        assert_eq!(t.items[0].status, "running");
     }
 }
 
@@ -4323,3 +4466,4 @@ mod short_name_tests {
         assert_eq!(short_name(r"D:\cursor\"), "cursor");
     }
 }
+
