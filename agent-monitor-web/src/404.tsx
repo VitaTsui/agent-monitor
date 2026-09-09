@@ -1,39 +1,37 @@
-import { ConfigProvider, Result } from "antd";
+import { Result } from "antd";
 import { Button } from "@hsu-react/ui";
 
 import React from "react";
 import { useNavigate } from "react-router";
 
-// 兜底路由挂在 App/Theme 之外，拿不到全局 ConfigProvider——
-// 自带一份品牌主色，避免退化成 antd 默认蓝。
+// 主题不在这里配：外观控制器与 antd 主题都在应用根上（src/index.tsx 的 Layout.Theme
+// ＋ router/Routes.tsx 的 ConfigProvider），本页在它们里面。
+// 原来这里自带一份 `colorPrimary: "#18181b"` ＋ 一片写死的青灰渐变底 —— 前者在暗色下
+// 与令牌那侧的主色对不上，后者根本不跟主题走，暗色时整页是一块亮色。
 const NoFoundPage: React.FC = () => {
   const navigate = useNavigate();
 
   return (
-    <ConfigProvider
-      theme={{ token: { colorPrimary: "#18181b", colorLink: "#18181b" } }}
+    <div
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "var(--background)",
+      }}
     >
-      <div
-        style={{
-          minHeight: "100vh",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: "linear-gradient(180deg, #f4fafb 0%, #eaf4f6 100%)",
-        }}
-      >
-        <Result
-          status="404"
-          title="404"
-          subTitle="抱歉，你访问的页面不存在。"
-          extra={
-            <Button type="primary" onClick={() => navigate("/")}>
-              返回首页
-            </Button>
-          }
-        ></Result>
-      </div>
-    </ConfigProvider>
+      <Result
+        status="404"
+        title="404"
+        subTitle="抱歉，你访问的页面不存在。"
+        extra={
+          <Button type="primary" onClick={() => navigate("/")}>
+            返回首页
+          </Button>
+        }
+      ></Result>
+    </div>
   );
 };
 

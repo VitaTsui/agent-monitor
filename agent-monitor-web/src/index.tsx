@@ -31,8 +31,15 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
   <BrowserRouter>
     <SingleRouter showPath={false}>
       <HsuLayout.I18n>
-        <ClientTitleBar />
-        <Routes />
+        {/* 外观控制器：它是唯一写 `html[data-theme]` 的地方，而全套设计令牌的暗色
+            （组件库的 --vita-*、本项目 styles/tokens.scss 的 shadcn 语义层）都挂在
+            那个属性上。原先它只包着 App（后管壳），于是前台 /portal、官网 /、登录页
+            都不在它作用域内 —— 暗色令牌永远不会被激活，前台没有暗色模式可言。
+            data-theme 是**文档级**的，写它的人就该在应用根上，一个就够。 */}
+        <HsuLayout.Theme>
+          <ClientTitleBar />
+          <Routes />
+        </HsuLayout.Theme>
       </HsuLayout.I18n>
     </SingleRouter>
   </BrowserRouter>,

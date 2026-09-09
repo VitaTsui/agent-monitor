@@ -1,9 +1,6 @@
-$cream: var(--background); // 页面底
-$oat: var(--card); // 卡片/区块面
-$text: var(--foreground);
-$muted: var(--muted-foreground);
-$accent: var(--primary);
-$border: color-mix(in srgb, var(--foreground) 10%, transparent);
+@use "@hsu-react/ui/es/styles/responsive" as r;
+// 颜色一律直接写 styles/tokens.scss 的令牌，不再垫一层 scss 别名。
+// 描边原来是 --foreground 10%，与前台的 9% 只是抄漏，统一收进 --overlay-2。
 
 .Home {
   // #root 是 100vh + overflow:hidden（后管布局需要），
@@ -11,8 +8,8 @@ $border: color-mix(in srgb, var(--foreground) 10%, transparent);
   height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
-  background: $cream;
-  color: $text;
+  background: var(--background);
+  color: var(--foreground);
 }
 
 .logo {
@@ -29,7 +26,7 @@ $border: color-mix(in srgb, var(--foreground) 10%, transparent);
   position: sticky; top: 0; z-index: 20;
   background: color-mix(in srgb, var(--background) 85%, transparent);
   backdrop-filter: blur(10px);
-  border-bottom: 1px solid $border;
+  border-bottom: 1px solid var(--overlay-2);
 
   .navInner {
     max-width: 1120px; margin: 0 auto;
@@ -40,13 +37,13 @@ $border: color-mix(in srgb, var(--foreground) 10%, transparent);
   .brandName { font-weight: 700; font-size: var(--text-lg); }
   .navLinks {
     margin-left: 12px; display: flex; gap: 24px; flex: 1;
-    a { color: $muted; font-size: var(--text-md); text-decoration: none;
-      &:hover { color: $text; } }
+    a { color: var(--muted-foreground); font-size: var(--text-md); text-decoration: none;
+      &:hover { color: var(--foreground); } }
   }
   .navCta {
     height: 36px;
     border: none !important;
-    background: $accent !important; color: var(--primary-foreground) !important;
+    background: var(--primary) !important; color: var(--primary-foreground) !important;
     padding: 0 18px; border-radius: var(--radius);
     font-size: var(--text-md); font-weight: 600;
     box-shadow: none;
@@ -62,16 +59,16 @@ $border: color-mix(in srgb, var(--foreground) 10%, transparent);
 
   .badge {
     display: inline-flex; align-items: center; gap: 7px;
-    background: color-mix(in srgb, var(--primary) 10%, transparent); color: $accent;
+    background: color-mix(in srgb, var(--primary) 10%, transparent); color: var(--primary);
     padding: 5px 12px; border-radius: var(--radius-full);
     font-size: 12.5px; font-weight: 600; margin-bottom: 20px;
   }
   .title { font-size: 42px; font-weight: 800; line-height: 1.18; margin: 0 0 18px; }
-  .accent { color: $accent; }
+  .accent { color: var(--primary); }
   .subtitle { font-size: var(--text-lg); line-height: 1.75; color: color-mix(in srgb, var(--foreground) 72%, transparent); margin: 0 0 26px; }
   .heroActions { display: flex; gap: 12px; margin-bottom: 16px; }
   .heroMeta {
-    display: flex; gap: 8px; font-size: 12.5px; color: $muted;
+    display: flex; gap: 8px; font-size: 12.5px; color: var(--muted-foreground);
     span:nth-child(even) { color: color-mix(in srgb, var(--foreground) 25%, transparent); }
   }
 }
@@ -79,7 +76,7 @@ $border: color-mix(in srgb, var(--foreground) 10%, transparent);
 .primaryBtn {
   height: 46px;
   border: none !important;
-  background: linear-gradient(135deg, $accent, var(--primary-hover)) !important;
+  background: linear-gradient(135deg, var(--primary), var(--primary-hover)) !important;
   color: var(--primary-foreground) !important;
   padding: 0 26px; border-radius: var(--radius-lg);
   font-size: var(--text-md); font-weight: 600;
@@ -88,7 +85,7 @@ $border: color-mix(in srgb, var(--foreground) 10%, transparent);
 }
 .ghostBtn {
   cursor: pointer; text-decoration: none;
-  background: var(--card); color: $text; border: 1px solid $border;
+  background: var(--card); color: var(--foreground); border: 1px solid var(--overlay-2);
   padding: 12px 24px; border-radius: var(--radius-lg);
   font-size: var(--text-md); font-weight: 600;
   display: inline-flex; align-items: center;
@@ -104,7 +101,7 @@ $border: color-mix(in srgb, var(--foreground) 10%, transparent);
     border-radius: var(--radius-lg);
   }
   .previewNote {
-    text-align: center; font-size: var(--text-xs); color: $muted; margin-top: 10px;
+    text-align: center; font-size: var(--text-xs); color: var(--muted-foreground); margin-top: 10px;
   }
 }
 
@@ -128,7 +125,7 @@ $border: color-mix(in srgb, var(--foreground) 10%, transparent);
   .featureIcon {
     display: inline-flex; align-items: center; justify-content: center;
     width: 44px; height: 44px; border-radius: var(--radius-lg);
-    background: color-mix(in srgb, var(--primary) 10%, transparent); color: $accent; font-size: 20px;
+    background: color-mix(in srgb, var(--primary) 10%, transparent); color: var(--primary); font-size: 20px;
     margin-bottom: 16px;
   }
   .featureTitle { font-size: var(--text-lg); font-weight: 700; margin-bottom: 8px; }
@@ -136,7 +133,7 @@ $border: color-mix(in srgb, var(--foreground) 10%, transparent);
 }
 
 // 工作原理
-.how { background: $oat; padding: 70px 24px; }
+.how { background: var(--card); padding: 70px 24px; }
 .steps {
   max-width: 960px; margin: 0 auto;
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px;
@@ -146,7 +143,7 @@ $border: color-mix(in srgb, var(--foreground) 10%, transparent);
   .stepNum {
     display: inline-flex; align-items: center; justify-content: center;
     width: 46px; height: 46px; border-radius: 50%;
-    background: $accent; color: var(--primary-foreground); font-size: 20px; font-weight: 700;
+    background: var(--primary); color: var(--primary-foreground); font-size: 20px; font-weight: 700;
     margin-bottom: 16px;
   }
   .stepTitle { font-size: var(--text-lg); font-weight: 700; margin-bottom: 8px; }
@@ -174,15 +171,15 @@ $border: color-mix(in srgb, var(--foreground) 10%, transparent);
   &:hover { transform: translateY(-3px); box-shadow: 0 10px 28px color-mix(in srgb, var(--foreground) 12%, transparent); color: inherit; }
   .clientDl {
     display: inline-block; margin-top: 14px; padding: 6px 18px;
-    border-radius: var(--radius-full); background: $accent; color: var(--primary-foreground); font-size: var(--text-base); font-weight: 600;
+    border-radius: var(--radius-full); background: var(--primary); color: var(--primary-foreground); font-size: var(--text-base); font-weight: 600;
   }
-  .clientIcon { font-size: 40px; color: $text; margin-bottom: 14px; }
+  .clientIcon { font-size: 40px; color: var(--foreground); margin-bottom: 14px; }
   .clientName { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
   .clientDesc { font-size: var(--text-base); color: color-mix(in srgb, var(--foreground) 62%, transparent); line-height: 1.6; }
 }
 .clientHint {
   text-align: center; margin-top: 24px;
-  font-size: var(--text-base); color: $muted;
+  font-size: var(--text-base); color: var(--muted-foreground);
 }
 
 // CTA
@@ -193,16 +190,16 @@ $border: color-mix(in srgb, var(--foreground) 10%, transparent);
 
 // 页脚
 .footer {
-  border-top: 1px solid $border;
+  border-top: 1px solid var(--overlay-2);
   max-width: 1120px; margin: 0 auto;
   padding: 30px 24px;
   display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
   .footBrand { display: flex; align-items: center; gap: 9px; font-weight: 600; }
-  .footNote { font-size: 12.5px; color: $muted; }
+  .footNote { font-size: 12.5px; color: var(--muted-foreground); }
 }
 
 // 响应式：窄屏堆叠
-@media (max-width: 760px) {
+@include r.down(md) {
   .hero { grid-template-columns: 1fr; padding-top: 40px;
     .title { font-size: 32px; } }
   .heroPreview { display: none; }

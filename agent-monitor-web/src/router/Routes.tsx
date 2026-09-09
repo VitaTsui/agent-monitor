@@ -12,18 +12,7 @@ import { getAccessToken } from "@/utils/auth";
 import { ConfigProvider as HsuConfigProvider } from "@hsu-react/ui";
 import { get, post, del, put } from "@/services/Axios";
 import HsuLayout from "@hsu-react/ui/es/layout";
-
-/**
- * 主色。与 styles/tokens.scss 里的 --primary 同一取值：完整照搬 shadcn 默认主题——
- * 浅色取中性阶最深的 zinc-900，暗色翻到最浅的 zinc-50。
- *
- * 必须是**字面量**，不能填 var(--primary)：antd 要由它派生一整条 10 级色板，
- * 拿到 var() 会直接算不出来。两处取值重复是有意的，改动时一起改。
- *
- * 这一层原本由本项目的 layout/Theme 承担（写死 #13C2C2）；布局收进组件库后没人接手，
- * 主色会静默回落成 antd 默认的蓝，所以在这里显式传给 ConfigProvider。
- */
-const primaryColorOf = (isDark: boolean) => (isDark ? "#fafafa" : "#18181b");
+import { primaryForegroundOf, primaryOf } from "@/styles/primary";
 
 const Routes: React.FC = observer(() => {
   const { router, permissions } = RouterStore;
@@ -74,11 +63,20 @@ const Routes: React.FC = observer(() => {
     <HsuConfigProvider
       permissions={permissions}
       request={{ get, post, del, put }}
-      primaryColor={primaryColorOf(headerTheme !== "light")}
-      // antd 的链接色不跟随 colorPrimary。主色换成单色墨黑后，若不一并设置，
-      // 表格里的「修改」「重置密码」这类 link 按钮会留在默认蓝上，
-      // 整站只剩它们是彩色。
-      theme={{ token: { colorLink: primaryColorOf(headerTheme !== "light") } }}
+      primaryColor={primaryOf(headerTheme !== "light")}
+      theme={{
+        token: {
+          // antd 的链接色不跟随 colorPrimary。主色换成单色墨黑后，若不一并设置，
+          // 表格里的「修改」「重置密码」这类 link 按钮会留在默认蓝上，
+          // 整站只剩它们是彩色。
+          colorLink: primaryOf(headerTheme !== "light"),
+          // 实心主色控件（Button type=primary 等）上的文字色。antd 把它固定成白，
+          // 那是「主色一定比白暗」的隐含前提 —— 而 shadcn 暗色主题把主色翻成
+          // zinc-50，白字压在近白底上等于看不见（实测「保存」按钮对比度 1.02）。
+          // 主色是从令牌取的，它的前景也必须从令牌取。
+          colorTextLightSolid: primaryForegroundOf(headerTheme !== "light"),
+        },
+      }}
     >
       <ReloadContent.Provider value={value}>
         <NavTabBarContent.Provider value={dropTabValue}>

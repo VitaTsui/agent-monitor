@@ -1,12 +1,9 @@
+@use "@hsu-react/ui/es/styles/responsive" as r;
 // 配色与 Composer 保持一致（同一屏内的组件，色板不该各写各的）
-$text: var(--foreground);
-$muted: var(--muted-foreground);
-$accent: var(--primary);
-$mono: "SF Mono", Menlo, Consolas, monospace;
 
 .hint {
   font-size: var(--text-sm);
-  color: $muted;
+  color: var(--muted-foreground);
   padding-bottom: 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
 
@@ -59,7 +56,7 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
   padding: 6px 12px;
   border-radius: 12px 12px 2px 12px;
   background: color-mix(in srgb, var(--primary) 10%, transparent);
-  color: $text;
+  color: var(--foreground);
   font-size: var(--text-base);
   // 正文交给 Markdown.Views 渲染，这里只管容器：长串（URL/路径）要能断行
   word-break: break-word;
@@ -101,12 +98,12 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
       overflow-x: auto;
       padding: 8px 10px;
       border-radius: var(--radius-sm);
-      background: color-mix(in srgb, var(--foreground) 6%, transparent);
+      background: var(--overlay-1);
       font-size: var(--text-sm);
       line-height: 1.55;
     }
     code {
-      font-family: $mono;
+      font-family: var(--font-mono);
       font-size: var(--text-sm);
     }
     table {
@@ -131,14 +128,14 @@ $mono: "SF Mono", Menlo, Consolas, monospace;
 .time {
   margin-top: 3px;
   font-size: var(--text-xs);
-  color: $muted;
-  font-family: $mono;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
 }
 
 // 移动端（Capacitor 壳直接加载本页，所以这里就是手机上的样子）：
 // 720px 的弹窗在手机上会溢出，改为全屏 —— 且「人不在电脑前翻记录」正是这块的核心场景，
 // 值得占满整屏而不是挤在一个小卡片里。
-@media (max-width: 760px) {
+@include r.down(md) {
   :global(.ant-modal-container) {
     height: 100dvh !important;
     max-height: 100dvh !important;

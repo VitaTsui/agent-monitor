@@ -1,9 +1,18 @@
 import React, { useEffect, useState } from "react";
 
 import { Button, Input, Modal, Switch } from "@hsu-react/ui";
-import { Badge, Empty, Modal as AntModal, Popconfirm, Progress, Tag } from "antd";
+import {
+  Badge,
+  Empty,
+  Modal as AntModal,
+  Popconfirm,
+  Progress,
+  Segmented,
+  Tag,
+} from "antd";
 import { message } from "@hsu-react/ui";
 import {
+  BgColorsOutlined,
   CloseOutlined,
   CloudSyncOutlined,
   CodeOutlined,
@@ -18,6 +27,11 @@ import {
   UserOutlined,
 } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
+// 外观三态（浅色 / 深色 / 跟随系统）的真源。走深路径而不是 `@hsu-react/ui/es/layout`：
+// 那是个 barrel，会把只有后管才用的 Header / Menu / NavTabBar 一起拉进前台的包里。
+// 写 `html[data-theme]` 的是根上的 Layout.Theme（src/index.tsx），两边同一个单例。
+import ThemeStore from "@hsu-react/ui/es/layout/Theme/ThemeStore";
+import type { Appearance } from "@hsu-react/ui/es/layout/Theme/ThemeStore";
 
 import {
   PortalDevice,
@@ -39,6 +53,7 @@ import styles from "./index.module.scss";
 
 export type SettingsTab =
   | "account"
+  | "appearance"
   | "devices"
   | "configs"
   | "bots"
@@ -316,19 +331,23 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
     }
   }, [open]);
 
+  // 每项原来还带一支 color（#3a8cff / #21b34a / #f2933c / #8a94a6），以内联
+  // `--nav-color` 写在图标上 —— 但全项目没有任何一条 CSS 读这个变量：设计早已改成
+  // 「单色细线图标」（见 index.module.scss 的 .navIcon），那四个字面量是改版后留下的
+  // 死数据，同时也违反 styles/tokens.scss 定的「整站只有中性灰 + 语义色」。整支删掉。
   const navItems: {
     key: Tab;
     label: string;
     icon: React.ReactNode;
-    color: string;
     badge?: number;
   }[] = [
-    { key: "account", label: "账户", icon: <UserOutlined />, color: "var(--primary)" },
-    { key: "devices", label: "设备管理", icon: <LaptopOutlined />, color: "#3a8cff", badge: pendingCount },
-    { key: "configs", label: "配置同步", icon: <CloudSyncOutlined />, color: "var(--primary)" },
-    { key: "bots", label: "机器人管理", icon: <RobotOutlined />, color: "#21b34a" },
-    { key: "security", label: "安全防护", icon: <SafetyOutlined />, color: "#f2933c" },
-    { key: "about", label: "关于", icon: <InfoCircleOutlined />, color: "#8a94a6" },
+    { key: "account", label: "账户", icon: <UserOutlined /> },
+    { key: "appearance", label: "外观", icon: <BgColorsOutlined /> },
+    { key: "devices", label: "设备管理", icon: <LaptopOutlined />, badge: pendingCount },
+    { key: "configs", label: "配置同步", icon: <CloudSyncOutlined /> },
+    { key: "bots", label: "机器人管理", icon: <RobotOutlined /> },
+    { key: "security", label: "安全防护", icon: <SafetyOutlined /> },
+    { key: "about", label: "关于", icon: <InfoCircleOutlined /> },
   ];
 
   const renderDevice = (d: PortalDevice) => (
@@ -525,12 +544,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                   }
                 }}
               >
-                <span
-                  className={styles.navIcon}
-                  style={{ ["--nav-color" as string]: n.color }}
-                >
-                  {n.icon}
-                </span>
+                <span className={styles.navIcon}>{n.icon}</span>
                 <span className={styles.navLabel}>{n.label}</span>
                 {n.badge ? <Badge count={n.badge} size="small" /> : null}
                 <RightOutlined className={styles.navChevron} />
@@ -558,6 +572,29 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
               <Button icon={<LogoutOutlined />} danger onClick={onLogout} style={{ marginTop: 20 }}>
                 退出登录
               </Button>
+            </div>
+          )}
+
+          {tab === "appearance" && (
+            <div className={styles.pane}>
+              <div className={styles.paneTitle}>外观</div>
+              <div className={styles.device}>
+                <div className={styles.devInfo}>
+                  <div className={styles.devName}>主题</div>
+                  <div className={styles.devMeta}>
+                    「跟随系统」会随操作系统的浅色 / 深色设置实时切换
+                  </div>
+                </div>
+                <Segmented<Appearance>
+                  value={ThemeStore.appearance}
+                  onChange={(v) => ThemeStore.setAppearance(v)}
+                  options={[
+                    { value: "light", label: "浅色" },
+                    { value: "dark", label: "深色" },
+                    { value: "system", label: "跟随系统" },
+                  ]}
+                />
+              </div>
             </div>
           )}
 

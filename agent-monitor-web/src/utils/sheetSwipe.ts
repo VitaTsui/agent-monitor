@@ -7,8 +7,10 @@
  * 起手条件（避免和内容滚动打架）：触点落在顶部抓手/标题区（<72px），或内容已滚到顶。
  * 释放时下移超过阈值（或快速下甩）→ 滑出并 click 隐藏的关闭钮触发 onCancel；否则弹回。
  */
+import { isMobileViewport } from "./breakpoint";
+
 export function installSheetSwipe() {
-  const isMobile = () => window.matchMedia("(max-width: 760px)").matches;
+  const isMobile = isMobileViewport;
 
   let active: HTMLElement | null = null;
   let startY = 0;

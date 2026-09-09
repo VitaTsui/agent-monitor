@@ -1,9 +1,4 @@
-$oat: var(--card); // 面板面，不是品牌淡染
-$border: color-mix(in srgb, var(--foreground) 9%, transparent);
-$text: var(--foreground);
-$muted: var(--muted-foreground);
-$accent: var(--primary);
-$hover: color-mix(in srgb, var(--foreground) 6%, transparent);
+@use "@hsu-react/ui/es/styles/responsive" as r;
 
 .SettingsModal {
   .paneHead {
@@ -41,7 +36,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       justify-content: center;
       font-size: var(--text-lg);
       color: var(--primary-foreground);
-      background: $accent;
+      background: var(--primary);
     }
 
     .connectEntryText {
@@ -51,20 +46,20 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       .connectEntryTitle {
         font-size: var(--text-md);
         font-weight: 600;
-        color: $text;
+        color: var(--foreground);
       }
 
       .connectEntryDesc {
         margin-top: 2px;
         font-size: var(--text-sm);
-        color: $muted;
+        color: var(--muted-foreground);
       }
     }
 
     .connectEntryArrow {
       flex: none;
       font-size: var(--text-base);
-      color: $muted;
+      color: var(--muted-foreground);
     }
   }
 
@@ -115,12 +110,12 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     justify-content: center;
     border-radius: var(--radius);
     cursor: pointer;
-    color: $muted;
+    color: var(--muted-foreground);
     font-size: var(--text-md);
 
     &:hover {
-      background: $hover;
-      color: $text;
+      background: var(--overlay-1);
+      color: var(--foreground);
     }
   }
 
@@ -130,14 +125,14 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
   .nav {
     width: 200px;
     min-width: 200px;
-    background: $oat;
-    border-right: 1px solid $border;
+    background: var(--card);
+    border-right: 1px solid var(--overlay-2);
     padding: 18px 8px;
 
     .navTitle {
       font-size: var(--text-md);
       font-weight: 600;
-      color: $text;
+      color: var(--foreground);
       padding: 4px 10px 14px;
     }
 
@@ -149,24 +144,24 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       border-radius: var(--radius);
       cursor: pointer;
       font-size: var(--text-md);
-      color: $text;
+      color: var(--foreground);
       margin-bottom: 2px;
 
       :global(.anticon) {
         font-size: var(--text-lg);
-        color: $muted;
+        color: var(--muted-foreground);
       }
 
       &:hover {
-        background: $hover;
+        background: var(--overlay-1);
       }
 
       &.active {
-        background: color-mix(in srgb, var(--foreground) 9%, transparent);
+        background: var(--overlay-2);
         font-weight: 500;
 
         :global(.anticon) {
-          color: $text;
+          color: var(--foreground);
         }
       }
 
@@ -194,7 +189,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
 
   // 移动端：iOS 设置式两级界面 —— 一级=菜单列表，二级=分区内容（固定
   // 头部：返回 + 标题 + 关闭，内容区单独滚动，关闭钮永远可达）
-  @media (max-width: 760px) {
+  @include r.down(md) {
     // 固定全屏：不同分栏内容高度不同会让抽屉式 sheet「高高低低变来变去」，
     // 这里锁死为整屏高度，切换分栏时高度不再跳动，也不再露出顶部背景间隙。
     :global(.ant-modal-container) {
@@ -235,7 +230,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       .mobileHeadTitle {
         font-size: 18px;
         font-weight: 650;
-        color: $text;
+        color: var(--foreground);
       }
 
       .mobileBack {
@@ -272,14 +267,14 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       height: 34px;
       border-radius: 50%;
       background: var(--card);
-      color: $text;
+      color: var(--foreground);
       font-size: var(--text-md);
       box-shadow: 0 1px 4px color-mix(in srgb, var(--foreground) 16%, transparent);
       z-index: 3;
 
       &:hover {
         background: var(--card);
-        color: $text;
+        color: var(--foreground);
       }
     }
 
@@ -313,7 +308,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
           width: 34px;
           height: 34px;
           border-radius: 50%;
-          background: $accent;
+          background: var(--primary);
           color: var(--primary-foreground);
           font-size: var(--text-md);
           font-weight: 600;
@@ -327,7 +322,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
           min-width: 0;
           font-size: var(--text-lg);
           font-weight: 600;
-          color: $text;
+          color: var(--foreground);
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
@@ -418,7 +413,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
         }
 
         &:active {
-          background: color-mix(in srgb, var(--foreground) 6%, transparent);
+          background: var(--overlay-1);
         }
       }
     }
@@ -482,7 +477,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     .paneTitle {
       font-size: 18px;
       font-weight: 600;
-      color: $text;
+      color: var(--foreground);
       margin-bottom: 18px;
     }
   }
@@ -495,7 +490,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     gap: 14px;
     margin-bottom: 22px;
     padding: 16px 18px;
-    border: 1px solid $border;
+    border: 1px solid var(--overlay-2);
     border-radius: var(--radius-lg);
 
     .avatar {
@@ -503,7 +498,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       height: 48px;
       min-width: 48px;
       border-radius: 50%;
-      background: $accent;
+      background: var(--primary);
       color: var(--primary-foreground);
       font-size: 20px;
       font-weight: 600;
@@ -515,13 +510,13 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     .accName {
       font-size: var(--text-md);
       font-weight: 600;
-      color: $text;
+      color: var(--foreground);
     }
 
     .accMeta {
       margin-top: 3px;
       font-size: 12.5px;
-      color: $muted;
+      color: var(--muted-foreground);
     }
   }
 
@@ -560,7 +555,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     justify-content: space-between;
     gap: 10px;
     padding: 10px 12px;
-    border: 1px solid $border;
+    border: 1px solid var(--overlay-2);
     border-radius: var(--radius-lg);
     margin-bottom: 8px;
 
@@ -573,14 +568,14 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
         gap: 6px;
         font-size: var(--text-base);
         font-weight: 600;
-        color: $text;
+        color: var(--foreground);
         flex-wrap: wrap;
       }
 
       .devMeta {
         margin-top: 4px;
         font-size: var(--text-xs);
-        color: $muted;
+        color: var(--muted-foreground);
       }
     }
 
@@ -605,8 +600,8 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
 
       // 撤销信任 / 断开：中性描边，hover 转警示
       .actBtn {
-        color: $muted;
-        border-color: $border;
+        color: var(--muted-foreground);
+        border-color: var(--overlay-2);
         background: transparent;
 
         &:hover {
@@ -618,14 +613,14 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
 
       // 协助共享：主题色描边，hover 填充
       .shareBtn {
-        color: $accent;
+        color: var(--primary);
         border-color: color-mix(in srgb, var(--primary) 45%, transparent);
         background: transparent;
 
         &:hover {
           color: var(--primary-foreground);
-          border-color: $accent;
-          background: $accent;
+          border-color: var(--primary);
+          background: var(--primary);
         }
       }
 
@@ -636,7 +631,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
 
       // 删除：极低调，hover 才显红
       .delBtn {
-        color: $muted;
+        color: var(--muted-foreground);
 
         &:hover {
           color: var(--destructive);
@@ -661,7 +656,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     .updateProgressText {
       flex: none;
       font-size: var(--text-xs);
-      color: $muted;
+      color: var(--muted-foreground);
       white-space: nowrap;
     }
   }
@@ -672,15 +667,15 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     border-radius: var(--radius-full);
     padding-inline: 14px;
     font-size: var(--text-sm);
-    color: $accent;
+    color: var(--primary);
     border-color: color-mix(in srgb, var(--primary) 45%, transparent);
     background: transparent;
     transition: all 0.2s;
 
     &:hover {
       color: var(--primary-foreground);
-      border-color: $accent;
-      background: $accent;
+      border-color: var(--primary);
+      background: var(--primary);
     }
   }
 
@@ -691,8 +686,8 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     border-radius: var(--radius-full);
     padding-inline: 14px;
     font-size: var(--text-sm);
-    background: $accent !important;
-    border-color: $accent !important;
+    background: var(--primary) !important;
+    border-color: var(--primary) !important;
 
     &,
     span,
@@ -716,7 +711,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       gap: 6px;
       font-size: var(--text-base);
       font-weight: 600;
-      color: $text;
+      color: var(--foreground);
       margin-bottom: 8px;
 
       &::before {
@@ -724,7 +719,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
         width: 3px;
         height: 12px;
         border-radius: 2px;
-        background: $accent;
+        background: var(--primary);
       }
     }
 
@@ -734,7 +729,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       justify-content: space-between;
       gap: 12px;
       padding: 9px 12px;
-      border: 1px solid $border;
+      border: 1px solid var(--overlay-2);
       border-radius: var(--radius);
       margin-bottom: 6px;
       transition: border-color 0.15s, background 0.15s;
@@ -746,7 +741,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
 
       .termScopeName {
         font-size: var(--text-base);
-        color: $text;
+        color: var(--foreground);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -755,17 +750,17 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
 
     .termScopeEmpty {
       padding: 14px 12px;
-      border: 1px dashed $border;
+      border: 1px dashed var(--overlay-2);
       border-radius: var(--radius);
       font-size: var(--text-sm);
-      color: $muted;
+      color: var(--muted-foreground);
       text-align: center;
     }
 
     .termScopeHint {
       margin-top: 2px;
       font-size: var(--text-xs);
-      color: $muted;
+      color: var(--muted-foreground);
     }
   }
 
@@ -778,7 +773,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
       width: 60px;
       height: 60px;
       border-radius: var(--radius-lg);
-      background: $accent;
+      background: var(--primary);
       color: var(--primary-foreground);
       font-size: 28px;
       font-weight: 700;
@@ -791,13 +786,13 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     .aboutName {
       font-size: var(--text-lg);
       font-weight: 600;
-      color: $text;
+      color: var(--foreground);
       margin-bottom: 8px;
     }
 
     .aboutDesc {
       font-size: var(--text-base);
-      color: $muted;
+      color: var(--muted-foreground);
       line-height: 1.7;
       max-width: 380px;
       margin: 0 auto;
@@ -820,7 +815,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
 
   .quotaUsed {
     font-size: var(--text-sm);
-    color: $muted;
+    color: var(--muted-foreground);
   }
 
   .quotaInput {
@@ -868,8 +863,8 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
 // 弹窗内控件统一 Claude 色调
 .SettingsModal {
   :global(.ant-btn-primary) {
-    background: $accent !important;
-    border-color: $accent !important;
+    background: var(--primary) !important;
+    border-color: var(--primary) !important;
 
     &:hover:not(:disabled) {
       background: var(--primary-hover) !important;
@@ -878,7 +873,7 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
   }
 
   :global(.ant-switch-checked) {
-    background: $accent !important;
+    background: var(--primary) !important;
   }
 
   // hsu-ui TextArea 包裹层的深色边框调淡

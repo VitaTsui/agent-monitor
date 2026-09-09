@@ -1,6 +1,3 @@
-$text: var(--foreground);
-$muted: var(--muted-foreground);
-$accent: var(--primary);
 
 // 头部那一行的胶囊：与 ChatPane 的 tokenChip / deviceChip 同一档尺寸，
 // 只是可点（点开列出运行中的子会话）。
@@ -50,11 +47,11 @@ $accent: var(--primary);
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: $muted;
+    background: var(--muted-foreground);
 
     // 执行中用呼吸态标出来，与等待中区分
     &.running {
-      background: $accent;
+      background: var(--primary);
       animation: chipPulse 1.6s ease-in-out infinite;
     }
   }
@@ -65,13 +62,13 @@ $accent: var(--primary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: $text;
+    color: var(--foreground);
   }
 
   .status {
     flex: none;
     font-size: 10.5px;
-    color: $muted;
+    color: var(--muted-foreground);
   }
 
   // 耗时用等宽，秒数每跳一格不会把整行推来推去
@@ -79,7 +76,7 @@ $accent: var(--primary);
     flex: none;
     font-family: "SF Mono", Menlo, Consolas, monospace;
     font-size: 10.5px;
-    color: $muted;
+    color: var(--muted-foreground);
   }
 }
 

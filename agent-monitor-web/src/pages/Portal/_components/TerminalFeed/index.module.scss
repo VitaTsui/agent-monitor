@@ -1,17 +1,9 @@
-// 颜色全部走 styles/tokens.scss 的令牌。这里保留 scss 变量名只是为了不改下面几百处用法，
-// 值一律指向 token —— 终端那几支是**不跟随主题**的独立语义（见 tokens.scss 的说明）。
-$text: var(--foreground);
-$muted: var(--muted-foreground);
+@use "@hsu-react/ui/es/styles/responsive" as r;
+// 颜色全部直接写 styles/tokens.scss 的令牌（中间那层 scss 别名已删）。
+// 终端那几支 --term-* 是**不跟随主题**的独立语义，见 tokens.scss 的说明。
 // 用户气泡：语义是「谁说的话」，不是品牌淡染。原先映射到 --primary-subtle 是错的——
 // 主色一换（青 → shadcn 单色墨黑），它跟着变成 zinc-100 #f4f4f5，压在 #fafafa 的对话流
 // 底上只差 6/255，气泡等于消失。改成从对话流底往文字色压一档，任何配色下都有稳定落差。
-$user-bubble: color-mix(in srgb, var(--foreground) 8%, transparent);
-$term-bg: var(--term-bg);
-$term-text: var(--term-text);
-$term-dim: var(--term-dim);
-$term-accent: var(--term-accent);
-$term-green: var(--term-green);
-$mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
 .TerminalFeed {
   display: flex;
@@ -33,8 +25,8 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
     .userBubble {
       max-width: 85%;
-      background: $user-bubble;
-      color: $text;
+      background: color-mix(in srgb, var(--foreground) 8%, transparent);
+      color: var(--foreground);
       border-radius: 16px 16px 4px 16px;
       padding: 10px 14px;
       font-size: var(--text-md);
@@ -68,7 +60,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
   // 助手回合（Claude Code 终端式深色卡片）
   .terminal {
-    background: $term-bg;
+    background: var(--term-bg);
     border-radius: var(--radius-lg);
     overflow: hidden;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
@@ -105,9 +97,9 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
       .termTitle {
         flex: 1;
-        font-family: $mono;
+        font-family: var(--font-mono);
         font-size: var(--text-xs);
-        color: $term-dim;
+        color: var(--term-dim);
       }
 
       .termTime {
@@ -121,7 +113,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       display: flex;
       flex-direction: column;
       gap: 8px;
-      font-family: $mono;
+      font-family: var(--font-mono);
       font-size: 12.5px;
       line-height: 1.7;
     }
@@ -133,12 +125,12 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     gap: 8px;
 
     .assistantDot {
-      color: $term-green;
+      color: var(--term-green);
       flex: none;
     }
 
     .assistantText {
-      color: $term-text;
+      color: var(--term-text);
       word-break: break-word;
       overflow-wrap: anywhere;
       min-width: 0;
@@ -147,8 +139,8 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       :global(.hsu-markdown),
       :global(.markdown-body) {
         background: transparent;
-        color: $term-text;
-        font-family: $mono;
+        color: var(--term-text);
+        font-family: var(--font-mono);
         font-size: 12.5px;
       }
 
@@ -165,7 +157,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       h6,
       table {
         margin: 0 0 6px;
-        color: $term-text;
+        color: var(--term-text);
 
         &:last-child {
           margin-bottom: 0;
@@ -279,14 +271,14 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     .planHead {
       padding: 5px 10px;
       background: color-mix(in srgb, var(--term-accent) 12%, transparent);
-      color: $term-accent;
+      color: var(--term-accent);
       font-size: var(--text-sm);
       font-weight: 600;
     }
 
     .planBody {
       padding: 8px 10px;
-      color: $term-text;
+      color: var(--term-text);
       min-width: 0;
       // 方案正文是 markdown，交给组件渲染；这里只压掉它的默认外边距，
       // 避免在终端卡里撑出多余留白。
@@ -302,7 +294,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       }
 
       code {
-        font-family: $mono;
+        font-family: var(--font-mono);
       }
     }
   }
@@ -313,12 +305,12 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     gap: 8px;
 
     .toolDot {
-      color: $term-accent;
+      color: var(--term-accent);
       flex: none;
     }
 
     .toolText {
-      color: $term-text;
+      color: var(--term-text);
       white-space: pre-wrap;
       word-break: break-word;
       overflow-wrap: anywhere;
@@ -343,9 +335,9 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
       .resultText {
         margin: 0;
-        font-family: $mono;
+        font-family: var(--font-mono);
         font-size: var(--text-sm);
-        color: $term-dim;
+        color: var(--term-dim);
         white-space: pre-wrap;
         word-break: break-word;
       overflow-wrap: anywhere;
@@ -355,7 +347,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
         display: inline-block;
         margin-top: 2px;
         font-size: var(--text-xs);
-        color: $term-accent;
+        color: var(--term-accent);
         cursor: pointer;
         user-select: none;
 
@@ -371,7 +363,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     display: flex;
     align-items: baseline;
     gap: 8px;
-    color: $term-accent;
+    color: var(--term-accent);
 
     .workingDot {
       flex: none;
@@ -388,14 +380,14 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       // 已走的步数：紧跟「执行中…」，用弱化色，别抢正文
       .workingSteps {
         margin-left: 8px;
-        color: $term-dim;
+        color: var(--term-dim);
         font-size: 11.5px;
         white-space: nowrap;
       }
 
       .workingAction {
         margin-left: 10px;
-        color: $term-dim;
+        color: var(--term-dim);
         font-size: 11.5px;
         display: inline-block;
         max-width: 100%;
@@ -542,7 +534,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       padding: 8px 10px 2px;
 
       .selectQuestion {
-        color: $term-text;
+        color: var(--term-text);
         font-size: 12.5px;
         margin-bottom: 6px;
       }
@@ -606,7 +598,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
           min-width: 0;
 
           .selectOptLabel {
-            color: $term-text;
+            color: var(--term-text);
             font-size: 12.5px;
           }
 
@@ -635,7 +627,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
             border-radius: var(--radius-sm);
             border: 1px solid color-mix(in srgb, var(--term-fg) 12%, transparent);
             background: color-mix(in srgb, var(--foreground) 22%, transparent);
-            color: $term-text;
+            color: var(--term-text);
             font-size: 12.5px;
             outline: none;
 
@@ -730,7 +722,7 @@ $mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
 // 移动端：选择卡是「人不在电脑前时唯一能替终端做决定」的入口，
 // 触摸目标必须够大（44px 是 iOS 的可点击下限），字号也要够看。
-@media (max-width: 760px) {
+@include r.down(md) {
   .TerminalFeed .selectCard {
     .selectQ .selectOpt {
       padding: 10px 10px;

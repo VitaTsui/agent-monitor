@@ -8,7 +8,7 @@
   .card {
     width: 380px;
     background: var(--card);
-    border: 1px solid color-mix(in srgb, var(--foreground) 9%, transparent);
+    border: 1px solid var(--overlay-2);
     border-radius: 20px;
     box-shadow: 0 10px 36px color-mix(in srgb, var(--foreground) 8%, transparent);
     padding: 36px 32px;

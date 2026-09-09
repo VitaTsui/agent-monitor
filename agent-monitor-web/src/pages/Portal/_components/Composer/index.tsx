@@ -3,6 +3,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { Chat, Input, Modal } from "@hsu-react/ui";
 import { message } from "@hsu-react/ui";
 import { reaction } from "mobx";
+
+import { isMobileViewport } from "@/utils/breakpoint";
 import {
   DeleteOutlined,
   EditOutlined,
@@ -218,7 +220,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
           return;
         }
       }
-      const isMobile = window.matchMedia("(max-width: 760px)").matches;
+      const isMobile = isMobileViewport();
       if (isMobile && e.key === "Enter" && !e.shiftKey && !composing) {
         e.stopPropagation();
       }

@@ -76,8 +76,10 @@ const App: React.FC = observer(() => {
     checkPermission(item.hasPermi)
   );
 
+  // 外观控制器 HsuLayout.Theme 已上移到应用根（src/index.tsx）：写 html[data-theme]
+  // 是文档级的事，包在后管壳里会让前台 /portal 拿不到暗色令牌。
   return (
-    <HsuLayout.Theme>
+    <>
       <Layout id="App" className={headerTheme}>
         {/* 站点标题与用户信息原本由本项目的 Header 自己去读全局 Config 与 @/utils/auth，
             组件收进库之后不再认识这两样，改由这里注入。
@@ -132,7 +134,7 @@ const App: React.FC = observer(() => {
         onCancel={() => setPwdOpen(false)}
         onOk={() => logout(quit)}
       />
-    </HsuLayout.Theme>
+    </>
   );
 });
 

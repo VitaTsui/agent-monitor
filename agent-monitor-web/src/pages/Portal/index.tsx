@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 
 import { Input } from "@hsu-react/ui";
-import { Badge, ConfigProvider, Modal, Popover, Tooltip } from "antd";
+import { Badge, Modal, Popover, Tooltip } from "antd";
 import { useNativeBack } from "./_hooks/useNativeBack";
 import { useApkUpdateCheck } from "./_hooks/useApkUpdateCheck";
 import { useClientUpdateToast } from "./_hooks/useClientUpdateToast";
@@ -35,6 +35,7 @@ import {
   localMachineId,
 } from "@/utils/clientAuth";
 import PortalStore from "./PortalStore";
+import { MOBILE_QUERY, isMobileViewport } from "@/utils/breakpoint";
 import { ShareReceiveModal } from "./_hooks/useShareReceive";
 import ChatPane from "./_components/ChatPane";
 import ScrollText from "./_components/ScrollText";
@@ -109,14 +110,12 @@ const Portal: React.FC = observer(() => {
   const [mobileNav, setMobileNav] = useState(false);
   // 移动端：顶栏「⋯」操作菜单与代码改动弹窗
   const [mobileActs, setMobileActs] = useState(false);
-  const [isMobile, setIsMobile] = useState(
-    () => window.matchMedia("(max-width: 760px)").matches,
-  );
+  const [isMobile, setIsMobile] = useState(isMobileViewport);
 
   // 移动端强制展开侧栏内容：桌面折叠态下缩窄窗口时，
   // CSS 会把抽屉撑到 84vw，但折叠态 JSX 不渲染内容 → 空白抽屉，这里在 JS 层纠正
   useEffect(() => {
-    const mq = window.matchMedia("(max-width: 760px)");
+    const mq = window.matchMedia(MOBILE_QUERY);
     const sync = () => {
       setIsMobile(mq.matches);
       if (mq.matches) {
@@ -340,17 +339,11 @@ const Portal: React.FC = observer(() => {
     </div>
   );
 
+  // 本页不再自己给一份 antd 主题：主色 / 链接色 / 实心控件前景统一由 router/Routes.tsx
+  // 的 ConfigProvider 按当前明暗下发（值来自 styles/primary.ts，与 tokens.scss 同步）。
+  // 原来这里写死 colorPrimary: "#18181b" —— 暗色下 CSS 变量那侧的主色已翻成 zinc-50，
+  // antd 这侧还按墨黑算，同一颗按钮拿到近白底 + 白字，文字直接消失。
   return (
-    // Portal 路由挂在全局 Theme 之外，所以这里自己给一份主题；
-    // ConfigProvider 走 React context，portal 出去的弹窗一样生效。
-    //
-    // 主色与 styles/tokens.scss 的 --primary 保持一致（shadcn 默认的单色墨黑）。
-    // 必须是字面量：antd 要由它派生 10 级色板，给 var() 算不出来。
-    // colorLink 单独给：antd 的链接色不跟随 colorPrimary，不设的话「修改」「重置密码」
-    // 这类 link 按钮会留在默认蓝上，整站只剩它们是彩色。
-    <ConfigProvider
-      theme={{ token: { colorPrimary: "#18181b", colorLink: "#18181b" } }}
-    >
     <div className={styles.Portal}>
       {/* 移动端顶部栏（仅窄屏显示） */}
       <div className={styles.mobileBar}>
@@ -664,7 +657,7 @@ const Portal: React.FC = observer(() => {
             // 移动端：不弹菜单，直接进整屏设置（Claude App 式头像入口）。
             // 不再顺手收起侧栏——点头像只是开设置，设置浮在上层，关掉后侧栏仍在，
             // 避免「点头像侧栏莫名收起」的观感。
-            if (o && window.matchMedia("(max-width: 760px)").matches) {
+            if (o && isMobile) {
               openSettings("account");
               return;
             }
@@ -787,7 +780,6 @@ const Portal: React.FC = observer(() => {
       />
       <ShareReceiveModal />
     </div>
-    </ConfigProvider>
   );
 });
 

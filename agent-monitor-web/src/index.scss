@@ -1,3 +1,4 @@
+@use "@hsu-react/ui/es/styles/responsive" as r;
 * {
   padding: 0;
   margin: 0;
@@ -89,14 +90,29 @@ body,
   text-size-adjust: 100%;
 }
 
+// TODO(hsu-ui): 组件库 Layout.Theme 的外层盒子写死了 100vw / 100vh
+// （@hsu-react/ui/es/layout/Theme/index.module.scss），而外观控制器上移到应用根之后，
+// 它就是 #root 的唯一子节点。
+// 根因：软键盘弹起时 utils/keyboardInset 会把 #root 的高度钉成「可视视口高」，靠子孙
+// height:100% 层层跟随；中间夹了一层 100vh 的盒子，这条链就断了 —— 实测把 #root 设成
+// 500px，该层仍是 844px，底部对话框被 #root 的 overflow:hidden 裁掉（移动端浏览器，
+// 非 Capacitor 壳；原生壳走 --kb-height 内边距，不受影响）。
+// 正确修法在库里：那两行应为 100%（消费方都自己给 #root 定尺寸，行为等价）。
+// 上游 PR：https://github.com/VitaTsui/hsu-ui-v2/pull/32（已改好并推到 v2/develop，
+// 版本 2.5.9）。合并发版后把依赖升到 >=2.5.9 并删掉这一条。
+#root > div {
+  width: 100%;
+  height: 100%;
+}
+
 // 极窄窗口布局保护：后管等桌面布局窗口过窄时横向滚动而非挤碎；
-// 移动端（<=760px）改为自适应，前台 Portal / 官网 / 登录页已做响应式。
+// 移动端（< md，见组件库的 responsive mixin）改为自适应，前台 Portal / 官网 / 登录页已做响应式。
 //
 // 例外 —— 完全响应式的页面（Portal）在挂载时打 `data-fluid` 标记豁免这条：
 // 桌面客户端窗口可以拖到 960 以下，那时这条 min-width 会让整页横向滚动，
 // 把右上角的暂停/中断等控制键推出可视区（拖窄到 929px 实测复现）。
 // 用属性标记而不是 `:has()`，是为了兼容 Capacitor 安卓壳里较老的 WebView。
-@media (min-width: 761px) {
+@include r.up(md) {
   body:not([data-fluid]) {
     overflow-x: auto;
   }
