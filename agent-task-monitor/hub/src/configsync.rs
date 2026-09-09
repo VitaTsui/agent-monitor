@@ -39,7 +39,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn safe_user(user: &str) -> String {
     let mut s: String = user
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(32)
         .collect();
     if s.is_empty() {
@@ -74,12 +80,16 @@ impl ConfigStore {
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
                 let path = e.path().join("manifest.json");
-                let Ok(txt) = std::fs::read_to_string(&path) else { continue };
+                let Ok(txt) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
                 match serde_json::from_str::<PersistedBaseline>(&txt) {
                     Ok(p) => {
                         manifests.insert(p.user, p.manifest);
                     }
-                    Err(e) => tracing::warn!("配置基线 {} 解析失败，将由源机重建: {e}", path.display()),
+                    Err(e) => {
+                        tracing::warn!("配置基线 {} 解析失败，将由源机重建: {e}", path.display())
+                    }
                 }
             }
         }
@@ -192,7 +202,9 @@ impl ConfigStore {
     /// 注意这只影响基线——镜像机上已有的那份**不删**（第一期不同步删除，
     /// 误删别人机器上的文件是不可逆的，而多留一份最多是碍眼）。
     pub fn retain(&mut self, user: &str, keep: &std::collections::HashSet<&str>) -> usize {
-        let Some(m) = self.manifests.get_mut(user) else { return 0 };
+        let Some(m) = self.manifests.get_mut(user) else {
+            return 0;
+        };
         let before = m.files.len();
         let mut dropped = Vec::new();
         m.files.retain(|f| {
@@ -215,14 +227,21 @@ impl ConfigStore {
     }
 
     fn save_user(&self, user: &str) {
-        let Some(manifest) = self.manifests.get(user) else { return };
+        let Some(manifest) = self.manifests.get(user) else {
+            return;
+        };
         let dir = self.user_dir(user);
         if let Err(e) = std::fs::create_dir_all(&dir) {
             tracing::warn!("创建基线目录失败 {}: {e}", dir.display());
             return;
         }
-        let p = PersistedBaseline { user: user.to_string(), manifest: manifest.clone() };
-        let Ok(txt) = serde_json::to_string_pretty(&p) else { return };
+        let p = PersistedBaseline {
+            user: user.to_string(),
+            manifest: manifest.clone(),
+        };
+        let Ok(txt) = serde_json::to_string_pretty(&p) else {
+            return;
+        };
         let path = dir.join("manifest.json");
         let tmp = dir.join("manifest.json.tmp");
         if std::fs::write(&tmp, &txt).is_err() {
@@ -240,8 +259,11 @@ impl ConfigStore {
 /// 只比哈希，不比 mtime：各机器时钟不保证同步，按 mtime 判新旧会让「时钟慢的那台」
 /// 永远被判成落后，于是每一轮都被推同一批文件。
 pub fn diff(from: &ConfigManifest, to: &ConfigManifest) -> Vec<String> {
-    let have: HashMap<&str, &str> =
-        to.files.iter().map(|f| (f.path.as_str(), f.sha256.as_str())).collect();
+    let have: HashMap<&str, &str> = to
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.sha256.as_str()))
+        .collect();
     from.files
         .iter()
         .filter(|f| have.get(f.path.as_str()) != Some(&f.sha256.as_str()))
@@ -255,7 +277,12 @@ mod tests {
     use am_core::model::ConfigFileMeta;
 
     fn meta(path: &str, sha: &str) -> ConfigFileMeta {
-        ConfigFileMeta { path: path.into(), sha256: sha.into(), size: 1, mtime: 0 }
+        ConfigFileMeta {
+            path: path.into(),
+            sha256: sha.into(),
+            size: 1,
+            mtime: 0,
+        }
     }
 
     fn body(path: &str, content: &[u8]) -> ConfigFileBody {
@@ -276,11 +303,17 @@ mod tests {
     #[test]
     fn diff_reports_missing_and_changed_only() {
         let base = ConfigManifest {
-            files: vec![meta("claude/CLAUDE.md", "aa"), meta("claude/agents/x.md", "bb")],
+            files: vec![
+                meta("claude/CLAUDE.md", "aa"),
+                meta("claude/agents/x.md", "bb"),
+            ],
             scanned_at: 0,
         };
         let dev = ConfigManifest {
-            files: vec![meta("claude/CLAUDE.md", "aa"), meta("claude/agents/x.md", "OLD")],
+            files: vec![
+                meta("claude/CLAUDE.md", "aa"),
+                meta("claude/agents/x.md", "OLD"),
+            ],
             scanned_at: 0,
         };
         assert_eq!(diff(&base, &dev), vec!["claude/agents/x.md".to_string()]);
@@ -304,7 +337,10 @@ mod tests {
         // 重启后基线还在
         let reloaded = ConfigStore::load(&d);
         assert_eq!(reloaded.file_count("a@b.com"), 1);
-        assert_eq!(reloaded.manifest_of("a@b.com").files[0].path, "claude/CLAUDE.md");
+        assert_eq!(
+            reloaded.manifest_of("a@b.com").files[0].path,
+            "claude/CLAUDE.md"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

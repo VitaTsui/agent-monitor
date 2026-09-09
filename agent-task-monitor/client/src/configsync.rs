@@ -55,7 +55,10 @@ pub fn abs_path(home: &Path, rel: &str) -> Option<PathBuf> {
 
 /// 绝对路径 → 同步集相对路径（扫描时用）
 fn rel_of(home: &Path, abs: &Path) -> Option<String> {
-    for (root, prefix) in [(home.join(".claude"), "claude"), (home.join(".codex"), "codex")] {
+    for (root, prefix) in [
+        (home.join(".claude"), "claude"),
+        (home.join(".codex"), "codex"),
+    ] {
         if let Ok(sub) = abs.strip_prefix(&root) {
             let sub = sub.to_string_lossy().replace('\\', "/");
             let rel = format!("{prefix}/{sub}");
@@ -98,7 +101,9 @@ impl ConfigScanner {
             }
         }
         for d in DIRS {
-            let Some(dir) = dir_abs(home, d) else { continue };
+            let Some(dir) = dir_abs(home, d) else {
+                continue;
+            };
             collect_md(&dir, 0, &mut paths);
         }
         paths.sort();
@@ -107,8 +112,12 @@ impl ConfigScanner {
         let mut files = Vec::with_capacity(paths.len());
         let mut next_cache = HashMap::with_capacity(paths.len());
         for p in paths {
-            let Some(rel) = rel_of(home, &p) else { continue };
-            let Ok(meta) = std::fs::metadata(&p) else { continue };
+            let Some(rel) = rel_of(home, &p) else {
+                continue;
+            };
+            let Ok(meta) = std::fs::metadata(&p) else {
+                continue;
+            };
             let size = meta.len();
             if size > MAX_FILE_BYTES {
                 continue;
@@ -128,10 +137,18 @@ impl ConfigScanner {
                 },
             };
             next_cache.insert(rel.clone(), (mtime, size, sha.clone()));
-            files.push(ConfigFileMeta { path: rel, sha256: sha, size, mtime });
+            files.push(ConfigFileMeta {
+                path: rel,
+                sha256: sha,
+                size,
+                mtime,
+            });
         }
         self.cache = next_cache;
-        ConfigManifest { files, scanned_at: now_secs() }
+        ConfigManifest {
+            files,
+            scanned_at: now_secs(),
+        }
     }
 }
 
@@ -150,7 +167,9 @@ fn collect_md(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if depth > MAX_DEPTH || out.len() >= MAX_FILES {
         return;
     }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         let name = e.file_name().to_string_lossy().to_string();
@@ -184,11 +203,15 @@ pub fn read_bodies(home: &Path, paths: &[String]) -> Vec<ConfigFileBody> {
             tracing::warn!("拒绝回传非同步集配置: {rel}");
             continue;
         };
-        let Ok(meta) = std::fs::metadata(&abs) else { continue };
+        let Ok(meta) = std::fs::metadata(&abs) else {
+            continue;
+        };
         if meta.len() > MAX_FILE_BYTES {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&abs) else { continue };
+        let Ok(bytes) = std::fs::read(&abs) else {
+            continue;
+        };
         let encoded = B64.encode(&bytes);
         // 预算按 base64 后的长度算：编码会膨胀 1/3，按原文算会低估请求体
         if encoded.len() > budget && !out.is_empty() {
@@ -228,7 +251,11 @@ pub fn apply(home: &Path, pushes: &[ConfigPush]) -> usize {
         // 用户不会收到任何报错，只会发现自己的 agent 少了一半。
         let actual = sha256_hex(&bytes);
         if actual != push.sha256 {
-            tracing::warn!("配置内容哈希不符，跳过: {}（期望 {}）", push.path, push.sha256);
+            tracing::warn!(
+                "配置内容哈希不符，跳过: {}（期望 {}）",
+                push.path,
+                push.sha256
+            );
             continue;
         }
         // 本机已经是这份内容就别写了：否则每次下发都刷新 mtime，

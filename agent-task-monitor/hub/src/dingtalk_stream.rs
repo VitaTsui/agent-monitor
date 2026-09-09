@@ -106,7 +106,9 @@ async fn connect_once(
     let endpoint = open
         .get("endpoint")
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("open 无 endpoint（AppKey/AppSecret 是否正确？）: {open}"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("open 无 endpoint（AppKey/AppSecret 是否正确？）: {open}")
+        })?;
     let ticket = open
         .get("ticket")
         .and_then(Value::as_str)
@@ -130,7 +132,10 @@ async fn connect_once(
         };
         let frame: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         let ftype = frame.get("type").and_then(Value::as_str).unwrap_or("");
-        let topic = frame.pointer("/headers/topic").and_then(Value::as_str).unwrap_or("");
+        let topic = frame
+            .pointer("/headers/topic")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let message_id = frame
             .pointer("/headers/messageId")
             .and_then(Value::as_str)
@@ -171,20 +176,35 @@ async fn connect_once(
                         .trim()
                         .to_string()
                 } else {
-                    m.pointer("/text/content").and_then(Value::as_str).unwrap_or("").trim().to_string()
+                    m.pointer("/text/content")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
                 };
                 // 文件/图片：file(带 fileName) / picture / richText 内嵌多图 → 全部暂存待发
                 let files = extract_files(&m, msgtype);
-                let session_webhook =
-                    m.get("sessionWebhook").and_then(Value::as_str).unwrap_or("").to_string();
-                let webhook_expiry =
-                    m.get("sessionWebhookExpiredTime").and_then(Value::as_u64).unwrap_or(0);
+                let session_webhook = m
+                    .get("sessionWebhook")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let webhook_expiry = m
+                    .get("sessionWebhookExpiredTime")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 // 捕获发信人身份：主动推送（任务完成/需要操作）靠 OTO 发给这个人。
                 // robotCode 缺省回落到 app_key（Stream 机器人一般二者一致）。
-                let staff_id =
-                    m.get("senderStaffId").and_then(Value::as_str).unwrap_or("").to_string();
-                let sender_nick =
-                    m.get("senderNick").and_then(Value::as_str).unwrap_or("").to_string();
+                let staff_id = m
+                    .get("senderStaffId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let sender_nick = m
+                    .get("senderNick")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 let robot_code = m
                     .get("robotCode")
                     .or_else(|| m.get("chatbotUserId"))
@@ -228,8 +248,14 @@ async fn connect_once(
                 let account = match &bind_reply {
                     Some(_) => Err(String::new()), // 绑定指令：账号无关，下面按 bind_reply 回
                     None => {
-                        crate::bot::resolve_account(&state, user, &staff_id, &robot_code, &sender_nick)
-                            .await
+                        crate::bot::resolve_account(
+                            &state,
+                            user,
+                            &staff_id,
+                            &robot_code,
+                            &sender_nick,
+                        )
+                        .await
                     }
                 };
 
@@ -422,12 +448,25 @@ fn extract_files(m: &Value, msgtype: &str) -> Vec<(String, String)> {
         .pointer("/content/fileName")
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or(if msgtype == "picture" { "图片.jpg" } else { "钉钉文件" })
+        .unwrap_or(if msgtype == "picture" {
+            "图片.jpg"
+        } else {
+            "钉钉文件"
+        })
         .to_string();
     deep_download_codes(m.get("content").unwrap_or(&Value::Null))
         .into_iter()
         .enumerate()
-        .map(|(i, c)| (c, if i == 0 { name.clone() } else { format!("{i}-{name}") }))
+        .map(|(i, c)| {
+            (
+                c,
+                if i == 0 {
+                    name.clone()
+                } else {
+                    format!("{i}-{name}")
+                },
+            )
+        })
         .collect()
 }
 
@@ -519,16 +558,25 @@ mod extract_files_tests {
     #[test]
     fn standard_shapes_unchanged() {
         let m = json!({"content": {"downloadCode": "c1", "fileName": "a.pdf"}});
-        assert_eq!(extract_files(&m, "file"), vec![("c1".into(), "a.pdf".into())]);
+        assert_eq!(
+            extract_files(&m, "file"),
+            vec![("c1".into(), "a.pdf".into())]
+        );
 
         let m = json!({"content": {"pictureDownloadCode": "p1"}});
-        assert_eq!(extract_files(&m, "picture"), vec![("p1".into(), "图片.jpg".into())]);
+        assert_eq!(
+            extract_files(&m, "picture"),
+            vec![("p1".into(), "图片.jpg".into())]
+        );
 
         let m = json!({"content": {"richText": [
             {"downloadCode": "r1"}, {"text": "说明"}, {"downloadCode": "r2"}]}});
         assert_eq!(
             extract_files(&m, "richText"),
-            vec![("r1".into(), "图片1.jpg".into()), ("r2".into(), "图片2.jpg".into())]
+            vec![
+                ("r1".into(), "图片1.jpg".into()),
+                ("r2".into(), "图片2.jpg".into())
+            ]
         );
     }
 
@@ -541,15 +589,24 @@ mod extract_files_tests {
         // 嵌在附件数组里
         let m = json!({"content": {"attachments": [{"fileDownloadCode": "x9", "fileName": "报告.pdf"}]},
                        "msgtype": "file"});
-        assert_eq!(extract_files(&m, "file"), vec![("x9".into(), "钉钉文件".into())]);
+        assert_eq!(
+            extract_files(&m, "file"),
+            vec![("x9".into(), "钉钉文件".into())]
+        );
 
         // fileName 在 content 顶层、下载码在深处
         let m = json!({"content": {"fileName": "年报.pdf", "space": {"downloadCode": "d7"}}});
-        assert_eq!(extract_files(&m, "file"), vec![("d7".into(), "年报.pdf".into())]);
+        assert_eq!(
+            extract_files(&m, "file"),
+            vec![("d7".into(), "年报.pdf".into())]
+        );
 
         // 完全不认识的 msgtype，只要有下载码也捞出来
         let m = json!({"content": {"someDownloadCode": "k1"}});
-        assert_eq!(extract_files(&m, "spaceFile"), vec![("k1".into(), "钉钉文件".into())]);
+        assert_eq!(
+            extract_files(&m, "spaceFile"),
+            vec![("k1".into(), "钉钉文件".into())]
+        );
     }
 
     /// 多个下载码要全部捞到且去重，文件名不能互相覆盖。
@@ -579,14 +636,23 @@ mod extract_files_tests {
         // 图 + 一句话：数组里那个图片元素没有 text 键，下载码却没解出来 → 必须告警
         let with_text = json!({"content": {"richText": [
             {"text": "按这张图改一下"}, {"type": "picture"}]}});
-        assert!(should_warn_unparsed_media(&with_text, "richText", 0), "图文一起发也要告警");
+        assert!(
+            should_warn_unparsed_media(&with_text, "richText", 0),
+            "图文一起发也要告警"
+        );
         // richText 结构完全对不上预期 —— 里面有没有文件根本无从判断，正是最该报的
         let broken = json!({"content": {"foo": "bar"}});
-        assert!(should_warn_unparsed_media(&broken, "richText", 0), "结构对不上就该报");
+        assert!(
+            should_warn_unparsed_media(&broken, "richText", 0),
+            "结构对不上就该报"
+        );
 
         let file = json!({"content": {"fileName": "a.pdf"}});
         assert!(should_warn_unparsed_media(&file, "file", 0));
-        assert!(should_warn_unparsed_media(&file, "spaceFile", 0), "不认识的富媒体类型也要告警");
+        assert!(
+            should_warn_unparsed_media(&file, "spaceFile", 0),
+            "不认识的富媒体类型也要告警"
+        );
         // 解析出来了就别多嘴
         assert!(!should_warn_unparsed_media(&with_text, "richText", 1));
         assert!(!should_warn_unparsed_media(&file, "file", 2));
@@ -605,7 +671,10 @@ mod extract_files_tests {
         use super::should_warn_unparsed_media;
         let pasted = json!({"content": {"richText": [
             {"text": "第一段", "bold": true}, {"text": "第二段"}]}});
-        assert!(!should_warn_unparsed_media(&pasted, "richText", 0), "粘贴的带格式纯文本不该告警");
+        assert!(
+            !should_warn_unparsed_media(&pasted, "richText", 0),
+            "粘贴的带格式纯文本不该告警"
+        );
         // 空数组同理：里面什么都没有，没有「丢了文件」这回事
         let empty = json!({"content": {"richText": []}});
         assert!(!should_warn_unparsed_media(&empty, "richText", 0));

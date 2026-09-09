@@ -141,8 +141,9 @@ mod tests {
     /// 取最近 N 条时必须保持正序（旧→新），否则聊天记录会倒着读
     #[test]
     fn keeps_chronological_order() {
-        let all: Vec<HistoryEntry> =
-            (0..5).map(|i| entry(&format!("e{i}"), "user", i as u64)).collect();
+        let all: Vec<HistoryEntry> = (0..5)
+            .map(|i| entry(&format!("e{i}"), "user", i as u64))
+            .collect();
         let limit = 3;
         let start = all.len().saturating_sub(limit);
         let got: Vec<u64> = all[start..].iter().map(|e| e.at).collect();
@@ -152,8 +153,9 @@ mod tests {
     /// 超出上限从头砍，保留最新的
     #[test]
     fn drops_oldest_when_over_limit() {
-        let mut h: Vec<HistoryEntry> =
-            (0..5).map(|i| entry(&format!("e{i}"), "user", i as u64)).collect();
+        let mut h: Vec<HistoryEntry> = (0..5)
+            .map(|i| entry(&format!("e{i}"), "user", i as u64))
+            .collect();
         let max = 3;
         if h.len() > max {
             let cut = h.len() - max;

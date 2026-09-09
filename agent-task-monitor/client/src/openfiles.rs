@@ -35,7 +35,11 @@ pub fn pin_sessions(pids: &[u32], projects_dirs: &[PathBuf]) -> HashMap<u32, Str
 #[cfg(unix)]
 fn pin_unix(pids: &[u32]) -> HashMap<u32, String> {
     let mut out = HashMap::new();
-    let csv = pids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let csv = pids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
     // -n -P：跳过 DNS/端口反查更快；-F pn：机器可读，按进程输出 p<pid> 与 n<name>
     let Ok(o) = std::process::Command::new("lsof")
         .args(["-n", "-P", "-F", "pn", "-p", &csv])
@@ -50,9 +54,10 @@ fn pin_unix(pids: &[u32]) -> HashMap<u32, String> {
             cur = r.trim().parse::<u32>().ok();
         } else if let Some(n) = line.strip_prefix('n') {
             if n.ends_with(".jsonl") {
-                if let (Some(pid), Some(stem)) =
-                    (cur, std::path::Path::new(n).file_stem().and_then(|s| s.to_str()))
-                {
+                if let (Some(pid), Some(stem)) = (
+                    cur,
+                    std::path::Path::new(n).file_stem().and_then(|s| s.to_str()),
+                ) {
                     // 一个进程只占一个会话文件；保留第一个即可
                     out.entry(pid).or_insert_with(|| stem.to_string());
                 }
@@ -129,7 +134,9 @@ fn collect_recent_jsonl(dir: &std::path::Path, now_ms: u64, out: &mut Vec<PathBu
     if depth > 4 || out.len() > 200 {
         return;
     }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         let Ok(meta) = e.metadata() else { continue };
@@ -157,8 +164,8 @@ fn collect_recent_jsonl(dir: &std::path::Path, now_ms: u64, out: &mut Vec<PathBu
 fn holder_pids(file: &std::path::Path) -> Vec<u32> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::System::RestartManager::{
-        RmEndSession, RmGetList, RmRegisterResources, RmStartSession, RM_PROCESS_INFO,
-        CCH_RM_SESSION_KEY,
+        RmEndSession, RmGetList, RmRegisterResources, RmStartSession, CCH_RM_SESSION_KEY,
+        RM_PROCESS_INFO,
     };
 
     let mut session: u32 = 0;
@@ -167,7 +174,11 @@ fn holder_pids(file: &std::path::Path) -> Vec<u32> {
     if unsafe { RmStartSession(&mut session, 0, key.as_mut_ptr()) } != 0 {
         return Vec::new();
     }
-    let wide: Vec<u16> = file.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = file
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let files = [wide.as_ptr()];
     let reg = unsafe {
         RmRegisterResources(
@@ -186,7 +197,13 @@ fn holder_pids(file: &std::path::Path) -> Vec<u32> {
         let mut reason: u32 = 0;
         // 先探所需数量
         let _ = unsafe {
-            RmGetList(session, &mut needed, &mut count, std::ptr::null_mut(), &mut reason)
+            RmGetList(
+                session,
+                &mut needed,
+                &mut count,
+                std::ptr::null_mut(),
+                &mut reason,
+            )
         };
         if needed == 0 {
             Vec::new()
@@ -195,7 +212,13 @@ fn holder_pids(file: &std::path::Path) -> Vec<u32> {
                 vec![unsafe { std::mem::zeroed() }; needed as usize];
             count = needed;
             let rc = unsafe {
-                RmGetList(session, &mut needed, &mut count, infos.as_mut_ptr(), &mut reason)
+                RmGetList(
+                    session,
+                    &mut needed,
+                    &mut count,
+                    infos.as_mut_ptr(),
+                    &mut reason,
+                )
             };
             if rc == 0 {
                 infos

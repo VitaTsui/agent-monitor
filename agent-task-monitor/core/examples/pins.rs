@@ -51,10 +51,19 @@ fn main() {
     }
 
     println!("进程总数 = {total}");
-    println!("能读到 environ 的进程数 = {with_env}  ({}%)", with_env * 100 / total.max(1));
+    println!(
+        "能读到 environ 的进程数 = {with_env}  ({}%)",
+        with_env * 100 / total.max(1)
+    );
     println!("\nclaude 进程 = {claude_procs:?}");
-    println!("\n带 CLAUDE_PID+SESSION_ID 的进程（candidates）= {} 个", carriers.len());
+    println!(
+        "\n带 CLAUDE_PID+SESSION_ID 的进程（candidates）= {} 个",
+        carriers.len()
+    );
     for (pid, name, cp, sid) in &carriers {
-        println!("  reporter pid={pid} name={name} CLAUDE_PID={cp} sid={}", &sid[..8.min(sid.len())]);
+        println!(
+            "  reporter pid={pid} name={name} CLAUDE_PID={cp} sid={}",
+            &sid[..8.min(sid.len())]
+        );
     }
 }

@@ -2,22 +2,21 @@
 //! 聚合各机上报、托管网页与下载、用户/设备/配对管理。纯服务端：不含扫描/托盘/上报。
 
 mod admin;
+mod bot;
 mod commands;
 /// 配置同步：各账号的配置基线与差异计算
 mod configsync;
 mod crypto;
 mod dingtalk;
 mod dingtalk_stream;
-mod oauth;
-mod registry;
 mod history;
 mod mcp;
 mod mdfmt;
+mod oauth;
+mod registry;
 mod server;
 mod slots;
 mod state;
-mod bot;
-
 
 use anyhow::{Context, Result};
 use rsa::pkcs8::DecodePrivateKey;

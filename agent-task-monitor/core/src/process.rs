@@ -103,8 +103,20 @@ impl ProcessScanner {
         let is_shell = |n: &str| {
             matches!(
                 n,
-                "powershell.exe" | "pwsh.exe" | "cmd.exe" | "bash.exe" | "nu.exe" | "wsl.exe"
-                    | "bash" | "zsh" | "sh" | "fish" | "nu" | "pwsh" | "powershell" | "-zsh"
+                "powershell.exe"
+                    | "pwsh.exe"
+                    | "cmd.exe"
+                    | "bash.exe"
+                    | "nu.exe"
+                    | "wsl.exe"
+                    | "bash"
+                    | "zsh"
+                    | "sh"
+                    | "fish"
+                    | "nu"
+                    | "pwsh"
+                    | "powershell"
+                    | "-zsh"
                     | "-bash"
             )
         };
@@ -186,8 +198,17 @@ impl ProcessScanner {
             let name = proc_.name().to_lowercase();
             if matches!(
                 name.as_str(),
-                "powershell.exe" | "pwsh.exe" | "cmd.exe" | "bash.exe" | "sh.exe"
-                    | "wsl.exe" | "nu.exe" | "powershell" | "pwsh" | "cmd" | "bash"
+                "powershell.exe"
+                    | "pwsh.exe"
+                    | "cmd.exe"
+                    | "bash.exe"
+                    | "sh.exe"
+                    | "wsl.exe"
+                    | "nu.exe"
+                    | "powershell"
+                    | "pwsh"
+                    | "cmd"
+                    | "bash"
             ) {
                 return true;
             }
@@ -270,7 +291,11 @@ impl ProcessScanner {
         // 父链里没有终端宿主时，用 shell 本身兜底（Windows cmd/PowerShell 直开场景）
         for name in &chain {
             let lower = name.to_lowercase();
-            if lower == "powershell.exe" || lower == "pwsh.exe" || lower == "powershell" || lower == "pwsh" {
+            if lower == "powershell.exe"
+                || lower == "pwsh.exe"
+                || lower == "powershell"
+                || lower == "pwsh"
+            {
                 return (IdeKind::Terminal, "PowerShell".into());
             }
             if lower == "cmd.exe" || lower == "cmd" {
@@ -316,11 +341,7 @@ fn resolve_session_pins(
 }
 
 /// 顺 `parent_of` 父链从 `from` 上溯（最多 24 跳），判断 `ancestor` 是否为其祖先。
-fn is_ancestor(
-    ancestor: u32,
-    from: u32,
-    parent_of: &std::collections::HashMap<u32, u32>,
-) -> bool {
+fn is_ancestor(ancestor: u32, from: u32, parent_of: &std::collections::HashMap<u32, u32>) -> bool {
     let mut cur = from;
     for _ in 0..24 {
         if cur == ancestor {
@@ -445,7 +466,10 @@ fn first_subcommand(cmd: &[String]) -> Option<&str> {
         Some("node") | Some("node.exe") => 2,
         _ => 1,
     };
-    cmd.iter().skip(skip).find(|a| !a.starts_with('-')).map(String::as_str)
+    cmd.iter()
+        .skip(skip)
+        .find(|a| !a.starts_with('-'))
+        .map(String::as_str)
 }
 
 /// 对指定 pid 执行控制动作。返回动作的中文描述。
@@ -464,9 +488,7 @@ pub fn control(pid: u32, action: ControlAction) -> Result<&'static str> {
             ControlAction::Stop => libc::SIGTERM,
             ControlAction::Kill => libc::SIGKILL,
             ControlAction::Input => return Err(anyhow!("Input 动作需走 send_input")),
-            ControlAction::TermKey => {
-                return Err(anyhow!("TermKey 动作需走 send_terminal_keys"))
-            }
+            ControlAction::TermKey => return Err(anyhow!("TermKey 动作需走 send_terminal_keys")),
         };
         let ret = unsafe { libc::kill(pid as i32, sig) };
         if ret != 0 {
@@ -494,7 +516,9 @@ pub fn control(pid: u32, action: ControlAction) -> Result<&'static str> {
                 if force {
                     cmd.arg("/F");
                 }
-                let out = cmd.output().map_err(|e| anyhow!("taskkill 执行失败: {e}"))?;
+                let out = cmd
+                    .output()
+                    .map_err(|e| anyhow!("taskkill 执行失败: {e}"))?;
                 if !out.status.success() {
                     return Err(anyhow!(
                         "taskkill 失败: {}",
@@ -691,7 +715,10 @@ fn mac_send_key(pid: u32, key: &str, count: usize) -> Result<&'static str> {
 end tell
 return "notfound""#
     );
-    if run_osascript(&iterm).map(|o| o.contains("ok")).unwrap_or(false) {
+    if run_osascript(&iterm)
+        .map(|o| o.contains("ok"))
+        .unwrap_or(false)
+    {
         return Ok("已注入按键");
     }
 
@@ -799,7 +826,14 @@ if([AmSusp]::Run([uint32]$TargetPid,[bool]$Suspend)){ exit 0 } else { exit 2 }
 "#;
     std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
     let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
         .arg(&ps_path)
         .arg(pid.to_string())
         .arg(if suspend { "1" } else { "0" })
@@ -822,9 +856,9 @@ fn windows_send_key(pid: u32, key: &str, count: usize) -> Result<&'static str> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let (vk, uch): (u16, u16) = match key {
-        "up" => (0x26, 0),    // VK_UP，非可打印字符 → UnicodeChar 0
-        "esc" => (0x1B, 27),  // VK_ESCAPE，UnicodeChar = ESC
-        "tab" => (0x09, 9),   // VK_TAB，UnicodeChar = HT
+        "up" => (0x26, 0),     // VK_UP，非可打印字符 → UnicodeChar 0
+        "esc" => (0x1B, 27),   // VK_ESCAPE，UnicodeChar = ESC
+        "tab" => (0x09, 9),    // VK_TAB，UnicodeChar = HT
         "enter" => (0x0D, 13), // VK_RETURN，UnicodeChar = CR（TUI 认 CR 为提交）
         _ => return Err(anyhow!("未知按键: {key}")),
     };
@@ -880,7 +914,14 @@ if([AmKey]::Send([uint32]$TargetPid,[uint16]$Vk,[char]$Uch,$Count)){{ exit 0 }} 
     );
     std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
     let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
         .arg(&ps_path)
         .arg("-TargetPid")
         .arg(pid.to_string())
@@ -932,8 +973,7 @@ fn windows_send_input(pid: u32, text: &str, submit: bool) -> Result<&'static str
     let stamp = std::process::id();
     let txt_path = dir.join(format!("am-send-{pid}-{stamp}.txt"));
     let ps_path = dir.join(format!("am-send-{pid}-{stamp}.ps1"));
-    std::fs::write(&txt_path, payload.as_bytes())
-        .map_err(|e| anyhow!("写入临时文本失败: {e}"))?;
+    std::fs::write(&txt_path, payload.as_bytes()).map_err(|e| anyhow!("写入临时文本失败: {e}"))?;
 
     // 脚本：读文本 → 逐字符写 KEY_EVENT_RECORD → 末尾补一个回车提交
     let script = r#"param([int]$TargetPid,[string]$TextFile,[int]$Submit=1)
@@ -1058,8 +1098,21 @@ pub fn ide_shell_pid(claude_pid: u32) -> Option<u32> {
     let is_shell = |n: &str| {
         matches!(
             n,
-            "powershell.exe" | "pwsh.exe" | "cmd.exe" | "bash.exe" | "nu.exe" | "wsl.exe"
-                | "bash" | "zsh" | "sh" | "fish" | "nu" | "pwsh" | "powershell" | "-zsh" | "-bash"
+            "powershell.exe"
+                | "pwsh.exe"
+                | "cmd.exe"
+                | "bash.exe"
+                | "nu.exe"
+                | "wsl.exe"
+                | "bash"
+                | "zsh"
+                | "sh"
+                | "fish"
+                | "nu"
+                | "pwsh"
+                | "powershell"
+                | "-zsh"
+                | "-bash"
         )
     };
     // 命中 Cursor/VSCode 宿主（含 mac 的 helper/electron 命名，与 detect_ide 一致）
@@ -1162,7 +1215,14 @@ if([AmFKey]::Run([uint32]$WtPid,[byte]$Vk,$Count)){ exit 0 } else { exit 4 }
     std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
 
     let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
         .arg(&ps_path)
         .arg("-WtPid")
         .arg(wt_pid.to_string())
@@ -1382,7 +1442,10 @@ fn applescript_write(tty: &str, text: &str, submit: bool) -> Result<&'static str
 end tell
 return "notfound""#
     );
-    if run_osascript(&iterm).map(|o| o.contains("ok")).unwrap_or(false) {
+    if run_osascript(&iterm)
+        .map(|o| o.contains("ok"))
+        .unwrap_or(false)
+    {
         return Ok("已发送");
     }
 
@@ -1426,7 +1489,10 @@ return "notfound""#
 end tell
 return "notfound""#
     );
-    if run_osascript(&terminal).map(|o| o.contains("ok")).unwrap_or(false) {
+    if run_osascript(&terminal)
+        .map(|o| o.contains("ok"))
+        .unwrap_or(false)
+    {
         return Ok("已发送");
     }
 
@@ -1442,7 +1508,10 @@ fn run_osascript(script: &str) -> Result<String> {
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
-        Err(anyhow!("osascript: {}", String::from_utf8_lossy(&out.stderr)))
+        Err(anyhow!(
+            "osascript: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ))
     }
 }
 
@@ -1530,15 +1599,33 @@ mod agent_kind_tests {
 
     #[test]
     fn exact_matches() {
-        assert_eq!(agent_kind("claude", &s(&["claude", "--flag"])), Some("claude"));
-        assert_eq!(agent_kind("codex.exe", &s(&["C:\\bin\\codex.exe"])), Some("codex"));
-        assert_eq!(agent_kind("zsh", &s(&["/usr/local/bin/claude"])), Some("claude"));
-        // npm 全局安装形态：node + 包目录 claude-code
         assert_eq!(
-            agent_kind("node", &s(&["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"])),
+            agent_kind("claude", &s(&["claude", "--flag"])),
             Some("claude")
         );
-        assert_eq!(agent_kind("node", &s(&["node", "/opt/bin/codex"])), Some("codex"));
+        assert_eq!(
+            agent_kind("codex.exe", &s(&["C:\\bin\\codex.exe"])),
+            Some("codex")
+        );
+        assert_eq!(
+            agent_kind("zsh", &s(&["/usr/local/bin/claude"])),
+            Some("claude")
+        );
+        // npm 全局安装形态：node + 包目录 claude-code
+        assert_eq!(
+            agent_kind(
+                "node",
+                &s(&[
+                    "node",
+                    "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+                ])
+            ),
+            Some("claude")
+        );
+        assert_eq!(
+            agent_kind("node", &s(&["node", "/opt/bin/codex"])),
+            Some("codex")
+        );
     }
 
     /// 用户实际踩过：只开了 Claude Code，列表却多出 codex ——
@@ -1546,17 +1633,34 @@ mod agent_kind_tests {
     #[test]
     fn args_substrings_do_not_match() {
         assert_eq!(
-            agent_kind("node", &s(&["node", "/x/mcp-server.js", "--config", "/Users/a/.claude/codex mcp.json"])),
+            agent_kind(
+                "node",
+                &s(&[
+                    "node",
+                    "/x/mcp-server.js",
+                    "--config",
+                    "/Users/a/.claude/codex mcp.json"
+                ])
+            ),
             None,
             "第三个参数里的 codex/claude 字样不该命中"
         );
         assert_eq!(
-            agent_kind("node", &s(&["node", "/app/extensions/vendor-codex-helper/main.js"])),
+            agent_kind(
+                "node",
+                &s(&["node", "/app/extensions/vendor-codex-helper/main.js"])
+            ),
             None,
             "路径分量是 vendor-codex-helper 而非 codex，不该命中"
         );
-        assert_eq!(agent_kind("Cursor Helper", &s(&["/Applications/Cursor.app/x"])), None);
-        assert_eq!(agent_kind("claude-backup-tool", &s(&["claude-backup-tool"])), None);
+        assert_eq!(
+            agent_kind("Cursor Helper", &s(&["/Applications/Cursor.app/x"])),
+            None
+        );
+        assert_eq!(
+            agent_kind("claude-backup-tool", &s(&["claude-backup-tool"])),
+            None
+        );
     }
 }
 
@@ -1585,7 +1689,10 @@ mod service_mode_tests {
         assert!(is_service_mode("codex", &s(&["codex", "mcp"])));
         assert!(is_service_mode("codex", &s(&["codex", "proto"])));
         // node 包装形态多一层脚本路径
-        assert!(is_service_mode("codex", &s(&["node", "/opt/bin/codex", "app-server"])));
+        assert!(is_service_mode(
+            "codex",
+            &s(&["node", "/opt/bin/codex", "app-server"])
+        ));
     }
 
     /// 交互式会话一律放行，选项与提示词都不能被当成子命令。
@@ -1593,7 +1700,10 @@ mod service_mode_tests {
     fn interactive_sessions_pass() {
         assert!(!is_service_mode("codex", &s(&["codex"])));
         assert!(!is_service_mode("codex", &s(&["codex", "--yolo"])));
-        assert!(!is_service_mode("codex", &s(&["codex", "exec", "跑一下测试"])), "exec 是用户自己跑的一次性任务，照常监控");
+        assert!(
+            !is_service_mode("codex", &s(&["codex", "exec", "跑一下测试"])),
+            "exec 是用户自己跑的一次性任务，照常监控"
+        );
         assert!(
             !is_service_mode("codex", &s(&["codex", "帮我看下 mcp 配置"])),
             "提示词里带 mcp 字样不该被当成子命令"
@@ -1657,7 +1767,11 @@ mod session_pins_tests {
     fn rejects_when_not_ancestor() {
         // 100 是存活 claude，但 reporter 200 的父链是 200→300→1，够不到 100
         let cands = vec![(200, 100, "sess-A".to_string())];
-        let got = resolve_session_pins(&cands, &parents(&[(200, 300), (300, 1)]), &alive(&[100, 300]));
+        let got = resolve_session_pins(
+            &cands,
+            &parents(&[(200, 300), (300, 1)]),
+            &alive(&[100, 300]),
+        );
         assert!(got.is_empty());
     }
 
@@ -1668,11 +1782,7 @@ mod session_pins_tests {
             (200, 100, "sess-A".to_string()),
             (201, 100, "sess-A".to_string()),
         ];
-        let got = resolve_session_pins(
-            &cands,
-            &parents(&[(200, 100), (201, 100)]),
-            &alive(&[100]),
-        );
+        let got = resolve_session_pins(&cands, &parents(&[(200, 100), (201, 100)]), &alive(&[100]));
         assert_eq!(got.len(), 1);
         assert_eq!(got.get(&100), Some(&"sess-A".to_string()));
     }
@@ -1713,9 +1823,15 @@ mod key_spec_tests {
     /// 期间任何一次别的注入都会把焦点从 Submit 上带走，回车就落到别处去了。
     #[test]
     fn submit_sequence_is_ordered() {
-        assert_eq!(parse_key_spec("tab:5,enter"), vec![("tab", 5), ("enter", 1)]);
+        assert_eq!(
+            parse_key_spec("tab:5,enter"),
+            vec![("tab", 5), ("enter", 1)]
+        );
         // 顺序即书写顺序，不做任何重排
-        assert_eq!(parse_key_spec("enter,tab:2"), vec![("enter", 1), ("tab", 2)]);
+        assert_eq!(
+            parse_key_spec("enter,tab:2"),
+            vec![("enter", 1), ("tab", 2)]
+        );
     }
 
     /// 空段与 0 次段一律丢掉：0 次若被当成「发一次」，会凭空多出一下按键，
@@ -1739,7 +1855,10 @@ mod bridge_key_tests {
     fn keys_become_control_chars() {
         assert_eq!(key_spec_to_chars("esc").as_deref(), Some("\x1b"));
         assert_eq!(key_spec_to_chars("up:2").as_deref(), Some("\x1b[A\x1b[A"));
-        assert_eq!(key_spec_to_chars("tab:3,enter").as_deref(), Some("\t\t\t\r"));
+        assert_eq!(
+            key_spec_to_chars("tab:3,enter").as_deref(),
+            Some("\t\t\t\r")
+        );
     }
 
     /// 回车必须是 CR：换行会让扩展把整段包进 bracketed paste，

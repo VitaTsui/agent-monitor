@@ -1,14 +1,14 @@
 use crate::admin::{self, auth_user, err, ok};
-use am_core::model::{ControlCmd, ControlReq, ReportPayload, Task, TaskStatus};
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
 use crate::state::{MachineEntry, SharedState, NEW_SESSION_SETTLE_SECS, OFFLINE_AFTER_SECS};
+use am_core::model::{ControlCmd, ControlReq, ReportPayload, Task, TaskStatus};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -80,7 +80,10 @@ pub fn router(state: SharedState) -> Router {
         .route("/mcp", post(crate::mcp::mcp_post).get(crate::mcp::mcp_get))
         // ---- vita-admin 契约 ----
         .route("/auth/access/getCryptoKey", get(admin::get_crypto_key))
-        .route("/auth/access/isNeedLoginCaptcha", get(admin::is_need_captcha))
+        .route(
+            "/auth/access/isNeedLoginCaptcha",
+            get(admin::is_need_captcha),
+        )
         .route("/auth/access/dingtalk/url", get(admin::dingtalk_url))
         .route("/auth/access/login", post(admin::login))
         // 客户端静默续登：设备令牌换登录会话（设备已绑定账号 = 该机即该用户）
@@ -90,11 +93,23 @@ pub fn router(state: SharedState) -> Router {
         .route("/sys/menu/getMenuATopATopMenu", get(admin::menus))
         .route("/sys/menu/getStringPermissions", get(admin::permissions))
         // ---- 第三方登录（Google / Apple，按环境变量启用）----
-        .route("/auth/access/oauth/providers", get(crate::oauth::oauth_providers))
-        .route("/auth/access/oauth/:provider/url", get(crate::oauth::oauth_url))
-        .route("/auth/access/oauth/:provider/login", post(crate::oauth::oauth_login))
+        .route(
+            "/auth/access/oauth/providers",
+            get(crate::oauth::oauth_providers),
+        )
+        .route(
+            "/auth/access/oauth/:provider/url",
+            get(crate::oauth::oauth_url),
+        )
+        .route(
+            "/auth/access/oauth/:provider/login",
+            post(crate::oauth::oauth_login),
+        )
         // Apple form_post 回调（POST）→ 转跳前端登录页
-        .route("/auth/access/oauth/apple/callback", post(crate::oauth::apple_callback))
+        .route(
+            "/auth/access/oauth/apple/callback",
+            post(crate::oauth::apple_callback),
+        )
         // ---- 后管（admin token 锁 + 仅用户管理）----
         .route("/sys/admin/verify", post(admin::verify_admin_token))
         .route("/sys/user/page", get(admin::user_page))
@@ -116,7 +131,10 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/tasks/page", get(page_tasks))
         .route("/monitor/tasks/detail/:id", get(task_detail))
         .route("/monitor/tasks/:id/messages", get(task_messages))
-        .route("/monitor/tasks/:id/slash-commands", get(task_slash_commands))
+        .route(
+            "/monitor/tasks/:id/slash-commands",
+            get(task_slash_commands),
+        )
         .route("/monitor/tasks/:id/control", post(control_task))
         .route("/monitor/tasks/:id/input", post(input_task))
         .route("/monitor/tasks/:id/termkey", post(termkey_task))
@@ -142,7 +160,10 @@ pub fn router(state: SharedState) -> Router {
             post(upload_file).layer(axum::extract::DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
         )
         // ---- 协助共享（跨用户设备接入，类似远程控制）----
-        .route("/monitor/share/:id", get(share_info).post(share_create).delete(share_revoke))
+        .route(
+            "/monitor/share/:id",
+            get(share_info).post(share_create).delete(share_revoke),
+        )
         .route("/monitor/share/:id/guests", get(share_guests))
         .route("/monitor/share/:id/kick", post(share_kick))
         .route("/monitor/share/connect", post(share_connect))
@@ -153,18 +174,30 @@ pub fn router(state: SharedState) -> Router {
         // ---- 用户自助机器人集成 ----
         // 配置读写（登录用户，返回各渠道配置 + 专属回调地址）
         .route("/monitor/integrations", get(integrations_get))
-        .route("/monitor/integrations/dingtalk-recv-dir", post(set_dingtalk_recv_dir))
+        .route(
+            "/monitor/integrations/dingtalk-recv-dir",
+            post(set_dingtalk_recv_dir),
+        )
         .route("/monitor/integrations/dingtalk-app", post(set_dingtalk_app))
         // 钉钉号绑定（走管理员的全局机器人时才需要）：取码 / 认领链接 / 查看 / 解绑
-        .route("/monitor/integrations/dingtalk-bindcode", post(dingtalk_bind_code))
+        .route(
+            "/monitor/integrations/dingtalk-bindcode",
+            post(dingtalk_bind_code),
+        )
         .route("/monitor/integrations/dingtalk-qr", get(dingtalk_qr))
         // 扫码回调：人在手机钉钉里打开，没有登录态，故不鉴权（凭一次性 state 认人）
         .route("/monitor/integrations/dingtalk-scan", get(dingtalk_scan_cb))
         .route("/monitor/integrations/dingtalk-bind", post(dingtalk_bind))
         .route("/monitor/integrations/dingtalk-ids", get(dingtalk_ids_get))
-        .route("/monitor/integrations/dingtalk-unbind", post(dingtalk_unbind))
+        .route(
+            "/monitor/integrations/dingtalk-unbind",
+            post(dingtalk_unbind),
+        )
         // 回调（每用户 channel 路由）
-        .route("/monitor/int/dingtalk/:channel", post(crate::bot::dingtalk_message))
+        .route(
+            "/monitor/int/dingtalk/:channel",
+            post(crate::bot::dingtalk_message),
+        )
         // ---- 设备配对（注册+安装即可用，无需管理员发令牌）----
         .route("/monitor/pair/start", post(pair_start))
         .route("/monitor/pair/claim", post(pair_claim))
@@ -223,7 +256,9 @@ pub fn router(state: SharedState) -> Router {
                         bytes,
                     )
                         .into_response(),
-                    Err(_) => (axum::http::StatusCode::NOT_FOUND, "index.html 缺失").into_response(),
+                    Err(_) => {
+                        (axum::http::StatusCode::NOT_FOUND, "index.html 缺失").into_response()
+                    }
                 }
             }
         });
@@ -262,7 +297,10 @@ struct PairStartReq {
 
 /// POST /monitor/pair/start —— 客户端领配对码（公开）。
 /// 返回 code（给用户/网页认领用）与 pairToken（客户端轮询凭证）。
-async fn pair_start(State(state): State<SharedState>, Json(req): Json<PairStartReq>) -> Json<Value> {
+async fn pair_start(
+    State(state): State<SharedState>,
+    Json(req): Json<PairStartReq>,
+) -> Json<Value> {
     if req.machine_id.trim().is_empty() {
         return err(400, "缺少 machineId");
     }
@@ -276,7 +314,9 @@ async fn pair_start(State(state): State<SharedState>, Json(req): Json<PairStartR
     const ALPHA: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    let code: String = (0..8).map(|_| ALPHA[rng.gen_range(0..ALPHA.len())] as char).collect();
+    let code: String = (0..8)
+        .map(|_| ALPHA[rng.gen_range(0..ALPHA.len())] as char)
+        .collect();
     let pair_token = uuid::Uuid::new_v4().simple().to_string();
     map.insert(
         code.clone(),
@@ -318,10 +358,16 @@ async fn pair_claim(
     if entry.device_token.is_some() {
         return err(400, "该配对码已被认领");
     }
-    let token = state.registry.write().await.bind_device(&entry.machine_id, &user);
+    let token = state
+        .registry
+        .write()
+        .await
+        .bind_device(&entry.machine_id, &user);
     entry.device_token = Some(token);
     tracing::info!("设备配对成功: {} → 用户 {user}", entry.machine_id);
-    ok(json!({ "machineId": entry.machine_id, "hostname": entry.hostname, "platform": entry.platform }))
+    ok(
+        json!({ "machineId": entry.machine_id, "hostname": entry.hostname, "platform": entry.platform }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -459,7 +505,11 @@ pub(crate) async fn wait_file_result(
             return Some(if r.ok {
                 Ok(r.path)
             } else {
-                Err(if r.err.is_empty() { "未说明原因".into() } else { r.err })
+                Err(if r.err.is_empty() {
+                    "未说明原因".into()
+                } else {
+                    r.err
+                })
             });
         }
     }
@@ -550,7 +600,12 @@ async fn version_info(State(state): State<SharedState>) -> Json<Value> {
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .unwrap_or(Value::Null);
-    let pick = |ptr: &str| manifest.pointer(ptr).and_then(Value::as_str).map(String::from);
+    let pick = |ptr: &str| {
+        manifest
+            .pointer(ptr)
+            .and_then(Value::as_str)
+            .map(String::from)
+    };
     // minVersion = 强制更新下限：低于它的客户端必须更新才能继续使用
     // （有根本性协议/安全变更时在 manifest.json 里抬高对应字段）
     ok(json!({
@@ -570,7 +625,11 @@ async fn desktop_min_version(state: &SharedState) -> Option<String> {
         .await
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|m| m.pointer("/desktop/minVersion").and_then(Value::as_str).map(String::from))
+        .and_then(|m| {
+            m.pointer("/desktop/minVersion")
+                .and_then(Value::as_str)
+                .map(String::from)
+        })
 }
 
 /// 前端构建产物目录：AM_WEB_DIST > 可执行文件旁的 web/ > ../agent-monitor-web/dist
@@ -646,7 +705,11 @@ async fn me_info(State(state): State<SharedState>, headers: HeaderMap) -> Json<V
     let (id, nickname) = reg
         .user_by_name(&username)
         .map(|u| {
-            let nick = if u.display.is_empty() { u.username.clone() } else { u.display.clone() };
+            let nick = if u.display.is_empty() {
+                u.username.clone()
+            } else {
+                u.display.clone()
+            };
             (u.id.clone(), nick)
         })
         .unwrap_or_default();
@@ -675,11 +738,7 @@ async fn list_tasks(
 ///
 /// 号位的分配与去重统一由 `bot::sorted_active_tasks` 负责（那里保证了分配顺序稳定），
 /// 这里**只按终端锚查、不分配**，避免两处各自分配导致编号不一致。
-async fn with_slots(
-    state: &SharedState,
-    user: &str,
-    tasks: &[am_core::model::Task],
-) -> Vec<Value> {
+async fn with_slots(state: &SharedState, user: &str, tasks: &[am_core::model::Task]) -> Vec<Value> {
     let by_anchor: std::collections::HashMap<String, u32> =
         crate::bot::sorted_active_tasks(state, user)
             .await
@@ -740,7 +799,10 @@ async fn page_tasks(
         .and_then(|o| o.first())
         .map(|o| {
             (
-                o.get("k").and_then(Value::as_str).unwrap_or("crtTm").to_string(),
+                o.get("k")
+                    .and_then(Value::as_str)
+                    .unwrap_or("crtTm")
+                    .to_string(),
                 o.get("t").and_then(Value::as_str).unwrap_or("desc") == "desc",
             )
         })
@@ -813,7 +875,9 @@ fn field_of(t: &Task, k: &str) -> Option<String> {
 
 fn match_one(t: &Task, k: &str, v: &Value, m: &str) -> bool {
     // 未知字段不参与过滤（宽松处理，避免前端加字段导致空列表）
-    let Some(field) = field_of(t, k) else { return true };
+    let Some(field) = field_of(t, k) else {
+        return true;
+    };
     let vs = match v {
         Value::String(s) => s.clone(),
         Value::Number(n) => n.to_string(),
@@ -828,7 +892,11 @@ fn match_one(t: &Task, k: &str, v: &Value, m: &str) -> bool {
             .as_array()
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|x| x.as_str().map(str::to_string).or_else(|| x.as_u64().map(|n| n.to_string())))
+                    .filter_map(|x| {
+                        x.as_str()
+                            .map(str::to_string)
+                            .or_else(|| x.as_u64().map(|n| n.to_string()))
+                    })
                     .any(|x| x == field)
             })
             .unwrap_or(true),
@@ -891,7 +959,10 @@ async fn task_messages(
     let _limit = q.limit.unwrap_or(120).clamp(1, 500);
     let machine_id = {
         let tasks = state.tasks_for(&user).await;
-        tasks.iter().find(|t| t.id == id).map(|t| t.machine_id.clone())
+        tasks
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.machine_id.clone())
     };
     let Some(machine_id) = machine_id else {
         return err(404, "任务不存在");
@@ -1015,7 +1086,10 @@ pub(crate) fn select_summary(v: &Value) -> String {
     for (qi, q) in qs.iter().enumerate() {
         // 多选与单选的作答方式完全不同（单选发一个序号即落定，多选要连写序号再补
         // Submit 的编号），不标出来的话，远端只能靠猜 —— 猜错就卡在选择卡上不动。
-        let multi = q.get("multiSelect").and_then(|x| x.as_bool()).unwrap_or(false);
+        let multi = q
+            .get("multiSelect")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
         // 题与题之间空一行。**这一行不能省**：markdown 的 lazy continuation 会把紧跟在
         // 列表项后面的文字当成该项的续行，于是下一题的题干被吞进上一题的最后一个选项，
         // 后面的有序列表还会被视为同一个列表的延续、自动接着编号。
@@ -1112,7 +1186,10 @@ pub(crate) enum SelectStep {
 /// 末尾那个回车对**没有** Review 的情形是无害的：它落在空的输入框上，什么也不会发出。
 pub(crate) fn plan_select_answer(card: &Value, answer: &str) -> Vec<SelectStep> {
     let answer = answer.trim();
-    let Some(qs) = card.get("questions").and_then(|q| q.as_array()).filter(|q| !q.is_empty())
+    let Some(qs) = card
+        .get("questions")
+        .and_then(|q| q.as_array())
+        .filter(|q| !q.is_empty())
     else {
         // 认不出卡片结构就原样发，维持翻译之前的行为 —— 宁可不翻译，也不能把答案吃掉
         return vec![SelectStep::Text(answer.to_string())];
@@ -1130,10 +1207,17 @@ pub(crate) fn plan_select_answer(card: &Value, answer: &str) -> Vec<SelectStep> 
         let Some(q) = qs.get(i) else { break };
         steps.push(SelectStep::Text(seg.to_string()));
         answered += 1;
-        if q.get("multiSelect").and_then(|x| x.as_bool()).unwrap_or(false) {
+        if q.get("multiSelect")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false)
+        {
             // 数字只是勾选，落定还得走 Submit。它排在「N 个选项 + Other」之后，
             // 所以要 Tab 走 N+1 次（起始焦点在第 1 项）才轮到它。
-            let n = q.get("options").and_then(|o| o.as_array()).map(|o| o.len()).unwrap_or(0);
+            let n = q
+                .get("options")
+                .and_then(|o| o.as_array())
+                .map(|o| o.len())
+                .unwrap_or(0);
             steps.push(SelectStep::Keys(format!("tab:{},enter", n + 1)));
         }
     }
@@ -1221,7 +1305,11 @@ async fn input_task(
     if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
         return err(500, "任务所属机器已离线，无法下发");
     }
-    tracing::info!("已向机器 {} 下发输入: {}", task.machine_id, truncate_log(&text));
+    tracing::info!(
+        "已向机器 {} 下发输入: {}",
+        task.machine_id,
+        truncate_log(&text)
+    );
     let cmd_id = uuid::Uuid::new_v4().to_string();
     let text_for_notify = text.clone();
     // 选择卡的作答要按题型翻译成一串动作 —— 多选的 Submit 不在选项列表里、多题答完还
@@ -1253,12 +1341,11 @@ async fn input_task(
         });
     }
     drop(machines); // 释放锁：下面后台任务会再读 machines
-    // 记进「远程交互历史」的 user 侧。网页这条路径没走 bot::queue_command（它自己压队列），
-    // 所以要单独记一次，否则网页发的任务不会出现在聊天记录里。
-    // 选择卡的作答除外（见 InputReq::from_select）。
+                    // 记进「远程交互历史」的 user 侧。网页这条路径没走 bot::queue_command（它自己压队列），
+                    // 所以要单独记一次，否则网页发的任务不会出现在聊天记录里。
+                    // 选择卡的作答除外（见 InputReq::from_select）。
     if !req.from_select {
-        let slot =
-            crate::slots::slot_of(&state, &user, &crate::slots::anchor_of(&task)).await;
+        let slot = crate::slots::slot_of(&state, &user, &crate::slots::anchor_of(&task)).await;
         crate::history::append(
             &state,
             crate::history::HistoryEntry {
@@ -1516,7 +1603,11 @@ async fn task_dirs(
     {
         // 进弹窗那一次（rel==""）才按会话重新解析；之后逐层点进去一律复用钉住的根，
         // 否则会话在两次点击之间 cd 了，`<新根>/<刚点的子目录>` 不存在，列出来就是空的。
-        let pinned = if rel.is_empty() { None } else { pinned_root(entry, &id) };
+        let pinned = if rel.is_empty() {
+            None
+        } else {
+            pinned_root(entry, &id)
+        };
         entry.pending_dir.push_back(am_core::model::DirQuery {
             task_id: id.clone(),
             // by_session 为真时客户端不看它，只为旧客户端兜底；复用钉住的根时它就是权威值
@@ -1549,7 +1640,11 @@ pub(crate) async fn fetch_session_file(
     if rel.is_empty() || rel.split('/').any(|s| s == "..") || rel.starts_with('/') {
         return None;
     }
-    let task = state.tasks_for(owner).await.into_iter().find(|t| t.id == task_id)?;
+    let task = state
+        .tasks_for(owner)
+        .await
+        .into_iter()
+        .find(|t| t.id == task_id)?;
     let cwd = session_root(&task);
     if cwd.is_empty() {
         return None;
@@ -1561,14 +1656,20 @@ pub(crate) async fn fetch_session_file(
         if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
             return None;
         }
-        if !entry.pending_file_fetch.iter().any(|f| f.fetch_id == fetch_id) {
-            entry.pending_file_fetch.push_back(am_core::model::FileFetch {
-                fetch_id: fetch_id.clone(),
-                cwd,
-                rel: rel.to_string(),
-                task_id: task_id.to_string(),
-                by_session: true,
-            });
+        if !entry
+            .pending_file_fetch
+            .iter()
+            .any(|f| f.fetch_id == fetch_id)
+        {
+            entry
+                .pending_file_fetch
+                .push_back(am_core::model::FileFetch {
+                    fetch_id: fetch_id.clone(),
+                    cwd,
+                    rel: rel.to_string(),
+                    task_id: task_id.to_string(),
+                    by_session: true,
+                });
         }
     }
     for _ in 0..20 {
@@ -1619,17 +1720,12 @@ async fn pub_image(
 }
 
 /// 把一张图放进一次性外链，返回完整 URL。
-pub(crate) async fn stash_pub_image(
-    state: &SharedState,
-    bytes: Vec<u8>,
-    mime: &str,
-) -> String {
+pub(crate) async fn stash_pub_image(state: &SharedState, bytes: Vec<u8>, mime: &str) -> String {
     let token = crate::state::new_bind_code().repeat(2); // 高熵，猜不出
-    state
-        .pub_images
-        .write()
-        .await
-        .insert(token.clone(), (bytes, mime.to_string(), std::time::Instant::now()));
+    state.pub_images.write().await.insert(
+        token.clone(),
+        (bytes, mime.to_string(), std::time::Instant::now()),
+    );
     format!("{}/pub/img/{token}", public_base())
 }
 
@@ -1660,7 +1756,12 @@ async fn task_file(
         return err(400, "非法路径");
     }
     // 归属校验走 tasks_for：只能取自己名下、已信任设备上的会话文件
-    let Some(task) = state.tasks_for(&user).await.into_iter().find(|t| t.id == id) else {
+    let Some(task) = state
+        .tasks_for(&user)
+        .await
+        .into_iter()
+        .find(|t| t.id == id)
+    else {
         return err(404, "任务不存在");
     };
     let cwd = session_root(&task);
@@ -1682,14 +1783,20 @@ async fn task_file(
         }
         return ok(json!({ "pending": false, "mime": r.mime, "contentB64": r.content_b64 }));
     }
-    if !entry.pending_file_fetch.iter().any(|f| f.fetch_id == fetch_id) {
-        entry.pending_file_fetch.push_back(am_core::model::FileFetch {
-            fetch_id,
-            cwd,
-            rel,
-            task_id: id.clone(),
-            by_session: true,
-        });
+    if !entry
+        .pending_file_fetch
+        .iter()
+        .any(|f| f.fetch_id == fetch_id)
+    {
+        entry
+            .pending_file_fetch
+            .push_back(am_core::model::FileFetch {
+                fetch_id,
+                cwd,
+                rel,
+                task_id: id.clone(),
+                by_session: true,
+            });
     }
     ok(json!({ "pending": true }))
 }
@@ -1723,7 +1830,12 @@ async fn task_fsop(
         return err(401, "未登录");
     };
     let rel = req.rel.trim().trim_matches('/').to_string();
-    if rel.split('/').filter(|s| !s.is_empty()).any(|seg| seg == "..") || rel.starts_with('/') {
+    if rel
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .any(|seg| seg == "..")
+        || rel.starts_with('/')
+    {
         return err(400, "非法目录");
     }
     if !matches!(req.op.as_str(), "mkdir" | "delete" | "rename") {
@@ -1833,19 +1945,18 @@ async fn config_sync_status(State(state): State<SharedState>, headers: HeaderMap
                 .unwrap_or(false);
             let is_source = source.as_deref() == Some(id.as_str());
             // 没有清单 = 客户端版本还不支持配置同步，或刚上线还没扫完第一轮
-            let (supported, file_count, behind, scanned_at) = match entry
-                .and_then(|e| e.config_manifest.as_ref())
-            {
-                Some(m) => {
-                    let behind = if is_source {
-                        crate::configsync::diff(m, &baseline).len()
-                    } else {
-                        crate::configsync::diff(&baseline, m).len()
-                    };
-                    (true, m.files.len(), behind, m.scanned_at)
-                }
-                None => (false, 0usize, 0usize, 0u64),
-            };
+            let (supported, file_count, behind, scanned_at) =
+                match entry.and_then(|e| e.config_manifest.as_ref()) {
+                    Some(m) => {
+                        let behind = if is_source {
+                            crate::configsync::diff(m, &baseline).len()
+                        } else {
+                            crate::configsync::diff(&baseline, m).len()
+                        };
+                        (true, m.files.len(), behind, m.scanned_at)
+                    }
+                    None => (false, 0usize, 0usize, 0u64),
+                };
             json!({
                 "machineId": id,
                 "hostname": meta.hostname,
@@ -1887,7 +1998,12 @@ async fn set_config_source(
         return err(401, "未登录");
     };
     // 归属校验在 registry 里做（填别人的 machine_id 就能把对方配置拉进自己的基线）
-    match state.registry.write().await.set_config_source(&user, &req.machine_id) {
+    match state
+        .registry
+        .write()
+        .await
+        .set_config_source(&user, &req.machine_id)
+    {
         Ok(()) if req.machine_id.trim().is_empty() => ok(json!({ "result": "已关闭配置同步" })),
         Ok(()) => ok(json!({ "result": "已设为配置源" })),
         Err(e) => err(400, &e),
@@ -1895,7 +2011,11 @@ async fn set_config_source(
 }
 
 /// 校验当前用户对设备的管理权限（超级管理员或归属本人）
-async fn ensure_owner(state: &SharedState, headers: &HeaderMap, id: &str) -> Result<String, Json<Value>> {
+async fn ensure_owner(
+    state: &SharedState,
+    headers: &HeaderMap,
+    id: &str,
+) -> Result<String, Json<Value>> {
     let Some(user) = auth_user(state, headers).await else {
         return Err(err(401, "未登录"));
     };
@@ -1976,7 +2096,10 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
     // cursor，分隔符/盘符/标点常有细微差异）归并为一项，避免像 sub-centers 那样冒重复行。
     let mut devs: std::collections::BTreeMap<
         String,
-        (String, std::collections::BTreeMap<String, (String, String, Option<String>)>),
+        (
+            String,
+            std::collections::BTreeMap<String, (String, String, Option<String>)>,
+        ),
     > = std::collections::BTreeMap::new();
     let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     for t in state.tasks_for(&user).await {
@@ -1993,10 +2116,9 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
         let d = devs
             .entry(t.machine_id.clone())
             .or_insert_with(|| (t.hostname.clone(), std::collections::BTreeMap::new()));
-        let p = d
-            .1
-            .entry(key)
-            .or_insert_with(|| (t.project.clone(), t.project_name.clone(), None));
+        let p =
+            d.1.entry(key)
+                .or_insert_with(|| (t.project.clone(), t.project_name.clone(), None));
         // 代表 cwd/taskId 优先取带活跃会话 id 的那条（网页据此浏览目录树）
         if p.2.is_none() && !t.id.is_empty() {
             p.0 = t.project.clone();
@@ -2007,10 +2129,19 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
     for k in recv_dirs.keys() {
         let key = am_core::scanner::encode_path(k);
         if !seen_keys.contains(&key) {
-            let name =
-                k.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(k).to_string();
+            let name = k
+                .trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(k)
+                .to_string();
             devs.entry(String::new())
-                .or_insert_with(|| ("（未在线项目）".to_string(), std::collections::BTreeMap::new()))
+                .or_insert_with(|| {
+                    (
+                        "（未在线项目）".to_string(),
+                        std::collections::BTreeMap::new(),
+                    )
+                })
                 .1
                 .insert(key, (k.clone(), name, None));
         }
@@ -2039,7 +2170,9 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
     let is_super = reg.is_global_dingtalk_app(&user);
     let app = reg.dingtalk_app_of(&user);
     // 管理员配了全局机器人 → 没自己配机器人的用户也能用（绑钉钉号即可）
-    let has_global = reg.global_dingtalk_app().is_some_and(|a| !a.app_key.is_empty());
+    let has_global = reg
+        .global_dingtalk_app()
+        .is_some_and(|a| !a.app_key.is_empty());
     let bound: Vec<Value> = reg
         .dingtalk_ids_of(&user)
         .into_iter()
@@ -2104,7 +2237,11 @@ async fn set_dingtalk_app(
     if app_secret.is_empty() {
         return err(400, "请填写 AppSecret");
     }
-    state.registry.write().await.set_dingtalk_app(&user, &app_secret, &app_key);
+    state
+        .registry
+        .write()
+        .await
+        .set_dingtalk_app(&user, &app_secret, &app_key);
     // 立刻重连 Stream：不重连的话要等下次 hub 重启才生效
     state.dingtalk_reload.notify_one();
     ok(json!({ "result": "已保存，去钉钉给机器人发条消息即可开始使用" }))
@@ -2131,7 +2268,10 @@ async fn dingtalk_bind_code(State(state): State<SharedState>, headers: HeaderMap
         return err(429, "绑定请求过多，请稍后再试");
     }
     let code = crate::state::new_bind_code();
-    map.insert(code.clone(), crate::state::PendingBindCode { user, at: now });
+    map.insert(
+        code.clone(),
+        crate::state::PendingBindCode { user, at: now },
+    );
     ok(json!({
         "code": code,
         "expiresIn": crate::bot::BIND_TOKEN_TTL_SECS,
@@ -2156,16 +2296,20 @@ async fn dingtalk_qr(State(state): State<SharedState>, headers: HeaderMap) -> Js
     };
     // 自己配了应用就用自己的；都没有才说不能扫码
     let Some(app) = state.registry.read().await.dingtalk_bind_app(&user) else {
-        return err(400, "请先配置自己的钉钉机器人（或等管理员配好公共机器人）再扫码绑定");
+        return err(
+            400,
+            "请先配置自己的钉钉机器人（或等管理员配好公共机器人）再扫码绑定",
+        );
     };
     let now = crate::state::now_secs();
     let mut map = state.dingtalk_bind_codes.write().await;
     map.retain(|_, e| now.saturating_sub(e.at) < crate::bot::BIND_TOKEN_TTL_SECS);
     // 与取码走同一张表：手上那个码没过期就接着用，别每次刷新都换二维码
     let (code, left) = match map.iter().find(|(_, e)| e.user == user) {
-        Some((c, e)) => {
-            (c.clone(), crate::bot::BIND_TOKEN_TTL_SECS.saturating_sub(now.saturating_sub(e.at)))
-        }
+        Some((c, e)) => (
+            c.clone(),
+            crate::bot::BIND_TOKEN_TTL_SECS.saturating_sub(now.saturating_sub(e.at)),
+        ),
         None => {
             if map.len() >= 5000 {
                 return err(429, "绑定请求过多，请稍后再试");
@@ -2212,7 +2356,11 @@ async fn dingtalk_scan_cb(
              <div style=\"margin-top:10px;color:#8a8f8d;font-size:14px\">{}</div></div>",
             if ok { "✅" } else { "⚠️" },
             msg,
-            if ok { "可以关掉这个页面了" } else { "请回到网页重新扫码" },
+            if ok {
+                "可以关掉这个页面了"
+            } else {
+                "请回到网页重新扫码"
+            },
         ))
     };
     if q.code.is_empty() || q.state.is_empty() {
@@ -2220,7 +2368,11 @@ async fn dingtalk_scan_cb(
     }
     // state = 绑定码 → 认出「是谁在网页上发起的这次绑定」。一次性，用掉即销。
     let now = crate::state::now_secs();
-    let pending = state.dingtalk_bind_codes.write().await.remove(q.state.trim());
+    let pending = state
+        .dingtalk_bind_codes
+        .write()
+        .await
+        .remove(q.state.trim());
     let Some(p) = pending else {
         return page(false, "二维码已失效");
     };
@@ -2234,7 +2386,11 @@ async fn dingtalk_scan_cb(
     let now_ms = now * 1000;
     match crate::dingtalk::resolve_scan_user(&app.app_key, &app.app_secret, &q.code, now_ms).await {
         Ok((staff_id, nick)) => {
-            state.registry.write().await.bind_dingtalk_id(&staff_id, &p.user, &nick);
+            state
+                .registry
+                .write()
+                .await
+                .bind_dingtalk_id(&staff_id, &p.user, &nick);
             tracing::info!("钉钉扫码绑定成功 user={} nick={nick}", p.user);
             page(true, &format!("已绑定到 {}", p.user))
         }
@@ -2271,7 +2427,11 @@ async fn dingtalk_bind(
     if now.saturating_sub(p.at) >= crate::bot::BIND_TOKEN_TTL_SECS {
         return err(400, "绑定链接已过期，请在钉钉里重新给机器人发条消息");
     }
-    state.registry.write().await.bind_dingtalk_id(&p.staff_id, &user, &p.nick);
+    state
+        .registry
+        .write()
+        .await
+        .bind_dingtalk_id(&p.staff_id, &user, &p.nick);
     ok(json!({ "result": "已绑定", "staffId": p.staff_id, "nick": p.nick }))
 }
 
@@ -2307,11 +2467,21 @@ async fn dingtalk_unbind(
         return err(401, "未登录");
     };
     // 只能解绑自己的：否则拿到别人的 staffId 就能把人踢下线
-    if state.registry.read().await.dingtalk_user_of(&req.staff_id).as_deref() != Some(user.as_str())
+    if state
+        .registry
+        .read()
+        .await
+        .dingtalk_user_of(&req.staff_id)
+        .as_deref()
+        != Some(user.as_str())
     {
         return err(403, "该钉钉号不在你名下");
     }
-    state.registry.write().await.unbind_dingtalk_id(&req.staff_id);
+    state
+        .registry
+        .write()
+        .await
+        .unbind_dingtalk_id(&req.staff_id);
     ok(json!({ "result": "已解绑" }))
 }
 
@@ -2416,10 +2586,20 @@ async fn share_create(
     let fixed = (!req.temporary).then_some(req.password.as_str());
     // 先 clone 出结果再释放写锁：写锁临时量若活到 match 结束，Ok 分支里
     // 再取读锁 share_info 会自我死锁（同 if-let 锁跨块陷阱）。
-    let created = state.registry.write().await.create_share(&id, req.temporary, fixed);
+    let created = state
+        .registry
+        .write()
+        .await
+        .create_share(&id, req.temporary, fixed);
     match created {
         Ok((code, password)) => {
-            let expires_at = state.registry.read().await.share_info(&id).map(|(_, _, e)| e).unwrap_or(0);
+            let expires_at = state
+                .registry
+                .read()
+                .await
+                .share_info(&id)
+                .map(|(_, _, e)| e)
+                .unwrap_or(0);
             ok(json!({
                 "code": code,
                 "password": password,
@@ -2497,7 +2677,11 @@ async fn share_connect(
         tokio::time::sleep(delay).await;
     }
     // 先释放注册表写锁再动 login_throttle，避免跨锁持有
-    let res = state.registry.write().await.connect_share(&req.code, &req.password, &user);
+    let res = state
+        .registry
+        .write()
+        .await
+        .connect_share(&req.code, &req.password, &user);
     match res {
         Ok(machine_id) => {
             state.login_throttle.write().await.record_success(&req.code);
@@ -2526,7 +2710,11 @@ async fn share_disconnect(
     let Some(user) = auth_user(&state, &headers).await else {
         return err(401, "未登录");
     };
-    state.registry.write().await.disconnect_share(&req.machine_id, &user);
+    state
+        .registry
+        .write()
+        .await
+        .disconnect_share(&req.machine_id, &user);
     ok(json!({ "result": "已断开" }))
 }
 
@@ -2560,10 +2748,20 @@ async fn upload_file(
             // 显式文件名（UTF-8 文本字段）：优先用它，避免 multipart filename 对非 ASCII 解歪
             "name" => name_field = field.text().await.unwrap_or_default(),
             "chunkIndex" => {
-                chunk_index = field.text().await.ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+                chunk_index = field
+                    .text()
+                    .await
+                    .ok()
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(0);
             }
             "chunkTotal" => {
-                chunk_total = field.text().await.ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+                chunk_total = field
+                    .text()
+                    .await
+                    .ok()
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(0);
             }
             // 会话 id + 相对会话当前目录的子路径：由 agent 在落盘那一刻解析落点，
             // 比 hub 事先算好的 dir 新鲜一整轮往返（见 model 的 FileTransfer::by_session）
@@ -2642,15 +2840,27 @@ async fn upload_file(
         };
         entry.pending_files.push_back(am_core::model::FileTransfer {
             dir,
-            task_id: if by_session { task_id.trim().to_string() } else { String::new() },
-            rel_dir: if by_session { rel_dir_clean.clone() } else { String::new() },
+            task_id: if by_session {
+                task_id.trim().to_string()
+            } else {
+                String::new()
+            },
+            rel_dir: if by_session {
+                rel_dir_clean.clone()
+            } else {
+                String::new()
+            },
             by_session,
             filename: safe_name,
             content_b64: B64.encode(&bytes),
             chunk_index,
             chunk_total,
             // 空 = 不要求回报（旧客户端本就不认识这个字段，发了也没人回）
-            transfer_id: if wants { transfer_id.clone() } else { String::new() },
+            transfer_id: if wants {
+                transfer_id.clone()
+            } else {
+                String::new()
+            },
         });
         wants
     };
@@ -2685,14 +2895,16 @@ async fn upload_file(
     }
 }
 
-
 /// GET /monitor/agent —— 监控端状态（按当前用户可见范围统计）
 async fn agent_status(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
     let Some(user) = auth_user(&state, &headers).await else {
         return err(401, "未登录");
     };
     let tasks = state.tasks_for(&user).await;
-    let running = tasks.iter().filter(|t| t.status == TaskStatus::Running).count();
+    let running = tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Running)
+        .count();
     let process_count = tasks.iter().filter(|t| t.process.is_some()).count();
     let machines = state.devices_for(&user).await;
     ok(json!({
@@ -2730,7 +2942,9 @@ async fn sync_configs(
         if !meta.trusted {
             return empty();
         }
-        let Some(owner) = meta.owner else { return empty() };
+        let Some(owner) = meta.owner else {
+            return empty();
+        };
         let source = reg.config_source_of(&owner);
         (owner, source)
     };
@@ -2749,7 +2963,9 @@ async fn sync_configs(
     }
 
     // 还没收到过这台机器的清单（旧客户端，或刚上线还没扫完）：这一轮没有可比对的东西
-    let Some(device) = device_manifest else { return empty() };
+    let Some(device) = device_manifest else {
+        return empty();
+    };
 
     if is_source {
         // 源机：基线要向它看齐。先摘掉源机已经删掉的条目，否则用户在源机删了一个 agent，
@@ -2817,7 +3033,11 @@ async fn report(
     // owned_by 是严格相等，devices_for 也没有超管兜底，用户却只会看到托盘上
     // 一句「已连接 · 待信任」，然后在网页上永远找不到这台机器。
     // 这里直接拒绝，agent 会把原因显示到托盘上（见 agent::describe_reject）。
-    let claim_owner = if dev_ok { None } else { payload.owner.as_deref() };
+    let claim_owner = if dev_ok {
+        None
+    } else {
+        payload.owner.as_deref()
+    };
     if let Some(owner) = claim_owner.filter(|o| !o.is_empty()) {
         if !state.registry.read().await.user_exists(owner) {
             return err(
@@ -2841,7 +3061,12 @@ async fn report(
     }
 
     // 钉钉推送：本次上报的归属者（用于状态变化推送）
-    let notify_owner = state.registry.read().await.device_meta(&payload.machine_id).owner;
+    let notify_owner = state
+        .registry
+        .read()
+        .await
+        .device_meta(&payload.machine_id)
+        .owner;
 
     let mut machines = state.machines.write().await;
     let mut was_new = false;
@@ -2904,7 +3129,9 @@ async fn report(
     let mut tasks = payload.tasks;
     for t in tasks.iter_mut() {
         if !t.recent_messages.is_empty() {
-            entry.messages.insert(t.id.clone(), std::mem::take(&mut t.recent_messages));
+            entry
+                .messages
+                .insert(t.id.clone(), std::mem::take(&mut t.recent_messages));
         }
     }
     // 会话状态变化事件（对比旧快照）
@@ -2920,8 +3147,11 @@ async fn report(
     let mut history_records: Vec<(crate::history::HistoryEntry, String)> = Vec::new();
     if let Some(owner) = &notify_owner {
         use crate::dingtalk::{EventKind, NotifyEvent};
-        let old: std::collections::HashMap<&str, TaskStatus> =
-            entry.tasks.iter().map(|t| (t.id.as_str(), t.status)).collect();
+        let old: std::collections::HashMap<&str, TaskStatus> = entry
+            .tasks
+            .iter()
+            .map(|t| (t.id.as_str(), t.status))
+            .collect();
         // 上一轮还是「进程占位任务」的那些终端锚。
         //
         // 占位任务一收到输入就落盘 jsonl、配上真会话，id 从 `<machine>-pid-<pid>` 换成
@@ -2961,7 +3191,11 @@ async fn report(
         // markdown 正文：设备/终端/项目/会话（两空格软换行，钉钉 markdown 才逐行断开）。
         // `{{NO}}`（format! 编译后为 `{NO}`）占位由 deliver 换成会话编号。
         let body = |t: &am_core::model::Task| -> String {
-            let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
+            let title = if t.title.is_empty() {
+                t.provider_dsr.clone()
+            } else {
+                t.title.clone()
+            };
             let title: String = title.chars().take(40).collect();
             format!(
                 "**设备**：{dev}  \n**终端**：{}  \n**项目**：{}  \n**会话**：{{NO}}{title}",
@@ -2988,8 +3222,7 @@ async fn report(
                     if s.is_empty() {
                         (String::new(), None)
                     } else {
-                        let file =
-                            (full.chars().count() > HUGE).then(|| full.to_string());
+                        let file = (full.chars().count() > HUGE).then(|| full.to_string());
                         (format!("\n\n**最后结果**\n\n{s}"), file)
                     }
                 })
@@ -3281,7 +3514,9 @@ async fn report(
             entry.select_diag.insert(id, s);
         }
         // 会话没了就别留着它的摘要，否则这张表随历史会话总数一直长
-        entry.select_diag.retain(|id, _| entry.messages.contains_key(id));
+        entry
+            .select_diag
+            .retain(|id, _| entry.messages.contains_key(id));
     }
     if notify_owner.is_some() {
         entry.notified_online = true;
@@ -3307,7 +3542,9 @@ async fn report(
     }
     // 兜底清理：会话没等到锚稳定就消失、或早已过了「真实年龄」闸门（5 分钟）不会再推的，
     // 留着只会让表无限长。10 分钟一刀切即可。
-    entry.new_session_pending.retain(|_, (since, _)| since.elapsed().as_secs() < 10 * 60);
+    entry
+        .new_session_pending
+        .retain(|_, (since, _)| since.elapsed().as_secs() < 10 * 60);
     entry.tasks = tasks;
     // 会话历史（需要 &state，故在释放 machines 锁之后写 —— 见函数末尾）
     let pending_history = history_records;
@@ -3324,11 +3561,15 @@ async fn report(
             if changed {
                 entry.dir_cache.retain(|(t, _), _| t != &r.task_id);
             }
-            entry
-                .dir_roots
-                .insert(r.task_id.clone(), (r.root.clone(), std::time::Instant::now()));
+            entry.dir_roots.insert(
+                r.task_id.clone(),
+                (r.root.clone(), std::time::Instant::now()),
+            );
         }
-        entry.dir_cache.insert((r.task_id.clone(), r.rel.clone()), (r.dirs, r.files, r.root));
+        entry.dir_cache.insert(
+            (r.task_id.clone(), r.rel.clone()),
+            (r.dirs, r.files, r.root),
+        );
     }
     // 文件夹操作结果：按 op_id 存起来供网页轮询（上限防止 map 无限涨）
     for r in payload.fs_op_results {
@@ -3340,7 +3581,9 @@ async fn report(
     // 现取文件的结果：存进内存等网页来领。**同时清掉过期的** —— 没人来领的不能
     // 一直躺着，否则等于把会话内容留在了我方（见 FETCH_RESULT_TTL_SECS）。
     for r in payload.file_fetch_results {
-        entry.file_fetch_results.insert(r.fetch_id.clone(), (r, std::time::Instant::now()));
+        entry
+            .file_fetch_results
+            .insert(r.fetch_id.clone(), (r, std::time::Instant::now()));
     }
     entry
         .file_fetch_results
@@ -3348,7 +3591,9 @@ async fn report(
     // 下发文件的落盘回报：等在 attach_pending_file 里的那一侧按 transfer_id 来认领。
     // 同样带 TTL —— 等的人可能已经超时走了，没人来领的不留。
     for r in payload.file_results {
-        entry.file_results.insert(r.transfer_id.clone(), (r, std::time::Instant::now()));
+        entry
+            .file_results
+            .insert(r.transfer_id.clone(), (r, std::time::Instant::now()));
     }
     entry
         .file_results
@@ -3371,20 +3616,27 @@ async fn report(
             "下发给设备 {}：命令 {} 条 {:?}，文件 {} 个",
             payload.machine_id,
             commands.len(),
-            commands.iter().map(|c| (c.action, c.task_id.as_str())).collect::<Vec<_>>(),
+            commands
+                .iter()
+                .map(|c| (c.action, c.task_id.as_str()))
+                .collect::<Vec<_>>(),
             files.len()
         );
     }
     let dir_queries: Vec<am_core::model::DirQuery> = entry.pending_dir.drain(..).collect();
     let fs_ops: Vec<am_core::model::FsOp> = entry.pending_fsop.drain(..).collect();
-    let file_fetches: Vec<am_core::model::FileFetch> =
-        entry.pending_file_fetch.drain(..).collect();
+    let file_fetches: Vec<am_core::model::FileFetch> = entry.pending_file_fetch.drain(..).collect();
     drop(machines);
 
     // 配置同步：锁已释放再算 —— 里面要拿 registry 与 configs 两把锁，
     // 在 machines 写锁里嵌套取锁是自找死锁。
-    let (config_pulls, config_pushes) =
-        sync_configs(&state, &payload.machine_id, &payload.config_bodies, device_manifest).await;
+    let (config_pulls, config_pushes) = sync_configs(
+        &state,
+        &payload.machine_id,
+        &payload.config_bodies,
+        device_manifest,
+    )
+    .await;
 
     // 会话历史：锁已释放，这里统一落（record 内部去重 + 截断 + 标脏，tick 循环负责写盘）
     for (mut rec, anchor) in pending_history {
@@ -3402,7 +3654,12 @@ async fn report(
     }
 
     // 告知 agent 是否已被信任：未信任时 agent 不应再上报任何会话数据
-    let trusted = state.registry.read().await.device_meta(&payload.machine_id).trusted;
+    let trusted = state
+        .registry
+        .read()
+        .await
+        .device_meta(&payload.machine_id)
+        .trusted;
     // hubVersion：只推「安装包已上传」的版本，避免推送早于构建/上传完成（见 ready_desktop_version）
     let downloads_dir = std::env::var("AM_DOWNLOADS_DIR")
         .map(std::path::PathBuf::from)
@@ -3452,18 +3709,23 @@ async fn client_session(
         (reg.is_super_user(&owner), user)
     };
     let token = uuid::Uuid::new_v4().to_string();
+    state.tokens.write().await.insert(
+        token.clone(),
+        crate::state::Session::new(user.username.clone()),
+    );
     state
-        .tokens
-        .write()
-        .await
-        .insert(token.clone(), crate::state::Session::new(user.username.clone()));
-    state.sessions_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        .sessions_dirty
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let nickname = if user.display.is_empty() {
         user.username.clone()
     } else {
         user.display.clone()
     };
-    tracing::info!("客户端静默续登: {}（machine={}）", user.username, req.machine_id);
+    tracing::info!(
+        "客户端静默续登: {}（machine={}）",
+        user.username,
+        req.machine_id
+    );
     ok(json!({
         "token": token,
         "userInfo": {
@@ -3505,7 +3767,9 @@ async fn ws_loop(socket: WebSocket, state: SharedState, user: Option<String>, to
     let (mut tx, mut rx) = socket.split();
     let Some(user) = user else {
         let _ = tx
-            .send(Message::Text(json!({ "type": "error", "msg": "未登录" }).to_string()))
+            .send(Message::Text(
+                json!({ "type": "error", "msg": "未登录" }).to_string(),
+            ))
             .await;
         return;
     };
@@ -3524,7 +3788,11 @@ async fn ws_loop(socket: WebSocket, state: SharedState, user: Option<String>, to
         serde_json::to_string(&json!({ "type": "tasks", "data": data })).unwrap_or_default()
     }
 
-    if tx.send(Message::Text(snapshot(&state, &user).await)).await.is_err() {
+    if tx
+        .send(Message::Text(snapshot(&state, &user).await))
+        .await
+        .is_err()
+    {
         return;
     }
     // 登录态是否仍然有效。握手时校验过一次是不够的：这条流会持续推送该用户的
@@ -3598,7 +3866,10 @@ mod select_summary_tests {
             s.contains("\n\n") && !s.contains("复用总体增长率\n允许选几个？"),
             "第二题题干被粘到了上一题的选项后面：\n{s}"
         );
-        assert!(s.contains("**第 1 题**") && s.contains("**第 2 题**"), "多题要标题号：\n{s}");
+        assert!(
+            s.contains("**第 1 题**") && s.contains("**第 2 题**"),
+            "多题要标题号：\n{s}"
+        );
     }
 
     /// 题干与其选项之间也要空行，否则列表不会被当成新列表起头
@@ -3612,7 +3883,10 @@ mod select_summary_tests {
     #[test]
     fn each_question_numbers_from_one() {
         let s = select_summary(&two_questions());
-        assert!(s.contains("1. 前端自算") && s.contains("1. 单选，可取消"), "得到：\n{s}");
+        assert!(
+            s.contains("1. 前端自算") && s.contains("1. 单选，可取消"),
+            "得到：\n{s}"
+        );
         assert!(s.contains("逐题作答"), "多题要提示作答顺序：\n{s}");
     }
 
@@ -3640,9 +3914,15 @@ mod select_summary_tests {
         ]}));
         assert!(s.contains("（多选）"), "得到：\n{s}");
         assert!(s.contains("序号连写"), "要给出多选的作答格式：\n{s}");
-        assert!(!s.contains("Submit"), "Submit 无序号可言，不该出现在提示里：\n{s}");
+        assert!(
+            !s.contains("Submit"),
+            "Submit 无序号可言，不该出现在提示里：\n{s}"
+        );
         // 多选同样隐含「其它」，两条提示要并存
-        assert!(s.contains("直接写答案"), "多选也要给出自定义答案的出路：\n{s}");
+        assert!(
+            s.contains("直接写答案"),
+            "多选也要给出自定义答案的出路：\n{s}"
+        );
     }
 
     /// 选项说明要跟着 label 一起给出去。
@@ -3668,7 +3948,10 @@ mod select_summary_tests {
         let s = select_summary(&json!({"questions": [
             {"question": "继续吗？", "options": [{"label": "继续"}, {"label": "停"}]}
         ]}));
-        assert!(s.contains("直接写答案"), "单题要给出自定义答案的出路：\n{s}");
+        assert!(
+            s.contains("直接写答案"),
+            "单题要给出自定义答案的出路：\n{s}"
+        );
         // 提示自成一段，别被 lazy continuation 粘进最后一个选项
         assert!(s.contains("2. 停\n\n（"), "提示前要空行：\n{s}");
     }
@@ -3678,7 +3961,10 @@ mod select_summary_tests {
     fn custom_answer_hint_not_repeated_per_question() {
         let s = select_summary(&two_questions());
         assert_eq!(s.matches("直接写答案").count(), 1, "只该出现一次：\n{s}");
-        assert!(s.trim_end().ends_with("可以直接写答案）"), "该在末尾统一提示：\n{s}");
+        assert!(
+            s.trim_end().ends_with("可以直接写答案）"),
+            "该在末尾统一提示：\n{s}"
+        );
     }
 }
 
@@ -3710,7 +3996,10 @@ mod chunked_support_tests {
     fn unparsable_is_treated_as_unsupported() {
         assert!(!agent_supports_chunked(""));
         assert!(!agent_supports_chunked("unknown"));
-        assert!(!agent_supports_chunked("0.10"), "位数不足不能当成 0.10.0 放行");
+        assert!(
+            !agent_supports_chunked("0.10"),
+            "位数不足不能当成 0.10.0 放行"
+        );
         assert!(!agent_supports_chunked("a.b.c"));
     }
 
@@ -3729,7 +4018,11 @@ mod selecting_tests {
     use serde_json::json;
 
     fn msg(role: &str) -> MessageBrief {
-        MessageBrief { role: role.into(), content: String::new(), timestamp: String::new() }
+        MessageBrief {
+            role: role.into(),
+            content: String::new(),
+            timestamp: String::new(),
+        }
     }
     fn msgs(roles: &[&str]) -> Vec<MessageBrief> {
         roles.iter().map(|r| msg(r)).collect()
@@ -3754,24 +4047,42 @@ mod selecting_tests {
     #[test]
     fn null_hook_report_is_not_waiting() {
         let answered = msgs(&["select", "tool_result"]);
-        assert!(!task_is_selecting(Some(&serde_json::Value::Null), Some(&answered)));
+        assert!(!task_is_selecting(
+            Some(&serde_json::Value::Null),
+            Some(&answered)
+        ));
     }
 
     /// hook 没装/没配到的客户端（恒为 None）：兜底扫消息，这条路不能断
     #[test]
     fn falls_back_to_messages_without_hook() {
         // select 之后没有应答 → 仍在等
-        assert!(task_is_selecting(None, Some(&msgs(&["assistant", "select"]))));
+        assert!(task_is_selecting(
+            None,
+            Some(&msgs(&["assistant", "select"]))
+        ));
         // select 不必在绝对末尾，后面跟 assistant 文本也算
-        assert!(task_is_selecting(None, Some(&msgs(&["select", "assistant"]))));
+        assert!(task_is_selecting(
+            None,
+            Some(&msgs(&["select", "assistant"]))
+        ));
         // 状态快照追加在末尾，要跳过
-        assert!(task_is_selecting(None, Some(&msgs(&["select", "todos", "bgtasks"]))));
+        assert!(task_is_selecting(
+            None,
+            Some(&msgs(&["select", "todos", "bgtasks"]))
+        ));
         // 已被应答 → 不算
-        assert!(!task_is_selecting(None, Some(&msgs(&["select", "tool_result"]))));
+        assert!(!task_is_selecting(
+            None,
+            Some(&msgs(&["select", "tool_result"]))
+        ));
         // 用户又发了新任务 → 不算
         assert!(!task_is_selecting(None, Some(&msgs(&["select", "user"]))));
         // 从来没有选择卡
-        assert!(!task_is_selecting(None, Some(&msgs(&["assistant", "tool"]))));
+        assert!(!task_is_selecting(
+            None,
+            Some(&msgs(&["assistant", "tool"]))
+        ));
         assert!(!task_is_selecting(None, None));
     }
 }
@@ -3788,7 +4099,10 @@ mod file_result_support_tests {
         assert!(agent_reports_file_path("0.12.0"));
         assert!(agent_reports_file_path("1.0.0"));
         assert!(agent_reports_file_path("v0.11.48"), "带 v 前缀也要认");
-        assert!(agent_reports_file_path("0.11.48-beta1"), "预发布后缀能力相同");
+        assert!(
+            agent_reports_file_path("0.11.48-beta1"),
+            "预发布后缀能力相同"
+        );
     }
 
     /// 差一个补丁号都不行：0.11.47 及更早不认识 transferId，发了也没人回，
@@ -3825,13 +4139,19 @@ mod proc_placeholder_tests {
     #[test]
     fn bare_placeholder_is_detected() {
         assert!(is_proc_placeholder_id("pid-1234", ""));
-        assert!(is_proc_placeholder_id("pid-1234", "mach01"), "前缀剥不掉时按裸形态兜底");
+        assert!(
+            is_proc_placeholder_id("pid-1234", "mach01"),
+            "前缀剥不掉时按裸形态兜底"
+        );
     }
 
     /// 真会话（jsonl 的 uuid 文件名）绝不能被误判成占位 —— 误判就是漏推「会话已结束」
     #[test]
     fn real_session_is_not_placeholder() {
-        assert!(!is_proc_placeholder_id("mach01-9f3c-4a1e-bb02-77d1", "mach01"));
+        assert!(!is_proc_placeholder_id(
+            "mach01-9f3c-4a1e-bb02-77d1",
+            "mach01"
+        ));
         assert!(!is_proc_placeholder_id("9f3c4a1e-bb02-77d1", ""));
     }
 
@@ -3868,8 +4188,14 @@ mod finish_notice_tests {
     /// 边界两侧各验一次，防阈值写反
     #[test]
     fn boundary_is_inclusive() {
-        assert!(worth_finish_notice((NOW - STALE_FINISH_SECS) * 1000, NOW), "刚好卡线仍推");
-        assert!(!worth_finish_notice((NOW - STALE_FINISH_SECS - 1) * 1000, NOW), "过线即不推");
+        assert!(
+            worth_finish_notice((NOW - STALE_FINISH_SECS) * 1000, NOW),
+            "刚好卡线仍推"
+        );
+        assert!(
+            !worth_finish_notice((NOW - STALE_FINISH_SECS - 1) * 1000, NOW),
+            "过线即不推"
+        );
     }
 
     /// 拿不到 mtime（0）时按「很旧」处理：信息不足就别打扰
@@ -3881,7 +4207,10 @@ mod finish_notice_tests {
     /// mtime 比当前时间还新（客户端时钟快）不能算成「极旧」而漏推
     #[test]
     fn future_mtime_does_not_underflow() {
-        assert!(worth_finish_notice((NOW + 60) * 1000, NOW), "时钟偏差不该吞掉通知");
+        assert!(
+            worth_finish_notice((NOW + 60) * 1000, NOW),
+            "时钟偏差不该吞掉通知"
+        );
     }
 }
 
@@ -3891,7 +4220,9 @@ mod select_answer_tests {
     use serde_json::json;
 
     fn q(multi: bool, n: usize) -> serde_json::Value {
-        let opts: Vec<_> = (0..n).map(|i| json!({"label": format!("opt{i}")})).collect();
+        let opts: Vec<_> = (0..n)
+            .map(|i| json!({"label": format!("opt{i}")}))
+            .collect();
         json!({"question": "Q", "multiSelect": multi, "options": opts})
     }
     fn text(s: &str) -> SelectStep {
@@ -3916,8 +4247,8 @@ mod select_answer_tests {
     #[test]
     fn single_question_never_appends_a_trailing_enter() {
         for card in [
-            json!({"questions": [q(false, 3)]}),        // 单题单选
-            json!({"questions": [q(true, 3)]}),         // 单题多选
+            json!({"questions": [q(false, 3)]}), // 单题单选
+            json!({"questions": [q(true, 3)]}),  // 单题多选
             json!({"questions": [q(false, 2)]}),
         ] {
             let steps = plan_select_answer(&card, "2");
@@ -3970,7 +4301,10 @@ mod select_answer_tests {
     #[test]
     fn free_text_passes_through() {
         let card = json!({"questions": [q(false, 3)]});
-        assert_eq!(plan_select_answer(&card, "换个思路吧"), vec![text("换个思路吧")]);
+        assert_eq!(
+            plan_select_answer(&card, "换个思路吧"),
+            vec![text("换个思路吧")]
+        );
         assert_eq!(plan_select_answer(&card, "1，2"), vec![text("1，2")]);
     }
 
@@ -3978,7 +4312,10 @@ mod select_answer_tests {
     #[test]
     fn unknown_card_falls_back_to_raw() {
         assert_eq!(plan_select_answer(&json!({}), "2"), vec![text("2")]);
-        assert_eq!(plan_select_answer(&json!({"questions": []}), "2"), vec![text("2")]);
+        assert_eq!(
+            plan_select_answer(&json!({"questions": []}), "2"),
+            vec![text("2")]
+        );
     }
 
     /// 答案比题目多：多出来的丢掉，别把它们当新任务发进终端。

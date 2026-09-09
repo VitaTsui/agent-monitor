@@ -95,12 +95,13 @@ pub async fn login(State(state): State<SharedState>, Json(req): Json<LoginReq>) 
     };
     state.login_throttle.write().await.record_success(&username);
     let token = uuid::Uuid::new_v4().to_string();
+    state.tokens.write().await.insert(
+        token.clone(),
+        crate::state::Session::new(user.username.clone()),
+    );
     state
-        .tokens
-        .write()
-        .await
-        .insert(token.clone(), crate::state::Session::new(user.username.clone()));
-    state.sessions_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        .sessions_dirty
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let nickname = if user.display.is_empty() {
         user.username.clone()
     } else {
@@ -128,7 +129,10 @@ pub struct RegisterReq {
 }
 
 /// POST /auth/access/register —— 自助注册用户
-pub async fn register(State(state): State<SharedState>, Json(req): Json<RegisterReq>) -> Json<Value> {
+pub async fn register(
+    State(state): State<SharedState>,
+    Json(req): Json<RegisterReq>,
+) -> Json<Value> {
     let session_key = match crypto::aes_gcm_decrypt(&req.crypto_key, &state.config.crypto_key) {
         Ok(k) => k,
         Err(_) => return err(400, "cryptoKey 无效"),
@@ -143,17 +147,23 @@ pub async fn register(State(state): State<SharedState>, Json(req): Json<Register
             Ok(p) => p,
             Err(_) => return err(400, "密码解密失败"),
         };
-    let user = match state.registry.write().await.register(&username, &password, &req.nickname) {
+    let user = match state
+        .registry
+        .write()
+        .await
+        .register(&username, &password, &req.nickname)
+    {
         Ok(u) => u,
         Err(e) => return err(400, &e),
     };
     let token = uuid::Uuid::new_v4().to_string();
+    state.tokens.write().await.insert(
+        token.clone(),
+        crate::state::Session::new(user.username.clone()),
+    );
     state
-        .tokens
-        .write()
-        .await
-        .insert(token.clone(), crate::state::Session::new(user.username.clone()));
-    state.sessions_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        .sessions_dirty
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     ok(json!({
         "token": token,
         "userInfo": { "id": user.id, "username": user.username, "nickname": user.display, "isSuper": false }
@@ -161,10 +171,15 @@ pub async fn register(State(state): State<SharedState>, Json(req): Json<Register
 }
 
 /// GET /auth/access/logout
-pub async fn logout(State(state): State<SharedState>, headers: axum::http::HeaderMap) -> Json<Value> {
+pub async fn logout(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+) -> Json<Value> {
     if let Some(t) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
         state.tokens.write().await.remove(t);
-        state.sessions_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        state
+            .sessions_dirty
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
     ok(json!(true))
 }
@@ -244,7 +259,10 @@ pub async fn verify_admin_token(
 }
 
 /// GET /sys/menu/getMenuATopATopMenu —— 后管仅保留「用户管理」
-pub async fn menus(State(state): State<SharedState>, headers: axum::http::HeaderMap) -> Json<Value> {
+pub async fn menus(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+) -> Json<Value> {
     if let Err(e) = admin_gate(&state, &headers).await {
         return e;
     }
@@ -335,10 +353,22 @@ pub async fn user_page(
                 || u.display.to_lowercase().contains(&keyword)
         })
         .collect();
-    users.sort_by(|a, b| a.id.parse::<u64>().unwrap_or(0).cmp(&b.id.parse::<u64>().unwrap_or(0)));
+    users.sort_by(|a, b| {
+        a.id.parse::<u64>()
+            .unwrap_or(0)
+            .cmp(&b.id.parse::<u64>().unwrap_or(0))
+    });
 
-    let page_num = parsed.pointer("/p/n").and_then(Value::as_u64).unwrap_or(1).max(1) as usize;
-    let page_size = parsed.pointer("/p/s").and_then(Value::as_u64).unwrap_or(20).clamp(1, 200) as usize;
+    let page_num = parsed
+        .pointer("/p/n")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .max(1) as usize;
+    let page_size = parsed
+        .pointer("/p/s")
+        .and_then(Value::as_u64)
+        .unwrap_or(20)
+        .clamp(1, 200) as usize;
     let total = users.len();
 
     // 饱和运算：页码无上界，(n-1)*s 溢出会回绕（release）或 panic（debug）
@@ -394,7 +424,12 @@ pub async fn user_add(
             Ok(p) => p,
             Err(_) => return err(400, "密码解密失败"),
         };
-    match state.registry.write().await.register(&req.username, &password, &req.nickname) {
+    match state
+        .registry
+        .write()
+        .await
+        .register(&req.username, &password, &req.nickname)
+    {
         Ok(_) => ok(json!(true)),
         Err(e) => err(400, &e),
     }
@@ -416,7 +451,12 @@ pub async fn user_upd(
     if let Err(e) = admin_gate(&state, &headers).await {
         return e;
     }
-    match state.registry.write().await.update_display(&req.username, &req.nickname) {
+    match state
+        .registry
+        .write()
+        .await
+        .update_display(&req.username, &req.nickname)
+    {
         Ok(_) => ok(json!(true)),
         Err(e) => err(400, &e),
     }
@@ -449,7 +489,12 @@ pub async fn user_reset_pwd(
             Ok(p) => p,
             Err(_) => return err(400, "密码解密失败"),
         };
-    match state.registry.write().await.reset_password(&req.username, &password) {
+    match state
+        .registry
+        .write()
+        .await
+        .reset_password(&req.username, &password)
+    {
         Ok(_) => ok(json!(true)),
         Err(e) => err(400, &e),
     }
@@ -472,8 +517,14 @@ pub async fn user_del(
     match state.registry.write().await.delete_user(&username) {
         Ok(_) => {
             // 用户已删除：踢掉其所有在线会话
-            state.tokens.write().await.retain(|_, s| s.username != username);
-            state.sessions_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+            state
+                .tokens
+                .write()
+                .await
+                .retain(|_, s| s.username != username);
+            state
+                .sessions_dirty
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             ok(json!(true))
         }
         Err(e) => err(400, &e),
@@ -516,7 +567,12 @@ pub async fn version_admin_info(
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .unwrap_or(Value::Null);
-    let pick = |ptr: &str| manifest.pointer(ptr).and_then(Value::as_str).map(String::from);
+    let pick = |ptr: &str| {
+        manifest
+            .pointer(ptr)
+            .and_then(Value::as_str)
+            .map(String::from)
+    };
     ok(json!({
         "desktop": env!("CARGO_PKG_VERSION"),
         "desktopMin": pick("/desktop/minVersion"),
@@ -525,7 +581,6 @@ pub async fn version_admin_info(
         "changelog": read_changelog(&state),
     }))
 }
-
 
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -584,7 +639,11 @@ pub async fn dingtalk_app_admin_set(
     if secret.is_empty() {
         return err(400, "请填写 AppSecret");
     }
-    state.registry.write().await.set_global_dingtalk_app(&secret, &app_key);
+    state
+        .registry
+        .write()
+        .await
+        .set_global_dingtalk_app(&secret, &app_key);
     // 立刻重连 Stream，免得管理员配完等半分钟没反应
     state.dingtalk_reload.notify_one();
     ok(json!({ "result": "已保存" }))
@@ -616,7 +675,11 @@ pub async fn version_set_minimum(
     }
     if let Some(v) = req.android_min.as_deref().map(str::trim) {
         // 保留 android.version（APK 最新版号）不被覆盖
-        if manifest.get("android").map(|a| !a.is_object()).unwrap_or(true) {
+        if manifest
+            .get("android")
+            .map(|a| !a.is_object())
+            .unwrap_or(true)
+        {
             manifest["android"] = json!({});
         }
         manifest["android"]["minVersion"] = json!(v);
@@ -627,7 +690,11 @@ pub async fn version_set_minimum(
     if let Err(e) = std::fs::write(&path, txt) {
         return err(500, &format!("写入 manifest 失败: {e}"));
     }
-    tracing::info!("后管更新强制更新下限: desktop={:?} android={:?}", req.desktop_min, req.android_min);
+    tracing::info!(
+        "后管更新强制更新下限: desktop={:?} android={:?}",
+        req.desktop_min,
+        req.android_min
+    );
     ok(json!(true))
 }
 
@@ -659,7 +726,10 @@ pub async fn changelog_add(
     };
     let mut list = read_changelog(&state);
     list.retain(|e| e.pointer("/version").and_then(Value::as_str) != Some(version.as_str()));
-    list.insert(0, json!({ "version": version, "date": date, "notes": req.notes.trim() }));
+    list.insert(
+        0,
+        json!({ "version": version, "date": date, "notes": req.notes.trim() }),
+    );
     if let Err(e) = write_changelog(&state, &list) {
         return err(500, &format!("写入失败: {e}"));
     }

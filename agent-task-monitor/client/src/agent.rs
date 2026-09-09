@@ -1,6 +1,6 @@
 //! agent 模式：扫描本机，把任务快照上报给 hub，并执行 hub 下发的控制命令。
-use am_core::model::{ControlCmd, ReportPayload, Task};
 use crate::state::SharedState;
+use am_core::model::{ControlCmd, ReportPayload, Task};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -17,7 +17,15 @@ use std::collections::HashMap;
 /// 代价是活跃会话每 5 分钟多重算一次消息。
 struct MsgCache {
     /// session_id → (父会话 mtime_ms, 子会话记录最新写入 ms, 算出来的时刻, messages)
-    inner: HashMap<String, (u64, u64, std::time::Instant, Vec<am_core::model::MessageBrief>)>,
+    inner: HashMap<
+        String,
+        (
+            u64,
+            u64,
+            std::time::Instant,
+            Vec<am_core::model::MessageBrief>,
+        ),
+    >,
 }
 
 /// 下发后「待确认是否真的提交」的记录。Cursor 内嵌终端粘贴态会吞掉提交回车，表现为
@@ -78,7 +86,9 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     let owner = std::env::var("AM_USER").ok().filter(|s| !s.is_empty());
     // 全局令牌仅在显式配置时使用（内部部署/兼容旧客户端）；
     // 普通用户走「配对绑定 → 每设备令牌」，无需任何预置密钥。
-    let legacy_token = std::env::var("AM_AGENT_TOKEN").ok().filter(|s| !s.is_empty());
+    let legacy_token = std::env::var("AM_AGENT_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
     // 连接池空闲超时短一点 + TCP keepalive：休眠/唤醒后不会复用死 socket
     // 而挂起，能尽快用新连接重连（自动恢复连接的关键）。
     fn build_client() -> reqwest::Client {
@@ -91,7 +101,9 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             .expect("构建 HTTP 客户端失败")
     }
     let mut client = build_client();
-    let mut msg_cache = MsgCache { inner: HashMap::new() };
+    let mut msg_cache = MsgCache {
+        inner: HashMap::new(),
+    };
     let mut hub_ok = false;
     // 连续网络失败次数：用于给失败日志限流（首次必打，之后每 ~60s 一条）
     let mut net_fail_streak: u32 = 0;
@@ -120,11 +132,15 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
         let dirs = {
             let scanner = state.scanner.lock().await;
             let home = dirs::home_dir().unwrap_or_default();
-            vec![scanner.projects_dir().to_path_buf(), home.join(".codex/sessions")]
+            vec![
+                scanner.projects_dir().to_path_buf(),
+                home.join(".codex/sessions"),
+            ]
         };
         match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             // 内容有变化才唤醒（元数据/访问时间等噪声忽略），避免空转
-            if matches!(res, Ok(ev) if ev.kind.is_create() || ev.kind.is_modify() || ev.kind.is_remove()) {
+            if matches!(res, Ok(ev) if ev.kind.is_create() || ev.kind.is_modify() || ev.kind.is_remove())
+            {
                 fc.notify_one();
             }
         }) {
@@ -152,7 +168,10 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
         // 刚从睡眠/休眠恢复 —— 连接池里可能全是死 socket，重建客户端并强制
         // 下一轮当作断线重连，尽快恢复连接。
         if last_tick.elapsed() >= std::time::Duration::from_secs(8) {
-            tracing::info!("检测到系统恢复（间隔 {:?}），重建连接自动重连", last_tick.elapsed());
+            tracing::info!(
+                "检测到系统恢复（间隔 {:?}），重建连接自动重连",
+                last_tick.elapsed()
+            );
             client = build_client();
             hub_ok = false;
             state
@@ -179,7 +198,8 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                 {
                     Ok(resp) => {
                         if let Ok(body) = resp.json::<Value>().await {
-                            if body.pointer("/data/claimed").and_then(Value::as_bool) == Some(true) {
+                            if body.pointer("/data/claimed").and_then(Value::as_bool) == Some(true)
+                            {
                                 if let Some(t) =
                                     body.pointer("/data/deviceToken").and_then(Value::as_str)
                                 {
@@ -190,7 +210,8 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                                 }
                             }
                             // 配对码过期：重新领一个，窗口下次打开会用新码
-                            if body.pointer("/data/expired").and_then(Value::as_bool) == Some(true) {
+                            if body.pointer("/data/expired").and_then(Value::as_bool) == Some(true)
+                            {
                                 start_pairing(&state, &client, &hub).await;
                             }
                         }
@@ -227,9 +248,12 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             .iter()
             .filter_map(|t| {
                 let p = t.process.as_ref()?;
-                matches!(p.ide, am_core::model::IdeKind::Cursor | am_core::model::IdeKind::Vscode)
-                    .then(|| p.shell_pid.map(|s| (p.pid, s)))
-                    .flatten()
+                matches!(
+                    p.ide,
+                    am_core::model::IdeKind::Cursor | am_core::model::IdeKind::Vscode
+                )
+                .then(|| p.shell_pid.map(|s| (p.pid, s)))
+                .flatten()
             })
             .collect();
         // 活跃会话的项目目录：文件上传允许写进这些目录（项目常不在家目录下，
@@ -285,8 +309,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
         } else if let Some(t) = &legacy_token {
             req = req.header("x-agent-token", t);
         }
-        match req.json(&payload).send().await
-        {
+        match req.json(&payload).send().await {
             Ok(resp) if !resp.status().is_success() => {
                 // 收到响应 ≠ 上报成功：413（负载过大）、401（令牌不对）等
                 // 都会走到这里。若照旧标记「已连接」，托盘会一直显示正常，
@@ -328,7 +351,10 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         let next = newer.then(|| hv.to_string());
                         if *slot != next {
                             if let Some(v) = &next {
-                                tracing::info!("检测到新版本可用: v{v}（当前 v{}）", env!("CARGO_PKG_VERSION"));
+                                tracing::info!(
+                                    "检测到新版本可用: v{v}（当前 v{}）",
+                                    env!("CARGO_PKG_VERSION")
+                                );
                             }
                             *slot = next;
                         }
@@ -347,7 +373,11 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                     if now_trusted != trusted {
                         tracing::info!(
                             "设备信任状态变更: {}",
-                            if now_trusted { "已被信任，开始上报会话" } else { "未信任，仅登记设备" }
+                            if now_trusted {
+                                "已被信任，开始上报会话"
+                            } else {
+                                "未信任，仅登记设备"
+                            }
                         );
                         trusted = now_trusted;
                     }
@@ -521,7 +551,12 @@ async fn start_pairing(state: &SharedState, client: &reqwest::Client, hub: &str)
         "hostname": state.config.hostname,
         "platform": state.config.platform,
     });
-    if let Ok(resp) = client.post(format!("{hub}/monitor/pair/start")).json(&body).send().await {
+    if let Ok(resp) = client
+        .post(format!("{hub}/monitor/pair/start"))
+        .json(&body)
+        .send()
+        .await
+    {
         if let Ok(v) = resp.json::<Value>().await {
             if let (Some(code), Some(pt)) = (
                 v.pointer("/data/code").and_then(Value::as_str),
@@ -545,11 +580,16 @@ async fn persist_device_token(state: &SharedState, token: &str) {
 /// 客户端与 hub 版本都出自 Cargo semver，够用且不引依赖。
 pub(crate) fn version_newer(a: &str, b: &str) -> bool {
     let parse = |s: &str| -> Vec<u64> {
-        s.split('.').map(|p| p.trim().parse().unwrap_or(0)).collect()
+        s.split('.')
+            .map(|p| p.trim().parse().unwrap_or(0))
+            .collect()
     };
     let (va, vb) = (parse(a), parse(b));
     for i in 0..va.len().max(vb.len()) {
-        let (x, y) = (va.get(i).copied().unwrap_or(0), vb.get(i).copied().unwrap_or(0));
+        let (x, y) = (
+            va.get(i).copied().unwrap_or(0),
+            vb.get(i).copied().unwrap_or(0),
+        );
         if x != y {
             return x > y;
         }
@@ -577,7 +617,9 @@ fn describe_reject(code: u16, body: &str) -> String {
         }
     };
     match code {
-        401 => from_body("上报令牌无效（设备未绑定或令牌已失效），打开客户端窗口登录一次即可重新绑定"),
+        401 => {
+            from_body("上报令牌无效（设备未绑定或令牌已失效），打开客户端窗口登录一次即可重新绑定")
+        }
         403 => "hub 拒绝本设备（无权上报）".into(),
         413 => "上报内容过大，已被 hub 拒绝".into(),
         400 => from_body("上报被 hub 拒绝（400）"),
@@ -590,7 +632,9 @@ fn describe_reject(code: u16, body: &str) -> String {
 /// 每轮扫描调用一次：拿本轮各会话最新用户提示词，与待确认表逐条比对。
 fn check_pending_submits(state: &SharedState, tasks: &[Task]) {
     let mut guard = PENDING_SUBMITS.lock().unwrap();
-    let Some(pending) = guard.as_mut() else { return };
+    let Some(pending) = guard.as_mut() else {
+        return;
+    };
     if pending.is_empty() {
         return;
     }
@@ -622,8 +666,12 @@ fn check_pending_submits(state: &SharedState, tasks: &[Task]) {
                     return false;
                 }
                 // 经桥接补一个回车（空文本 → 扩展只送一个提交回车）
-                let sent =
-                    crate::bridge::send_via_extension(&state.config.data_dir, p.shell_pid, "", true);
+                let sent = crate::bridge::send_via_extension(
+                    &state.config.data_dir,
+                    p.shell_pid,
+                    "",
+                    true,
+                );
                 p.retries += 1;
                 p.last_ms = now;
                 crate::state::client_log(&format!(
@@ -652,8 +700,7 @@ async fn attach_messages(state: &SharedState, tasks: &mut [Task], cache: &mut Ms
         }
         // 父会话与子会话记录都没变化、且没过最长寿命，才复用缓存
         let sub_ms = scanner.subagents_mtime(&t.id);
-        let max_age =
-            std::time::Duration::from_millis(am_core::scanner::SUBAGENT_SETTLE_MS);
+        let max_age = std::time::Duration::from_millis(am_core::scanner::SUBAGENT_SETTLE_MS);
         if let Some((mtime, subs, at, msgs)) = cache.inner.get(&t.id) {
             if *mtime == t.mtime_ms && *subs == sub_ms && at.elapsed() < max_age {
                 t.recent_messages = msgs.clone();
@@ -714,14 +761,15 @@ fn write_transfer(
     session_dirs: &[std::path::PathBuf],
 ) -> Option<am_core::model::FileTransferResult> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
-    let report = |ok: bool, path: String, err: String| -> Option<am_core::model::FileTransferResult> {
-        (!f.transfer_id.is_empty()).then(|| am_core::model::FileTransferResult {
-            transfer_id: f.transfer_id.clone(),
-            path,
-            ok,
-            err,
-        })
-    };
+    let report =
+        |ok: bool, path: String, err: String| -> Option<am_core::model::FileTransferResult> {
+            (!f.transfer_id.is_empty()).then(|| am_core::model::FileTransferResult {
+                transfer_id: f.transfer_id.clone(),
+                path,
+                ok,
+                err,
+            })
+        };
     // 这条链路的成败必须落进 client.log：GUI 客户端的 tracing 输出没人看得到，
     // 写失败时是彻底静默的 —— 网页说「已上传」、路径也回填进了输入框，终端却报文件
     // 不存在，从两头都查不出原因。落盘的路径也一并记上，改名后到底叫什么一目了然。
@@ -763,7 +811,8 @@ fn write_transfer(
         let t = unique_target(&dir, &safe);
         if chunked {
             let mut g = CHUNK_TARGETS.lock().unwrap();
-            g.get_or_insert_with(HashMap::new).insert(key.clone(), t.clone());
+            g.get_or_insert_with(HashMap::new)
+                .insert(key.clone(), t.clone());
         }
         t
     } else {
@@ -838,9 +887,15 @@ fn unique_target(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
         return target;
     }
     let p = std::path::Path::new(name);
-    let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
     // 扩展名连点一起带上；没有扩展名（Makefile、LICENSE）就是空串，序号直接缀在末尾
-    let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let ext = p
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
     for i in 1..10_000u32 {
         let cand = dir.join(format!("{stem} ({i}){ext}"));
         if !cand.exists() {
@@ -895,8 +950,10 @@ async fn execute(
         // 扩展在管这个终端，就把任务写进文件桥交给扩展 terminal.sendText 送达（全平台）。
         // 终端 shell pid 用扫描时已算好的终端锚（与配对同锚）；本轮没扫到（罕见）再退回
         // ide_shell_pid() 现算，保证不漏。
-        if let Some(shell_pid) =
-            ide_shell_of.get(&pid).copied().or_else(|| am_core::process::ide_shell_pid(pid))
+        if let Some(shell_pid) = ide_shell_of
+            .get(&pid)
+            .copied()
+            .or_else(|| am_core::process::ide_shell_pid(pid))
         {
             let live = crate::bridge::has_live_terminal(&state.config.data_dir, shell_pid);
             crate::state::client_log(&format!(
@@ -904,7 +961,12 @@ async fn execute(
                 cmd.task_id
             ));
             if live
-                && crate::bridge::send_via_extension(&state.config.data_dir, shell_pid, &text, submit)
+                && crate::bridge::send_via_extension(
+                    &state.config.data_dir,
+                    shell_pid,
+                    &text,
+                    submit,
+                )
             {
                 crate::state::client_log(&format!(
                     "注入输入：经 Cursor/VSCode 扩展桥接（终端 pid={shell_pid}，{preview}…）"
@@ -936,13 +998,14 @@ async fn execute(
         }
         // send_input 在 macOS 上走 osascript，会遍历 Terminal/iTerm 的每个窗口与标签页，
         // 常态就要数秒，终端处于模态/无响应时还可能一直挂着 —— 绝不能占住 async worker。
-        let res =
-            tokio::task::spawn_blocking(move || am_core::process::send_input_ex(pid, &text, submit))
-                .await;
+        let res = tokio::task::spawn_blocking(move || {
+            am_core::process::send_input_ex(pid, &text, submit)
+        })
+        .await;
         match res {
-            Ok(Ok(m)) => crate::state::client_log(&format!(
-                "注入输入成功：pid={pid} {m}（{preview}…）"
-            )),
+            Ok(Ok(m)) => {
+                crate::state::client_log(&format!("注入输入成功：pid={pid} {m}（{preview}…）"))
+            }
             Ok(Err(e)) => crate::state::client_log(&format!("注入输入失败：pid={pid} {e}")),
             Err(e) => crate::state::client_log(&format!("注入输入阻塞任务异常：pid={pid} {e}")),
         }
@@ -956,8 +1019,10 @@ async fn execute(
         // 按键这条却一直没有，于是在编辑器里跑的会话上，撤回/打断/选择卡提交
         // 统统石沉大海。扩展只会发文本，所以把键名还原成终端本就认的控制字符发过去。
         if let Some(chars) = am_core::process::key_spec_to_chars(&spec) {
-            if let Some(shell_pid) =
-                ide_shell_of.get(&pid).copied().or_else(|| am_core::process::ide_shell_pid(pid))
+            if let Some(shell_pid) = ide_shell_of
+                .get(&pid)
+                .copied()
+                .or_else(|| am_core::process::ide_shell_pid(pid))
             {
                 if crate::bridge::has_live_terminal(&state.config.data_dir, shell_pid)
                     // submit=false：这串本身就是按键，补回车会多出一下
@@ -990,8 +1055,10 @@ async fn execute(
     // 「中断当前任务」＝按 Esc。内嵌终端里进程级的中断根本递不进 TUI，
     // 与按键走同一条桥接才送得到（Windows 上 control() 内部也已改成发 Esc）。
     if matches!(cmd.action, am_core::model::ControlAction::Interrupt) {
-        if let Some(shell_pid) =
-            ide_shell_of.get(&pid).copied().or_else(|| am_core::process::ide_shell_pid(pid))
+        if let Some(shell_pid) = ide_shell_of
+            .get(&pid)
+            .copied()
+            .or_else(|| am_core::process::ide_shell_pid(pid))
         {
             if crate::bridge::has_live_terminal(&state.config.data_dir, shell_pid)
                 && crate::bridge::send_via_extension(
@@ -1057,7 +1124,10 @@ mod reject_tests {
 
         // 400 的具体原因在 body 里（如 machineId 冲突），要原样带出
         let m = describe_reject(400, "machineId 与 hub 本机冲突");
-        assert!(m.contains("machineId 与 hub 本机冲突"), "400 应带出 body 原因: {m}");
+        assert!(
+            m.contains("machineId 与 hub 本机冲突"),
+            "400 应带出 body 原因: {m}"
+        );
     }
 
     /// body 为空的 400 不能拼出「上报被拒：」这种半截话
@@ -1081,7 +1151,10 @@ mod reject_tests {
     #[test]
     fn server_errors_are_transient_wording() {
         let m = describe_reject(503, "");
-        assert!(m.contains("稍后重试"), "5xx 属于可自愈，措辞应区别于配置错误: {m}");
+        assert!(
+            m.contains("稍后重试"),
+            "5xx 属于可自愈，措辞应区别于配置错误: {m}"
+        );
     }
 }
 
@@ -1093,7 +1166,10 @@ mod version_tests {
     #[test]
     fn newer_detection() {
         assert!(version_newer("0.2.0", "0.1.0"));
-        assert!(version_newer("0.1.10", "0.1.9"), "逐段数字比较，不是字符串比较");
+        assert!(
+            version_newer("0.1.10", "0.1.9"),
+            "逐段数字比较，不是字符串比较"
+        );
         assert!(version_newer("1.0.0", "0.9.9"));
         assert!(!version_newer("0.1.0", "0.1.0"), "相同版本不提示");
         assert!(!version_newer("0.1.0", "0.2.0"), "hub 更旧不提示");
@@ -1102,12 +1178,12 @@ mod version_tests {
     }
 }
 
-
 /// 执行会话目录内的文件夹操作（新建/删除/重命名）。全程用 canonicalize 卡在会话根内，
 /// 越权/非法一律拒绝。返回 (成功, 提示语)。
 fn run_fs_op(op: &am_core::model::FsOp) -> (bool, String) {
     use std::path::Path;
-    let bad = |n: &str| n.is_empty() || n.contains('/') || n.contains('\\') || n == "." || n == "..";
+    let bad =
+        |n: &str| n.is_empty() || n.contains('/') || n.contains('\\') || n == "." || n == "..";
     if bad(&op.name) {
         return (false, "非法名称".into());
     }
@@ -1270,7 +1346,9 @@ fn list_entries(root: &str, rel: &str) -> (Vec<String>, Vec<String>) {
     let mut dirs: Vec<String> = Vec::new();
     let mut files: Vec<String> = Vec::new();
     for e in rd.filter_map(|e| e.ok()).take(1000) {
-        let Ok(name) = e.file_name().into_string() else { continue };
+        let Ok(name) = e.file_name().into_string() else {
+            continue;
+        };
         match e.file_type() {
             Ok(t) if t.is_dir() => dirs.push(name),
             // 符号链接等按文件处理，够用即可
@@ -1311,7 +1389,11 @@ mod fetch_tests {
         let inner = root.join("sub");
         std::fs::create_dir_all(&inner).unwrap();
         // 目录外的「机密」，以及目录内的正常图片
-        std::fs::write(root.parent().unwrap().join("am-outside-secret.txt"), b"secret").unwrap();
+        std::fs::write(
+            root.parent().unwrap().join("am-outside-secret.txt"),
+            b"secret",
+        )
+        .unwrap();
         std::fs::write(inner.join("shot.png"), b"\x89PNG\r\n\x1a\n rest").unwrap();
         let cwd = inner.to_string_lossy().to_string();
 
@@ -1335,7 +1417,10 @@ mod fetch_tests {
         assert_eq!(image_mime(b"\x89PNG\r\n\x1a\n"), "image/png");
         assert_eq!(image_mime(&[0xff, 0xd8, 0xff, 0xe0]), "image/jpeg");
         // 伪装成图片的文本：不认，页面据此不会当图片渲染
-        assert_eq!(image_mime(b"#!/bin/sh\nrm -rf /"), "application/octet-stream");
+        assert_eq!(
+            image_mime(b"#!/bin/sh\nrm -rf /"),
+            "application/octet-stream"
+        );
     }
 }
 
@@ -1344,7 +1429,12 @@ mod transfer_report_tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
-    fn transfer(dir: &std::path::Path, name: &str, body: &[u8], id: &str) -> am_core::model::FileTransfer {
+    fn transfer(
+        dir: &std::path::Path,
+        name: &str,
+        body: &[u8],
+        id: &str,
+    ) -> am_core::model::FileTransfer {
         am_core::model::FileTransfer {
             dir: dir.to_string_lossy().to_string(),
             filename: name.into(),

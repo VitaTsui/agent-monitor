@@ -149,7 +149,9 @@ impl SessionScanner {
             if !pdir.is_dir() {
                 continue;
             }
-            let Ok(files) = fs::read_dir(&pdir) else { continue };
+            let Ok(files) = fs::read_dir(&pdir) else {
+                continue;
+            };
             for f in files.flatten() {
                 let path = f.path();
                 if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
@@ -205,7 +207,9 @@ impl SessionScanner {
         let mut files = Vec::new();
         walk(&self.codex_dir.clone(), &mut files, 0);
         for path in files {
-            let Ok(meta) = fs::metadata(&path) else { continue };
+            let Ok(meta) = fs::metadata(&path) else {
+                continue;
+            };
             let mtime_ms = meta
                 .modified()
                 .ok()
@@ -248,7 +252,9 @@ impl SessionScanner {
         let mut started_at = None;
         let mut prompt = String::new();
         for line in head_txt.lines() {
-            let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
             match v.get("type").and_then(Value::as_str) {
                 Some("session_meta") => {
                     let p = v.get("payload");
@@ -278,7 +284,11 @@ impl SessionScanner {
         }
         // 文件名兜底取会话号：rollout-…-<uuid>.jsonl
         let session_id = session_id.or_else(|| {
-            path.file_stem()?.to_str()?.rsplitn(6, '-').next().map(String::from)
+            path.file_stem()?
+                .to_str()?
+                .rsplitn(6, '-')
+                .next()
+                .map(String::from)
         })?;
 
         // 尾部：最近动作 + 回合是否结束（最后一条有效项是否助手文本）
@@ -287,7 +297,9 @@ impl SessionScanner {
         let mut turn_ended = false;
         let mut last_active = None;
         for line in tail.lines() {
-            let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
             if let Some(ts) = v.get("timestamp").and_then(Value::as_str) {
                 last_active = Some(ts.to_string());
             }
@@ -438,7 +450,13 @@ impl SessionScanner {
         };
         self.cache.insert(
             path.to_path_buf(),
-            CacheEntry { size, mtime_ms, line_count, summary: summary.clone(), head },
+            CacheEntry {
+                size,
+                mtime_ms,
+                line_count,
+                summary: summary.clone(),
+                head,
+            },
         );
         Some(summary)
     }
@@ -453,8 +471,14 @@ impl SessionScanner {
         let tail = read_tail(&path, 8 * 1024 * 1024)?;
         let mut msgs = Vec::new();
         for line in tail.lines() {
-            let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-            let brief = if is_codex { codex_entry_to_brief(&v) } else { entry_to_brief(&v) };
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let brief = if is_codex {
+                codex_entry_to_brief(&v)
+            } else {
+                entry_to_brief(&v)
+            };
             if let Some(m) = brief {
                 msgs.push(m);
             }
@@ -472,10 +496,18 @@ impl SessionScanner {
         let ts = out.last().map(|m| m.timestamp.clone()).unwrap_or_default();
         let (todos, bgtasks) = self.replay_state(&path)?;
         if let Some(m) = todos {
-            out.push(MessageBrief { role: "todos".into(), content: m, timestamp: ts.clone() });
+            out.push(MessageBrief {
+                role: "todos".into(),
+                content: m,
+                timestamp: ts.clone(),
+            });
         }
         if let Some(m) = bgtasks {
-            out.push(MessageBrief { role: "bgtasks".into(), content: m, timestamp: ts });
+            out.push(MessageBrief {
+                role: "bgtasks".into(),
+                content: m,
+                timestamp: ts,
+            });
         }
         Ok(out)
     }
@@ -515,7 +547,9 @@ impl SessionScanner {
             };
             let text = String::from_utf8_lossy(&buf[..end]);
             for line in text.lines() {
-                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
                 st.todos.observe(&v);
                 st.bg.observe(&v);
             }
@@ -530,14 +564,23 @@ impl SessionScanner {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let subs = SubAgentDir::scan(path);
-        let bg = st.bg.reconciled(&subs.last_write, now_ms, &|id| subs.tail(id));
-        let bg = if bg.is_empty() { None } else { serde_json::to_string(&bg).ok() };
+        let bg = st
+            .bg
+            .reconciled(&subs.last_write, now_ms, &|id| subs.tail(id));
+        let bg = if bg.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&bg).ok()
+        };
         Ok((st.todos.take_snapshot("").map(|m| m.content), bg))
     }
 
     fn find_session_file(&self, session_id: &str) -> Result<PathBuf> {
         // 防路径穿越：session_id 只允许 uuid 字符
-        if !session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        if !session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
             anyhow::bail!("非法会话 ID");
         }
         if let Ok(projects) = fs::read_dir(&self.projects_dir) {
@@ -638,10 +681,11 @@ pub fn build_tasks(
     let mut pid_of_session: HashMap<&str, &ProcessInfo> = HashMap::new();
     let mut paired_pids: HashSet<u32> = HashSet::new();
     // pid→进程、session_id→会话：全函数各建一份，供各配对层共用，避免每层重建映射或线性 find
-    let proc_by_pid: HashMap<u32, &ProcessInfo> =
-        processes.iter().map(|p| (p.pid, p)).collect();
-    let sid_index: HashMap<&str, &SessionSummary> =
-        sessions.iter().map(|s| (s.session_id.as_str(), s)).collect();
+    let proc_by_pid: HashMap<u32, &ProcessInfo> = processes.iter().map(|p| (p.pid, p)).collect();
+    let sid_index: HashMap<&str, &SessionSummary> = sessions
+        .iter()
+        .map(|s| (s.session_id.as_str(), s))
+        .collect();
 
     // 第一优先：按「进程打开着哪个会话文件」得出的确定配对（pinned）。
     // 这能解决「关闭的会话 mtime 反而更新、抢走了活进程」——因为已关闭会话的文件
@@ -672,7 +716,9 @@ pub fn build_tasks(
         if paired_pids.contains(pid) || pid_of_session.contains_key(sid.as_str()) {
             continue;
         }
-        let Some(s) = sid_index.get(sid.as_str()).copied() else { continue };
+        let Some(s) = sid_index.get(sid.as_str()).copied() else {
+            continue;
+        };
         if s.cleared {
             if let Some(p) = proc_by_pid.get(pid) {
                 pid_of_session.insert(s.session_id.as_str(), *p);
@@ -694,12 +740,16 @@ pub fn build_tasks(
                 if old_sid == &s_new.session_id || paired_pids.contains(pid) {
                     continue;
                 }
-                let Some(p) = proc_by_pid.get(pid) else { continue };
+                let Some(p) = proc_by_pid.get(pid) else {
+                    continue;
+                };
                 if p.agent != s_new.provider || encode_path(&p.cwd) != s_new.project_key {
                     continue;
                 }
                 // 旧会话须存在、且比新会话更早创建（确是被取代的前身）
-                let Some(old) = sid_index.get(old_sid.as_str()).copied() else { continue };
+                let Some(old) = sid_index.get(old_sid.as_str()).copied() else {
+                    continue;
+                };
                 if old.created_ms >= s_new.created_ms {
                     continue;
                 }
@@ -838,10 +888,7 @@ pub fn build_tasks(
             for p in free_procs {
                 let p_start_ms = (p.start_time as u64).saturating_mul(1000);
                 // free_sess 已按 mtime 降序：第一条满足「mtime≥启动」的即该进程可认领的最新会话
-                if let Some(pos) = free_sess
-                    .iter()
-                    .position(|s| s.mtime_ms >= p_start_ms)
-                {
+                if let Some(pos) = free_sess.iter().position(|s| s.mtime_ms >= p_start_ms) {
                     let s = free_sess.remove(pos);
                     pid_of_session.insert(s.session_id.as_str(), p);
                     paired_pids.insert(p.pid);
@@ -877,7 +924,9 @@ pub fn build_tasks(
 
     let mut tasks = Vec::new();
     for s in sessions {
-        let proc_info = pid_of_session.get(s.session_id.as_str()).map(|p| (*p).clone());
+        let proc_info = pid_of_session
+            .get(s.session_id.as_str())
+            .map(|p| (*p).clone());
         let status = match &proc_info {
             None => TaskStatus::Finished,
             Some(p) => {
@@ -903,7 +952,11 @@ pub fn build_tasks(
             platform_dsr: String::new(),
             provider: s.provider.clone(),
             provider_dsr: crate::model::provider_dsr(&s.provider),
-            title: if s.title.is_empty() { s.prompt.clone() } else { s.title.clone() },
+            title: if s.title.is_empty() {
+                s.prompt.clone()
+            } else {
+                s.title.clone()
+            },
             used_tokens_5h: s.used_tokens_5h,
             token_limit: 0,
             auto_paused: false,
@@ -917,8 +970,7 @@ pub fn build_tasks(
             project_name: short_name(&s.cwd),
             // 与 project 不同时才有意义（会话 cd 进了子目录）；相同就当没有，
             // 让调用方走 project 那条老路，少一个可能对不上的来源。
-            live_cwd: (!s.live_cwd.is_empty() && s.live_cwd != s.cwd)
-                .then(|| s.live_cwd.clone()),
+            live_cwd: (!s.live_cwd.is_empty() && s.live_cwd != s.cwd).then(|| s.live_cwd.clone()),
             prompt: s.prompt.clone(),
             last_action: s.last_action.clone(),
             status,
@@ -1044,7 +1096,9 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
     let mut select_answered_ms: Option<u64> = None;
 
     for line in tail.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         if let Some(c) = v.get("cwd").and_then(Value::as_str) {
             if cwd.is_empty() {
                 cwd = c.to_string();
@@ -1076,7 +1130,9 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         match ty {
             "user" => {
                 if v.get("isMeta").and_then(Value::as_bool).unwrap_or(false)
-                    || v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false)
+                    || v.get("isSidechain")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
                 {
                     continue;
                 }
@@ -1093,8 +1149,10 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                 // 只有中断标记、永远等不到结果 —— 两者都意味着这张卡不该再挂在远端。
                 if let Some(id) = &open_ask {
                     if content_answers(content, id) || is_interrupt_marker(content) {
-                        select_answered_ms =
-                            v.get("timestamp").and_then(Value::as_str).and_then(iso_to_ms);
+                        select_answered_ms = v
+                            .get("timestamp")
+                            .and_then(Value::as_str)
+                            .and_then(iso_to_ms);
                         open_ask = None;
                     }
                 }
@@ -1117,7 +1175,11 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
             }
             "queue-operation" => match v.get("operation").and_then(Value::as_str) {
                 Some("enqueue") => {
-                    let key = v.get("content").and_then(Value::as_str).unwrap_or("").trim();
+                    let key = v
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
                     let disp = queued_user_text(&v);
                     if let Some(text) = &disp {
                         prompt = text.clone();
@@ -1131,7 +1193,11 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                 // 的 remove 之前被 queued_user_text 滤成 None、什么都不做，已接受/撤回的项
                 // 因此卡在队列里一直显示「排队中」不消失。
                 Some("remove") => {
-                    let key = v.get("content").and_then(Value::as_str).unwrap_or("").trim();
+                    let key = v
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
                     if !key.is_empty() {
                         let k = truncate(key, 500);
                         if let Some(pos) = queue.iter().position(|(c, _)| c == &k) {
@@ -1215,7 +1281,11 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         provider: "claude".into(),
         session_id: session_id.to_string(),
         project_key,
-        cwd: if canonical_cwd.is_empty() { cwd } else { canonical_cwd },
+        cwd: if canonical_cwd.is_empty() {
+            cwd
+        } else {
+            canonical_cwd
+        },
         // 此处先原样放最后那个 cwd；收到仓库根是在 summarize 里做的（那儿才有 prev 兜底，
         // 且只在会话文件真的变了时才走一次，不会每轮都去 stat 一遍父链）。
         live_cwd: live_cwd.clone(),
@@ -1241,7 +1311,9 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
 
 /// 这条 user 记录里是否含**指定** tool_use 的结果（即那次工具调用已了结）
 fn content_answers(content: Option<&Value>, tool_use_id: &str) -> bool {
-    let Some(Value::Array(items)) = content else { return false };
+    let Some(Value::Array(items)) = content else {
+        return false;
+    };
     items.iter().any(|it| {
         it.get("type").and_then(Value::as_str) == Some("tool_result")
             && it.get("tool_use_id").and_then(Value::as_str) == Some(tool_use_id)
@@ -1252,7 +1324,8 @@ fn content_answers(content: Option<&Value>, tool_use_id: &str) -> bool {
 /// 会话号。恢复的会话 started_at 很旧，靠时间配不上，只能从命令行认出来。
 /// `--continue`（无显式 id）返回 None，交给 started_at/mtime 兜底。
 fn resume_session_id(command: &str) -> Option<&str> {
-    let looks_id = |s: &str| s.len() >= 8 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    let looks_id =
+        |s: &str| s.len() >= 8 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
     let toks: Vec<&str> = command.split_whitespace().collect();
     for (i, t) in toks.iter().enumerate() {
         if let Some(rest) = t.strip_prefix("--resume=") {
@@ -1421,7 +1494,11 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
     if v.get("type").and_then(Value::as_str) != Some("response_item") {
         return None;
     }
-    let ts = v.get("timestamp").and_then(Value::as_str).unwrap_or("").to_string();
+    let ts = v
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let p = v.get("payload")?;
     match p.get("type").and_then(Value::as_str)? {
         "message" => match p.get("role").and_then(Value::as_str)? {
@@ -1461,7 +1538,11 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
             } else {
                 format!("{name}: {}", truncate(args, 120))
             };
-            Some(MessageBrief { role: "tool".into(), content, timestamp: ts })
+            Some(MessageBrief {
+                role: "tool".into(),
+                content,
+                timestamp: ts,
+            })
         }
         "function_call_output" | "custom_tool_call_output" => {
             let out = p.get("output").and_then(Value::as_str).unwrap_or("");
@@ -1482,9 +1563,16 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
 const FLOW_TEXT_MAX: usize = 16_000;
 
 fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
-    let ts = v.get("timestamp").and_then(Value::as_str).unwrap_or("").to_string();
+    let ts = v
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let ty = v.get("type").and_then(Value::as_str)?;
-    if v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false) {
+    if v.get("isSidechain")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         return None;
     }
     match ty {
@@ -1494,7 +1582,11 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
             }
             let content = v.pointer("/message/content");
             if let Some(text) = user_text(content) {
-                return Some(MessageBrief { role: "user".into(), content: text, timestamp: ts });
+                return Some(MessageBrief {
+                    role: "user".into(),
+                    content: text,
+                    timestamp: ts,
+                });
             }
             // tool_result：展示简要执行结果
             if let Some(Value::Array(items)) = content {
@@ -1606,8 +1698,18 @@ fn tool_result_text(item: &Value) -> String {
 
 /// 提取工具调用的关键入参做展示（命令 / 文件路径 / 描述）
 fn tool_input_hint(input: Option<&Value>) -> String {
-    let Some(input) = input else { return String::new() };
-    for key in ["command", "file_path", "path", "pattern", "description", "prompt", "url"] {
+    let Some(input) = input else {
+        return String::new();
+    };
+    for key in [
+        "command",
+        "file_path",
+        "path",
+        "pattern",
+        "description",
+        "prompt",
+        "url",
+    ] {
         if let Some(s) = input.get(key).and_then(Value::as_str) {
             return truncate(s, 120);
         }
@@ -1721,7 +1823,9 @@ impl BgTracker {
         //   agentId          → 异步子代理
         //   backgroundTaskId → 后台命令
         // 其余（绝大多数）工具调用当场就结束了，不进清单。
-        let Some((id, kind)) = bg_identity(meta) else { return };
+        let Some((id, kind)) = bg_identity(meta) else {
+            return;
+        };
         let (label, started_at) = match started {
             Some((l, t)) => (l, t),
             // tool_use 落在重放窗口之外（极少见）：退回结果里的说明，时间用当前这条
@@ -1756,7 +1860,9 @@ impl BgTracker {
         if !text.contains("<task-notification>") {
             return;
         }
-        let Some(status) = tag_value(text, "status") else { return };
+        let Some(status) = tag_value(text, "status") else {
+            return;
+        };
         // "__orphan_summary__:*" 是会话续跑/压缩恢复时的孤儿汇总标记：语义是「此前所有
         // 后台 shell/子代理都已不在」。它往往只枚举部分 id，漏网的若只按枚举清，会永远
         // 卡在「运行中」（后台起的 dev server / 测试 hub 尤其常见）。
@@ -1781,7 +1887,9 @@ impl BgTracker {
                     t.ended_ms = ended_ms;
                 }
             }
-            let Some(pos) = rest.find("</task-id>") else { break };
+            let Some(pos) = rest.find("</task-id>") else {
+                break;
+            };
             rest = &rest[pos + "</task-id>".len()..];
         }
         if is_orphan_summary {
@@ -1827,7 +1935,9 @@ impl BgTracker {
             return items;
         }
         for t in items.iter_mut().filter(|t| t.kind == "agent") {
-            let Some(&wrote_ms) = last_write.get(&t.id) else { continue };
+            let Some(&wrote_ms) = last_write.get(&t.id) else {
+                continue;
+            };
             // 已是终态、且通知之后没再动过 → 通知说了算，不必读文件
             let resumed = wrote_ms > t.ended_ms.saturating_add(SUBAGENT_SETTLE_MS);
             if t.status != "running" && !resumed {
@@ -1952,14 +2062,20 @@ impl SubAgentDir {
         let dir = session_path
             .file_stem()
             .and_then(|s| s.to_str())
-            .and_then(|stem| session_path.parent().map(|p| p.join(stem).join("subagents")))
+            .and_then(|stem| {
+                session_path
+                    .parent()
+                    .map(|p| p.join(stem).join("subagents"))
+            })
             .unwrap_or_default();
         let mut last_write = HashMap::new();
         if let Ok(entries) = fs::read_dir(&dir) {
             for e in entries.flatten() {
                 let name = e.file_name();
                 let Some(name) = name.to_str() else { continue };
-                let Some(id) = name.strip_prefix("agent-").and_then(|s| s.strip_suffix(".jsonl"))
+                let Some(id) = name
+                    .strip_prefix("agent-")
+                    .and_then(|s| s.strip_suffix(".jsonl"))
                 else {
                     continue;
                 };
@@ -2005,7 +2121,11 @@ impl SubAgentDir {
                     .iter()
                     .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
             });
-        Some(if has_tool_use { SubAgentTail::Midflight } else { SubAgentTail::Finished })
+        Some(if has_tool_use {
+            SubAgentTail::Midflight
+        } else {
+            SubAgentTail::Finished
+        })
     }
 }
 
@@ -2119,13 +2239,17 @@ impl TodoTracker {
 /// 解析文件头部：初始 cwd、第一条真实用户提示词、会话开始时间
 fn parse_head(path: &Path) -> HeadInfo {
     let mut info = HeadInfo::default();
-    let Ok(mut f) = fs::File::open(path) else { return info };
+    let Ok(mut f) = fs::File::open(path) else {
+        return info;
+    };
     let mut buf = vec![0u8; HEAD_BYTES];
     let Ok(n) = f.read(&mut buf) else { return info };
     buf.truncate(n);
     let text = String::from_utf8_lossy(&buf);
     for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         if info.cwd.is_none() {
             if let Some(c) = v.get("cwd").and_then(Value::as_str) {
                 info.cwd = Some(c.to_string());
@@ -2139,7 +2263,10 @@ fn parse_head(path: &Path) -> HeadInfo {
         if info.prompt.is_none()
             && v.get("type").and_then(Value::as_str) == Some("user")
             && !v.get("isMeta").and_then(Value::as_bool).unwrap_or(false)
-            && !v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false)
+            && !v
+                .get("isSidechain")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
         {
             let content = v.pointer("/message/content");
             if let Some(t) = user_text(content) {
@@ -2188,7 +2315,9 @@ pub fn current_cwd_of_session(jsonl: &Path) -> Option<String> {
     // 从后往前找第一条能解析出 cwd 的记录。逐行反向比整体解析便宜得多，
     // 而且尾部第一行常是被截断的半行，正向扫描反而更容易踩空。
     for line in tail.lines().rev() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         if let Some(c) = v.get("cwd").and_then(Value::as_str) {
             if !c.is_empty() {
                 return Some(c.to_string());
@@ -2323,7 +2452,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-
 #[cfg(test)]
 mod todo_tests {
     use super::*;
@@ -2352,7 +2480,11 @@ mod todo_tests {
     #[test]
     fn task_id_comes_from_tool_result() {
         let mut t = TodoTracker::default();
-        t.observe(&assistant_tool("u1", "TaskCreate", serde_json::json!({ "subject": "甲" })));
+        t.observe(&assistant_tool(
+            "u1",
+            "TaskCreate",
+            serde_json::json!({ "subject": "甲" }),
+        ));
         // 只有 tool_use 时还拿不到任务号，清单应为空
         assert!(t.items.is_empty());
         assert!(t.take_snapshot("ts").is_none());
@@ -2369,9 +2501,17 @@ mod todo_tests {
     #[test]
     fn update_changes_status_and_delete_removes() {
         let mut t = TodoTracker::default();
-        t.observe(&assistant_tool("u1", "TaskCreate", serde_json::json!({ "subject": "甲" })));
+        t.observe(&assistant_tool(
+            "u1",
+            "TaskCreate",
+            serde_json::json!({ "subject": "甲" }),
+        ));
         t.observe(&tool_result("u1", "Task #1 created successfully: 甲"));
-        t.observe(&assistant_tool("u2", "TaskCreate", serde_json::json!({ "subject": "乙" })));
+        t.observe(&assistant_tool(
+            "u2",
+            "TaskCreate",
+            serde_json::json!({ "subject": "乙" }),
+        ));
         t.observe(&tool_result("u2", "Task #2 created successfully: 乙"));
         let _ = t.take_snapshot("ts");
 
@@ -2380,7 +2520,10 @@ mod todo_tests {
             "TaskUpdate",
             serde_json::json!({ "taskId": "2", "status": "completed" }),
         ));
-        assert_eq!(t.items.iter().find(|i| i.id == "2").unwrap().status, "completed");
+        assert_eq!(
+            t.items.iter().find(|i| i.id == "2").unwrap().status,
+            "completed"
+        );
         assert!(t.take_snapshot("ts").is_some());
 
         t.observe(&assistant_tool(
@@ -2537,7 +2680,11 @@ mod bg_tests {
         ));
         let by = |id: &str| t.items.iter().find(|i| i.id == id).unwrap().status.clone();
         assert_eq!(by("a22222222"), "completed");
-        assert_eq!(by("a11111111"), "running", "正文里的字样不该顺手把兄弟任务停掉");
+        assert_eq!(
+            by("a11111111"),
+            "running",
+            "正文里的字样不该顺手把兄弟任务停掉"
+        );
     }
 
     /// 孤儿汇总只枚举了部分 id 时，漏网的运行中任务也应一并落终态：
@@ -2581,7 +2728,10 @@ mod bg_tests {
     #[cfg(windows)]
     #[test]
     fn windows_pairing_is_case_insensitive() {
-        assert_eq!(encode_path("D:\\Program\\Foo"), encode_path("d:\\program\\foo"));
+        assert_eq!(
+            encode_path("D:\\Program\\Foo"),
+            encode_path("d:\\program\\foo")
+        );
         assert_eq!(encode_path("D:\\Program\\Foo"), "d--program-foo");
     }
 
@@ -2609,7 +2759,10 @@ mod bg_tests {
             assert_eq!(t.items.len(), 1, "工具名 {name} 应照样识别");
             assert_eq!(t.items[0].kind, "agent");
             assert_eq!(t.items[0].label, "调研");
-            assert_eq!(t.items[0].started_at, "2026-07-17T10:00:00Z", "起跑时刻取 tool_use 那条");
+            assert_eq!(
+                t.items[0].started_at, "2026-07-17T10:00:00Z",
+                "起跑时刻取 tool_use 那条"
+            );
         }
     }
 
@@ -2679,7 +2832,10 @@ mod bg_notification_path_tests {
             "operation": "enqueue",
             "content": "<task-notification>\n<task-id>a21278fd478be0810</task-id>\n<status>completed</status>\n</task-notification>"
         }));
-        assert_eq!(t.items[0].status, "completed", "顶层 content 的通知必须被接住");
+        assert_eq!(
+            t.items[0].status, "completed",
+            "顶层 content 的通知必须被接住"
+        );
     }
 }
 
@@ -2716,7 +2872,10 @@ mod subagent_tests {
             Some(SubAgentTail::Finished)
         });
         assert_eq!(out[0].status, "completed", "交回结果了就是跑完了，别再挂着");
-        assert_eq!(t.items[0].status, "running", "判定不写回状态，续跑时才翻得回来");
+        assert_eq!(
+            t.items[0].status, "running",
+            "判定不写回状态，续跑时才翻得回来"
+        );
     }
 
     /// 流式写入途中，最后一条常常正好是 thinking / text（assistant 按内容块拆条落盘），
@@ -2728,7 +2887,9 @@ mod subagent_tests {
         t.items.push(agent("a1", "running", 0));
         let now = 12 * HOUR;
         // 才静了 1 分钟：可能只是下一个内容块还没落盘
-        let out = t.reconciled(&writes("a1", now - 60_000), now, &|_| Some(SubAgentTail::Finished));
+        let out = t.reconciled(&writes("a1", now - 60_000), now, &|_| {
+            Some(SubAgentTail::Finished)
+        });
         assert_eq!(out[0].status, "running", "回合内空窗不该判死");
     }
 
@@ -2794,7 +2955,9 @@ mod subagent_tests {
         let mut t = BgTracker::default();
         let now = 12 * HOUR;
         t.items.push(agent("a1", "completed", now - 2 * HOUR));
-        let out = t.reconciled(&writes("a1", now - HOUR), now, &|_| Some(SubAgentTail::Finished));
+        let out = t.reconciled(&writes("a1", now - HOUR), now, &|_| {
+            Some(SubAgentTail::Finished)
+        });
         assert_eq!(out[0].status, "completed");
     }
 
@@ -2805,14 +2968,22 @@ mod subagent_tests {
         let run = |idle: u64, tail: SubAgentTail| {
             let mut t = BgTracker::default();
             t.items.push(agent("a1", "running", 0));
-            t.reconciled(&writes("a1", now - idle), now, &|_| Some(tail))[0].status.clone()
+            t.reconciled(&writes("a1", now - idle), now, &|_| Some(tail))[0]
+                .status
+                .clone()
         };
         // 静置窗口：正好 300s 还不收尾，多 1ms 才收
         assert_eq!(run(SUBAGENT_SETTLE_MS, SubAgentTail::Finished), "running");
-        assert_eq!(run(SUBAGENT_SETTLE_MS + 1, SubAgentTail::Finished), "completed");
+        assert_eq!(
+            run(SUBAGENT_SETTLE_MS + 1, SubAgentTail::Finished),
+            "completed"
+        );
         // 半路兜底：正好 2h 还算在跑，多 1ms 才放弃
         assert_eq!(run(SUBAGENT_ABANDON_MS, SubAgentTail::Midflight), "running");
-        assert_eq!(run(SUBAGENT_ABANDON_MS + 1, SubAgentTail::Midflight), "stopped");
+        assert_eq!(
+            run(SUBAGENT_ABANDON_MS + 1, SubAgentTail::Midflight),
+            "stopped"
+        );
     }
 
     /// 续跑判定同样是严格大于：只比通知晚 SETTLE 那一刻不算续跑
@@ -2823,11 +2994,17 @@ mod subagent_tests {
         let run = |wrote: u64| {
             let mut t = BgTracker::default();
             t.items.push(agent("a1", "failed", ended));
-            t.reconciled(&writes("a1", wrote), now, &|_| Some(SubAgentTail::Midflight))[0]
+            t.reconciled(&writes("a1", wrote), now, &|_| {
+                Some(SubAgentTail::Midflight)
+            })[0]
                 .status
                 .clone()
         };
-        assert_eq!(run(ended + SUBAGENT_SETTLE_MS), "failed", "边界上还不算续跑");
+        assert_eq!(
+            run(ended + SUBAGENT_SETTLE_MS),
+            "failed",
+            "边界上还不算续跑"
+        );
         assert_eq!(run(ended + SUBAGENT_SETTLE_MS + 1), "running");
     }
 
@@ -2839,7 +3016,9 @@ mod subagent_tests {
         let now = 12 * HOUR;
         t.items.push(agent("a1", "failed", now - 3 * HOUR));
         // 通知之后又写了两小时，且已静置够久
-        let out = t.reconciled(&writes("a1", now - HOUR), now, &|_| Some(SubAgentTail::Finished));
+        let out = t.reconciled(&writes("a1", now - HOUR), now, &|_| {
+            Some(SubAgentTail::Finished)
+        });
         assert_eq!(out[0].status, "completed", "续跑跑完了就不该还挂着 failed");
     }
 
@@ -2878,12 +3057,28 @@ mod subagent_tests {
         fs::create_dir_all(&dir).unwrap();
         let write = |id: &str, tail: &str| {
             let head = "{\"type\":\"user\",\"timestamp\":\"2026-09-08T14:35:47.772Z\"}\n";
-            fs::write(dir.join(format!("agent-{id}.jsonl")), format!("{head}{tail}")).unwrap();
+            fs::write(
+                dir.join(format!("agent-{id}.jsonl")),
+                format!("{head}{tail}"),
+            )
+            .unwrap();
         };
-        write("adone", r#"{"type":"assistant","message":{"content":[{"type":"text","text":"结论"}]}}"#);
-        write("apend", r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"x","name":"Bash"}]}}"#);
-        write("akill", r#"{"type":"user","message":{"content":[{"type":"tool_result"}]}}"#);
-        write("ahalf", r#"{"type":"assistant","message":{"content":[{"type":"te"#);
+        write(
+            "adone",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"结论"}]}}"#,
+        );
+        write(
+            "apend",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"x","name":"Bash"}]}}"#,
+        );
+        write(
+            "akill",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result"}]}}"#,
+        );
+        write(
+            "ahalf",
+            r#"{"type":"assistant","message":{"content":[{"type":"te"#,
+        );
         // 不是子会话记录的文件不该被收进来
         fs::write(dir.join("agent-adone.meta.json"), "{}").unwrap();
 
@@ -2893,9 +3088,21 @@ mod subagent_tests {
         assert_eq!(ids, ["adone", "ahalf", "akill", "apend"]);
         assert!(d.newest_ms() > 0);
         assert_eq!(d.tail("adone"), Some(SubAgentTail::Finished));
-        assert_eq!(d.tail("apend"), Some(SubAgentTail::Midflight), "等工具返回 = 还在跑");
-        assert_eq!(d.tail("akill"), Some(SubAgentTail::Midflight), "停在工具结果 = 还在半路");
-        assert_eq!(d.tail("ahalf"), Some(SubAgentTail::Midflight), "半截行 = 正在写");
+        assert_eq!(
+            d.tail("apend"),
+            Some(SubAgentTail::Midflight),
+            "等工具返回 = 还在跑"
+        );
+        assert_eq!(
+            d.tail("akill"),
+            Some(SubAgentTail::Midflight),
+            "停在工具结果 = 还在半路"
+        );
+        assert_eq!(
+            d.tail("ahalf"),
+            Some(SubAgentTail::Midflight),
+            "半截行 = 正在写"
+        );
         assert_eq!(d.tail("anope"), None, "没有这份记录就别猜");
         let _ = fs::remove_dir_all(&root);
     }
@@ -2987,7 +3194,8 @@ mod replay_state_tests {
 
         // 追加第二个任务，只该解析新增部分
         let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        f.write_all((create("u2", "乙") + &created("u2", 2, "乙")).as_bytes()).unwrap();
+        f.write_all((create("u2", "乙") + &created("u2", 2, "乙")).as_bytes())
+            .unwrap();
         f.flush().unwrap();
 
         let (todos, _) = sc.replay_state(&path).unwrap();
@@ -3091,7 +3299,10 @@ mod select_close_tests {
     /// 答完 → 记下 tool_result 的时刻，客户端据此撤卡
     #[test]
     fn answered_records_result_time() {
-        let t = parse(&[ask("toolu_1", "2026-08-14T08:00:00.000Z"), answer("toolu_1", "2026-08-14T08:01:00.000Z")]);
+        let t = parse(&[
+            ask("toolu_1", "2026-08-14T08:00:00.000Z"),
+            answer("toolu_1", "2026-08-14T08:01:00.000Z"),
+        ]);
         assert_eq!(t, iso_to_ms("2026-08-14T08:01:00.000Z"));
     }
 
@@ -3105,7 +3316,10 @@ mod select_close_tests {
     #[test]
     fn other_tool_result_does_not_close_it() {
         let other = answer("toolu_OTHER", "2026-08-14T08:00:30.000Z");
-        assert_eq!(parse(&[ask("toolu_1", "2026-08-14T08:00:00.000Z"), other]), None);
+        assert_eq!(
+            parse(&[ask("toolu_1", "2026-08-14T08:00:00.000Z"), other]),
+            None
+        );
     }
 
     /// 按 Esc 打断：永远等不到 tool_result，同样要撤卡
@@ -3180,11 +3394,16 @@ mod pairing_tests {
     #[test]
     fn parse_tail_flags_cleared_session() {
         let tail = concat!(
-            r#"{"type":"mode","mode":"normal","sessionId":"s1"}"#, "\n",
-            r#"{"type":"file-history-snapshot","messageId":"m1"}"#, "\n",
-            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"<local-command-caveat>Caveat: local command</local-command-caveat>"}}"#, "\n",
-            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"<command-name>/clear</command-name>\n<command-args></command-args>"}}"#, "\n",
-            r#"{"type":"system","subtype":"local_command","content":"<local-command-stdout></local-command-stdout>"}"#, "\n",
+            r#"{"type":"mode","mode":"normal","sessionId":"s1"}"#,
+            "\n",
+            r#"{"type":"file-history-snapshot","messageId":"m1"}"#,
+            "\n",
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"<local-command-caveat>Caveat: local command</local-command-caveat>"}}"#,
+            "\n",
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"<command-name>/clear</command-name>\n<command-args></command-args>"}}"#,
+            "\n",
+            r#"{"type":"system","subtype":"local_command","content":"<local-command-stdout></local-command-stdout>"}"#,
+            "\n",
         );
         let s = parse_tail("s1", std::path::Path::new("/x/-proj/s1.jsonl"), tail).unwrap();
         assert!(s.cleared, "只含 /clear 的新会话应标记 cleared");
@@ -3216,7 +3435,10 @@ mod pairing_tests {
         }
         // 反例：真实输入照常通过，别把人家正常打的字也滤掉
         let real = serde_json::json!("帮我看看这个 session 的问题");
-        assert_eq!(user_text(Some(&real)).as_deref(), Some("帮我看看这个 session 的问题"));
+        assert_eq!(
+            user_text(Some(&real)).as_deref(),
+            Some("帮我看看这个 session 的问题")
+        );
     }
 
     /// 在终端按 Esc 中断后，会话应判为「回合已结束」（Idle），而不是卡在执行中。
@@ -3227,8 +3449,10 @@ mod pairing_tests {
     #[test]
     fn parse_tail_interrupt_ends_turn() {
         let base = concat!(
-            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"跑一下测试"}}"#, "\n",
-            r#"{"type":"assistant","cwd":"/proj","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash"}]}}"#, "\n",
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"跑一下测试"}}"#,
+            "\n",
+            r#"{"type":"assistant","cwd":"/proj","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash"}]}}"#,
+            "\n",
         );
         // 中断前：正在调用工具 → 未结束
         let s = parse_tail("s1", std::path::Path::new("/x/-proj/s1.jsonl"), base).unwrap();
@@ -3261,8 +3485,10 @@ mod pairing_tests {
     #[test]
     fn parse_tail_cleared_reset_after_real_input() {
         let tail = concat!(
-            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"<command-name>/clear</command-name>"}}"#, "\n",
-            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"hello world"}}"#, "\n",
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"<command-name>/clear</command-name>"}}"#,
+            "\n",
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"hello world"}}"#,
+            "\n",
         );
         let s = parse_tail("s2", std::path::Path::new("/x/-proj/s2.jsonl"), tail).unwrap();
         assert!(!s.cleared, "清空后有真实输入 → 不再 cleared");
@@ -3290,7 +3516,14 @@ mod pairing_tests {
         let mut cached = HashMap::new();
         cached.insert(200u32, "old".to_string());
 
-        let tasks = build_tasks(&[old, fresh], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &cached);
+        let tasks = build_tasks(
+            &[old, fresh],
+            &[p],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &cached,
+        );
         let f = tasks.iter().find(|t| t.id == "fresh").unwrap();
         let o = tasks.iter().find(|t| t.id == "old").unwrap();
         assert_eq!(f.pid, Some(200), "clear-follow 应把进程迁到刚清空的新会话");
@@ -3316,7 +3549,14 @@ mod pairing_tests {
         let p = proc(200, start_s);
         let mut cached = HashMap::new();
         cached.insert(200u32, "fresh".to_string()); // 上一轮已迁到 fresh
-        let tasks = build_tasks(&[old, fresh], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &cached);
+        let tasks = build_tasks(
+            &[old, fresh],
+            &[p],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &cached,
+        );
         let f = tasks.iter().find(|t| t.id == "fresh").unwrap();
         let o = tasks.iter().find(|t| t.id == "old").unwrap();
         assert_eq!(f.pid, Some(200), "进程应继续粘在新会话（不回抖）");
@@ -3338,7 +3578,14 @@ mod pairing_tests {
         let mut cached = HashMap::new();
         cached.insert(201u32, "a".to_string());
         cached.insert(202u32, "b".to_string());
-        let tasks = build_tasks(&[a, b], &[pa, pb], &|_| false, &HashMap::new(), &HashSet::new(), &cached);
+        let tasks = build_tasks(
+            &[a, b],
+            &[pa, pb],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &cached,
+        );
         // 两条会话各自保住自己的进程，没有互串
         assert!(tasks.iter().any(|t| t.id == "a" && t.pid.is_some()));
         assert!(tasks.iter().any(|t| t.id == "b" && t.pid.is_some()));
@@ -3359,7 +3606,14 @@ mod pairing_tests {
         let mut p = proc(200, start_s);
         p.command = "claude".into();
 
-        let tasks = build_tasks(&[blank, old], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
+        let tasks = build_tasks(
+            &[blank, old],
+            &[p],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
         let b = tasks.iter().find(|t| t.id == "blank").unwrap();
         let o = tasks.iter().find(|t| t.id == "old").unwrap();
         assert_eq!(b.pid, Some(200), "进程应配给创建时刻≈启动的空白会话");
@@ -3370,8 +3624,14 @@ mod pairing_tests {
     /// 命令行 --resume <id>：恢复的会话 created_ms/started_at 都很旧，只能靠命令行认出。
     #[test]
     fn resume_command_pairs_old_session() {
-        assert_eq!(resume_session_id("claude --resume abc12345-ef"), Some("abc12345-ef"));
-        assert_eq!(resume_session_id("node x/claude.js -r sess-9999"), Some("sess-9999"));
+        assert_eq!(
+            resume_session_id("claude --resume abc12345-ef"),
+            Some("abc12345-ef")
+        );
+        assert_eq!(
+            resume_session_id("node x/claude.js -r sess-9999"),
+            Some("sess-9999")
+        );
         assert_eq!(resume_session_id("claude --continue"), None);
 
         let now = now_ms();
@@ -3380,8 +3640,18 @@ mod pairing_tests {
         let mut p = proc(300, now / 1000 - 30);
         p.command = "claude --resume resumed-xyz".into();
 
-        let tasks = build_tasks(&[resumed], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
-        assert_eq!(tasks.iter().find(|t| t.id == "resumed-xyz").unwrap().pid, Some(300));
+        let tasks = build_tasks(
+            &[resumed],
+            &[p],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            tasks.iter().find(|t| t.id == "resumed-xyz").unwrap().pid,
+            Some(300)
+        );
     }
 
     /// 「按打开文件配对」优先于 mtime：已关闭的会话 mtime 更新，但活进程占着的是
@@ -3398,7 +3668,14 @@ mod pairing_tests {
         let mut pinned = HashMap::new();
         pinned.insert(100u32, "cursor".to_string()); // 进程真正打开的是 cursor 会话
 
-        let tasks = build_tasks(&[closed, cursor], &[p], &|_| false, &pinned, &HashSet::new(), &HashMap::new());
+        let tasks = build_tasks(
+            &[closed, cursor],
+            &[p],
+            &|_| false,
+            &pinned,
+            &HashSet::new(),
+            &HashMap::new(),
+        );
         let cur = tasks.iter().find(|t| t.id == "cursor").unwrap();
         let clo = tasks.iter().find(|t| t.id == "closed").unwrap();
         assert_eq!(cur.pid, Some(100), "活进程应配给它打开的 cursor 会话");
@@ -3414,7 +3691,10 @@ mod pairing_tests {
     fn windows_trailing_backslash_cwd_still_pairs() {
         assert_eq!(encode_path("D:\\proj\\"), encode_path("D:\\proj"));
         // 期望值随平台大小写策略走：Windows 统一小写（d--proj），其它平台保持原样（D--proj）
-        assert_eq!(encode_path("D:\\proj\\"), normalize_key_case("D--proj".to_string()));
+        assert_eq!(
+            encode_path("D:\\proj\\"),
+            normalize_key_case("D--proj".to_string())
+        );
 
         let now = now_ms();
         let mut s = sess("live", "2026-07-20T00:00:00Z", now - 30_000);
@@ -3426,7 +3706,14 @@ mod pairing_tests {
         p.cwd = "D:\\proj\\".into(); // 进程 cwd 带尾随反斜杠
         p.tty = String::new();
 
-        let tasks = build_tasks(&[s], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
+        let tasks = build_tasks(
+            &[s],
+            &[p],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
         // 配对成功 = 恰好一条任务、带 pid、状态非 Finished（不是占位进程）
         assert_eq!(tasks.len(), 1, "应配成一条，而非会话+占位进程两条");
         assert_eq!(tasks[0].pid, Some(4242));
@@ -3447,8 +3734,14 @@ mod pairing_tests {
         let mut p = proc(700, now / 1000 - 3600); // 进程 1h 前启动、无 --continue
         p.command = "claude".into();
 
-        let tasks =
-            build_tasks(&[cont, old], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
+        let tasks = build_tasks(
+            &[cont, old],
+            &[p],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
         assert_eq!(
             tasks.iter().find(|t| t.id == "cont").unwrap().pid,
             Some(700),
@@ -3475,8 +3768,14 @@ mod pairing_tests {
         let mut p = proc(902, now / 1000 - 60);
         p.command = "claude".into();
 
-        let tasks =
-            build_tasks(&[resumed], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
+        let tasks = build_tasks(
+            &[resumed],
+            &[p],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
         assert_eq!(
             tasks.iter().find(|t| t.id == "resumed").unwrap().pid,
             None,
@@ -3501,8 +3800,14 @@ mod pairing_tests {
         let mut idle = sess("idle", "2026-07-25T00:00:00Z", now - 3 * 3600 * 1000);
         idle.created_ms = 0;
 
-        let tasks =
-            build_tasks(&[idle], &[p], &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
+        let tasks = build_tasks(
+            &[idle],
+            &[p],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
         assert_eq!(
             tasks.iter().find(|t| t.id == "idle").unwrap().pid,
             Some(1500),
@@ -3530,7 +3835,14 @@ mod pairing_tests {
         p.command = "claude --continue".into();
         let procs = vec![p];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
+        let tasks = build_tasks(
+            &sessions,
+            &procs,
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
         let by_id = |id: &str| tasks.iter().find(|t| t.id == id).unwrap().clone();
 
         assert_eq!(by_id("alive").pid, Some(3191), "正在写入的会话必须拿到进程");
@@ -3558,7 +3870,14 @@ mod pairing_tests {
         let sessions = vec![newest, middle, stale];
         let procs = vec![proc(100, start_a), proc(200, start_b)];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
+        let tasks = build_tasks(
+            &sessions,
+            &procs,
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
         let pid = |id: &str| tasks.iter().find(|t| t.id == id).unwrap().pid;
 
         assert_eq!(pid("newest"), Some(200), "进程配自己启动时创建的会话");
@@ -3606,7 +3925,8 @@ mod user_text_tests {
     /// 别误伤真正的用户消息
     #[test]
     fn real_user_message_survives() {
-        let m = entry_to_brief(&user_entry("把服务启动，然后打开前台")).expect("真实用户消息必须保留");
+        let m =
+            entry_to_brief(&user_entry("把服务启动，然后打开前台")).expect("真实用户消息必须保留");
         assert_eq!(m.role, "user");
         assert_eq!(m.content, "把服务启动，然后打开前台");
     }
@@ -3639,7 +3959,10 @@ mod codex_tests {
             "type": "message", "role": "user",
             "content": [{ "type": "input_text", "text": "<permissions instructions>\nFilesystem..." }]
         }));
-        assert!(codex_entry_to_brief(&injected).is_none(), "注入块不该冒充用户消息");
+        assert!(
+            codex_entry_to_brief(&injected).is_none(),
+            "注入块不该冒充用户消息"
+        );
 
         let dev = line(serde_json::json!({
             "type": "message", "role": "developer",
@@ -3716,9 +4039,20 @@ mod codex_tests {
             shell_start: None,
         };
         let sessions = vec![mk("claude", "c1", "-w-app"), mk("codex", "x1", "-w-app")];
-        let procs = vec![proc("claude", 11, "app"), proc("codex", 22, "app"), proc("gemini", 33, "app")];
+        let procs = vec![
+            proc("claude", 11, "app"),
+            proc("codex", 22, "app"),
+            proc("gemini", 33, "app"),
+        ];
 
-        let tasks = build_tasks(&sessions, &procs, &|_| false, &HashMap::new(), &HashSet::from(["c1".to_string(), "x1".to_string()]), &HashMap::new());
+        let tasks = build_tasks(
+            &sessions,
+            &procs,
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::from(["c1".to_string(), "x1".to_string()]),
+            &HashMap::new(),
+        );
         let by = |id: &str| tasks.iter().find(|t| t.id == id).unwrap();
 
         assert_eq!(by("c1").pid, Some(11), "claude 会话配 claude 进程");
@@ -3748,11 +4082,20 @@ mod codex_tests {
     fn title_keeps_filename_drops_leading_dirs() {
         use super::shorten_leading_paths as f;
         // 典型：先甩路径、再说需求 —— 省下的字数正好留给需求
-        assert_eq!(f("./tmp/图片.jpg 根据图片里的需求进行修改"), "图片.jpg 根据图片里的需求进行修改");
+        assert_eq!(
+            f("./tmp/图片.jpg 根据图片里的需求进行修改"),
+            "图片.jpg 根据图片里的需求进行修改"
+        );
         // 多个文件连着甩，也一并缩短
-        assert_eq!(f("./tmp/a.md ./tmp/b.md 对比这两个"), "a.md b.md 对比这两个");
+        assert_eq!(
+            f("./tmp/a.md ./tmp/b.md 对比这两个"),
+            "a.md b.md 对比这两个"
+        );
         // 整条消息就是一个路径：留下文件名，别剥成空
-        assert_eq!(f("./tmp/监控IP分页-用户类型多选-前端交接"), "监控IP分页-用户类型多选-前端交接");
+        assert_eq!(
+            f("./tmp/监控IP分页-用户类型多选-前端交接"),
+            "监控IP分页-用户类型多选-前端交接"
+        );
         // Windows 分隔符同样处理
         assert_eq!(f("tmp\\图片.jpg 改一下"), "图片.jpg 改一下");
         // 正文中间的路径是有意引用，原样保留
@@ -3782,7 +4125,14 @@ mod codex_tests {
             shell_pid: None,
             shell_start: None,
         }];
-        let tasks = build_tasks(&[], &procs, &|_| false, &HashMap::new(), &HashSet::new(), &HashMap::new());
+        let tasks = build_tasks(
+            &[],
+            &procs,
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Claude Code", "空目录名不该带「 · 」尾巴");
         assert!(!tasks[0].title.contains('·'));
@@ -3824,7 +4174,8 @@ mod live_cwd_tests {
         let mut f = fs::File::create(&path).unwrap();
         // 先在项目根，后 cd 进子目录 —— 最后一条才是终端此刻所在
         f.write_all(line(root, "在项目根").as_bytes()).unwrap();
-        f.write_all(line("/tmp/amlive/proj/desktop", "cd 了一层").as_bytes()).unwrap();
+        f.write_all(line("/tmp/amlive/proj/desktop", "cd 了一层").as_bytes())
+            .unwrap();
         f.write_all(line(deep, "又深了一层").as_bytes()).unwrap();
         f.flush().unwrap();
 
@@ -3857,7 +4208,8 @@ mod live_cwd_tests {
         let path = dir.join("s.jsonl");
         let mut f = fs::File::create(&path).unwrap();
         f.write_all(line(&repo_s, "在仓库根").as_bytes()).unwrap();
-        f.write_all(line(&deep_s, "cd 进子目录").as_bytes()).unwrap();
+        f.write_all(line(&deep_s, "cd 进子目录").as_bytes())
+            .unwrap();
         f.flush().unwrap();
 
         let meta = fs::metadata(&path).unwrap();
@@ -3865,7 +4217,10 @@ mod live_cwd_tests {
         let sum = sc.summarize(&path, meta.len(), 0).expect("应能解析出摘要");
 
         assert_eq!(sum.live_cwd, repo_s, "锚定目录必须收到 git 仓库根");
-        assert_eq!(sum.shell_cwd, deep_s, "shell_cwd 保留真实所在，供前端判断漂移");
+        assert_eq!(
+            sum.shell_cwd, deep_s,
+            "shell_cwd 保留真实所在，供前端判断漂移"
+        );
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -3896,12 +4251,20 @@ mod live_cwd_tests {
         let dir = std::env::temp_dir().join(format!("am-now-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("s.jsonl");
-        fs::write(&path, line("/a/proj", "起点") + &line("/a/proj/sub", "cd 了")).unwrap();
-        assert_eq!(current_cwd_of_session(&path).as_deref(), Some("/a/proj/sub"));
+        fs::write(
+            &path,
+            line("/a/proj", "起点") + &line("/a/proj/sub", "cd 了"),
+        )
+        .unwrap();
+        assert_eq!(
+            current_cwd_of_session(&path).as_deref(),
+            Some("/a/proj/sub")
+        );
 
         // 再 cd 一次：不带任何缓存，下一次调用就该看到新值
         let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        f.write_all(line("/a/proj/sub/deeper", "又深了").as_bytes()).unwrap();
+        f.write_all(line("/a/proj/sub/deeper", "又深了").as_bytes())
+            .unwrap();
         f.flush().unwrap();
         assert_eq!(
             current_cwd_of_session(&path).as_deref(),
@@ -3920,7 +4283,11 @@ mod live_cwd_tests {
         let path = dir.join("s.jsonl");
         // 头一行是被字节截断的半行（后面跟着换行，与 read_tail 的真实产物一致），
         // 其后才是完整记录
-        fs::write(&path, "{\"cwd\":\"/a/br\n".to_string() + &line("/a/proj", "好行")).unwrap();
+        fs::write(
+            &path,
+            "{\"cwd\":\"/a/br\n".to_string() + &line("/a/proj", "好行"),
+        )
+        .unwrap();
         assert_eq!(current_cwd_of_session(&path).as_deref(), Some("/a/proj"));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -3956,4 +4323,3 @@ mod short_name_tests {
         assert_eq!(short_name(r"D:\cursor\"), "cursor");
     }
 }
-

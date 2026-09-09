@@ -105,7 +105,10 @@ pub fn run_hook_cli(data_dir: &Path) {
     // tool_result，即从未作答），15:32:53 记录已被改写成 null。
     //
     // 所以清除只认一个明确信号：PostToolUse(AskUserQuestion) —— 那才是「答完了」。
-    let event = v.get("hook_event_name").and_then(|x| x.as_str()).unwrap_or("");
+    let event = v
+        .get("hook_event_name")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
     let tool = v.get("tool_name").and_then(|x| x.as_str()).unwrap_or("");
     let pending_select = match (event, tool) {
         ("PreToolUse", "AskUserQuestion") => v.get("tool_input").cloned(),
@@ -121,7 +124,9 @@ pub fn run_hook_cli(data_dir: &Path) {
         "at_ms": now_ms(),
         "pending_select": pending_select,
     });
-    let Ok(txt) = serde_json::to_string(&rec) else { return };
+    let Ok(txt) = serde_json::to_string(&rec) else {
+        return;
+    };
     // 原子写：扫描循环随时可能在读，半个文件会解析失败
     let tmp = dir.join(format!("{claude_pid}.json.tmp"));
     if std::fs::write(&tmp, txt).is_ok() {
@@ -159,7 +164,9 @@ fn parent_pid() -> Option<u32> {
 /// （不过那时还有 pin 累积表和启发式兜底，不至于配不上）。
 pub fn read_reports(data_dir: &Path, max_age_secs: u64) -> Vec<HookReport> {
     let dir = hooks_dir(data_dir);
-    let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
     let now = now_secs();
     let mut out = Vec::new();
     for e in rd.flatten() {
@@ -167,7 +174,9 @@ pub fn read_reports(data_dir: &Path, max_age_secs: u64) -> Vec<HookReport> {
         if path.extension().and_then(|x| x.to_str()) != Some("json") {
             continue;
         }
-        let Ok(txt) = std::fs::read_to_string(&path) else { continue };
+        let Ok(txt) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else {
             let _ = std::fs::remove_file(&path); // 坏文件直接删，免得每轮都解析失败
             continue;
@@ -187,7 +196,10 @@ pub fn read_reports(data_dir: &Path, max_age_secs: u64) -> Vec<HookReport> {
             claude_pid: pid as u32,
             session_id: sid.to_string(),
             // 旧客户端写的记录没有 at_ms，退回秒精度（比不上就当没答，卡片多留一轮）
-            at_ms: v.get("at_ms").and_then(|x| x.as_u64()).unwrap_or(at.saturating_mul(1000)),
+            at_ms: v
+                .get("at_ms")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(at.saturating_mul(1000)),
             pending_select: v.get("pending_select").filter(|x| !x.is_null()).cloned(),
         });
     }
@@ -222,11 +234,17 @@ pub fn ensure_hook_config(data_dir: &Path, exe: &Path, force: bool) -> bool {
     if !force && marker.exists() {
         return false;
     }
-    let Some(home) = dirs::home_dir() else { return false };
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
     let path = home.join(".claude").join("settings.json");
     // Claude Code 没装/没跑过就没有这个文件，此时不该替它创建目录结构
-    let Ok(txt) = std::fs::read_to_string(&path) else { return false };
-    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&txt) else { return false };
+    let Ok(txt) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&txt) else {
+        return false;
+    };
     if !root.is_object() {
         return false;
     }
@@ -244,7 +262,9 @@ pub fn ensure_hook_config(data_dir: &Path, exe: &Path, force: bool) -> bool {
     // 备份 + 原子写：这是用户的配置文件，改坏了他会丢掉自己所有的 hook/权限设置
     let bak = path.with_extension("json.am-bak");
     let _ = std::fs::copy(&path, &bak);
-    let Ok(out) = serde_json::to_string_pretty(&root) else { return false };
+    let Ok(out) = serde_json::to_string_pretty(&root) else {
+        return false;
+    };
     let tmp = path.with_extension("json.am-tmp");
     if std::fs::write(&tmp, &out).is_err() {
         return false;
@@ -264,9 +284,13 @@ pub fn ensure_hook_config(data_dir: &Path, exe: &Path, force: bool) -> bool {
 /// - 客户端换安装位置后命令会变，所以先摘旧条目再加新的，而不是简单去重；
 /// - 用户已手工配了等价命令时不重复添加。
 pub(crate) fn apply_hook_config(root: &mut serde_json::Value, cmd: &str) -> bool {
-    let Some(obj) = root.as_object_mut() else { return false };
-    let Some(hooks) =
-        obj.entry("hooks").or_insert_with(|| serde_json::json!({})).as_object_mut()
+    let Some(obj) = root.as_object_mut() else {
+        return false;
+    };
+    let Some(hooks) = obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
     else {
         return false;
     };
@@ -293,7 +317,9 @@ pub(crate) fn apply_hook_config(root: &mut serde_json::Value, cmd: &str) -> bool
             }),
         };
         let list = hooks.entry(event).or_insert_with(|| serde_json::json!([]));
-        let Some(arr) = list.as_array_mut() else { continue };
+        let Some(arr) = list.as_array_mut() else {
+            continue;
+        };
         // 已经是我们写的、且命令一致 → 什么都不用做。
         // **必须先判这个**：若先摘旧条目再判重，稳态下每次都会「摘掉又加回」，
         // 于是每次客户端启动都改写一遍用户的配置文件（实测被幂等性测试抓到）。
@@ -321,7 +347,10 @@ fn has_cmd(entry: &serde_json::Value, cmd: &str) -> bool {
     entry
         .get("hooks")
         .and_then(|h| h.as_array())
-        .map(|hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(cmd)))
+        .map(|hs| {
+            hs.iter()
+                .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(cmd))
+        })
         .unwrap_or(false)
 }
 
@@ -331,7 +360,8 @@ fn is_ours(entry: &serde_json::Value) -> bool {
         .get("hooks")
         .and_then(|h| h.as_array())
         .map(|hs| {
-            hs.iter().any(|h| h.get("_source").and_then(|s| s.as_str()) == Some(MARK))
+            hs.iter()
+                .any(|h| h.get("_source").and_then(|s| s.as_str()) == Some(MARK))
         })
         .unwrap_or(false)
 }

@@ -73,8 +73,12 @@ impl SlotTable {
         let mut dirty = false;
         // 重启后 seen 可能比 slots 少（老版本表 / 手工改过）：缺的补成「本次首见」，
         // 让它照常走 SLOT_KEEP_SECS 的回收时钟，而不是永远占着号位。
-        let missing: Vec<String> =
-            self.slots.keys().filter(|k| !self.seen.contains_key(*k)).cloned().collect();
+        let missing: Vec<String> = self
+            .slots
+            .keys()
+            .filter(|k| !self.seen.contains_key(*k))
+            .cloned()
+            .collect();
         for k in missing {
             self.seen.insert(k, now);
             dirty = true;
@@ -105,9 +109,11 @@ impl SlotTable {
         // 被这边的新终端抢走；等它回来，用户手上的「@N」已经指向别人，钉钉回执照样说成功
         // （hub 确实入队了），命令却进了另一台设备的队列，终端毫无反应。
         // SLOT_KEEP_SECS 那一周的保留期本就是为「下班关机、周末不开机」留的，不能被这里绕过。
-        let online: HashSet<&str> =
-            alive.iter().filter_map(|k| k.split('|').next()).collect();
-        let fresh = alive.iter().filter(|k| !self.slots.contains_key(**k)).count();
+        let online: HashSet<&str> = alive.iter().filter_map(|k| k.split('|').next()).collect();
+        let fresh = alive
+            .iter()
+            .filter(|k| !self.slots.contains_key(**k))
+            .count();
         let over = (self.slots.len() + fresh).saturating_sub(SLOT_MAX);
         if over > 0 {
             let mut dead: Vec<(u64, &String)> = self
@@ -121,8 +127,11 @@ impl SlotTable {
                 })
                 .collect();
             dead.sort_unstable();
-            let doomed: Vec<String> =
-                dead.into_iter().take(over).map(|(_, k)| k.clone()).collect();
+            let doomed: Vec<String> = dead
+                .into_iter()
+                .take(over)
+                .map(|(_, k)| k.clone())
+                .collect();
             for k in doomed {
                 // 号位马上要转给新终端了，「连续对话」还锁着它就会串台：
                 // 用户以为在跟原来那个终端说话，实际发进了刚顶上来的陌生会话。解锁，让他重新 @N。
@@ -200,7 +209,8 @@ fn anchor_key(machine_id: &str, shell: Option<(u32, u64)>, task_id: &str) -> Str
 
 /// 这个锚是「还没配对到进程」的占位锚吗（machine_id 里不含 `|`，取第一段之后判断）
 fn is_placeholder(key: &str) -> bool {
-    key.split_once('|').is_some_and(|(_, rest)| rest.starts_with("task:"))
+    key.split_once('|')
+        .is_some_and(|(_, rest)| rest.starts_with("task:"))
 }
 
 /// 该锚消失后号位应保留多久
@@ -215,8 +225,10 @@ fn keep_secs(key: &str) -> u64 {
 /// 会话的号位锚：优先「终端窗口」身份；没配对到进程的占位会话退化用会话 id
 /// （这种会话 pid 为空、命令本来也投不进去，给个号只为能在列表里被指名）。
 pub fn anchor_of(t: &Task) -> String {
-    let shell =
-        t.process.as_ref().and_then(|p| p.shell_pid.map(|sp| (sp, p.shell_start.unwrap_or(0))));
+    let shell = t
+        .process
+        .as_ref()
+        .and_then(|p| p.shell_pid.map(|sp| (sp, p.shell_start.unwrap_or(0))));
     anchor_key(&t.machine_id, shell, &t.id)
 }
 
@@ -225,7 +237,10 @@ pub async fn ensure(state: &SharedState, username: &str, tasks: &[Task]) -> Hash
     let keys: Vec<String> = tasks.iter().map(anchor_of).collect();
     let now = now_secs();
     let mut all = state.bot_slots.write().await;
-    let (out, dirty) = all.entry(username.to_string()).or_default().assign(&keys, now);
+    let (out, dirty) = all
+        .entry(username.to_string())
+        .or_default()
+        .assign(&keys, now);
     if dirty {
         state.bot_slots_dirty.store(true, Ordering::Relaxed);
     }
@@ -242,7 +257,14 @@ const STICKY_COOLDOWN_SECS: u64 = 2 * 3600;
 /// 按终端锚直接查号位（不分配）。用于给**已结束**的会话补号位 —— 那时会话已不在活跃列表里，
 /// `ensure` 走不通，但锚还在表里（终端关掉要过保留期才回收）。
 pub async fn slot_of(state: &SharedState, username: &str, anchor: &str) -> Option<u32> {
-    state.bot_slots.read().await.get(username)?.slots.get(anchor).copied()
+    state
+        .bot_slots
+        .read()
+        .await
+        .get(username)?
+        .slots
+        .get(anchor)
+        .copied()
 }
 
 /// 读「连续对话」当前锁定的号位
@@ -253,7 +275,9 @@ pub async fn sticky_of(state: &SharedState, username: &str) -> Option<u32> {
 /// 锁定是否已「冷却」：太久没对话，下发前该先确认一次。没有锁定时返回 false。
 pub async fn sticky_cooled(state: &SharedState, username: &str) -> bool {
     let all = state.bot_slots.read().await;
-    let Some(t) = all.get(username) else { return false };
+    let Some(t) = all.get(username) else {
+        return false;
+    };
     if t.sticky.is_none() {
         return false;
     }
@@ -336,7 +360,11 @@ mod tests {
     /// 号位一旦分配就钉住：会话集合变了、顺序反了，老锚的号都不动
     #[test]
     fn slots_are_stable_across_reorder() {
-        let (a, b, c) = ("m|sh:1@1".to_string(), "m|sh:2@2".to_string(), "m|sh:3@3".to_string());
+        let (a, b, c) = (
+            "m|sh:1@1".to_string(),
+            "m|sh:2@2".to_string(),
+            "m|sh:3@3".to_string(),
+        );
         let mut t = SlotTable::default();
         let first = t.assign(&[a.clone(), b.clone()], 1000).0;
         assert_eq!((first[&a], first[&b]), (1, 2));
@@ -348,18 +376,31 @@ mod tests {
     /// 终端关掉：号位空着不复用，直到超过保留期才回收给新终端
     #[test]
     fn closed_terminal_slot_is_held_then_recycled() {
-        let (a, b, fresh) =
-            ("m|sh:1@1".to_string(), "m|sh:2@2".to_string(), "m|sh:9@9".to_string());
+        let (a, b, fresh) = (
+            "m|sh:1@1".to_string(),
+            "m|sh:2@2".to_string(),
+            "m|sh:9@9".to_string(),
+        );
         let mut t = SlotTable::default();
         t.assign(&[a.clone(), b.clone()], 1000);
         // b 的终端关了（不再出现）：保留期内新终端不得占用 2 号
-        let held = t.assign(&[a.clone(), fresh.clone()], 1000 + SLOT_KEEP_SECS - 1).0;
+        let held = t
+            .assign(&[a.clone(), fresh.clone()], 1000 + SLOT_KEEP_SECS - 1)
+            .0;
         assert_eq!(held[&fresh], 3, "保留期内 2 号仍属已关终端，新终端应拿 3");
         // 过了保留期：b 的号位回收，最小空闲号重新可用
         let late = 1000 + 2 * SLOT_KEEP_SECS + 1;
-        assert_eq!(t.assign(&[a.clone()], late).0[&a], 1, "还在的终端号位不受回收影响");
+        assert_eq!(
+            t.assign(&[a.clone()], late).0[&a],
+            1,
+            "还在的终端号位不受回收影响"
+        );
         let newcomer = "m|sh:7@7".to_string();
-        assert_eq!(t.assign(&[newcomer.clone()], late).0[&newcomer], 2, "回收后 2 号重新可分配");
+        assert_eq!(
+            t.assign(&[newcomer.clone()], late).0[&newcomer],
+            2,
+            "回收后 2 号重新可分配"
+        );
     }
 
     /// 占位锚（没配对到进程）是短命的：消失后很快让出号位，别让孤儿把号池顶飞
@@ -370,12 +411,23 @@ mod tests {
         assert_eq!(t.assign(&[ghost.clone()], 1000).0[&ghost], 1);
         // 会话配对上进程后换成终端锚，占位锚成孤儿 —— 保留期内还占着 1 号
         let real = "m|sh:5@5".to_string();
-        assert_eq!(t.assign(&[real.clone()], 1000 + PLACEHOLDER_KEEP_SECS - 1).0[&real], 2);
+        assert_eq!(
+            t.assign(&[real.clone()], 1000 + PLACEHOLDER_KEEP_SECS - 1)
+                .0[&real],
+            2
+        );
         // 过了这 10 分钟，1 号就该让出来（终端锚同期还远没到回收线）
         let newcomer = "m|sh:6@6".to_string();
         let late = 1000 + PLACEHOLDER_KEEP_SECS + 1;
-        assert_eq!(t.assign(&[real.clone(), newcomer.clone()], late).0[&newcomer], 1);
-        assert_eq!(t.assign(&[real.clone()], late).0[&real], 2, "终端锚的号不受占位回收影响");
+        assert_eq!(
+            t.assign(&[real.clone(), newcomer.clone()], late).0[&newcomer],
+            1
+        );
+        assert_eq!(
+            t.assign(&[real.clone()], late).0[&real],
+            2,
+            "终端锚的号不受占位回收影响"
+        );
     }
 
     /// 占位锚只按 machine_id 之后的那段判定，别被 hostname 里的字样带偏
@@ -407,12 +459,18 @@ mod tests {
         batch.push(newcomer.clone());
         let out = t.assign(&batch, now);
 
-        assert!(out.0[&newcomer] <= SLOT_MAX as u32, "新终端应捡回已释放的小号，而不是 31");
+        assert!(
+            out.0[&newcomer] <= SLOT_MAX as u32,
+            "新终端应捡回已释放的小号，而不是 31"
+        );
         assert!(t.slots.len() <= SLOT_MAX, "号池不得超过上限");
         for k in &live {
             assert!(t.slots.contains_key(k), "活着的锚 {k} 不该被回收");
         }
-        assert!(dead.iter().any(|k| !t.slots.contains_key(k)), "该回收掉一些僵尸");
+        assert!(
+            dead.iter().any(|k| !t.slots.contains_key(k)),
+            "该回收掉一些僵尸"
+        );
     }
 
     /// 活着的锚号位钉死：触发上限回收也不能动它们的号
@@ -442,7 +500,11 @@ mod tests {
         for k in &dead {
             assert!(t.slots.contains_key(k), "静默不足的锚 {k} 不该被回收");
         }
-        assert_eq!(t.slots[&newcomer], SLOT_MAX as u32 + 1, "收不到候选就照常往上发号");
+        assert_eq!(
+            t.slots[&newcomer],
+            SLOT_MAX as u32 + 1,
+            "收不到候选就照常往上发号"
+        );
     }
 
     /// 设备离线保护：另一台机器整批从活跃列表消失（关机/断网/客户端没跑）时，它的号位
@@ -475,10 +537,13 @@ mod tests {
         let mut t = SlotTable::default();
         let out = t.assign(&[a.clone(), b.clone()], 1000).0;
         t.sticky = Some(out[&b]); // 锁定 b
-        // b 的终端关了（不在本批），但 b 所属设备 m 仍在上报（a 还在）
+                                  // b 的终端关了（不在本批），但 b 所属设备 m 仍在上报（a 还在）
         t.assign(&[a.clone()], 1100);
         assert_eq!(t.sticky, None, "锁定的终端已关，锁必须放开");
-        assert!(t.slots.contains_key(&b), "号位本身仍要保留到 SLOT_KEEP_SECS");
+        assert!(
+            t.slots.contains_key(&b),
+            "号位本身仍要保留到 SLOT_KEEP_SECS"
+        );
     }
 
     /// 但设备整台离线时不许解锁：那只说明没人汇报，不代表终端关了 —— 关机一次就掉锁，
@@ -519,6 +584,9 @@ mod tests {
         assert!(t.assign(&[a.clone()], 1000).1, "首次分配应标脏");
         assert!(!t.assign(&[a.clone()], 1010).1, "紧接着再刷不该标脏");
         // 阈值从上一次续期（1010）起算，不是从首次分配起算
-        assert!(t.assign(&[a.clone()], 1010 + SEEN_FLUSH_SECS + 1).1, "续期跨阈值应标脏");
+        assert!(
+            t.assign(&[a.clone()], 1010 + SEEN_FLUSH_SECS + 1).1,
+            "续期跨阈值应标脏"
+        );
     }
 }

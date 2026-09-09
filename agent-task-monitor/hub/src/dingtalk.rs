@@ -46,8 +46,9 @@ fn md_title(text: &str) -> String {
 
 /// access_token 缓存：app_key -> (token, 过期 epoch 秒)。钉钉 token 2h 有效，缓存复用。
 fn token_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, (String, u64)>> {
-    static C: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (String, u64)>>> =
-        std::sync::OnceLock::new();
+    static C: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (String, u64)>>,
+    > = std::sync::OnceLock::new();
     C.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -115,7 +116,11 @@ async fn access_token(app_key: &str, app_secret: &str, now_ms: u64) -> Result<St
 
 fn robot_code_of(app: &crate::registry::DingtalkApp) -> &str {
     // Stream 机器人 robotCode 一般 == app_key；捕获到就用捕获的
-    if app.robot_code.is_empty() { &app.app_key } else { &app.robot_code }
+    if app.robot_code.is_empty() {
+        &app.app_key
+    } else {
+        &app.robot_code
+    }
 }
 
 /// 发一条 OTO 消息（msgKey + msgParam 由调用方给），复用已取的 token。
@@ -245,12 +250,19 @@ async fn download_bot_file_once(
         let body = resp.text().await.unwrap_or_default();
         return Err(classify_status("取下载地址被拒", status, &body));
     }
-    let v: serde_json::Value = resp.json().await.map_err(|e| classify_net("下载地址响应读取失败", e))?;
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| classify_net("下载地址响应读取失败", e))?;
     let url = v
         .get("downloadUrl")
         .and_then(|u| u.as_str())
         .ok_or_else(|| DlFail::Fatal(format!("无 downloadUrl: {v}")))?;
-    let resp = cli.get(url).send().await.map_err(|e| classify_net("下载文件失败", e))?;
+    let resp = cli
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| classify_net("下载文件失败", e))?;
     let status = resp.status();
     // 这一步以前**不查状态码**，直接 `.bytes()`：CDN 返回的 403/404 错误页会被原样当成
     // 文件内容落到用户目录里 —— 文件名没错、大小几百字节、打开是一段 XML。比下载失败更难查。
@@ -258,7 +270,11 @@ async fn download_bot_file_once(
         let body = resp.text().await.unwrap_or_default();
         return Err(classify_status("下载文件被拒", status, &body));
     }
-    let bytes = resp.bytes().await.map_err(|e| classify_net("下载文件中断", e))?.to_vec();
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| classify_net("下载文件中断", e))?
+        .to_vec();
     Ok(bytes)
 }
 
@@ -282,7 +298,10 @@ pub async fn download_bot_file(
     // 先降成 &str 再进闭包：这样闭包捕获的全是「借自本函数」的引用，产出的 future 不牵扯
     // 闭包自身的借用，`FnMut(u32) -> Fut` 才推得动。
     let token: &str = &token;
-    retry_once("钉钉文件下载", move |_| download_bot_file_once(app, download_code, token)).await
+    retry_once("钉钉文件下载", move |_| {
+        download_bot_file_once(app, download_code, token)
+    })
+    .await
 }
 
 /// 上传一段文本为钉钉媒体文件，返回 media_id（用同一 access_token）。
@@ -382,7 +401,11 @@ pub async fn resolve_scan_user(
         .get("unionId")
         .and_then(|u| u.as_str())
         .ok_or_else(|| format!("获取用户信息失败: {me}"))?;
-    let nick = me.get("nick").and_then(|n| n.as_str()).unwrap_or("").to_string();
+    let nick = me
+        .get("nick")
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_string();
 
     // 3) unionId → 企业 userId（= senderStaffId）
     let corp_token = access_token(app_key, app_secret, now_ms).await?;
@@ -440,14 +463,29 @@ pub async fn push_oto(
     // 渲染不了），只有公网 URL 能内联显示。所以图片经 hub 的一次性外链给出去，
     // 由钉钉服务器来拉一次（见 server::stash_pub_image）。
     for url in images {
-        if let Err(e) = oto_send(app, staff_id, &token, "sampleImageMsg",
-                                 serde_json::json!({ "photoURL": url })).await {
+        if let Err(e) = oto_send(
+            app,
+            staff_id,
+            &token,
+            "sampleImageMsg",
+            serde_json::json!({ "photoURL": url }),
+        )
+        .await
+        {
             tracing::warn!("钉钉 OTO 图片发送失败: {e}");
         }
     }
     // 内容太长被截断：把完整内容作为文件补发（失败只记日志，不影响正文已送达）
     if let Some(full) = full {
-        match upload_media(&token, "完整内容.txt", full.as_bytes(), "file", "text/plain").await {
+        match upload_media(
+            &token,
+            "完整内容.txt",
+            full.as_bytes(),
+            "file",
+            "text/plain",
+        )
+        .await
+        {
             Ok(media_id) => {
                 let param = serde_json::json!({
                     "mediaId": media_id,
@@ -513,10 +551,7 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
         // 不再有全局群 webhook，也不再按 staffId 去查它归属哪个账号。
         if matches!(
             ev.kind,
-            EventKind::NewSession
-                | EventKind::Waiting
-                | EventKind::Finished
-                | EventKind::Select
+            EventKind::NewSession | EventKind::Waiting | EventKind::Finished | EventKind::Select
         ) {
             let kind = match ev.kind {
                 EventKind::Select => "Select",
@@ -553,7 +588,16 @@ pub async fn deliver(state: &crate::state::SharedState, events: Vec<NotifyEvent>
                     }
                 }
             }
-            match push_oto(&app, &staff_id, &text, ev.full_content.as_deref(), now_ms, &images).await {
+            match push_oto(
+                &app,
+                &staff_id,
+                &text,
+                ev.full_content.as_deref(),
+                now_ms,
+                &images,
+            )
+            .await
+            {
                 Ok(_) => tracing::info!("钉钉已推送 kind={kind}（{}）", ev.owner),
                 Err(e) => tracing::warn!("钉钉推送失败 kind={kind}（{}）: {e}", ev.owner),
             }
@@ -576,7 +620,10 @@ mod tests {
         let good = B64.encode(mac.finalize().into_bytes());
         assert!(verify_app_sign(secret, ts, &good), "正确签名应通过");
         assert!(!verify_app_sign(secret, ts, "bogus"), "错误签名必须拒绝");
-        assert!(!verify_app_sign(secret, "1700000000001", &good), "时间戳变了签名就不该过");
+        assert!(
+            !verify_app_sign(secret, "1700000000001", &good),
+            "时间戳变了签名就不该过"
+        );
     }
 
     #[test]
@@ -618,7 +665,10 @@ mod tests {
         })
         .await;
         assert_eq!(calls.get(), 2, "只重试一次，不能无限重试把人晾在那");
-        assert!(got.unwrap_err().contains("连不上"), "错误里要留下最后一次的原因");
+        assert!(
+            got.unwrap_err().contains("连不上"),
+            "错误里要留下最后一次的原因"
+        );
     }
 
     /// 4xx 不重试 —— 下载码过期 / 鉴权不过重试多少次都是同一个结果，
@@ -644,11 +694,23 @@ mod tests {
         assert!(retryable(StatusCode::INTERNAL_SERVER_ERROR));
         assert!(retryable(StatusCode::BAD_GATEWAY));
         assert!(retryable(StatusCode::SERVICE_UNAVAILABLE));
-        assert!(retryable(StatusCode::REQUEST_TIMEOUT), "408 就是超时，正是要重试的那种");
-        assert!(retryable(StatusCode::TOO_MANY_REQUESTS), "429 限流，退一步再来");
+        assert!(
+            retryable(StatusCode::REQUEST_TIMEOUT),
+            "408 就是超时，正是要重试的那种"
+        );
+        assert!(
+            retryable(StatusCode::TOO_MANY_REQUESTS),
+            "429 限流，退一步再来"
+        );
         // 请求本身不行 → 重试只是白等
-        assert!(!retryable(StatusCode::UNAUTHORIZED), "401 token 不对，重试没用");
-        assert!(!retryable(StatusCode::FORBIDDEN), "403 下载码过期，重试没用");
+        assert!(
+            !retryable(StatusCode::UNAUTHORIZED),
+            "401 token 不对，重试没用"
+        );
+        assert!(
+            !retryable(StatusCode::FORBIDDEN),
+            "403 下载码过期，重试没用"
+        );
         assert!(!retryable(StatusCode::NOT_FOUND));
         assert!(!retryable(StatusCode::BAD_REQUEST));
     }

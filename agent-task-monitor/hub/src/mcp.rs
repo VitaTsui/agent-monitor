@@ -48,7 +48,9 @@ pub async fn mcp_post(
     let headers = {
         let mut h = headers.clone();
         if let Some(v) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
-            let bare = v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer "));
+            let bare = v
+                .strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "));
             if let Some(raw) = bare {
                 if let Ok(hv) = raw.trim().parse() {
                     h.insert("authorization", hv);
@@ -62,7 +64,11 @@ pub async fn mcp_post(
     let Some(user) = crate::admin::auth_user(&state, &headers).await else {
         return (
             StatusCode::OK,
-            Json(rpc_err(id, -32001, "未授权：请在 Authorization 头带上登录 token")),
+            Json(rpc_err(
+                id,
+                -32001,
+                "未授权：请在 Authorization 头带上登录 token",
+            )),
         );
     };
 
@@ -97,14 +103,20 @@ pub async fn mcp_post(
     };
 
     match result {
-        Ok(r) => (StatusCode::OK, Json(json!({ "jsonrpc": "2.0", "id": id, "result": r }))),
+        Ok(r) => (
+            StatusCode::OK,
+            Json(json!({ "jsonrpc": "2.0", "id": id, "result": r })),
+        ),
         Err((code, msg)) => (StatusCode::OK, Json(rpc_err(id, code, &msg))),
     }
 }
 
 /// GET /mcp —— 本端点不提供服务端推送（SSE）流，只做请求-响应。
 pub async fn mcp_get() -> (StatusCode, &'static str) {
-    (StatusCode::METHOD_NOT_ALLOWED, "本 MCP 端点只支持 POST（无 SSE 流）")
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        "本 MCP 端点只支持 POST（无 SSE 流）",
+    )
 }
 
 fn rpc_err(id: Option<Value>, code: i64, msg: &str) -> Value {
@@ -256,7 +268,11 @@ async fn call_tool(
     match name {
         "list_sessions" => list_sessions(state, user).await,
         "session_detail" => {
-            let n = args.get("messages").and_then(Value::as_u64).unwrap_or(10).min(50) as usize;
+            let n = args
+                .get("messages")
+                .and_then(Value::as_u64)
+                .unwrap_or(10)
+                .min(50) as usize;
             session_detail(state, user, &sess()?, n).await
         }
         "send_to_session" => {
@@ -291,7 +307,11 @@ async fn call_tool(
         }
         "terminal_key" => {
             let action = args.get("action").and_then(Value::as_str).unwrap_or("");
-            let count = args.get("count").and_then(Value::as_u64).unwrap_or(1).clamp(1, 50);
+            let count = args
+                .get("count")
+                .and_then(Value::as_u64)
+                .unwrap_or(1)
+                .clamp(1, 50);
             terminal_key(state, user, &sess()?, action, count as u32).await
         }
         _ => Err(format!("未知工具「{name}」")),
@@ -308,7 +328,9 @@ async fn resolve(state: &SharedState, user: &str, sess: &str) -> Result<String, 
     if state.tasks_for(user).await.iter().any(|t| t.id == s) {
         Ok(s.to_string())
     } else {
-        Err(format!("找不到会话「{s}」。用 list_sessions 看当前可操作的会话。"))
+        Err(format!(
+            "找不到会话「{s}」。用 list_sessions 看当前可操作的会话。"
+        ))
     }
 }
 
@@ -332,14 +354,22 @@ async fn list_sessions(state: &SharedState, user: &str) -> Result<String, String
             .await
             .map(|(hub, term)| hub.len() + term.len())
             .unwrap_or(0);
-        let title = if t.title.is_empty() { t.provider_dsr.clone() } else { t.title.clone() };
+        let title = if t.title.is_empty() {
+            t.provider_dsr.clone()
+        } else {
+            t.title.clone()
+        };
         lines.push(format!(
             "[{no}] {} · {} · {} —— {}{}",
             t.hostname,
             t.project_name,
             status_zh(t.status),
             title.chars().take(60).collect::<String>(),
-            if queued > 0 { format!("（排队 {queued} 条）") } else { String::new() },
+            if queued > 0 {
+                format!("（排队 {queued} 条）")
+            } else {
+                String::new()
+            },
         ));
     }
     Ok(lines.join("\n"))
@@ -363,7 +393,11 @@ async fn session_detail(
         task.hostname,
         task.project_name,
         status_zh(task.status),
-        if task.prompt.is_empty() { "（无）" } else { task.prompt.as_str() },
+        if task.prompt.is_empty() {
+            "（无）"
+        } else {
+            task.prompt.as_str()
+        },
     )];
     // 「正等你选」要排在最前：它是**阻塞**的 —— 不作答，这个会话什么都推进不了。
     // 没有这一段的话，MCP 客户端只看到一个「等待输入」的会话，根本不知道该调 answer_select，
@@ -379,7 +413,11 @@ async fn session_detail(
         if !all.is_empty() {
             out.push(format!("排队中（{} 条）：", all.len()));
             for (i, q) in all.iter().enumerate() {
-                out.push(format!("  {}. {}", i + 1, q.chars().take(80).collect::<String>()));
+                out.push(format!(
+                    "  {}. {}",
+                    i + 1,
+                    q.chars().take(80).collect::<String>()
+                ));
             }
         }
     }
@@ -392,7 +430,10 @@ async fn session_detail(
                 "assistant" => "助手",
                 other => other,
             };
-            out.push(format!("  [{who}] {}", m.content.chars().take(200).collect::<String>()));
+            out.push(format!(
+                "  [{who}] {}",
+                m.content.chars().take(200).collect::<String>()
+            ));
         }
     }
     Ok(out.join("\n"))
@@ -405,8 +446,15 @@ async fn send_to_session(
     text: &str,
 ) -> Result<String, String> {
     let id = resolve(state, user, sess).await?;
-    crate::bot::queue_command(state, user, &id, ControlAction::Input, Some(text.to_string()), "mcp")
-        .await?;
+    crate::bot::queue_command(
+        state,
+        user,
+        &id,
+        ControlAction::Input,
+        Some(text.to_string()),
+        "mcp",
+    )
+    .await?;
     // 状态只是「下发那一刻」的快照：忙就是会排队。真要确认有没有被吃进去，用 wait_until_idle。
     let busy = state
         .tasks_for(user)
@@ -444,14 +492,22 @@ async fn wait_until_idle(
             return Ok(format!(
                 "会话「{sess}」已就绪（{}）。当前任务：{}",
                 status_zh(task.status),
-                if task.prompt.is_empty() { "（无）" } else { task.prompt.as_str() },
+                if task.prompt.is_empty() {
+                    "（无）"
+                } else {
+                    task.prompt.as_str()
+                },
             ));
         }
         if std::time::Instant::now() >= deadline {
             return Ok(format!(
                 "等待超时（{timeout_secs}s）：会话「{sess}」仍在 {}{}。可以再调一次继续等。",
                 status_zh(task.status),
-                if queued > 0 { format!("、排队 {queued} 条") } else { String::new() },
+                if queued > 0 {
+                    format!("、排队 {queued} 条")
+                } else {
+                    String::new()
+                },
             ));
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -470,7 +526,11 @@ async fn control_session(
         "resume" => (ControlAction::Resume, "已恢复"),
         "interrupt" => (ControlAction::Interrupt, "已打断当前任务"),
         "stop" => (ControlAction::Stop, "已终止"),
-        other => return Err(format!("未知动作「{other}」，可用：pause / resume / interrupt / stop")),
+        other => {
+            return Err(format!(
+                "未知动作「{other}」，可用：pause / resume / interrupt / stop"
+            ))
+        }
     };
     crate::bot::queue_command(state, user, &id, act, None, "mcp").await?;
     Ok(format!("会话「{sess}」{word}。"))
@@ -478,17 +538,18 @@ async fn control_session(
 
 async fn recall_last(state: &SharedState, user: &str, sess: &str) -> Result<String, String> {
     let id = resolve(state, user, sess).await?;
-    let (hub_pending, term_q) =
-        crate::bot::read_queue(state, user, &id).await.ok_or("会话不存在")?;
+    let (hub_pending, term_q) = crate::bot::read_queue(state, user, &id)
+        .await
+        .ok_or("会话不存在")?;
     if hub_pending.is_empty() && term_q.is_empty() {
         return Err(format!("会话「{sess}」当前没有排队中的输入可撤回。"));
     }
     // 与钉钉「撤回」走同一条路径：先撤 hub 队列里还没下发的，撤不到才注入 ↑。
     // 不能无条件按 ↑ —— hub 侧还压着一条时那样会撤掉终端里**另一条**输入。
     match crate::bot::recall_input(state, user, &id).await? {
-        crate::bot::Recalled::FromHubQueue => {
-            Ok(format!("已撤回会话「{sess}」最近一条排队中的输入（尚未下发，直接丢弃）。"))
-        }
+        crate::bot::Recalled::FromHubQueue => Ok(format!(
+            "已撤回会话「{sess}」最近一条排队中的输入（尚未下发，直接丢弃）。"
+        )),
         crate::bot::Recalled::InjectedUpKey => Ok(format!(
             "会话「{sess}」那条输入已进终端队列，已注入 ↑ 撤回（macOS Terminal.app 需手动按 ↑）。"
         )),
@@ -498,20 +559,27 @@ async fn recall_last(state: &SharedState, user: &str, sess: &str) -> Result<Stri
 /// 排队清单：分两层列出，因为它们的可撤回性不同（hub 侧能精确撤、终端侧只能整体按 ↑）
 async fn list_queued(state: &SharedState, user: &str, sess: &str) -> Result<String, String> {
     let id = resolve(state, user, sess).await?;
-    let (hub_pending, term_q) =
-        crate::bot::read_queue(state, user, &id).await.ok_or("会话不存在")?;
+    let (hub_pending, term_q) = crate::bot::read_queue(state, user, &id)
+        .await
+        .ok_or("会话不存在")?;
     if hub_pending.is_empty() && term_q.is_empty() {
         return Ok(format!("会话「{sess}」当前没有排队中的输入。"));
     }
     let mut out = Vec::new();
     if !term_q.is_empty() {
-        out.push(format!("终端原生队列（{} 条，已在终端里等着）：", term_q.len()));
+        out.push(format!(
+            "终端原生队列（{} 条，已在终端里等着）：",
+            term_q.len()
+        ));
         for (i, t) in term_q.iter().enumerate() {
             out.push(format!("  {}. {}", i + 1, one_line(t, 120)));
         }
     }
     if !hub_pending.is_empty() {
-        out.push(format!("hub 队列（{} 条，还没送到终端，可精确撤回）：", hub_pending.len()));
+        out.push(format!(
+            "hub 队列（{} 条，还没送到终端，可精确撤回）：",
+            hub_pending.len()
+        ));
         for (i, t) in hub_pending.iter().enumerate() {
             out.push(format!("  {}. {}", i + 1, one_line(t, 120)));
         }
@@ -555,7 +623,10 @@ async fn answer_select(
         "mcp-select",
     )
     .await?;
-    Ok(format!("已回答会话「{sess}」的选择卡：{}", one_line(answer, 80)))
+    Ok(format!(
+        "已回答会话「{sess}」的选择卡：{}",
+        one_line(answer, 80)
+    ))
 }
 
 /// 终端按键：撤回排队（↑）/ 打断并让排队接上（Esc）
@@ -568,12 +639,20 @@ async fn terminal_key(
 ) -> Result<String, String> {
     let id = resolve(state, user, sess).await?;
     let (spec, done) = match action {
-        "recall" => (format!("up:{count}"), format!("已注入 {count} 次 ↑ 撤回终端排队")),
-        "flush" => ("esc".to_string(), "已注入 Esc：当前任务被打断，排队内容随即开始".to_string()),
+        "recall" => (
+            format!("up:{count}"),
+            format!("已注入 {count} 次 ↑ 撤回终端排队"),
+        ),
+        "flush" => (
+            "esc".to_string(),
+            "已注入 Esc：当前任务被打断，排队内容随即开始".to_string(),
+        ),
         _ => return Err("action 只能是 recall 或 flush".into()),
     };
     crate::bot::queue_command(state, user, &id, ControlAction::TermKey, Some(spec), "mcp").await?;
-    Ok(format!("{done}（会话「{sess}」）。仅 Windows 与 iTerm2 可注入。"))
+    Ok(format!(
+        "{done}（会话「{sess}」）。仅 Windows 与 iTerm2 可注入。"
+    ))
 }
 
 /// 队列条目压成单行摘要：排队内容常是多行任务描述，原样铺开会把清单冲垮

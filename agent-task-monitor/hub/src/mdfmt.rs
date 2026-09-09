@@ -87,7 +87,10 @@ pub fn take_local_images(text: &str) -> (String, Vec<(String, String)>) {
                         && !src.starts_with("https://")
                         && !src.starts_with("data:");
                     if local && !src.is_empty() {
-                        out.push_str(&format!("[图: {}]", if alt.is_empty() { &src } else { &alt }));
+                        out.push_str(&format!(
+                            "[图: {}]",
+                            if alt.is_empty() { &src } else { &alt }
+                        ));
                         found.push((alt, src));
                         i = end + 1;
                         continue;
@@ -183,7 +186,11 @@ fn strip_list_prefix(s: &str) -> String {
 /// `max_len == 0` 视为不限长。
 pub fn chunk_text(text: &str, max_len: usize) -> Vec<String> {
     if max_len == 0 || text.chars().count() <= max_len {
-        return if text.is_empty() { vec![] } else { vec![text.to_string()] };
+        return if text.is_empty() {
+            vec![]
+        } else {
+            vec![text.to_string()]
+        };
     }
     let mut chunks: Vec<String> = Vec::new();
     let mut cur: Vec<String> = Vec::new();
@@ -193,7 +200,11 @@ pub fn chunk_text(text: &str, max_len: usize) -> Vec<String> {
         let mut text = unit.text;
         loop {
             let len = text.chars().count();
-            let joined = if cur.is_empty() { len } else { cur_len + 1 + len };
+            let joined = if cur.is_empty() {
+                len
+            } else {
+                cur_len + 1 + len
+            };
             if joined <= max_len {
                 break;
             }
@@ -240,10 +251,17 @@ fn hard_split(text: &str, max_len: usize) -> (String, String) {
     let b: Vec<char> = text.chars().collect();
     let floor = max_len * 6 / 10;
     // 断得太靠前会切出一堆碎片，所以够不着 floor 就宁可硬切
-    let cut = b[..max_len].iter().rposition(|&c| c == ' ').filter(|&p| p >= floor).unwrap_or(max_len);
+    let cut = b[..max_len]
+        .iter()
+        .rposition(|&c| c == ' ')
+        .filter(|&p| p >= floor)
+        .unwrap_or(max_len);
     let piece: String = b[..cut].iter().collect();
     let rest: String = b[cut..].iter().collect();
-    (piece.trim_end().to_string(), rest.trim_start_matches(' ').to_string())
+    (
+        piece.trim_end().to_string(),
+        rest.trim_start_matches(' ').to_string(),
+    )
 }
 
 /// 切分的最小单位：一行普通文本，或**绑在一起的表头 + 分隔行**。
@@ -262,14 +280,23 @@ fn table_units(text: &str) -> Vec<Unit> {
     while i < lines.len() {
         if is_table_row(lines[i]) && i + 1 < lines.len() && is_separator_row(lines[i + 1]) {
             let head = format!("{}\n{}", lines[i], lines[i + 1]);
-            out.push(Unit { text: head.clone(), head: None });
+            out.push(Unit {
+                text: head.clone(),
+                head: None,
+            });
             i += 2;
             while i < lines.len() && is_table_row(lines[i]) {
-                out.push(Unit { text: lines[i].to_string(), head: Some(head.clone()) });
+                out.push(Unit {
+                    text: lines[i].to_string(),
+                    head: Some(head.clone()),
+                });
                 i += 1;
             }
         } else {
-            out.push(Unit { text: lines[i].to_string(), head: None });
+            out.push(Unit {
+                text: lines[i].to_string(),
+                head: None,
+            });
             i += 1;
         }
     }
@@ -298,7 +325,10 @@ mod img_tests {
         );
         // 本地的换成可读占位并挑出来；公网 URL 各渠道本来就认，原样留着
         assert_eq!(txt, "结果见 [图: 交互提示] 和 ![线上](https://a.com/b.png)");
-        assert_eq!(imgs, vec![("交互提示".to_string(), "qa/evidence/x.png".to_string())]);
+        assert_eq!(
+            imgs,
+            vec![("交互提示".to_string(), "qa/evidence/x.png".to_string())]
+        );
     }
 
     #[test]
@@ -322,7 +352,8 @@ mod tests {
     /// 表格原样保留：钉钉能渲染，转成列表反而丢了行列对照（这条曾断言相反，见模块注释）
     #[test]
     fn table_kept_as_is() {
-        let src = "结果如下：\n| 文件 | 状态 |\n| --- | --- |\n| a.rs | 已改 |\n| b.rs | 跳过 |\n完毕";
+        let src =
+            "结果如下：\n| 文件 | 状态 |\n| --- | --- |\n| a.rs | 已改 |\n| b.rs | 跳过 |\n完毕";
         assert_eq!(downgrade_for_dingtalk(src), src);
     }
 
@@ -370,8 +401,14 @@ mod tests {
     #[test]
     fn title_strips_markup() {
         assert_eq!(derive_title("## **任务完成**", "兜底", 24), "任务完成");
-        assert_eq!(derive_title("- [看这里](https://x.com) 改好了", "兜底", 24), "看这里 改好了");
-        assert_eq!(derive_title("![图](a.png) 标题在后面", "兜底", 24), "标题在后面");
+        assert_eq!(
+            derive_title("- [看这里](https://x.com) 改好了", "兜底", 24),
+            "看这里 改好了"
+        );
+        assert_eq!(
+            derive_title("![图](a.png) 标题在后面", "兜底", 24),
+            "标题在后面"
+        );
         assert_eq!(derive_title("\n\n", "兜底", 24), "兜底");
     }
 
@@ -422,8 +459,15 @@ mod tests {
         let out = chunk_text(&long_table(40), 400);
         assert!(out.len() >= 2, "这张表应该切成多片：{}", out.len());
         for (i, c) in out.iter().enumerate() {
-            assert!(c.starts_with("| 子模块 | 接口方法 |\n| --- | --- |"), "第 {i} 片缺表头：{c}");
-            assert!(c.chars().count() <= 400, "第 {i} 片超长：{}", c.chars().count());
+            assert!(
+                c.starts_with("| 子模块 | 接口方法 |\n| --- | --- |"),
+                "第 {i} 片缺表头：{c}"
+            );
+            assert!(
+                c.chars().count() <= 400,
+                "第 {i} 片超长：{}",
+                c.chars().count()
+            );
         }
         // 数据行一行不丢、也不重复
         let rows: usize = out.iter().map(|c| c.matches("| 模块").count()).sum();
@@ -436,7 +480,10 @@ mod tests {
         // 让上文长度正好逼近上限，把断点顶到表头附近
         let text = format!("{}\n{}", "垫".repeat(180), long_table(6));
         for c in chunk_text(&text, 200) {
-            assert!(!c.trim_start().starts_with("| ---"), "分隔行被切成了片首：{c}");
+            assert!(
+                !c.trim_start().starts_with("| ---"),
+                "分隔行被切成了片首：{c}"
+            );
             let last = c.lines().last().unwrap_or("");
             assert!(!last.starts_with("| 子模块"), "表头被留在了片尾：{c}");
         }
@@ -453,9 +500,16 @@ mod tests {
     /// 缺分隔行的「伪表格」按普通行处理，不补表头
     #[test]
     fn chunk_ignores_malformed_table() {
-        let text = format!("| 只有表头 | 没有分隔 |\n{}", "| a | b |\n".repeat(30).trim_end());
+        let text = format!(
+            "| 只有表头 | 没有分隔 |\n{}",
+            "| a | b |\n".repeat(30).trim_end()
+        );
         let out = chunk_text(&text, 120);
         assert!(out.len() > 1);
-        assert!(!out[1].starts_with("| 只有表头"), "伪表格不该补表头：{}", out[1]);
+        assert!(
+            !out[1].starts_with("| 只有表头"),
+            "伪表格不该补表头：{}",
+            out[1]
+        );
     }
 }

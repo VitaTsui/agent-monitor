@@ -15,7 +15,9 @@ pub const SUPER_USER: &str = "admin";
 pub fn looks_like_email(s: &str) -> bool {
     match s.split_once('@') {
         Some((local, domain)) => {
-            !local.is_empty() && domain.contains('.') && !domain.starts_with('.')
+            !local.is_empty()
+                && domain.contains('.')
+                && !domain.starts_with('.')
                 && !domain.ends_with('.')
         }
         None => false,
@@ -47,7 +49,9 @@ fn random_token32() -> String {
 fn new_channel() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    (0..24).map(|_| format!("{:x}", rng.gen_range(0..16))).collect()
+    (0..24)
+        .map(|_| format!("{:x}", rng.gen_range(0..16)))
+        .collect()
 }
 
 fn random_salt() -> String {
@@ -245,7 +249,16 @@ impl Registry {
                 p.super_user
             };
             let dingtalk_apps = p.dingtalk_apps;
-            Registry { dir, users: p.users, devices: p.devices, super_user, dingtalk_apps, dingtalk_recv_dirs: p.dingtalk_recv_dirs, dingtalk_ids: p.dingtalk_ids, config_source: p.config_source }
+            Registry {
+                dir,
+                users: p.users,
+                devices: p.devices,
+                super_user,
+                dingtalk_apps,
+                dingtalk_recv_dirs: p.dingtalk_recv_dirs,
+                dingtalk_ids: p.dingtalk_ids,
+                config_source: p.config_source,
+            }
         } else {
             Registry {
                 dir,
@@ -288,7 +301,10 @@ impl Registry {
             if !already {
                 reg.dingtalk_ids.insert(
                     app.staff_id.clone(),
-                    DingtalkIdBinding { user: owner.clone(), nick: String::new() },
+                    DingtalkIdBinding {
+                        user: owner.clone(),
+                        nick: String::new(),
+                    },
                 );
                 migrated = true;
             }
@@ -339,11 +355,13 @@ impl Registry {
         }
     }
 
-
-
-
     /// 注册新用户（用户名已存在则失败）。返回创建的用户。
-    pub fn register(&mut self, username: &str, password: &str, display: &str) -> Result<User, String> {
+    pub fn register(
+        &mut self,
+        username: &str,
+        password: &str,
+        display: &str,
+    ) -> Result<User, String> {
         let username = username.trim();
         if username.is_empty() || password.len() < 6 {
             return Err("用户名不能为空且密码至少 6 位".into());
@@ -371,12 +389,16 @@ impl Registry {
             .max()
             .unwrap_or(0)
             + 1)
-            .to_string();
+        .to_string();
         let user = User {
             id,
             username: username.to_string(),
             password: hash_password(password, &random_salt()),
-            display: if display.is_empty() { username.to_string() } else { display.to_string() },
+            display: if display.is_empty() {
+                username.to_string()
+            } else {
+                display.to_string()
+            },
             oauth_provider: None,
         };
         self.users.push(user.clone());
@@ -432,8 +454,12 @@ impl Registry {
 
     // ---------- 用户自助集成（钉钉企业应用，双向） ----------
 
-
-    pub fn set_dingtalk_app(&mut self, user: &str, app_secret: &str, app_key: &str) -> Option<String> {
+    pub fn set_dingtalk_app(
+        &mut self,
+        user: &str,
+        app_secret: &str,
+        app_key: &str,
+    ) -> Option<String> {
         if app_secret.trim().is_empty() {
             self.dingtalk_apps.remove(user);
             self.save();
@@ -441,14 +467,21 @@ impl Registry {
         }
         // 保留已捕获的身份（robot_code/staff_id）与 channel：重存凭据不该清掉它们
         let prev = self.dingtalk_apps.get(user).cloned().unwrap_or_default();
-        let channel = if prev.channel.is_empty() { new_channel() } else { prev.channel.clone() };
-        self.dingtalk_apps.insert(user.to_string(), DingtalkApp {
-            channel: channel.clone(),
-            app_secret: app_secret.trim().to_string(),
-            app_key: app_key.trim().to_string(),
-            robot_code: prev.robot_code,
-            staff_id: prev.staff_id,
-        });
+        let channel = if prev.channel.is_empty() {
+            new_channel()
+        } else {
+            prev.channel.clone()
+        };
+        self.dingtalk_apps.insert(
+            user.to_string(),
+            DingtalkApp {
+                channel: channel.clone(),
+                app_secret: app_secret.trim().to_string(),
+                app_key: app_key.trim().to_string(),
+                robot_code: prev.robot_code,
+                staff_id: prev.staff_id,
+            },
+        );
         self.save();
         Some(channel)
     }
@@ -460,8 +493,15 @@ impl Registry {
     /// 两者都按最新的存：robotCode 可能变；staffId 则跟着最后一个跟机器人说话的人走，
     /// 换个钉钉号来聊，推送自然跟过去（一个账号一个机器人，不存在争抢）。
     /// 仅在有变化时落盘，避免每条消息都写一次注册表。
-    pub fn capture_dingtalk_peer(&mut self, app_user: &str, robot_code: &str, staff_id: &str) -> bool {
-        let Some(app) = self.dingtalk_apps.get_mut(app_user) else { return false };
+    pub fn capture_dingtalk_peer(
+        &mut self,
+        app_user: &str,
+        robot_code: &str,
+        staff_id: &str,
+    ) -> bool {
+        let Some(app) = self.dingtalk_apps.get_mut(app_user) else {
+            return false;
+        };
         let mut changed = false;
         if !robot_code.is_empty() && app.robot_code != robot_code {
             app.robot_code = robot_code.to_string();
@@ -491,7 +531,10 @@ impl Registry {
     }
 
     pub fn dingtalk_app_by_channel(&self, channel: &str) -> Option<(String, DingtalkApp)> {
-        self.dingtalk_apps.iter().find(|(_, a)| a.channel == channel).map(|(u, a)| (u.clone(), a.clone()))
+        self.dingtalk_apps
+            .iter()
+            .find(|(_, a)| a.channel == channel)
+            .map(|(u, a)| (u.clone(), a.clone()))
     }
 
     // ---------- 全局机器人（管理员配置，供没配机器人的用户共用） ----------
@@ -534,7 +577,10 @@ impl Registry {
     pub fn bind_dingtalk_id(&mut self, staff_id: &str, user: &str, nick: &str) {
         self.dingtalk_ids.insert(
             staff_id.to_string(),
-            DingtalkIdBinding { user: user.to_string(), nick: nick.to_string() },
+            DingtalkIdBinding {
+                user: user.to_string(),
+                nick: nick.to_string(),
+            },
         );
         self.save();
     }
@@ -578,7 +624,10 @@ impl Registry {
         // 任何人给这个机器人发一句话都可能把自己变成收件人。改成扫码授权后，
         // 收件人是本人在钉钉里亲自授权的那个号。
         let staff_of = |app_owner: &str| {
-            self.dingtalk_ids.iter().find(|(_, b)| b.user == app_owner).map(|(s, _)| s.clone())
+            self.dingtalk_ids
+                .iter()
+                .find(|(_, b)| b.user == app_owner)
+                .map(|(s, _)| s.clone())
         };
         // 自己配了应用 → 用自己的应用 + 自己绑定的钉钉号
         if let Some(app) = self.dingtalk_apps.get(owner) {
@@ -609,14 +658,20 @@ impl Registry {
 
     /// 该用户已配置的全部「项目 → 接收目录」。
     pub fn dingtalk_recv_dirs_of(&self, username: &str) -> HashMap<String, String> {
-        self.dingtalk_recv_dirs.get(username).cloned().unwrap_or_default()
+        self.dingtalk_recv_dirs
+            .get(username)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// 设置某项目的接收目录；dir 为空则清除该项目的配置（回落默认 tmp）。
     /// 按 `encode_path` 归一：同一目录的不同 cwd 形态只保留一份，避免残留旧形态键
     /// 导致查目录时命中不到（与 [`dingtalk_recv_dir`](Self::dingtalk_recv_dir) 同规则）。
     pub fn set_dingtalk_recv_dir(&mut self, username: &str, project_cwd: &str, dir: &str) {
-        let entry = self.dingtalk_recv_dirs.entry(username.to_string()).or_default();
+        let entry = self
+            .dingtalk_recv_dirs
+            .entry(username.to_string())
+            .or_default();
         let target = am_core::scanner::encode_path(project_cwd);
         entry.retain(|k, _| am_core::scanner::encode_path(k) != target);
         if !dir.trim().is_empty() {
@@ -647,7 +702,8 @@ impl Registry {
         if !self.owned_by(id, username) {
             return Err("该设备不属于当前账号".into());
         }
-        self.config_source.insert(username.to_string(), id.to_string());
+        self.config_source
+            .insert(username.to_string(), id.to_string());
         self.save();
         Ok(())
     }
@@ -753,7 +809,7 @@ impl Registry {
             .max()
             .unwrap_or(0)
             + 1)
-            .to_string();
+        .to_string();
         let user = User {
             id,
             username: username.to_string(),
@@ -807,20 +863,28 @@ impl Registry {
     /// default_trust 只在「设备创建」或「首次被认领」时生效 —— 设备接入默认信任，
     /// 但用户手动撤销信任后，后续上报绝不能把它又打开（撤销要有粘性，
     /// 否则信任开关形同虚设）。
-    pub fn ensure_device(&mut self, machine_id: &str, claim_owner: Option<&str>, default_trust: bool) {
+    pub fn ensure_device(
+        &mut self,
+        machine_id: &str,
+        claim_owner: Option<&str>,
+        default_trust: bool,
+    ) {
         // 该函数在每次 agent 上报（1.5s 一次）时都会被调用，绝大多数情况下
         // 什么都没变。只有真的改了才落盘，否则等于把整个注册表按 1.5s × 设备数
         // 的频率反复重写。
         let mut dirty = false;
-        let entry = self.devices.entry(machine_id.to_string()).or_insert_with(|| {
-            dirty = true;
-            DeviceMeta {
-                owner: claim_owner.map(str::to_string),
-                trusted: default_trust,
-                device_token: None,
-                ..DeviceMeta::default()
-            }
-        });
+        let entry = self
+            .devices
+            .entry(machine_id.to_string())
+            .or_insert_with(|| {
+                dirty = true;
+                DeviceMeta {
+                    owner: claim_owner.map(str::to_string),
+                    trusted: default_trust,
+                    device_token: None,
+                    ..DeviceMeta::default()
+                }
+            });
         if entry.owner.is_none() {
             if let Some(o) = claim_owner {
                 entry.owner = Some(o.to_string());
@@ -888,7 +952,9 @@ impl Registry {
             // 8 位数字临时密码，好念好输
             use rand::Rng;
             let mut rng = rand::thread_rng();
-            (0..8).map(|_| char::from(b'0' + rng.gen_range(0..10))).collect::<String>()
+            (0..8)
+                .map(|_| char::from(b'0' + rng.gen_range(0..10)))
+                .collect::<String>()
         } else {
             let p = fixed_password.unwrap_or("").trim().to_string();
             if p.len() < 4 {
@@ -903,7 +969,11 @@ impl Registry {
             .and_then(|d| d.share.as_ref())
             .map(|s| s.code.clone())
             .unwrap_or_else(new_share_code);
-        let expires_at = if temporary { crate::state::now_secs() + 30 * 60 } else { 0 };
+        let expires_at = if temporary {
+            crate::state::now_secs() + 30 * 60
+        } else {
+            0
+        };
         let entry = ShareEntry {
             code: code.clone(),
             password_hash: hash_password(&password, &random_salt()),
@@ -936,10 +1006,18 @@ impl Registry {
     }
 
     /// 访客用连接码 + 密码接入。成功返回 machine_id。
-    pub fn connect_share(&mut self, code: &str, password: &str, user: &str) -> Result<String, String> {
+    pub fn connect_share(
+        &mut self,
+        code: &str,
+        password: &str,
+        user: &str,
+    ) -> Result<String, String> {
         let code = code.trim();
         let hit = self.devices.iter().find_map(|(id, d)| {
-            d.share.as_ref().filter(|s| s.code == code).map(|s| (id.clone(), s.clone()))
+            d.share
+                .as_ref()
+                .filter(|s| s.code == code)
+                .map(|s| (id.clone(), s.clone()))
         });
         let Some((machine_id, share)) = hit else {
             return Err("连接码无效".into());
@@ -980,7 +1058,10 @@ impl Registry {
 
     /// 某设备当前已接入的访客列表（供主人查看）
     pub fn share_guests(&self, machine_id: &str) -> Vec<String> {
-        self.devices.get(machine_id).map(|d| d.shared_with.clone()).unwrap_or_default()
+        self.devices
+            .get(machine_id)
+            .map(|d| d.shared_with.clone())
+            .unwrap_or_default()
     }
 
     /// 该用户通过协助码可访问的（他人）设备
@@ -997,7 +1078,9 @@ impl Registry {
 fn new_share_code() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    (0..9).map(|_| char::from(b'0' + rng.gen_range(0..10))).collect()
+    (0..9)
+        .map(|_| char::from(b'0' + rng.gen_range(0..10)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1018,7 +1101,10 @@ mod user_exists_tests {
         assert!(r.user_exists("admin"));
         assert!(!r.user_exists("admln"), "拼错的用户名不该被当成存在");
         assert!(!r.user_exists(""), "空用户名不存在");
-        assert!(!r.user_exists("Admin"), "用户名区分大小写（owned_by 也是严格相等）");
+        assert!(
+            !r.user_exists("Admin"),
+            "用户名区分大小写（owned_by 也是严格相等）"
+        );
     }
 }
 
@@ -1045,7 +1131,10 @@ mod default_trust_tests {
         // 该设备继续上报（每 1.5s 一次）—— 不得重新信任
         r.ensure_device("pc-1", Some("dave"), true);
         r.ensure_device("pc-1", None, true);
-        assert!(!r.device_meta("pc-1").trusted, "撤销必须有粘性，上报不能重新打开信任");
+        assert!(
+            !r.device_meta("pc-1").trusted,
+            "撤销必须有粘性，上报不能重新打开信任"
+        );
         // 用户手动恢复信任
         assert!(r.set_trust("pc-1", true));
         assert!(r.device_meta("pc-1").trusted);
@@ -1060,7 +1149,10 @@ mod default_trust_tests {
         r.ensure_device("pc-2", None, true);
         r.ensure_device("pc-2", Some("erin"), true);
         assert_eq!(r.device_meta("pc-2").owner.as_deref(), Some("erin"));
-        assert!(r.device_meta("pc-2").trusted, "首次认领视同新接入，默认信任");
+        assert!(
+            r.device_meta("pc-2").trusted,
+            "首次认领视同新接入，默认信任"
+        );
     }
 }
 
@@ -1141,7 +1233,10 @@ mod share_tests {
                 s.expires_at = 1;
             }
         }
-        assert!(r.connect_share(&code, &pw, "dave").is_err(), "过期临时密码应拒绝");
+        assert!(
+            r.connect_share(&code, &pw, "dave").is_err(),
+            "过期临时密码应拒绝"
+        );
     }
 
     /// 访客自断 & 主人踢人
@@ -1186,7 +1281,10 @@ mod dingtalk_routing_tests {
 
         // **光聊过不算数**：谁收推送必须由本人扫码授权确认，否则任何人给这个机器人
         // 发一句话都可能把自己变成收件人。
-        assert!(r.dingtalk_push_target("alice").is_none(), "没扫码绑定就不该能推");
+        assert!(
+            r.dingtalk_push_target("alice").is_none(),
+            "没扫码绑定就不该能推"
+        );
 
         r.bind_dingtalk_id("alice_staff", "alice", "Alice");
         let (app, staff) = r.dingtalk_push_target("alice").expect("绑了就该有推送目标");
@@ -1200,7 +1298,10 @@ mod dingtalk_routing_tests {
         let mut r = reg("global");
         r.register("bob", "pw123456", "bob").unwrap();
         r.set_global_dingtalk_app("gsecret", "gkey");
-        assert!(r.dingtalk_push_target("bob").is_none(), "没绑钉钉号时认不出该发给谁");
+        assert!(
+            r.dingtalk_push_target("bob").is_none(),
+            "没绑钉钉号时认不出该发给谁"
+        );
 
         r.bind_dingtalk_id("bob_staff", "bob", "Bob");
         let (app, staff) = r.dingtalk_push_target("bob").expect("绑了就该能推");
@@ -1216,10 +1317,17 @@ mod dingtalk_routing_tests {
         r.bind_dingtalk_id("carol_staff", "carol", "Carol");
 
         assert_eq!(r.dingtalk_user_of("carol_staff").as_deref(), Some("carol"));
-        assert_eq!(r.dingtalk_user_of("陌生人").as_deref(), None, "没绑过的认不出来");
+        assert_eq!(
+            r.dingtalk_user_of("陌生人").as_deref(),
+            None,
+            "没绑过的认不出来"
+        );
         // 全局机器人 = 超管名下那个
         assert!(r.is_global_dingtalk_app("admin"));
-        assert!(!r.is_global_dingtalk_app("carol"), "普通用户的应用不是全局的");
+        assert!(
+            !r.is_global_dingtalk_app("carol"),
+            "普通用户的应用不是全局的"
+        );
     }
 
     /// 超管名下那个机器人**同时**是他自己的私人机器人。
@@ -1230,8 +1338,14 @@ mod dingtalk_routing_tests {
         let mut r = reg("超管自用");
         r.set_global_dingtalk_app("gsecret", "gkey");
         r.capture_dingtalk_peer("admin", "grobot", "admin_staff");
-        assert!(r.dingtalk_ids_of("admin").is_empty(), "前提：他还没给自己绑过钉钉号");
-        assert!(r.dingtalk_push_target("admin").is_none(), "超管同样要先绑定");
+        assert!(
+            r.dingtalk_ids_of("admin").is_empty(),
+            "前提：他还没给自己绑过钉钉号"
+        );
+        assert!(
+            r.dingtalk_push_target("admin").is_none(),
+            "超管同样要先绑定"
+        );
 
         // 绑上之后照常走他自己那个（兼作全局的）机器人
         r.bind_dingtalk_id("admin_staff", "admin", "");

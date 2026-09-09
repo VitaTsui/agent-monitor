@@ -222,7 +222,14 @@ pub fn message_box(title: &str, text: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
     let wide = |x: &str| x.encode_utf16().chain([0]).collect::<Vec<u16>>();
     let (t, m) = (wide(title), wide(text));
-    unsafe { MessageBoxW(std::ptr::null_mut(), m.as_ptr(), t.as_ptr(), MB_OK | MB_ICONWARNING) };
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            m.as_ptr(),
+            t.as_ptr(),
+            MB_OK | MB_ICONWARNING,
+        )
+    };
 }
 
 /// Windows：检测 WebView2 运行时。缺失时 Tauri 建不出窗口、进程会静默退出，
@@ -250,10 +257,19 @@ fn ensure_webview2() -> bool {
     );
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     let wide = |x: &str| x.encode_utf16().chain([0]).collect::<Vec<u16>>();
-    let (op, url) = (wide("open"), wide("https://go.microsoft.com/fwlink/p/?LinkId=2124703"));
+    let (op, url) = (
+        wide("open"),
+        wide("https://go.microsoft.com/fwlink/p/?LinkId=2124703"),
+    );
     unsafe {
-        ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), url.as_ptr(),
-            std::ptr::null(), std::ptr::null(), 1)
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            op.as_ptr(),
+            url.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        )
     };
     false
 }
@@ -264,7 +280,11 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
         let path = state.config.data_dir.join("startup.log");
         move |step: &str| {
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 let _ = writeln!(f, "{step}");
             }
         }
@@ -282,11 +302,19 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
     // 网页会自动把本机绑定到该账号（无需任何手工令牌）。
     let (pair_q, unpaired) = tauri::async_runtime::block_on(async {
         let paired = state.device_token.read().await.is_some();
-        let legacy = std::env::var("AM_AGENT_TOKEN").ok().filter(|s| !s.is_empty()).is_some();
+        let legacy = std::env::var("AM_AGENT_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_some();
         let code = if paired {
             None
         } else {
-            state.pair_info.read().await.as_ref().map(|(c, _)| c.clone())
+            state
+                .pair_info
+                .read()
+                .await
+                .as_ref()
+                .map(|(c, _)| c.clone())
         };
         (code, !paired && !legacy)
     });
@@ -730,7 +758,11 @@ fn build_tray_menu<R: tauri::Runtime>(
         "refresh",
         "刷新界面",
         true,
-        Some(if cfg!(target_os = "macos") { "Cmd+R" } else { "Ctrl+R" }),
+        Some(if cfg!(target_os = "macos") {
+            "Cmd+R"
+        } else {
+            "Ctrl+R"
+        }),
     )?;
     let browser = MenuItem::with_id(manager, "browser", "在浏览器打开", true, None::<&str>)?;
     let scope = build_scope_submenu(manager, state)?;
@@ -899,10 +931,7 @@ fn autostart_target() -> Option<std::path::PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn launch_agent_plist_path() -> Option<std::path::PathBuf> {
-    Some(
-        dirs::home_dir()?
-            .join("Library/LaunchAgents/com.vitahsu.agentmonitor.plist"),
-    )
+    Some(dirs::home_dir()?.join("Library/LaunchAgents/com.vitahsu.agentmonitor.plist"))
 }
 
 /// Windows 上起 `reg` 这类控制台程序的统一入口。
@@ -992,7 +1021,11 @@ fn read_session_image(cwd: String, rel: String) -> Result<String, String> {
     }
     let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
-    Ok(format!("data:{};base64,{}", crate::desktop::image_mime(&bytes), B64.encode(&bytes)))
+    Ok(format!(
+        "data:{};base64,{}",
+        crate::desktop::image_mime(&bytes),
+        B64.encode(&bytes)
+    ))
 }
 
 /// 按魔数判图片类型。**不看扩展名** —— 扩展名是内容里写的，改个名就能让页面
@@ -1012,9 +1045,7 @@ pub(crate) fn image_mime(b: &[u8]) -> &'static str {
 /// 清掉本地令牌（含 device-token.dpapi），让 agent 循环回到配对流程重新绑定。
 /// —— 用户无需再手动去找并删除那个文件（静默续登拿到 401 时页面会调这里）。
 #[tauri::command]
-async fn clear_device_token(
-    ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>,
-) -> Result<(), String> {
+async fn clear_device_token(ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>) -> Result<(), String> {
     *ctx.state.device_token.write().await = None;
     crate::secrets::clear(&ctx.state.config.data_dir);
     tracing::info!("设备令牌被判无效，已清除本地令牌，将自动重新配对");
@@ -1068,10 +1099,7 @@ async fn update_status(
 
 /// 网页端 IPC：立即执行应用内更新（设置页「检查更新 → 立即更新」）
 #[tauri::command]
-fn update_start(
-    app: tauri::AppHandle,
-    ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>,
-) {
+fn update_start(app: tauri::AppHandle, ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>) {
     spawn_self_update_inner(app, ctx.web_base.clone(), false);
 }
 
@@ -1091,8 +1119,9 @@ async fn plugin_status() -> Result<serde_json::Value, String> {
             })
             .collect();
         // 任一编辑器已装即取其版本（多编辑器版本一致）
-        let installed =
-            editors.iter().find_map(|e| e["installed"].as_str().map(str::to_string));
+        let installed = editors
+            .iter()
+            .find_map(|e| e["installed"].as_str().map(str::to_string));
         serde_json::json!({
             "installed": installed,
             "latest": BRIDGE_EXT_VERSION,
@@ -1114,7 +1143,9 @@ async fn plugin_update(
     let dd = ctx.state.config.data_dir.clone();
     let (installed, version) = tauri::async_runtime::spawn_blocking(move || {
         let n = ensure_bridge_extension(&hub, &dd, true);
-        let version = ["cursor", "code"].iter().find_map(|c| installed_ext_version(c));
+        let version = ["cursor", "code"]
+            .iter()
+            .find_map(|c| installed_ext_version(c));
         (n, version)
     })
     .await
@@ -1140,7 +1171,9 @@ fn win_close(window: tauri::Window) {
     #[cfg(target_os = "macos")]
     {
         use tauri::ActivationPolicy;
-        let _ = window.app_handle().set_activation_policy(ActivationPolicy::Accessory);
+        let _ = window
+            .app_handle()
+            .set_activation_policy(ActivationPolicy::Accessory);
     }
 }
 
@@ -1309,14 +1342,23 @@ fn open_external(url: &str) {
         let wide = |x: &str| x.encode_utf16().chain([0]).collect::<Vec<u16>>();
         let (op, u) = (wide("open"), wide(url));
         let h = unsafe {
-            ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), u.as_ptr(),
-                std::ptr::null(), std::ptr::null(), 1)
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                op.as_ptr(),
+                u.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
         };
         // 按 Win32 约定，返回值 > 32 表示成功
         if h as usize > 32 {
             Ok(())
         } else {
-            Err(std::io::Error::other(format!("ShellExecuteW 返回 {}", h as usize)))
+            Err(std::io::Error::other(format!(
+                "ShellExecuteW 返回 {}",
+                h as usize
+            )))
         }
     };
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -1384,12 +1426,16 @@ fn settle_update_marker() {
     // 无论成败，先把上次遗留的「正在下载/重启」进度清掉：新实例已经起来了。
     clear_update_progress();
     if !prev.is_empty() && prev == local {
-        ulog(&format!("[update] 上次更新后仍是 v{local} —— 未生效，提示手动更新一次"));
+        ulog(&format!(
+            "[update] 上次更新后仍是 v{local} —— 未生效，提示手动更新一次"
+        ));
         notify_progress(&format!(
             "自动更新未生效（仍是 v{local}），请下载安装包手动更新一次"
         ));
     } else {
-        ulog(&format!("[update] 上次更新已生效（v{prev} → v{local}），清理标记"));
+        ulog(&format!(
+            "[update] 上次更新已生效（v{prev} → v{local}），清理标记"
+        ));
     }
     let _ = std::fs::remove_file(&marker);
 }
@@ -1409,7 +1455,9 @@ fn notify_new_version(v: &str) {
         let script = format!(
             "display notification \"新版本 v{v} 可用，重新打开窗口或在托盘中即可更新\" with title \"终端任务监控\""
         );
-        let _ = std::process::Command::new("osascript").args(["-e", &script]).output();
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output();
     }
     #[cfg(windows)]
     {
@@ -1428,7 +1476,6 @@ fn notify_new_version(v: &str) {
     let _ = v;
 }
 
-
 /// 更新进行中的轻量提示（不打断）：mac 系统通知 / Windows 右下角气泡
 fn notify_progress(msg: &str) {
     ulog(&format!("[update] {msg}"));
@@ -1438,7 +1485,9 @@ fn notify_progress(msg: &str) {
             "display notification \"{}\" with title \"终端任务监控\"",
             msg.replace('"', "'")
         );
-        let _ = std::process::Command::new("osascript").args(["-e", &script]).output();
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output();
     }
     #[cfg(windows)]
     {
@@ -1469,7 +1518,9 @@ fn alert_box(title: &str, text: &str) {
             esc(text),
             esc(title)
         );
-        let _ = std::process::Command::new("osascript").args(["-e", &script]).output();
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output();
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -1484,7 +1535,12 @@ fn alert_box(title: &str, text: &str) {
 /// 下载文件。`report`=true 才把进度写进「更新进度」通道（自更新用；扩展 vsix 等辅助
 /// 下载传 false，别污染更新 UI）。`min_bytes` 是最小合法大小（安装包用 1MB 挡半包，
 /// 小文件如 vsix 传更小）。
-fn download_to(url: &str, dest: &std::path::Path, report: bool, min_bytes: usize) -> anyhow::Result<()> {
+fn download_to(
+    url: &str,
+    dest: &std::path::Path,
+    report: bool,
+    min_bytes: usize,
+) -> anyhow::Result<()> {
     // 跨境链路（中国→海外 Vultr）慢且易抖：多试几次，指数退避，最后一次挂了才报错。
     let mut last = String::new();
     for attempt in 1..=4 {
@@ -1493,7 +1549,9 @@ fn download_to(url: &str, dest: &std::path::Path, report: bool, min_bytes: usize
             Err(e) => {
                 last = format!("{e}");
                 let wait = attempt * 3;
-                ulog(&format!("[update] 第{attempt}次下载失败（{e}），{wait}s 后重试"));
+                ulog(&format!(
+                    "[update] 第{attempt}次下载失败（{e}），{wait}s 后重试"
+                ));
                 std::thread::sleep(std::time::Duration::from_secs(wait as u64));
             }
         }
@@ -1501,18 +1559,22 @@ fn download_to(url: &str, dest: &std::path::Path, report: bool, min_bytes: usize
     anyhow::bail!("多次下载均失败：{last}")
 }
 
-fn download_to_once(url: &str, dest: &std::path::Path, report: bool, min_bytes: usize) -> anyhow::Result<()> {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+fn download_to_once(
+    url: &str,
+    dest: &std::path::Path,
+    report: bool,
+    min_bytes: usize,
+) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     let bytes = rt.block_on(async {
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(30))
             .build()?;
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            client.get(url).send(),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("连接更新服务器超时（60s）"))??;
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(60), client.get(url).send())
+            .await
+            .map_err(|_| anyhow::anyhow!("连接更新服务器超时（60s）"))??;
         if !resp.status().is_success() {
             anyhow::bail!("下载失败 HTTP {}", resp.status());
         }
@@ -1522,18 +1584,15 @@ fn download_to_once(url: &str, dest: &std::path::Path, report: bool, min_bytes: 
         let mut out: Vec<u8> = Vec::with_capacity(total as usize);
         let mut last_mark = 0usize;
         loop {
-            let chunk = tokio::time::timeout(
-                std::time::Duration::from_secs(120),
-                resp.chunk(),
-            )
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "下载停滞（120s 无数据，已收 {}/{} 字节），请稍后重试或到官网手动下载",
-                    out.len(),
-                    total
-                )
-            })??;
+            let chunk = tokio::time::timeout(std::time::Duration::from_secs(120), resp.chunk())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "下载停滞（120s 无数据，已收 {}/{} 字节），请稍后重试或到官网手动下载",
+                        out.len(),
+                        total
+                    )
+                })??;
             let Some(chunk) = chunk else { break };
             out.extend_from_slice(&chunk);
             if report {
@@ -1585,8 +1644,12 @@ fn ensure_bridge_extension(hub: &str, data_dir: &std::path::Path, force: bool) -
     // 静默下载（report=false，不动更新进度 UB）、最小 1KB（vsix 才几 KB）
     // 同样带 cache-buster：vsix 也是 CDN 默认缓存的类型，发了新版却下到旧的，
     // 表现就是「扩展装上了、行为还是老的」——比自更新那次更难查（版本号还对得上）
-    if let Err(e) = download_to(&cache_busted(hub, "agent-monitor-bridge.vsix"), &vsix, false, 1024)
-    {
+    if let Err(e) = download_to(
+        &cache_busted(hub, "agent-monitor-bridge.vsix"),
+        &vsix,
+        false,
+        1024,
+    ) {
         ulog(&format!("[bridge] 扩展 vsix 下载失败: {e}"));
         return 0;
     }
@@ -1669,7 +1732,9 @@ fn editor_clis(name: &str) -> Vec<String> {
 /// 查已装的桥接扩展版本：对该编辑器的候选 CLI 逐个试，任一给出版本即返回。
 /// 取不到（编辑器未装 / CLI 都不可用）返回 None。
 fn installed_ext_version(name: &str) -> Option<String> {
-    editor_clis(name).iter().find_map(|cli| installed_ext_version_via(cli))
+    editor_clis(name)
+        .iter()
+        .find_map(|cli| installed_ext_version_via(cli))
 }
 
 /// 单个 CLI 路径：`<cli> --list-extensions --show-versions` 里找
@@ -1754,7 +1819,12 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
     let zip = tmp.join("update.zip");
-    download_to(&cache_busted(hub, "agent-monitor-mac.zip"), &zip, true, 1024 * 1024)?;
+    download_to(
+        &cache_busted(hub, "agent-monitor-mac.zip"),
+        &zip,
+        true,
+        1024 * 1024,
+    )?;
     ulog("[update] 下载完成");
     set_update_progress("installing", 0, 0);
 
@@ -1777,7 +1847,9 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
 
     // 原地替换：旧 .app 改名挪到同一父目录（同目录 rename 不跨卷、不受
     // 临时目录权限影响），放入新包后延迟重启，最后清掉旧包。
-    let parent = bundle.parent().ok_or_else(|| anyhow::anyhow!("bundle 无父目录"))?;
+    let parent = bundle
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("bundle 无父目录"))?;
     let old = parent.join(".终端任务监控.old.app");
     let _ = std::fs::remove_dir_all(&old);
     std::fs::rename(&bundle, &old).map_err(|e| anyhow::anyhow!("移出旧版本失败: {e}"))?;
@@ -1818,7 +1890,12 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let tmp = std::env::temp_dir();
     let installer = tmp.join("agent-monitor-setup.exe");
-    download_to(&cache_busted(hub, "agent-monitor-setup.exe"), &installer, true, 1024 * 1024)?;
+    download_to(
+        &cache_busted(hub, "agent-monitor-setup.exe"),
+        &installer,
+        true,
+        1024 * 1024,
+    )?;
     ulog("[update] 安装器下载完成，静默安装");
     set_update_progress("installing", 0, 0);
     // 全静默更新，不出安装向导：NSIS /S 静默安装（沿用上次安装目录与组件选择），
@@ -1868,7 +1945,12 @@ fn confirm_box(title: &str, text: &str, ok_label: &str, cancel_label: &str) -> b
         let wide = |x: &str| x.encode_utf16().chain([0]).collect::<Vec<u16>>();
         let (t, m) = (wide(title), wide(text));
         let r = unsafe {
-            MessageBoxW(std::ptr::null_mut(), m.as_ptr(), t.as_ptr(), MB_YESNO | MB_ICONQUESTION)
+            MessageBoxW(
+                std::ptr::null_mut(),
+                m.as_ptr(),
+                t.as_ptr(),
+                MB_YESNO | MB_ICONQUESTION,
+            )
         };
         r == IDYES
     }
@@ -1924,7 +2006,10 @@ pub(crate) fn spawn_update_watcher<R: tauri::Runtime>(
 
             // 强制更新：本机低于下限 → 不更新就不能继续使用
             if !forced_prompted {
-                if let Some(min) = min.as_deref().filter(|m| crate::agent::version_newer(m, local)) {
+                if let Some(min) = min
+                    .as_deref()
+                    .filter(|m| crate::agent::version_newer(m, local))
+                {
                     forced_prompted = true;
                     let ok = confirm_box(
                         "终端任务监控 · 需要更新",

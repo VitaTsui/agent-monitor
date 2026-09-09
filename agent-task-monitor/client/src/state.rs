@@ -57,7 +57,6 @@ impl Excludes {
     }
 }
 
-
 pub fn upload_root() -> std::path::PathBuf {
     std::env::var("AM_UPLOAD_ROOT")
         .ok()
@@ -156,7 +155,9 @@ impl AppState {
     pub fn new(config: Config) -> SharedState {
         let excludes = Excludes::load(&config.data_dir);
         let scanner = SessionScanner::new(
-            dirs::home_dir().unwrap_or_default().join(".claude/projects"),
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".claude/projects"),
         );
         Arc::new(Self {
             config,
@@ -177,7 +178,6 @@ impl AppState {
     }
 }
 
-
 /// 客户端落盘日志（与 desktop::ulog 同一文件；服务/扫描层也能写）
 pub fn client_log(msg: &str) {
     tracing::info!("{msg}");
@@ -186,7 +186,11 @@ pub fn client_log(msg: &str) {
         .unwrap_or_else(|_| dirs::data_dir().unwrap_or_default().join("AgentMonitor"))
         .join("client.log");
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let ts = chrono::Local::now().format("%m-%d %H:%M:%S");
         let _ = writeln!(f, "[{ts}] {msg}");
     }
@@ -236,9 +240,15 @@ fn save_anchor_pairs(
 ) {
     let mut obj = serde_json::Map::new();
     for (anchor, (sid, sstart)) in anchors {
-        obj.insert(anchor.to_string(), serde_json::json!({ "sid": sid, "sstart": sstart }));
+        obj.insert(
+            anchor.to_string(),
+            serde_json::json!({ "sid": sid, "sstart": sstart }),
+        );
     }
-    let _ = std::fs::write(pairs_file(data_dir), serde_json::Value::Object(obj).to_string());
+    let _ = std::fs::write(
+        pairs_file(data_dir),
+        serde_json::Value::Object(obj).to_string(),
+    );
 }
 
 /// 把「终端锚 → (session, 锚 start)」翻译成「当前该终端下的**主 claude** pid → session」。
@@ -277,9 +287,7 @@ fn translate_anchors(
 
 /// 读盘：读回「终端锚 → (session, 锚 start)」。校验推迟到每轮翻译（pid + start 都对上才配），
 /// 故这里无需活进程；死终端/被重用的 pid 翻不出配对。缺 sstart 的旧格式按 0 处理（不会误配）。
-fn load_anchor_pairs(
-    data_dir: &std::path::Path,
-) -> std::collections::HashMap<u32, (String, u64)> {
+fn load_anchor_pairs(data_dir: &std::path::Path) -> std::collections::HashMap<u32, (String, u64)> {
     let mut out = std::collections::HashMap::new();
     let Ok(txt) = std::fs::read_to_string(pairs_file(data_dir)) else {
         return out;
@@ -288,9 +296,10 @@ fn load_anchor_pairs(
         return out;
     };
     for (anchor_s, ent) in &obj {
-        if let (Ok(anchor), Some(sid)) =
-            (anchor_s.parse::<u32>(), ent.get("sid").and_then(|x| x.as_str()))
-        {
+        if let (Ok(anchor), Some(sid)) = (
+            anchor_s.parse::<u32>(),
+            ent.get("sid").and_then(|x| x.as_str()),
+        ) {
             let sstart = ent.get("sstart").and_then(|x| x.as_u64()).unwrap_or(0);
             out.insert(anchor, (sid.to_string(), sstart));
         }
@@ -387,8 +396,15 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
                 for s in &sessions {
-                    let id6: String = s.session_id.chars().rev().take(6).collect::<Vec<_>>()
-                        .into_iter().rev().collect();
+                    let id6: String = s
+                        .session_id
+                        .chars()
+                        .rev()
+                        .take(6)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
                     let age_s = now_ms.saturating_sub(s.mtime_ms) / 1000;
                     // created=0 说明该系统取不到文件创建时间（btime），created_ms 配对会失效
                     let created_age = if s.created_ms == 0 {
@@ -435,9 +451,8 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         use std::sync::atomic::Ordering;
         // 值 = (会话 id, 该 claude 的启动时间)。带 start_time 是为了防 pid 重用 —— 进程退出后
         // pid 被别的进程占用时启动时间对不上，条目立即失效（与终端锚 shell_start 同一思路）。
-        static PIN_ACC: std::sync::Mutex<
-            Option<std::collections::HashMap<u32, (String, u64)>>,
-        > = std::sync::Mutex::new(None);
+        static PIN_ACC: std::sync::Mutex<Option<std::collections::HashMap<u32, (String, u64)>>> =
+            std::sync::Mutex::new(None);
         let tick = SCAN_TICKS.load(Ordering::Relaxed);
         // 本轮扫描到的活进程身份（pid → 启动时间），用来淘汰失效条目
         let alive: std::collections::HashMap<u32, u64> =
@@ -449,9 +464,14 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         // 丢弃它、把配对交还给迁移层。查不到该会话时保守保留（信息不足，且 build_tasks 找不到
         // sid 本来也不会用它）。
         let sess_by_id: std::collections::HashMap<&str, &am_core::scanner::SessionSummary> =
-            sessions.iter().map(|s| (s.session_id.as_str(), s)).collect();
+            sessions
+                .iter()
+                .map(|s| (s.session_id.as_str(), s))
+                .collect();
         let superseded_by_clear = |sid: &str| -> bool {
-            let Some(cur) = sess_by_id.get(sid) else { return false };
+            let Some(cur) = sess_by_id.get(sid) else {
+                return false;
+            };
             sessions.iter().any(|s| {
                 s.cleared
                     && s.provider == cur.provider
@@ -484,10 +504,12 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         // 并入累积表：只收当前存活进程的 pin，顺手记下启动时间当身份。
         // 同一 pid 再次抓到就以最新为准（同一进程换会话 = /clear 后新建了会话）。
         let merge = |acc: &mut std::collections::HashMap<u32, (String, u64)>,
-                         pins: std::collections::HashMap<u32, String>,
-                         added: &mut usize| {
+                     pins: std::collections::HashMap<u32, String>,
+                     added: &mut usize| {
             for (pid, sid) in pins {
-                let Some(&start) = alive.get(&pid) else { continue };
+                let Some(&start) = alive.get(&pid) else {
+                    continue;
+                };
                 if acc.insert(pid, (sid, start)).is_none() {
                     *added += 1;
                 }
@@ -497,7 +519,8 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         // `am-client hook` 落到 <data_dir>/hooks/<pid>.json（见 hookrec）。这条不用碰运气 ——
         // env pin 只在 claude 正跑工具时存在，而 hook 是 claude 主动报的，空闲会话照样有。
         // 每轮都读（就是列一个小目录，比 env 扫描还便宜），并覆盖其它来源：它最权威。
-        let hook_reports = crate::hookrec::read_reports(&state.config.data_dir, HOOK_REPORT_TTL_SECS);
+        let hook_reports =
+            crate::hookrec::read_reports(&state.config.data_dir, HOOK_REPORT_TTL_SECS);
         let hook_n = hook_reports.len();
         for r in hook_reports {
             // 只认当前存活的进程；死 pid 的记录顺手删掉，免得 pid 重用后张冠李戴
@@ -527,8 +550,10 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
             // 用户在那个终端 /clear 之后，hook 已经报了新会话，若这里再无条件覆盖，
             // 就会被子进程里的陈旧 id 顶回旧会话：表现为「/clear 之后这个终端再也不同步」，
             // 而同项目开着多个终端时尤其明显（实测 66378 就是这么被顶回去的）。
-            let only_new: std::collections::HashMap<u32, String> =
-                env_pins.into_iter().filter(|(pid, _)| !acc.contains_key(pid)).collect();
+            let only_new: std::collections::HashMap<u32, String> = env_pins
+                .into_iter()
+                .filter(|(pid, _)| !acc.contains_key(pid))
+                .collect();
             merge(acc, only_new, &mut added);
         }
         // 句柄扫描留作补充（env 优先级更高，上面先并入、这里不覆盖已有条目）
@@ -537,13 +562,18 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
             let dirs = {
                 let scanner = state.scanner.lock().await;
                 let home = dirs::home_dir().unwrap_or_default();
-                vec![scanner.projects_dir().to_path_buf(), home.join(".codex/sessions")]
+                vec![
+                    scanner.projects_dir().to_path_buf(),
+                    home.join(".codex/sessions"),
+                ]
             };
             let file_pins =
                 tokio::task::block_in_place(|| crate::openfiles::pin_sessions(&pids, &dirs));
             file_n = file_pins.len();
-            let only_new: std::collections::HashMap<u32, String> =
-                file_pins.into_iter().filter(|(pid, _)| !acc.contains_key(pid)).collect();
+            let only_new: std::collections::HashMap<u32, String> = file_pins
+                .into_iter()
+                .filter(|(pid, _)| !acc.contains_key(pid))
+                .collect();
             merge(acc, only_new, &mut added);
         }
         // 诊断：每 ~30s 记一次。env权威=0 是常态且**不再要紧** —— 只要累积表非空，配对就仍然
@@ -571,8 +601,10 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
             }
         }
         // 累积表 → build_tasks 要的 pid→sid（丢掉只用于校验身份的启动时间）
-        let out: std::collections::HashMap<u32, String> =
-            acc.iter().map(|(pid, (sid, _))| (*pid, sid.clone())).collect();
+        let out: std::collections::HashMap<u32, String> = acc
+            .iter()
+            .map(|(pid, (sid, _))| (*pid, sid.clone()))
+            .collect();
         out
     };
     // 「本轮相比上轮 mtime 有推进」的会话 = 此刻正在被写的活跃会话。用于兜底配对时
@@ -599,15 +631,17 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
     // 翻译成「该终端现在的 claude pid → 会话」，claude 换 pid（含客户端重启）也接得回，消除
     // 空闲/并发会话落到 mtime 启发式而下发错位。这份缓存直接持久化到盘、重启读回。
     // 值 = (session_id, 锚 start)：锚 start 一并存，恢复/翻译时防 shell pid 重用把新终端错配旧会话。
-    static ANCHOR_PAIRS: std::sync::Mutex<
-        Option<std::collections::HashMap<u32, (String, u64)>>,
-    > = std::sync::Mutex::new(None);
+    static ANCHOR_PAIRS: std::sync::Mutex<Option<std::collections::HashMap<u32, (String, u64)>>> =
+        std::sync::Mutex::new(None);
     static PAIRS_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     // 首轮：从盘恢复终端锚→会话
     if !PAIRS_LOADED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         let restored = load_anchor_pairs(&state.config.data_dir);
         if !restored.is_empty() {
-            client_log(&format!("恢复配对缓存 {} 条（终端锚，客户端重启）", restored.len()));
+            client_log(&format!(
+                "恢复配对缓存 {} 条（终端锚，客户端重启）",
+                restored.len()
+            ));
             *ANCHOR_PAIRS.lock().unwrap() = Some(restored);
         }
     }
@@ -644,7 +678,10 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                 // 判据取自 jsonl：那次 AskUserQuestion 的 **tool_result 落盘时间**晚于本条
                 // hook 记录，就说明这张卡已经被了结（作答或中断）。它按 tool_use_id 对上号，
                 // 与下面说的 mtime 启发式是两回事。
-                if answered_at.get(t.id.as_str()).is_some_and(|&ms| ms >= at_ms) {
+                if answered_at
+                    .get(t.id.as_str())
+                    .is_some_and(|&ms| ms >= at_ms)
+                {
                     continue;
                 }
                 // 这里**不要**再拿「jsonl 的 mtime 比 hook 晚多少」判过期。
@@ -812,7 +849,10 @@ mod anchor_tests {
 
     /// 锚表：(锚 pid, sid, 锚 start)。
     fn anchors(pairs: &[(u32, &str, u64)]) -> HashMap<u32, (String, u64)> {
-        pairs.iter().map(|(a, s, st)| (*a, (s.to_string(), *st))).collect()
+        pairs
+            .iter()
+            .map(|(a, s, st)| (*a, (s.to_string(), *st)))
+            .collect()
     }
 
     /// 核心：claude 换了 pid（100→200），但仍在同一终端 shell(2244) 下 —— 锚表存的是
@@ -868,11 +908,15 @@ mod anchor_tests {
         let a = anchors(&[(2244, "sess-A", SHELL_START)]);
         let main = proc_at(200, Some(2244), 1000); // 先启动
         let sub = proc_at(999, Some(2244), 2000); // 会话进行中才派生，启动更晚
-        // 两种进程顺序都要稳定挑主 claude（不受 Vec/HashMap 顺序影响）
+                                                  // 两种进程顺序都要稳定挑主 claude（不受 Vec/HashMap 顺序影响）
         let got1 = translate_anchors(&a, &[main.clone(), sub.clone()]);
         let got2 = translate_anchors(&a, &[sub, main]);
         for got in [got1, got2] {
-            assert_eq!(got.get(&200), Some(&"sess-A".to_string()), "会话应配到主 claude");
+            assert_eq!(
+                got.get(&200),
+                Some(&"sess-A".to_string()),
+                "会话应配到主 claude"
+            );
             assert_eq!(got.get(&999), None, "子 agent 不该拿到会话");
         }
     }

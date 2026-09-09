@@ -1,7 +1,7 @@
 //! hub 服务端状态：机器聚合、登录态、注册表、配对码。
 //! 不含任何本机扫描/托盘/上报（那些在 am-client）。
-use am_core::model::{ControlCmd, MachineInfo, MessageBrief, Task, TaskStatus};
 use crate::registry::Registry;
+use am_core::model::{ControlCmd, MachineInfo, MessageBrief, Task, TaskStatus};
 use rsa::RsaPrivateKey;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -193,7 +193,8 @@ impl LoginThrottle {
     }
 
     pub fn record_fail(&mut self, username: &str) {
-        self.fails.retain(|_, (_, at)| at.elapsed().as_secs() < THROTTLE_WINDOW_SECS);
+        self.fails
+            .retain(|_, (_, at)| at.elapsed().as_secs() < THROTTLE_WINDOW_SECS);
         if self.fails.len() >= THROTTLE_MAX_ENTRIES && !self.fails.contains_key(username) {
             // 满了就先丢最久没失败过的，保证新条目总能记上
             if let Some(k) = self
@@ -205,7 +206,10 @@ impl LoginThrottle {
                 self.fails.remove(&k);
             }
         }
-        let e = self.fails.entry(username.to_string()).or_insert((0, Instant::now()));
+        let e = self
+            .fails
+            .entry(username.to_string())
+            .or_insert((0, Instant::now()));
         e.0 = e.0.saturating_add(1);
         e.1 = Instant::now();
     }
@@ -247,7 +251,10 @@ pub struct Session {
 
 impl Session {
     pub fn new(username: String) -> Self {
-        Self { username, last_seen: now_secs() }
+        Self {
+            username,
+            last_seen: now_secs(),
+        }
     }
 
     pub fn expired(&self) -> bool {
@@ -410,7 +417,9 @@ pub fn new_bind_code() -> String {
     use rand::Rng;
     const ALPHA: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
     let mut rng = rand::thread_rng();
-    (0..6).map(|_| ALPHA[rng.gen_range(0..ALPHA.len())] as char).collect()
+    (0..6)
+        .map(|_| ALPHA[rng.gen_range(0..ALPHA.len())] as char)
+        .collect()
 }
 
 /// 钉钉挂起的待发文件（downloadCode 换取下载地址，随下一条任务发出时才真正下载+下发）
@@ -569,11 +578,19 @@ impl AppState {
             }
             let last = (meta.last_seen > 0).then(|| {
                 chrono::DateTime::from_timestamp(meta.last_seen as i64, 0)
-                    .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+                    .map(|t| {
+                        t.with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M")
+                            .to_string()
+                    })
                     .unwrap_or_default()
             });
             out.push(MachineInfo {
-                hostname: if meta.hostname.is_empty() { id.clone() } else { meta.hostname.clone() },
+                hostname: if meta.hostname.is_empty() {
+                    id.clone()
+                } else {
+                    meta.hostname.clone()
+                },
                 platform_dsr: am_core::model::platform_dsr(&meta.platform),
                 platform: meta.platform.clone(),
                 version: meta.version.clone(),
@@ -599,7 +616,11 @@ impl AppState {
                 .map(|e| e.last_report.elapsed().as_secs() < OFFLINE_AFTER_SECS)
                 .unwrap_or(false);
             out.push(MachineInfo {
-                hostname: if meta.hostname.is_empty() { id.clone() } else { meta.hostname.clone() },
+                hostname: if meta.hostname.is_empty() {
+                    id.clone()
+                } else {
+                    meta.hostname.clone()
+                },
                 platform_dsr: am_core::model::platform_dsr(&meta.platform),
                 platform: meta.platform.clone(),
                 version: meta.version.clone(),
@@ -607,10 +628,20 @@ impl AppState {
                 is_hub: false,
                 last_report_at: None,
                 session_count: live
-                    .map(|e| e.tasks.iter().filter(|t| t.status != TaskStatus::Finished).count())
+                    .map(|e| {
+                        e.tasks
+                            .iter()
+                            .filter(|t| t.status != TaskStatus::Finished)
+                            .count()
+                    })
                     .unwrap_or(0),
                 running_count: live
-                    .map(|e| e.tasks.iter().filter(|t| online && t.status == TaskStatus::Running).count())
+                    .map(|e| {
+                        e.tasks
+                            .iter()
+                            .filter(|t| online && t.status == TaskStatus::Running)
+                            .count()
+                    })
                     .unwrap_or(0),
                 owner: meta.owner.clone(),
                 trusted: true,
@@ -658,10 +689,9 @@ pub async fn tick_loop(state: SharedState) {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| state.config.data_dir.join("downloads"));
             if dir.is_dir() {
-                let _ = tokio::task::spawn_blocking(move || {
-                    crate::server::sync_fixed_installer(&dir)
-                })
-                .await;
+                let _ =
+                    tokio::task::spawn_blocking(move || crate::server::sync_fixed_installer(&dir))
+                        .await;
             }
         }
         // 机器人号位同上：分配/回收只标脏，这里统一写（丢一轮也只是号位重排一次）
@@ -680,7 +710,8 @@ pub async fn tick_loop(state: SharedState) {
                 let reg = state.registry.read().await;
                 let mut machines = state.machines.write().await;
                 for (id, m) in machines.iter_mut() {
-                    if m.notified_online && m.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
+                    if m.notified_online && m.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS
+                    {
                         m.notified_online = false;
                         if let Some(owner) = reg.device_meta(id).owner {
                             offline_events.push(crate::dingtalk::NotifyEvent {
@@ -697,7 +728,9 @@ pub async fn tick_loop(state: SharedState) {
             if !offline_events.is_empty() {
                 let st = state.clone();
                 let now_ms = now_secs() * 1000;
-                tokio::spawn(async move { crate::dingtalk::deliver(&st, offline_events, now_ms).await });
+                tokio::spawn(
+                    async move { crate::dingtalk::deliver(&st, offline_events, now_ms).await },
+                );
             }
         }
         let _ = state.tx.send(tick);

@@ -81,7 +81,16 @@ fn load_secure(_data_dir: &std::path::Path) -> Option<String> {
 #[cfg(target_os = "macos")]
 fn save_secure(_data_dir: &std::path::Path, token: &str) -> bool {
     std::process::Command::new(SECURITY_BIN)
-        .args(["add-generic-password", "-U", "-s", SERVICE, "-a", ACCOUNT, "-w", token])
+        .args([
+            "add-generic-password",
+            "-U",
+            "-s",
+            SERVICE,
+            "-a",
+            ACCOUNT,
+            "-w",
+            token,
+        ])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -116,8 +125,14 @@ fn load_secure(data_dir: &std::path::Path) -> Option<String> {
     if enc.is_empty() {
         return None;
     }
-    let mut input = CRYPT_INTEGER_BLOB { cbData: enc.len() as u32, pbData: enc.as_ptr() as *mut u8 };
-    let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+    let mut input = CRYPT_INTEGER_BLOB {
+        cbData: enc.len() as u32,
+        pbData: enc.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
     let ok = unsafe {
         CryptUnprotectData(
             &mut input,
@@ -132,7 +147,8 @@ fn load_secure(data_dir: &std::path::Path) -> Option<String> {
     if ok == 0 || output.pbData.is_null() {
         return None;
     }
-    let bytes = unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    let bytes =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
     unsafe { windows_sys::Win32::Foundation::LocalFree(output.pbData as _) };
     let t = String::from_utf8_lossy(&bytes).trim().to_string();
     (!t.is_empty()).then_some(t)
@@ -142,8 +158,14 @@ fn load_secure(data_dir: &std::path::Path) -> Option<String> {
 fn save_secure(data_dir: &std::path::Path, token: &str) -> bool {
     use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
     let data = token.as_bytes();
-    let mut input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
-    let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+    let mut input = CRYPT_INTEGER_BLOB {
+        cbData: data.len() as u32,
+        pbData: data.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
     let ok = unsafe {
         CryptProtectData(
             &mut input,
@@ -158,7 +180,8 @@ fn save_secure(data_dir: &std::path::Path, token: &str) -> bool {
     if ok == 0 || output.pbData.is_null() {
         return false;
     }
-    let bytes = unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    let bytes =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
     unsafe { windows_sys::Win32::Foundation::LocalFree(output.pbData as _) };
     std::fs::write(dpapi_path(data_dir), bytes).is_ok()
 }

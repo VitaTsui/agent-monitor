@@ -9,7 +9,12 @@
 pub const SINGLE_FILES: &[&str] = &["claude/CLAUDE.md", "codex/AGENTS.md"];
 
 /// 目录规则：递归收集其下的 .md（其余扩展名一律不收）
-pub const DIRS: &[&str] = &["claude/agents", "claude/commands", "claude/skills", "codex/prompts"];
+pub const DIRS: &[&str] = &[
+    "claude/agents",
+    "claude/commands",
+    "claude/skills",
+    "codex/prompts",
+];
 
 /// 单文件体积上限。配置类文本几 KB 顶天，超了多半是有人把日志/数据丢了进来——
 /// 这种东西挤进 1.5s 一轮的心跳会把上报撑到 413。
@@ -33,7 +38,10 @@ pub fn is_allowed(rel: &str) -> bool {
         return false;
     }
     // 隐藏段不收，且挡掉空段（`a//b`）
-    if rel.split('/').any(|seg| seg.is_empty() || seg.starts_with('.')) {
+    if rel
+        .split('/')
+        .any(|seg| seg.is_empty() || seg.starts_with('.'))
+    {
         return false;
     }
     SINGLE_FILES.contains(&rel) || DIRS.iter().any(|d| rel.starts_with(&format!("{d}/")))
@@ -63,7 +71,9 @@ mod tests {
 
     #[test]
     fn rejects_traversal() {
-        assert!(!is_allowed("claude/agents/../../../.ssh/authorized_keys.md"));
+        assert!(!is_allowed(
+            "claude/agents/../../../.ssh/authorized_keys.md"
+        ));
         assert!(!is_allowed("claude/agents/..\\x.md"));
         assert!(!is_allowed("/etc/x.md"));
         assert!(!is_allowed("claude/agents//x.md"));
