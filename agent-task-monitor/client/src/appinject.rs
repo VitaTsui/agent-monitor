@@ -814,6 +814,11 @@ mod imp {
             ));
         }
 
+        // 再踢一次再扫按钮：发送键是「撰写框有了内容」之后才渲染出来的，比刚才那次
+        // 回读又晚一拍。少了这一下，扫到的还是空撰写框那套按钮（Claude 上是语音键），
+        // 于是明明写进去了却报「没找到发送键」——实测就是这么漏的。
+        wake(cel);
+        std::thread::sleep(VERIFY_INTERVAL);
         let buttons_after = collect(win.get(), &["AXButton"]).0;
         let Some(btn) = pick_send_button(&buttons_after, &buttons_before, cbox) else {
             return Ok((
