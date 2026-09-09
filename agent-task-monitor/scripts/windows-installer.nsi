@@ -14,11 +14,17 @@ ManifestDPIAware true
 !define APP_EXE_LEGACY "终端任务监控.exe"
 !define APP_ID "AgentMonitor"
 !define APP_PUBLISHER "VitaHsu"
-!define APP_VERSION "0.7.3"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
 
 !ifndef EXE
   !error "请以 -DEXE=<agent-monitor.exe 路径> 调用"
+!endif
+; 版本号只有一个来源：Cargo.toml 的 [workspace.package] version，由
+; scripts/package-windows.sh 读出后 -DAPP_VERSION 传进来。这里**不留默认值**：
+; 之前写死的 "0.7.3" 跟着近 50 个版本一动不动，装完在「添加/删除程序」里
+; 全显示 0.7.3；缺省值只会让下次再静默错一遍，宁可编译直接失败。
+!ifndef APP_VERSION
+  !error "请以 -DAPP_VERSION=<版本号> 调用（取自 Cargo.toml 的 workspace version）"
 !endif
 !ifndef OUT
   !define OUT "终端任务监控-安装程序.exe"

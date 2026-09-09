@@ -256,6 +256,48 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                 .flatten()
             })
             .collect();
+        // 桌面客户端（Claude.app / ChatGPT.app）会话：claude/codex pid → 注入所需的一切
+        // （宿主 GUI 应用 pid、应用名、这条会话的身份）。注入要按宿主 pid 打开可访问性树，
+        // 不是按代理 pid。只在实验开关打开时才算 —— 关着的时候连这一次父链遍历都不做。
+        let desktop_of: std::collections::HashMap<u32, DesktopTarget> =
+            if crate::appinject::enabled() {
+                scanned
+                    .iter()
+                    .filter_map(|t| {
+                        let p = t.process.as_ref()?;
+                        if p.ide != am_core::model::IdeKind::Desktop {
+                            return None;
+                        }
+                        let (host_pid, app_name) = am_core::process::desktop_host(p.pid)?;
+                        Some((
+                            p.pid,
+                            DesktopTarget {
+                                host_pid,
+                                app_name,
+                                session: desktop_session_ref(p),
+                            },
+                        ))
+                    })
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            };
+        // 同一个宿主 App 上挂着几条会话。**只有认不出会话身份的宿主**（实测 ChatGPT.app）
+        // 才靠这个数兜底：那种宿主上多于一条会话就必须拒绝注入（见 execute），不能赌。
+        // Claude.app 那边改成比对窗口 URL，几条会话都不影响。
+        //
+        // 必须按**会话**数，不能按 desktop_of 的条目数：ChatGPT 桌面版只有一个
+        // `codex … app-server` 进程同时托着界面上的每一条对话（见 scanner 里
+        // shared_host 的配对），多条会话共用同一个 pid —— 按 pid 去重就永远只数出 1 条，
+        // 这道闸门等于没有。
+        let sessions_per_host: std::collections::HashMap<u32, usize> = scanned
+            .iter()
+            .filter_map(|t| t.process.as_ref())
+            .filter_map(|p| desktop_of.get(&p.pid).map(|d| d.host_pid))
+            .fold(std::collections::HashMap::new(), |mut m, hp| {
+                *m.entry(hp).or_insert(0) += 1;
+                m
+            });
         // 活跃会话的项目目录：文件上传允许写进这些目录（项目常不在家目录下，
         // 见 safe_upload_dir_within）
         let session_dirs: Vec<std::path::PathBuf> = scanned
@@ -304,9 +346,22 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
         };
 
         let mut req = client.post(format!("{hub}/monitor/report"));
-        if let Some(t) = state.device_token.read().await.as_deref() {
+        // 手里有哪张凭证就都递上去，由 hub 挑一张认（它本就写成「设备令牌或全局令牌，
+        // 任一成立即放行」）。原先是 `else if`：只要本机存过设备令牌，显式配置的
+        // AM_AGENT_TOKEN 就永远发不出去。
+        //
+        // （历史坑：钥匙串键名曾固定为 AgentMonitor/device-token，同一台 Mac 上的第二个
+        // 实例会捞到已安装客户端的令牌 —— 现在键按 machine_id 分开，见 secrets.rs。）
+        let device_token = state
+            .device_token
+            .read()
+            .await
+            .as_ref()
+            .map(|d| d.value.clone());
+        if let Some(t) = &device_token {
             req = req.header("x-device-token", t);
-        } else if let Some(t) = &legacy_token {
+        }
+        if let Some(t) = &legacy_token {
             req = req.header("x-agent-token", t);
         }
         match req.json(&payload).send().await {
@@ -326,24 +381,54 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                 *state.hub_error.write().await = Some(describe_reject(code.as_u16(), &body));
                 // 设备令牌失效（设备被删除/换绑）：清掉本地令牌，回到配对流程重新绑定
                 if code.as_u16() == 401 && legacy_token.is_none() {
-                    *state.device_token.write().await = None;
-                    crate::secrets::clear(&state.config.data_dir);
+                    state.invalidate_device_token().await;
                 }
             }
             Ok(resp) => {
-                if !hub_ok {
-                    tracing::info!("已连上 hub: {hub}");
-                    hub_ok = true;
-                }
-                net_fail_streak = 0;
-                state
-                    .hub_connected
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                // 上报成功即清掉旧的拒绝原因（例如用户刚把令牌改对了）
-                if state.hub_error.read().await.is_some() {
-                    *state.hub_error.write().await = None;
-                }
-                if let Ok(body) = resp.json::<Value>().await {
+                // 这个 hub 的业务错误码放在**响应体**里，HTTP 状态一律 200
+                // （`err(401, …)` 返回的是 `Json({"code":401,…})`）。所以上面那个
+                // `!resp.status().is_success()` 分支实际上只兜得住极少数传输层错误，
+                // 401「设备未绑定」、400「AM_USER 账号不存在」全都从这里进来 ——
+                // 而这里过去无脑当成功：打一句「已连上 hub」、托盘标「已连接」，
+                // 然后设备根本没在 hub 上登记，网页设备列表永远空着。
+                // 实测就是这个组合把人坑住的：日志说连上了、手工 curl 同样参数却能登记成功。
+                let body = resp.json::<Value>().await.unwrap_or(Value::Null);
+                let biz = body.get("code").and_then(Value::as_i64).unwrap_or(0);
+                if biz != 0 {
+                    let msg = body.get("msg").and_then(Value::as_str).unwrap_or_default();
+                    tracing::warn!("上报被 hub 拒绝: code={biz} {msg}");
+                    hub_ok = false;
+                    state
+                        .hub_connected
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    // 托盘要显示人话原因：这类失败是配置错了，重试一万次也不会好
+                    *state.hub_error.write().await = Some(describe_reject(biz as u16, msg));
+                    // 设备令牌失效（设备被删/换绑）：清掉本地令牌，回到配对流程重新绑定。
+                    // 判据与上面 HTTP 分支保持一致，别在两处各写一套。
+                    if biz == 401 && legacy_token.is_none() {
+                        state.invalidate_device_token().await;
+                    }
+                } else {
+                    // 上报被接受 = hub 确认这张设备令牌绑的就是本机 machine_id，
+                    // 于是「暂用」的旧版共用令牌（钥匙串里不区分机器的那条）归属落实：
+                    // 迁进本机专属键并删掉旧条目。**这是本地唯一能判定归属的依据** ——
+                    // 令牌是 hub 侧的随机串，本地看不出属于谁。
+                    // 配了全局令牌时跳过：那种情况下放行的可能是全局令牌，证明不了什么。
+                    if legacy_token.is_none() && device_token.is_some() {
+                        state.adopt_device_token().await;
+                    }
+                    if !hub_ok {
+                        tracing::info!("已连上 hub: {hub}");
+                        hub_ok = true;
+                    }
+                    net_fail_streak = 0;
+                    state
+                        .hub_connected
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    // 上报成功即清掉旧的拒绝原因（例如用户刚把令牌改对了）
+                    if state.hub_error.read().await.is_some() {
+                        *state.hub_error.write().await = None;
+                    }
                     // 更新推送：hub 版本比本机新 → 记录，托盘显示「新版本可用」
                     if let Some(hv) = body.pointer("/data/hubVersion").and_then(Value::as_str) {
                         let newer = version_newer(hv, env!("CARGO_PKG_VERSION"));
@@ -400,7 +485,15 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         _ => Vec::new(),
                     };
                     for cmd in commands {
-                        execute(&state, cmd, &known_pids, &ide_shell_of).await;
+                        execute(
+                            &state,
+                            cmd,
+                            &known_pids,
+                            &ide_shell_of,
+                            &desktop_of,
+                            &sessions_per_host,
+                        )
+                        .await;
                     }
                     // 待写入文件（hub 下发的文件传输）。同样不能静默吞——文件丢了，
                     // 回填进任务的路径却还在，agent 只会报「文件不存在」。
@@ -520,7 +613,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                 // 实际后果：换服务器后客户端拿着作废的设备令牌空转，日志里干干净净，
                 // 用户只看到网页上什么都没有，无从查起（这个 bug 就是这么被发现的）。
                 // 首次失败必打，之后每 ~60s 一条，既不刷屏也不至于全无痕迹。
-                if hub_ok || net_fail_streak == 0 || net_fail_streak % 40 == 0 {
+                if hub_ok || net_fail_streak == 0 || net_fail_streak.is_multiple_of(40) {
                     tracing::warn!("上报 hub 失败（第 {} 次）: {e}", net_fail_streak + 1);
                 }
                 net_fail_streak = net_fail_streak.saturating_add(1);
@@ -571,9 +664,8 @@ async fn start_pairing(state: &SharedState, client: &reqwest::Client, hub: &str)
 
 /// 持久化设备令牌（拿到后写盘，下次启动直接上报无需重新配对）
 async fn persist_device_token(state: &SharedState, token: &str) {
-    *state.device_token.write().await = Some(token.to_string());
-    // 系统安全存储（mac 钥匙串 / Windows DPAPI），失败回退受限权限文件
-    crate::secrets::save(&state.config.data_dir, token);
+    // 系统安全存储（mac 钥匙串按 machine_id 分键 / Windows DPAPI），失败回退受限权限文件
+    state.set_device_token(token).await;
 }
 
 /// a 是否比 b 更新（按点分数字逐段比较；解析不了的段按 0）。
@@ -905,14 +997,43 @@ fn unique_target(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     target
 }
 
+/// 一条桌面客户端会话注入所需的全部信息。
+struct DesktopTarget {
+    /// 宿主 GUI 应用（Claude.app / ChatGPT.app）的进程 id：可访问性树按它打开。
+    host_pid: u32,
+    /// 宿主应用名，只用于日志与给用户看的提示。
+    app_name: String,
+    /// 这条会话的身份。注入前拿它比对「窗口里此刻开着的是哪条」。
+    session: crate::appinject::SessionRef,
+}
+
+/// 认出这条桌面会话的身份。
+///
+/// 目前只有 Claude 桌面版的本地代理（Cowork）会话认得出来：它的进程工作目录就在
+/// 会话隔离家目录 `…/local-agent-mode-sessions/<组织>/<用户>/local_<uuid>/…` 里，
+/// 那个 `local_<uuid>` 正是桌面客户端自己的会话主键，也会出现在窗口 URL 里。
+///
+/// ChatGPT 桌面版认不出来（实测它整棵可访问性树里没有任何任务 id，
+/// 见 `appinject` 的模块说明），如实返回 [`SessionRef::Unidentified`]，
+/// 由调用方退回「宿主上只能有一条会话」的老规矩 —— 不拿标题文案硬凑一个身份。
+fn desktop_session_ref(p: &am_core::model::ProcessInfo) -> crate::appinject::SessionRef {
+    match am_core::scanner::claude_local_agent_session_id(&p.cwd) {
+        Some(id) => crate::appinject::SessionRef::ClaudeLocalAgent(id),
+        None => crate::appinject::SessionRef::Unidentified,
+    }
+}
+
 /// 执行 hub 下发的控制命令。
 /// `known_pids` 是本轮本机扫描出的会话 pid 集合——只对这些 pid 动手，
 /// 不无条件信任 hub 响应（响应链路若被中间人篡改，否则可对任意进程发信号）。
+#[allow(clippy::too_many_arguments)]
 async fn execute(
     state: &SharedState,
     cmd: ControlCmd,
     known_pids: &std::collections::HashSet<u32>,
     ide_shell_of: &std::collections::HashMap<u32, u32>,
+    desktop_of: &std::collections::HashMap<u32, DesktopTarget>,
+    sessions_per_host: &std::collections::HashMap<u32, usize>,
 ) {
     let Some(pid) = cmd.pid else {
         // 会话没配对到进程（前端显示为「Claude Code / 等待输入」这类占位标题）时 pid 为空，
@@ -946,6 +1067,78 @@ async fn execute(
         // 只认纯数字：选择卡的「自行输入」发的是文本，那条路仍要回车才提交得了。
         // from_select 已经限定了这是在回答选择卡，此时纯数字不会是别的东西。
         let submit = !(from_select && !text.is_empty() && text.chars().all(|c| c.is_ascii_digit()));
+        // 目标是桌面客户端（Claude.app / ChatGPT.app）拉起的会话：它没有 tty、也没有
+        // 内嵌终端，下面两条路都送不到 —— 改走宿主 App 的辅助功能接口，直接写进撰写框。
+        // 这是与「扩展桥接」「终端注入」并列的第三种送达目标，不是叠在它们之上的补丁：
+        // 会话宿主是什么类型，就走哪一条，走完即返回。
+        //
+        // desktop_of 只在实验开关开着时才非空，所以开关关闭时这一整段等价于不存在。
+        if let Some(target) = desktop_of.get(&pid) {
+            let (host_pid, app_name) = (target.host_pid, &target.app_name);
+            // 认不出会话身份的宿主（实测 ChatGPT.app）才需要这道数量闸门：屏幕上开着哪条
+            // 会话我们既读不出、也比不了，多于一条就是在赌 —— 宁可不发，也不能发错会话。
+            // Claude.app 那边身份认得出来，交给 appinject 逐条比对 URL，不受条数限制。
+            if target.session == crate::appinject::SessionRef::Unidentified {
+                let n = sessions_per_host.get(&host_pid).copied().unwrap_or(1);
+                if n > 1 {
+                    let msg = format!(
+                        "拒绝注入桌面会话：{app_name} 上有 {n} 条会话且认不出屏幕上是哪一条（任务 {}）",
+                        cmd.task_id
+                    );
+                    crate::state::client_log(&msg);
+                    crate::appinject::notify(&format!(
+                        "{app_name} 上有 {n} 条会话，无法确认当前打开的是哪一条，已拒绝注入"
+                    ));
+                    return;
+                }
+            }
+            let (hp, an, txt) = (host_pid, app_name.clone(), text.clone());
+            let sess = target.session.clone();
+            // AX 调用要跨进程等对方响应，App 卡住时会一直挂着，绝不能占住 async worker。
+            let res = tokio::task::spawn_blocking(move || {
+                crate::appinject::inject(hp, &sess, &txt, submit)
+            })
+            .await;
+            match res {
+                Ok(Ok((done, detail))) => {
+                    crate::state::client_log(&format!(
+                        "注入桌面会话：{an}(pid={host_pid}) {done:?} —— {detail}（{preview}…）"
+                    ));
+                    if let crate::appinject::Injected::Written { why } = done {
+                        crate::appinject::notify(&format!(
+                            "{an}：内容已写入撰写框但未发送（{why}）"
+                        ));
+                    }
+                    return;
+                }
+                // 「屏幕上不是这条会话」是一次**明确的拒绝**，不是一次没成功的尝试：
+                // 已经确定这条命令不该送到这里，再往下降级去试终端注入没有任何意义
+                // （桌面会话没有 tty，那条路只会再失败一次，把日志和通知各刷一遍）。
+                Ok(Err(e @ crate::appinject::InjectError::WrongSession { .. })) => {
+                    crate::state::client_log(&format!(
+                        "拒绝注入桌面会话：{an}(pid={host_pid}) {e}（任务 {}）",
+                        cmd.task_id
+                    ));
+                    crate::appinject::notify(&format!("{an}：{e}"));
+                    return;
+                }
+                Ok(Err(e)) => {
+                    // 不静默失败、也不假装成功：日志 + 系统通知都说清楚，
+                    // 然后落到下面的终端注入路径去（桌面会话通常没有 tty，
+                    // 那条路会再报一次它自己的错，两条都在 client.log 里可查）。
+                    crate::state::client_log(&format!(
+                        "桌面会话注入失败，降级走终端注入：{an}(pid={host_pid}) {e}（任务 {}）",
+                        cmd.task_id
+                    ));
+                    crate::appinject::notify(&format!("{an} 注入失败：{e}"));
+                }
+                Err(e) => {
+                    crate::state::client_log(&format!(
+                        "桌面会话注入阻塞任务异常：{an}(pid={host_pid}) {e}"
+                    ));
+                }
+            }
+        }
         // 目标是 Cursor/VSCode 内嵌终端（ConPTY/编辑器内置，注入不进去）、且有活着的桥接
         // 扩展在管这个终端，就把任务写进文件桥交给扩展 terminal.sendText 送达（全平台）。
         // 终端 shell pid 用扫描时已算好的终端锚（与配对同锚）；本轮没扫到（罕见）再退回

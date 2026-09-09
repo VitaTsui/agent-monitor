@@ -21,6 +21,9 @@ pub enum IdeKind {
     Cursor,
     Vscode,
     Terminal,
+    /// 桌面客户端（ChatGPT.app / Claude.app）拉起的代理进程：没有控制终端、
+    /// 父链里既没有 IDE 也没有终端模拟器，但有一个 GUI 应用包在托着它。
+    Desktop,
     Other,
 }
 
@@ -58,6 +61,14 @@ pub struct ProcessInfo {
     /// 错配到旧会话。配对恢复时须 pid + start 都对上才算同一 shell。
     #[serde(default)]
     pub shell_start: Option<u64>,
+    /// **共享宿主进程**：一个进程同时托着多条会话，它自己的 cwd 没有会话含义。
+    ///
+    /// 唯一来源是桌面客户端的服务端进程（实测 ChatGPT 桌面版的
+    /// `…/ChatGPT.app/Contents/Resources/codex … app-server`，cwd 恒为 `/`）。
+    /// 终端会话是「一进程一会话、cwd 即项目」，这条不是 —— 所以它不参与按 cwd 的
+    /// 配对，也绝不单独生成占位任务（那正是当初要把 app-server 整个挡掉的原因）。
+    #[serde(default)]
+    pub shared_host: bool,
 }
 
 /// 会话内一条简要消息（用于详情展示）
@@ -68,6 +79,17 @@ pub struct MessageBrief {
     /// user 提示词 / assistant 文本 / 工具名
     pub content: String,
     pub timestamp: String,
+    /// **这一步跑砸了**：`tool_result` 块上的 `is_error`。
+    ///
+    /// 原始记录里一直带着（实测本机 `~/.claude/projects` 25222 个块里 997 个为真），
+    /// 此前 `entry_to_brief` 只取了文本、把它丢掉 —— 于是前端执行链上每一步长得
+    /// 一模一样，跑成的和跑砸的没有任何区别，一轮里到底哪一步出的错看不出来。
+    ///
+    /// **只在为真时下发**（与 [`Task::live_cwd`] 同一套口径：没什么可说就不出这个键）。
+    /// 失败是少数派，把两万多条 `isError: false` 塞进每次轮询纯粹是搬运。
+    /// 前端按「有这个键且为真 = 失败」判，缺失即不失败，老客户端上报的数据不受影响。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_error: bool,
 }
 
 /// 聚合后的「任务」：一个代理会话 + 可能匹配到的进程
@@ -533,5 +555,18 @@ pub fn provider_dsr(provider: &str) -> String {
         "aider" => "Aider".into(),
         "opencode" => "OpenCode".into(),
         other => other.into(),
+    }
+}
+
+/// 桌面客户端会话的展示名。
+///
+/// 同一个 provider 既能从终端跑（Claude Code / Codex CLI），也能从桌面客户端跑
+/// （Claude 桌面版的本地代理、ChatGPT 桌面版的 Codex）。两者的会话文件格式一样、
+/// 控制方式却完全不同，列表里必须一眼看得出这条是从哪儿来的。
+pub fn provider_dsr_desktop(provider: &str) -> String {
+    match provider {
+        "claude" => "Claude 桌面版".into(),
+        "codex" => "ChatGPT 桌面版".into(),
+        other => format!("{} 桌面版", provider_dsr(other)),
     }
 }

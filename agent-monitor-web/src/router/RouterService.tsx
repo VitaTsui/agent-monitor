@@ -54,9 +54,20 @@ function wrapRoutes(routes: RouteType[]): RouteType[] {
 
 /**
  * 使用 webpack 的 require.context 动态导入所有页面组件
- * 这是 webpack 特有的功能，用于批量导入模块
+ * 这是 webpack 特有的功能，用于批量导入模块。
+ *
+ * 正则里排掉**任何以 `_` 开头的路径段**（`_components` / `_views` / `_hooks` /
+ * `_utils` …）。这些是页面私有目录，后端菜单表的 url 永远不会指向它们，
+ * 却会被 context 模块**同步**打进主包（下面 `r(key)` 是同步 require，
+ * 外面套的 `lazy()` 只是包了个已解析的 Promise，并不产生分包）——
+ * 于是前台按路由拆出去的那十条视图会原样留在首屏里，「懒加载」名存实亡。
+ * 私有目录都由各自的消费方显式 import，排掉不影响任何一处引用。
  */
-const pages = require.context("../pages/", true, /\.tsx$/);
+const pages = require.context(
+  "../pages/",
+  true,
+  /^\.\/(?:(?!_)[^/]+\/)*(?!_)[^/]+\.tsx$/
+);
 
 /**
  * 将所有页面组件转换为懒加载组件映射表
@@ -69,18 +80,16 @@ function importAll(r: __WebpackModuleApi.RequireContext) {
     React.LazyExoticComponent<React.ComponentType>
   > = {};
 
-  r.keys()
-    .filter((key) => !key.includes("/_contComps/") && !key.includes("\\_contComps\\"))
-    .forEach((key) => {
-      const normalizedKey = key
-        .toLowerCase()
-        .replace(/\.tsx$/, "")
-        .replace(/^\.\//, "");
+  r.keys().forEach((key) => {
+    const normalizedKey = key
+      .toLowerCase()
+      .replace(/\.tsx$/, "")
+      .replace(/^\.\//, "");
 
-      // lazy() 需要一个返回 Promise 的函数
-      // webpack 的 require.context 返回的模块需要包装成 Promise
-      modules[normalizedKey] = lazy(() => Promise.resolve(r(key)));
-    });
+    // lazy() 需要一个返回 Promise 的函数
+    // webpack 的 require.context 返回的模块需要包装成 Promise
+    modules[normalizedKey] = lazy(() => Promise.resolve(r(key)));
+  });
 
   return modules;
 }

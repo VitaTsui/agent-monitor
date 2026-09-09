@@ -135,6 +135,8 @@ pub fn router(state: SharedState) -> Router {
             "/monitor/tasks/:id/slash-commands",
             get(task_slash_commands),
         )
+        // 会话备注（用户给会话起的名字；空串 = 清除）
+        .route("/monitor/tasks/:id/note", post(set_task_note))
         .route("/monitor/tasks/:id/control", post(control_task))
         .route("/monitor/tasks/:id/input", post(input_task))
         .route("/monitor/tasks/:id/termkey", post(termkey_task))
@@ -579,7 +581,7 @@ fn ready_desktop_version(downloads_dir: &std::path::Path) -> String {
                 .and_then(|s| s.strip_suffix("-setup.exe"))
             {
                 if let Some(t) = parse(v) {
-                    if best.as_ref().map_or(true, |(bt, _)| t > *bt) {
+                    if best.as_ref().is_none_or(|(bt, _)| t > *bt) {
                         best = Some((t, v.to_string()));
                     }
                 }
@@ -733,8 +735,8 @@ async fn list_tasks(
     ok(json!({ "list": with_slots(&state, &user, &filtered).await }))
 }
 
-/// 给会话补上「号位」（钉钉里 `@N` 的 N），让网页/移动端与钉钉看到同一个编号 ——
-/// 否则在网页上看着会话，却不知道该 @ 几号。
+/// 给会话补上「号位」（钉钉里 `#N` 的 N），让网页/移动端与钉钉看到同一个编号 ——
+/// 否则在网页上看着会话，却不知道该 # 几号。
 ///
 /// 号位的分配与去重统一由 `bot::sorted_active_tasks` 负责（那里保证了分配顺序稳定），
 /// 这里**只按终端锚查、不分配**，避免两处各自分配导致编号不一致。
@@ -745,20 +747,75 @@ async fn with_slots(state: &SharedState, user: &str, tasks: &[am_core::model::Ta
             .into_iter()
             .map(|(t, no)| (crate::slots::anchor_of(&t), no))
             .collect();
+    let mut out = with_notes(state, user, tasks).await;
+    for (v, t) in out.iter_mut().zip(tasks) {
+        if let Some(obj) = v.as_object_mut() {
+            // 查不到 = 该会话还没进过号位表（罕见），给 null 让前端不显示徽标
+            obj.insert(
+                "slot".into(),
+                json!(by_anchor.get(&crate::slots::anchor_of(t))),
+            );
+        }
+    }
+    out
+}
+
+/// 给会话补上「备注」（用户自己起的名字）。挂在号位锚上，所以 `/clear`、`--resume`
+/// 换掉会话 id 之后仍能对上 —— 见 crate::notes。没起过名字的给 null。
+async fn with_notes(state: &SharedState, user: &str, tasks: &[am_core::model::Task]) -> Vec<Value> {
+    let notes = crate::notes::map_for(state, user).await;
     tasks
         .iter()
         .map(|t| {
             let mut v = serde_json::to_value(t).unwrap_or_else(|_| json!({}));
             if let Some(obj) = v.as_object_mut() {
-                // 查不到 = 该会话还没进过号位表（罕见），给 null 让前端不显示徽标
-                obj.insert(
-                    "slot".into(),
-                    json!(by_anchor.get(&crate::slots::anchor_of(t))),
-                );
+                obj.insert("note".into(), json!(notes.get(&crate::slots::anchor_of(t))));
             }
             v
         })
         .collect()
+}
+
+#[derive(Deserialize)]
+struct NoteReq {
+    /// 新备注；空串 / 全空白 = 清除。
+    ///
+    /// 用 `Option` 而不是 `#[serde(default)]`：字段缺失和空串必须区分开 —— 前者是调用方
+    /// 写错了字段名，若也当成空串处理，一次拼写错误就会**静默清掉**用户起的名字。
+    note: Option<String>,
+}
+
+/// POST /monitor/tasks/:id/note —— 设置或清除会话备注。
+///
+/// 只认登录态（Authorization）：备注是用户私有的，可见性沿用 `tasks_for` 的归属判定 ——
+/// 看得见这个会话才改得了它的备注，改的也只是**自己那份**。
+async fn set_task_note(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<NoteReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let task = state
+        .tasks_for(&user)
+        .await
+        .into_iter()
+        .find(|t| t.id == id);
+    let Some(task) = task else {
+        return err(404, "任务不存在");
+    };
+    let Some(raw) = req.note else {
+        return err(400, "缺少 note 字段（清除备注请传空串）");
+    };
+    let text = match crate::notes::normalize(&raw) {
+        Ok(t) => t,
+        Err(m) => return err(400, &m),
+    };
+    let anchor = crate::slots::anchor_of(&task);
+    let saved = crate::notes::set(&state, &user, &anchor, &text).await;
+    ok(json!({ "note": saved }))
 }
 
 // ---------- vita-admin Query 格式（后管 Panel.List 用） ----------
@@ -830,7 +887,7 @@ async fn page_tasks(
         .take(page_size)
         .collect();
     ok(json!({
-        "list": items,
+        "list": with_notes(&state, &user, &items).await,
         "page": { "pageNum": page_num, "pageSize": page_size, "total": total }
     }))
 }
@@ -912,13 +969,13 @@ fn sort_tasks(tasks: &mut [Task], key: &str, desc: bool) {
     match key {
         // crtTm（基类默认排序键）映射到最近活动时间
         "crtTm" | "mtimeMs" | "lastActiveAt" | "updTm" => {
-            tasks.sort_by(|a, b| a.mtime_ms.cmp(&b.mtime_ms));
+            tasks.sort_by_key(|a| a.mtime_ms);
         }
         "startedAt" => tasks.sort_by(|a, b| a.started_at.cmp(&b.started_at)),
         "hostname" => tasks.sort_by(|a, b| a.hostname.cmp(&b.hostname)),
         "projectName" => tasks.sort_by(|a, b| a.project_name.cmp(&b.project_name)),
         "status" => tasks.sort_by_key(|t| status_key(t.status)),
-        _ => tasks.sort_by(|a, b| a.mtime_ms.cmp(&b.mtime_ms)),
+        _ => tasks.sort_by_key(|a| a.mtime_ms),
     }
     if desc {
         tasks.reverse();
@@ -936,7 +993,10 @@ async fn task_detail(
     };
     let tasks = state.tasks_for(&user).await;
     match tasks.into_iter().find(|t| t.id == id) {
-        Some(t) => ok(serde_json::to_value(t).unwrap_or(Value::Null)),
+        Some(t) => match with_notes(&state, &user, &[t]).await.pop() {
+            Some(v) => ok(v),
+            None => err(404, "任务不存在"),
+        },
         None => err(404, "任务不存在"),
     }
 }
@@ -1345,7 +1405,9 @@ async fn input_task(
                     // 所以要单独记一次，否则网页发的任务不会出现在聊天记录里。
                     // 选择卡的作答除外（见 InputReq::from_select）。
     if !req.from_select {
-        let slot = crate::slots::slot_of(&state, &user, &crate::slots::anchor_of(&task)).await;
+        // 锚一次算好，两处都用：查号位、以及记进历史（备注按它现算，见 crate::history）
+        let anchor = crate::slots::anchor_of(&task);
+        let slot = crate::slots::slot_of(&state, &user, &anchor).await;
         crate::history::append(
             &state,
             crate::history::HistoryEntry {
@@ -1361,6 +1423,8 @@ async fn input_task(
                 project: task.project_name.clone(),
                 title: task.title.clone(),
                 provider: task.provider_dsr.clone(),
+                anchor,
+                note: None, // 读取时现填，不落盘
             },
         )
         .await;
@@ -1675,9 +1739,7 @@ pub(crate) async fn fetch_session_file(
     for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         let mut machines = state.machines.write().await;
-        let Some(entry) = machines.get_mut(&task.machine_id) else {
-            return None;
-        };
+        let entry = machines.get_mut(&task.machine_id)?;
         if let Some((r, _)) = entry.file_fetch_results.remove(&fetch_id) {
             if !r.err.is_empty() {
                 tracing::debug!("现取文件失败 {rel}: {}", r.err);
@@ -2081,6 +2143,12 @@ pub(crate) fn public_base() -> String {
         .to_string()
 }
 
+/// 一个项目在「设备 → 项目」表里的一行：(代表 cwd, 项目名, 活跃会话 taskId)。
+type ProjectEntry = (String, String, Option<String>);
+/// machine_id → (hostname, 项目 key → 项目行)。分组规则见 integrations_get 里的注释。
+type DeviceProjects =
+    std::collections::BTreeMap<String, (String, std::collections::BTreeMap<String, ProjectEntry>)>;
+
 /// GET /monitor/integrations —— 当前用户的三种渠道配置 + 专属回调地址。
 /// 密钥类字段不回传，只回「是否已设置」。
 async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) -> Json<Value> {
@@ -2094,13 +2162,7 @@ async fn integrations_get(State(state): State<SharedState>, headers: HeaderMap) 
     // 分组键用 encode_path（项目 key），与侧栏 selectedGroups / 配对 project_key 同规则：
     // 同一目录的不同 cwd 形态（占位任务用进程 cwd vs 真实会话用 jsonl cwd、cursor/非
     // cursor，分隔符/盘符/标点常有细微差异）归并为一项，避免像 sub-centers 那样冒重复行。
-    let mut devs: std::collections::BTreeMap<
-        String,
-        (
-            String,
-            std::collections::BTreeMap<String, (String, String, Option<String>)>,
-        ),
-    > = std::collections::BTreeMap::new();
+    let mut devs: DeviceProjects = std::collections::BTreeMap::new();
     let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     for t in state.tasks_for(&user).await {
         if t.project.is_empty() {
@@ -3143,8 +3205,8 @@ async fn report(
     let mut pending_sets: Vec<(String, String)> = Vec::new(); // (会话 id, 终端锚)
     let mut pending_removes: Vec<String> = Vec::new();
     // 会话结束时要落的历史记录（同样块内收集、块后写，避开借用冲突）
-    // (记录, 终端锚) —— 号位要在锁外查，见下方 pending_history 处理
-    let mut history_records: Vec<(crate::history::HistoryEntry, String)> = Vec::new();
+    // 号位要在锁外查，锚就在条目自己的 anchor 字段上，见下方 pending_history 处理
+    let mut history_records: Vec<crate::history::HistoryEntry> = Vec::new();
     if let Some(owner) = &notify_owner {
         use crate::dingtalk::{EventKind, NotifyEvent};
         let old: std::collections::HashMap<&str, TaskStatus> = entry
@@ -3239,33 +3301,32 @@ async fn report(
         };
         // 造一条 assistant 侧的交互记录（任务完成 / 会话结束时的结果）。
         // 正文优先用完整原文（推送里被截断时 full 有值），否则退回展示版并去掉「最后结果」抬头。
-        // 号位要 await 才能查，所以这里带回终端锚，等锁释放后再补。
+        // 号位要 await 才能查，锁释放后按条目自带的 anchor 补。
         let make_reply = |t: &am_core::model::Task,
                           owner: &str,
                           full: Option<&str>,
                           shown: &str|
-         -> (crate::history::HistoryEntry, String) {
+         -> crate::history::HistoryEntry {
             let content = match full {
                 Some(f) => f.to_string(),
                 None => shown.trim_start_matches("\n\n**最后结果**\n\n").to_string(),
             };
-            (
-                crate::history::HistoryEntry {
-                    id: crate::history::new_id(),
-                    owner: owner.to_string(),
-                    session_id: t.id.clone(),
-                    role: "assistant".into(),
-                    content,
-                    at: crate::state::now_secs(),
-                    source: String::new(),
-                    slot: None, // 锁外补
-                    hostname: t.hostname.clone(),
-                    project: t.project_name.clone(),
-                    title: t.title.clone(),
-                    provider: t.provider_dsr.clone(),
-                },
-                crate::slots::anchor_of(t),
-            )
+            crate::history::HistoryEntry {
+                id: crate::history::new_id(),
+                owner: owner.to_string(),
+                session_id: t.id.clone(),
+                role: "assistant".into(),
+                content,
+                at: crate::state::now_secs(),
+                source: String::new(),
+                slot: None, // 锁外补
+                hostname: t.hostname.clone(),
+                project: t.project_name.clone(),
+                title: t.title.clone(),
+                provider: t.provider_dsr.clone(),
+                anchor: crate::slots::anchor_of(t),
+                note: None, // 读取时现填，不落盘
+            }
         };
         let now_selecting: std::collections::HashSet<String> = tasks
             .iter()
@@ -3639,10 +3700,10 @@ async fn report(
     .await;
 
     // 会话历史：锁已释放，这里统一落（record 内部去重 + 截断 + 标脏，tick 循环负责写盘）
-    for (mut rec, anchor) in pending_history {
-        // 补号位，让历史里的编号与钉钉的「@N」对得上。会话可能已结束、活跃列表里查不到，
+    for mut rec in pending_history {
+        // 补号位，让历史里的编号与钉钉的「#N」对得上。会话可能已结束、活跃列表里查不到，
         // 所以按终端锚直接查表（锚要过保留期才回收，多数情况仍在）。
-        rec.slot = crate::slots::slot_of(&state, &rec.owner, &anchor).await;
+        rec.slot = crate::slots::slot_of(&state, &rec.owner, &rec.anchor).await;
         crate::history::append(&state, rec).await;
     }
 
@@ -4022,6 +4083,7 @@ mod selecting_tests {
             role: role.into(),
             content: String::new(),
             timestamp: String::new(),
+            is_error: false,
         }
     }
     fn msgs(roles: &[&str]) -> Vec<MessageBrief> {

@@ -3,12 +3,15 @@ import React, { useEffect, useRef, useState } from "react";
 import { Button } from "@hsu-react/ui";
 import { Dropdown, Modal, Popconfirm, Spin, Tooltip } from "antd";
 import {
+  ArrowDownOutlined,
+  ClockCircleOutlined,
   CloseOutlined,
   CompressOutlined,
   ExpandOutlined,
   MoreOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
+  ProfileOutlined,
   StopOutlined,
   SyncOutlined,
   ThunderboltOutlined,
@@ -20,7 +23,10 @@ import PortalStore from "../../PortalStore";
 import Composer from "../Composer";
 import TerminalFeed, { SelectCard } from "../TerminalFeed";
 import SessionPanels from "../SessionPanels";
+import SessionRename from "../SessionRename";
 import SubAgentChip from "../SubAgentChip";
+import { sessionTitle } from "../../_utils/sessionNote";
+import { useIsMobile } from "../../_hooks/useIsMobile";
 import styles from "./index.module.scss";
 
 interface ChatPaneProps {
@@ -75,12 +81,22 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     hubQueuedOf,
     focusedId,
     setFocused,
+    rightPaneOpen,
+    toggleRightPane,
   } = PortalStore;
+  // 状态卡去哪儿：宽屏进右栏，窄屏留在对话流末尾（那儿摆不下第三栏）
+  const isMobile = useIsMobile();
   const chatRef = useRef<HTMLDivElement>(null);
   const stickBottomRef = useRef(true);
   const rootRef = useRef<HTMLDivElement>(null);
   /** 本格是否窄到摆不下一排按钮（按实测宽度判定，不看视口 —— 决定拥挤的是格宽） */
   const [narrow, setNarrow] = useState(false);
+  /**
+   * 视图是否停在底部。为假时给一枚「回到底部」圆钮 ——
+   * 上滚看历史之后，原先没有任何回到最新内容的办法：滚动条被
+   * `display: none` 藏掉了，只能一路手动滚回去。
+   */
+  const [atBottom, setAtBottom] = useState(true);
 
   const id = task.id ?? "";
   const messages = messagesOf(id);
@@ -292,8 +308,21 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   const onChatScroll = () => {
     const el = chatRef.current;
     if (el) {
-      stickBottomRef.current =
-        el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      stickBottomRef.current = near;
+      // 只在跨过阈值那一下写 state：滚动事件每帧都来，无条件 setState
+      // 会让整条对话流跟着滚动重渲染。
+      setAtBottom((prev) => (prev === near ? prev : near));
+    }
+  };
+
+  /** 滚到底部。发送、以及点「回到底部」都走它 */
+  const scrollToBottom = () => {
+    stickBottomRef.current = true;
+    setAtBottom(true);
+    const el = chatRef.current;
+    if (el) {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     }
   };
 
@@ -362,13 +391,22 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
             {/* 号位：手机上看着这个号去钉钉发「@N …」。移动端头部是唯一能看到它的
                 地方（侧栏是抽屉、看完就收起了），所以这里必须有。 */}
             {task.slot != null && (
-              <Tooltip title={`钉钉里发「@${task.slot} 内容」即下发到这个终端`}>
-                <span className={styles.slotChip}>@{task.slot}</span>
+              <Tooltip title={`钉钉里发「#${task.slot} 内容」即下发到这个终端`}>
+                <span className={styles.slotChip}>#{task.slot}</span>
               </Tooltip>
             )}
-            <span className={styles.headTitleText}>
-              {task.title || task.prompt || task.projectName || "会话"}
-            </span>
+            {/* 点标题即改名。紧凑卡片除外 —— 那张卡整块都是「换到主区」的点击区，
+                标题再抢一次点击，右侧那列就没法用了。 */}
+            <SessionRename
+              taskId={id}
+              note={task.note}
+              disabled={compact || !id}
+              className={styles.headTitleEdit}
+            >
+              <span className={styles.headTitleText}>
+                {sessionTitle(task, "会话")}
+              </span>
+            </SessionRename>
           </div>
           <div className={styles.headMeta}>
             {/* 拆分可同时看多设备的会话：标题下标明本会话所属设备 */}
@@ -427,6 +465,18 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                     label: focusedId === id ? "还原为网格" : "放大这一格",
                     onClick: () => setFocused(id),
                   },
+                  // 右栏开关同样收进来：格子窄到折叠时它更需要 —— 那种宽度下
+                  // 正文与右栏抢地方，收放是高频动作
+                  ...(isMobile
+                    ? []
+                    : [
+                        {
+                          key: "rightPane",
+                          icon: <ProfileOutlined />,
+                          label: rightPaneOpen ? "收起会话状态栏" : "展开会话状态栏",
+                          onClick: toggleRightPane,
+                        },
+                      ]),
                   {
                     key: "sync",
                     icon: <SyncOutlined />,
@@ -488,6 +538,20 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                       focusedId === id ? <CompressOutlined /> : <ExpandOutlined />
                     }
                     onClick={() => setFocused(id)}
+                  />
+                </Tooltip>
+              ) : null}
+              {/* 右栏开关。照 VitaAgent 顶栏那枚 28×28 的面板钮
+                  （`web/src/pages/chat/index.tsx` 的 `panelBtn`）：亮起表示栏开着。
+                  窄屏不给 —— 那边没有第三栏，状态卡就在对话流里，开关无处可开。 */}
+              {!isMobile ? (
+                <Tooltip title={rightPaneOpen ? "收起会话状态栏" : "展开会话状态栏"}>
+                  <Button
+                    size="small"
+                    type="text"
+                    className={rightPaneOpen ? styles.paneBtnOn : undefined}
+                    icon={<ProfileOutlined />}
+                    onClick={toggleRightPane}
                   />
                 </Tooltip>
               ) : null}
@@ -556,123 +620,170 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
 
       <div className={styles.chat} ref={chatRef} onScroll={onChatScroll}>
         <Spin spinning={loading}>
-          {!loading && feedMessages.length === 0 ? (
-            <div className={styles.chatEmpty}>
-              <div className={styles.big}>💬</div>
-              <div>该会话暂无可展示的对话内容</div>
-            </div>
-          ) : (
-            <div className={styles.chatColumn}>
+          <div className={styles.chatColumn}>
+            {!loading && feedMessages.length === 0 && queuedItems.length === 0 ? (
+              <div className={styles.chatEmpty}>
+                <div className={styles.big}>💬</div>
+                <div>该会话暂无可展示的对话内容</div>
+              </div>
+            ) : (
               <TerminalFeed
                 messages={feedMessages}
                 running={task.status === "running"}
                 providerDsr={task.providerDsr}
                 imageCtx={imageCtx}
               />
-            </div>
-          )}
-        </Spin>
-      </div>
+            )}
 
-      {/* 清单与后台任务是「当前状态」而非时序事件：悬浮在本格右侧、可收起。
-          紧凑卡片不给 —— 它只有 320×260，这组悬浮面板会盖掉大半内容，而卡片的用途
-          就是「瞥一眼这个会话在干什么」。要看清单点一下把它换到主区即可。 */}
-      {!compact && (
-        <SessionPanels messages={messages} running={task.status === "running"} />
-      )}
+            {/* 清单 / 后台任务 / 子代理是「当前状态」而非时序事件 —— 所以宽屏把它们
+                放进右栏（见 SessionStatePane）：与正文并排、不跟着对话滚走，
+                往上翻历史时仍然看得见。
 
-      {/* 排队条同样不进紧凑卡片：它整条都是操作（撤回、打断），而紧凑卡片是只读的 */}
-      {!compact && queuedItems.length > 0 && (
-        <div className={styles.queuedStrip}>
-          <div className={styles.chatColumn}>
-            <div className={styles.queuedHead}>
-              <span className={styles.queuedTitle}>
-                <span className={styles.queuedDot} />
-                终端排队中 · {queuedItems.length}
-              </span>
-              <span className={styles.queuedActions}>
-                <span
-                  className={styles.recallAll}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => {
-                    const cmds = queuedItems
-                      .filter((q) => q.recallable && q.cmdId)
-                      .map((q) => q.cmdId as string);
-                    const nativeCount = queuedItems.filter(
-                      (q) => !q.recallable,
-                    ).length;
-                    // hub 队列里的（还没注入终端）走撤回 + 回填对话框
-                    if (cmds.length) {
-                      recallAllQueued(
-                        id,
-                        cmds,
-                        queuedItems
-                          .filter((q) => q.recallable)
-                          .map((q) => q.text)
-                          .join("\n"),
-                      );
-                    }
-                    // 已进终端原生队列的，注入 ↑ 键逐条撤回（iTerm2/Windows）
-                    if (nativeCount > 0) {
-                      termKey(id, "up", nativeCount);
-                    }
-                  }}
-                >
-                  全部撤回
-                </span>
-                {/* 注入 Esc：打断终端当前正在跑的那一轮，排队的内容随即开始执行。
-                    原先叫「插入会话」，看不出会打断什么 —— 而"打断"恰恰是这个按钮
-                    最该让人先知道的后果。 */}
-                <Tooltip title="打断终端当前正在执行的任务，让排队内容立即开始">
-                  <span
-                    className={styles.recallAll}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => termKey(id, "esc")}
-                  >
-                    打断并执行
+                **窄屏才留在这儿**：一块 390 宽的屏摆不下第三栏，退回对话流末尾是
+                唯一的去处。同一份内容任何时候只出现在一处，不会两边都有。
+
+                紧凑卡片仍然不给 —— 它只有 320×260，摆下这些就没剩多少地方看内容了。 */}
+            {!compact && isMobile && (
+              <SessionPanels
+                messages={messages}
+                running={task.status === "running"}
+              />
+            )}
+
+            {/* 排队卡：同样挂在对话流末尾，接在状态卡后面。
+
+                **与对话流是互补的两半，同一条任务任何时刻只出现在一处**：
+                进不进对话流、进不进排队卡，判据是同一个 `stillQueued`
+                （feedMessages 取 `!stillQueued(m)`、queuedItems 取 `stillQueued(m)`），
+                只有一份、没有第二套判断。所以把这块从输入框上方搬进对话流，
+                改的只是它待在哪儿，不会让同一条内容显示两遍。
+
+                紧凑卡片不给：它整块都是操作（撤回、打断），而紧凑卡片是只读的。 */}
+            {!compact && queuedItems.length > 0 && (
+              <section className={styles.queuedCard}>
+                {/* 卡片头：28×28 描边色块放图标 + 标题 + 一行元信息，
+                    与状态卡同一套规格（照 VitaAgent 的任务卡） */}
+                <div className={styles.queuedHead}>
+                  <span className={styles.queuedTile}>
+                    <ClockCircleOutlined />
                   </span>
-                </Tooltip>
-              </span>
-            </div>
-            <div className={styles.queuedList}>
-              {queuedItems.map((q, i) => (
-                <div key={i} className={styles.queuedItem}>
-                  <span className={styles.queuedItemText}>{q.text}</span>
-                  {/* 单条撤回从对话流搬到这里 —— 撤回是「队列管理」，跟排队条同属一处；
-                      留在正文里既与这块重复，又要为去重把消息藏起来。
-                      已进终端原生队列的撤不回（只能整体注入 ↑），仍只给个标签。 */}
-                  {q.recallable && q.cmdId ? (
+                  <span className={styles.queuedHeadText}>
+                    <span className={styles.queuedTitle}>终端排队中</span>
+                    <span className={styles.queuedMeta}>
+                      还有 {queuedItems.length} 条没轮到
+                    </span>
+                  </span>
+                  <span className={styles.queuedActions}>
                     <span
-                      className={styles.queuedItemRecall}
+                      className={styles.recallAll}
                       role="button"
                       tabIndex={0}
-                      onClick={() => recallInput(id, q.cmdId as string, q.text)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          recallInput(id, q.cmdId as string, q.text);
+                      onClick={() => {
+                        const cmds = queuedItems
+                          .filter((q) => q.recallable && q.cmdId)
+                          .map((q) => q.cmdId as string);
+                        const nativeCount = queuedItems.filter(
+                          (q) => !q.recallable,
+                        ).length;
+                        // hub 队列里的（还没注入终端）走撤回 + 回填对话框
+                        if (cmds.length) {
+                          recallAllQueued(
+                            id,
+                            cmds,
+                            queuedItems
+                              .filter((q) => q.recallable)
+                              .map((q) => q.text)
+                              .join("\n"),
+                          );
+                        }
+                        // 已进终端原生队列的，注入 ↑ 键逐条撤回（iTerm2/Windows）
+                        if (nativeCount > 0) {
+                          termKey(id, "up", nativeCount);
                         }
                       }}
                     >
-                      撤回
+                      全部撤回
                     </span>
-                  ) : (
-                    <span className={styles.queuedTag}>已入终端队列</span>
-                  )}
+                    {/* 注入 Esc：打断终端当前正在跑的那一轮，排队的内容随即开始执行。
+                        原先叫「插入会话」，看不出会打断什么 —— 而"打断"恰恰是这个按钮
+                        最该让人先知道的后果。 */}
+                    <Tooltip title="打断终端当前正在执行的任务，让排队内容立即开始">
+                      <span
+                        className={styles.recallAll}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => termKey(id, "esc")}
+                      >
+                        打断并执行
+                      </span>
+                    </Tooltip>
+                  </span>
                 </div>
-              ))}
-            </div>
-            {queuedItems.some((q) => !q.recallable) ? (
-              <div className={styles.queuedHint}>
-                「全部撤回」注入 ↑、「打断并执行」注入 Esc（仅 iTerm2 / Windows）；
-                Terminal.app 请在终端里手动按 ↑ / Esc（操作后此处自动同步）
-              </div>
-            ) : null}
+                <ul className={styles.queuedList}>
+                  {queuedItems.map((q, i) => (
+                    <li key={i} className={styles.queuedItem}>
+                      <span className={styles.queuedDot} />
+                      <span className={styles.queuedItemText}>{q.text}</span>
+                      {/* 单条撤回跟排队卡同属一处 —— 撤回是「队列管理」；
+                          留在正文里既与这块重复，又要为去重把消息藏起来。
+                          已进终端原生队列的撤不回（只能整体注入 ↑），仍只给个标签。 */}
+                      {q.recallable && q.cmdId ? (
+                        <span
+                          className={styles.queuedItemRecall}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() =>
+                            recallInput(id, q.cmdId as string, q.text)
+                          }
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              recallInput(id, q.cmdId as string, q.text);
+                            }
+                          }}
+                        >
+                          撤回
+                        </span>
+                      ) : (
+                        <span className={styles.queuedTag}>已入终端队列</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+                {queuedItems.some((q) => !q.recallable) ? (
+                  <div className={styles.queuedHint}>
+                    「全部撤回」注入 ↑、「打断并执行」注入 Esc（仅 iTerm2 / Windows）；
+                    Terminal.app 请在终端里手动按 ↑ / Esc（操作后此处自动同步）
+                  </div>
+                ) : null}
+              </section>
+            )}
           </div>
-        </div>
-      )}
+        </Spin>
+
+        {/* 回到底部。滚动条不再被藏掉（见 index.module.scss 的 scrollbar-gutter），
+            但上滚看历史之后仍需要一键回到最新内容 —— 尤其执行中，新内容一直在长。 */}
+        {!atBottom ? (
+          <div className={styles.toBottomDock}>
+            <span
+              className={styles.toBottomBtn}
+              role="button"
+              tabIndex={0}
+              aria-label="回到底部"
+              title="回到底部"
+              onClick={scrollToBottom}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  scrollToBottom();
+                }
+              }}
+            >
+              <ArrowDownOutlined />
+            </span>
+          </div>
+        ) : null}
+      </div>
 
       {/* 紧凑卡片不给输入区：卡片只有固定的一点高度，塞下输入框就没剩多少地方看内容。
           要发东西点一下把它换到主区 —— 那里才有完整的输入体验（附件、斜杠命令等）。 */}
@@ -734,6 +845,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
               sendInput(id, text);
               // 发送后强制滚到底部：即使之前上滚看历史，发出内容也应带着滚回底部
               stickBottomRef.current = true;
+              setAtBottom(true);
               requestAnimationFrame(() => {
                 const el = chatRef.current;
                 if (el) el.scrollTop = el.scrollHeight;

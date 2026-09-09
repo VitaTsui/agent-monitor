@@ -1,0 +1,167 @@
+@use "@hsu-react/ui/es/styles/responsive" as r;
+
+/**
+ * 前台路由出口下各视图共用的容器。
+ *
+ * 壳（Portal/index.tsx 的 .main）只保证「高度有界」，不加 overflow —— 会话面板
+ * 并不整页滚（消息流自己滚、输入框钉底），统一加滚动会把它弄坏。
+ * 所以「整页滚动」这件事由需要它的页面自己声明，也就是这里。
+ *
+ * 只服务前台。后管走的是组件库 Panel 那一套，两边不共用、也不互相覆盖。
+ */
+.page {
+  flex: 1;
+  // 少了这行，flex 子项的 min-height 默认 auto，内容再高也不肯收缩，
+  // overflow 就永远不触发
+  min-height: 0;
+  overflow-y: auto;
+  // 预留滚动条位置：内容够长的那几页会因为多出一条滚动条把整列往左挤，
+  // 在几个页面之间切换时标题会跳一下
+  scrollbar-gutter: stable;
+  /* 顶部 56：前台的列表页没有顶栏，标题从视口 y=56 起排（参照实测值）。
+     原来是 32，标题贴得太靠上、和侧栏顶部的品牌头挤在同一条线上。
+     底部 24 = 滚到底后最后一行离容器底的距离 */
+  padding: 56px 0 24px;
+
+  > * {
+    // 阅读列宽，与参照站的内容列一致
+    max-width: 832px;
+    margin: 0 auto;
+    padding: 0;
+  }
+}
+
+/**
+ * 所有列表页 / 详情页共用的骨架：**头部不滚、只有主体滚**（标题、返回、工具条
+ * 都钉在原地）。列表一长标题就滚没了，统一到这一套。
+ *
+ * 做法是「外层不滚、内层滚」而不是 sticky：sticky 要给吸顶态和初始态两套内边距，
+ * 纯 CSS 做不到、得挂滚动监听，还会有吸顶那一瞬的跳动。
+ *
+ * 代价写清楚：**滚动条落在内容列里面**，不在视口右缘 —— 头部站住了，
+ * 滚动条指的就是它下面那块在滚，这个位置反而是对的。
+ */
+.pageFixed {
+  composes: page;
+  // 自己不滚了，滚的是里面的 .fixedBody
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  // 底部留白交给内层，否则滚到底时那 24 是贴在视口上的固定空白，不跟着滚
+  padding-bottom: 0;
+
+  > * {
+    // 856 而不是 832：多出来的 24 是左右各 12 的「排水沟」，
+    // 让列表行的 hover 底色能比内容宽 12 而不越界撑出横向滚动条
+    max-width: 856px;
+
+    // 让 832 那一列自己成为「头部固定 ＋ 主体伸展」的纵向布局
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    // 必须显式给宽：`margin: 0 auto` 在 flex 列容器里会取消 stretch，
+    // 宽度退化成 fit-content
+    width: 100%;
+    min-height: 0;
+  }
+}
+
+/* 页面自己的头部与主体。**头部不滚、只有主体滚**。
+   左右各 12 的内边距是那条排水沟 */
+.fixedHead {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  padding: 0 12px;
+}
+
+.fixedBody {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 0 12px 24px;
+}
+
+/* 页面顶部的一行：返回 / 标题 / 右侧动作 */
+.headRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  margin-bottom: 14px;
+}
+
+.headTitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 返回 / 关闭：一律做成同规格的图标按钮，不同页面不再各画一个 */
+.headBtn {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--muted-foreground);
+  font-size: var(--text-md);
+
+  &:hover {
+    background: var(--overlay-1);
+    color: var(--foreground);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+}
+
+/* 移动端：内容列不再留左右大边距，安全区由页面自己让（见 HistoryView 的 .headSafe）——
+   这一层是共用骨架，统一让位会和页面自带的固定头部叠加，顶出一条空白 */
+@include r.down(md) {
+  .page {
+    padding: 0;
+  }
+
+  .pageFixed {
+    padding: 0;
+  }
+
+  .fixedHead {
+    padding: 0 16px;
+  }
+
+  .fixedBody {
+    padding: 0 16px calc(20px + env(safe-area-inset-bottom));
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .headRow {
+    // iOS 导航栏高度
+    min-height: 48px;
+    margin-bottom: 8px;
+  }
+
+  .headTitle {
+    font-size: 18px;
+    font-weight: 650;
+  }
+
+  .headBtn {
+    width: 36px;
+    height: 36px;
+    font-size: var(--text-lg);
+    color: var(--primary);
+  }
+}

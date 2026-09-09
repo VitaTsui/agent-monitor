@@ -1,3 +1,4 @@
+@use "@hsu-react/ui/es/styles/responsive" as r;
 // 项目特有的 antd 覆盖增量（组件库级覆盖由 @hsu-react/ui/es/styles/antd-overload.scss 提供，
 // 在 src/index.tsx 中先于本文件引入）；当前无增量
 
@@ -5,7 +6,7 @@
 // 移动端弹窗统一改「底部抽屉」：从下往上滑出，占约 3/4 屏（内容多则
 // 到 92dvh，内部滚动），顶部圆角 + 抓手条。覆盖全部 antd/hsu Modal。
 // ============================================================
-@media (max-width: 760px) {
+@include r.down(md) {
   .ant-modal-root .ant-modal-wrap {
     // 让弹窗贴底（antd 默认垂直方向 flex/定位居中）
     display: block;
@@ -51,8 +52,11 @@
     }
   }
 
-  // 移动端不显示右上角关闭钮，改为「下滑收起」（见 utils/sheetSwipe）。仍保留在 DOM 里，
-  // 供下滑关闭时编程 click 触发 onCancel。display:none 不影响 .click()。
+  // 移动端不显示右上角关闭钮：底部 sheet 的关闭手势是「下滑收起」（见 utils/sheetSwipe），
+  // 顶部抓手条就是它的提示；再挂一个小叉是两套并存的关闭入口。
+  // 手势不依赖这个节点 —— 它走 antd 自己的 Esc 通道，所以这里隐藏得干净。
+  // 另有两条退路始终在：点遮罩（组件式弹窗 maskClosable 默认 true）、
+  // 弹窗自己的「取消」按钮（Modal.confirm 一律有）。
   .ant-modal-root .ant-modal .ant-modal-close {
     display: none;
   }
@@ -98,7 +102,7 @@
   }
 }
 
-@media (max-width: 760px) {
+@include r.down(md) {
   .ant-modal-root .ant-modal .ant-modal-header {
     flex: none;
   }

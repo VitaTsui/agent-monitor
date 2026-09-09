@@ -69,12 +69,13 @@ dependencies = [
 
 [[package]]
 name = "am-client"
-version = "0.11.58"
+version = "0.11.59"
 dependencies = [
  "am-core",
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "core-foundation-sys",
  "dirs 5.0.1",
  "notify",
  "objc2-foundation",
@@ -94,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "am-core"
-version = "0.2.0"
+version = "0.11.59"
 dependencies = [
  "anyhow",
  "chrono",
@@ -108,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "am-hub"
-version = "0.11.58"
+version = "0.11.59"
 dependencies = [
  "aes",
  "aes-gcm",

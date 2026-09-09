@@ -70,15 +70,12 @@ pub fn upload_root() -> std::path::PathBuf {
 ///
 /// 不做限制的话，任何能向设备传文件的人都可以挑 `/root/.ssh`、`/etc/cron.d`
 /// 之类的目录写文件（文件名虽已过滤穿越，但目录本身就足够拿下机器）。
-/// 因此目标目录必须落在 `upload_root()` 之内。
-pub fn safe_upload_dir(dir: &str) -> Result<std::path::PathBuf, String> {
-    safe_upload_dir_within(dir, &[])
-}
-
-/// 同 `safe_upload_dir`，但除了 `upload_root()`，还额外允许写进 `extra_roots` 里的任一目录
-/// （传入本机活跃会话的项目 cwd）。原因：文件选目录弹窗是**相对会话 cwd**浏览的，项目常不在
-/// 家目录下；只按家目录校验会把「浏览进项目子目录再上传」这种合法操作误拒——表现为网页提示
-/// 上传成功、终端里却找不到文件。会话 cwd 是本机已在监控的合法目录，放行是安全的。
+/// 因此目标目录必须落在 `upload_root()`、或 `extra_roots` 里的任一目录之内。
+///
+/// `extra_roots` 传的是本机活跃会话的项目 cwd。原因：文件选目录弹窗是**相对会话 cwd**
+/// 浏览的，项目常不在家目录下；只按家目录校验会把「浏览进项目子目录再上传」这种合法操作
+/// 误拒——表现为网页提示上传成功、终端里却找不到文件。会话 cwd 是本机已在监控的合法目录，
+/// 放行是安全的。
 pub fn safe_upload_dir_within(
     dir: &str,
     extra_roots: &[std::path::PathBuf],
@@ -141,8 +138,8 @@ pub struct AppState {
     pub hub_latest_version: RwLock<Option<String>>,
     /// hub 下发的强制更新下限：本机低于它必须更新才能继续使用
     pub hub_min_version: RwLock<Option<String>>,
-    /// 每设备上报令牌（配对后持久化于 data_dir/device-token）
-    pub device_token: RwLock<Option<String>>,
+    /// 每设备上报令牌（配对后持久化到系统安全存储，见 secrets）
+    pub device_token: RwLock<Option<DeviceToken>>,
     /// 进行中的配对 (code, pair_token)
     pub pair_info: RwLock<Option<(String, String)>>,
     /// 最近一次上报被拒原因（托盘显示，与断网区分）
@@ -150,6 +147,37 @@ pub struct AppState {
 }
 
 pub type SharedState = Arc<AppState>;
+
+/// 每设备上报令牌 + 它的归属是否已确认。
+///
+/// `provisional` 为真：这张令牌来自 macOS 钥匙串里**旧版不区分机器**的那条条目
+/// （`AgentMonitor/device-token`），本地无从判断它属于哪台机器 —— 可能是本机升级前
+/// 自己写的，也可能是同一台 Mac 上另一个实例的。所以先拿来试，由 hub 裁决：
+/// - 上报成功 = hub 确认这张令牌绑的就是本机 machine_id → `adopt_device_token`
+///   写进本机专属键、删掉旧条目；
+/// - 被判 401 = 不是本机的（或已失效）→ 只从内存丢弃，**绝不删钥匙串里那条**，
+///   否则会把已安装客户端的令牌一起抹掉，害人家重新配对。
+pub struct DeviceToken {
+    pub value: String,
+    pub provisional: bool,
+}
+
+impl DeviceToken {
+    /// 归属已确认（本机专属键读出的 / 自家数据目录里的 / 刚配对签发的）
+    pub fn confirmed(value: String) -> Self {
+        Self {
+            value,
+            provisional: false,
+        }
+    }
+    /// 归属待确认（旧版共用条目读出的）
+    pub fn provisional(value: String) -> Self {
+        Self {
+            value,
+            provisional: true,
+        }
+    }
+}
 
 impl AppState {
     pub fn new(config: Config) -> SharedState {
@@ -175,6 +203,43 @@ impl AppState {
             pair_info: RwLock::new(None),
             hub_error: RwLock::new(None),
         })
+    }
+
+    /// 保存设备令牌（配对签发/换绑）：内存 + 系统安全存储的本机专属键。
+    pub async fn set_device_token(&self, token: &str) {
+        *self.device_token.write().await = Some(DeviceToken::confirmed(token.to_string()));
+        crate::secrets::save(&self.config.data_dir, &self.config.machine_id, token);
+    }
+
+    /// hub 认了这张暂用令牌：迁进本机专属键并删掉旧版共用条目。非暂用时是空操作。
+    pub async fn adopt_device_token(&self) {
+        if !matches!(self.device_token.read().await.as_ref(), Some(d) if d.provisional) {
+            return;
+        }
+        let mut guard = self.device_token.write().await;
+        if let Some(d) = guard.as_mut() {
+            if d.provisional {
+                crate::secrets::adopt_shared_legacy(
+                    &self.config.data_dir,
+                    &self.config.machine_id,
+                    &d.value,
+                );
+                d.provisional = false;
+                tracing::info!("设备令牌归属已确认，迁入本机专属键");
+            }
+        }
+    }
+
+    /// 令牌被 hub 判为无效：从内存丢弃；只有归属已确认的才连带清除本地存储
+    /// （暂用令牌可能是别的实例的，清了会害人家掉线）。
+    pub async fn invalidate_device_token(&self) {
+        let dropped = self.device_token.write().await.take();
+        match dropped {
+            Some(d) if d.provisional => {
+                tracing::info!("暂用设备令牌不属于本机，已丢弃（保留钥匙串旧条目不动）");
+            }
+            _ => crate::secrets::clear(&self.config.data_dir, &self.config.machine_id),
+        }
     }
 }
 
@@ -350,7 +415,7 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
     {
         use std::sync::atomic::Ordering;
         let n = SCAN_TICKS.fetch_add(1, Ordering::Relaxed);
-        if n < 3 || n % 40 == 0 {
+        if n < 3 || n.is_multiple_of(40) {
             let scanner = state.scanner.lock().await;
             let dir = scanner.projects_dir().to_path_buf();
             let (mut pdirs, mut jsonl) = (0u32, 0u32);
@@ -451,8 +516,11 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         use std::sync::atomic::Ordering;
         // 值 = (会话 id, 该 claude 的启动时间)。带 start_time 是为了防 pid 重用 —— 进程退出后
         // pid 被别的进程占用时启动时间对不上，条目立即失效（与终端锚 shell_start 同一思路）。
-        static PIN_ACC: std::sync::Mutex<Option<std::collections::HashMap<u32, (String, u64)>>> =
-            std::sync::Mutex::new(None);
+        // 用 tokio 的异步锁而非 std::sync::Mutex：下面两路采集要 `.await` 别的锁
+        // （state.procs / state.scanner），std 的 guard 跨 await 会把整个 future 变成
+        // !Send，且一旦将来有第二个调用方就会在 await 期间死占工作线程。
+        static PIN_ACC: tokio::sync::Mutex<Option<std::collections::HashMap<u32, (String, u64)>>> =
+            tokio::sync::Mutex::const_new(None);
         let tick = SCAN_TICKS.load(Ordering::Relaxed);
         // 本轮扫描到的活进程身份（pid → 启动时间），用来淘汰失效条目
         let alive: std::collections::HashMap<u32, u64> =
@@ -479,7 +547,7 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                     && s.created_ms > cur.created_ms
             })
         };
-        let mut guard = PIN_ACC.lock().unwrap();
+        let mut guard = PIN_ACC.lock().await;
         let acc = guard.get_or_insert_with(std::collections::HashMap::new);
         // 每轮淘汰（很便宜）：进程已退出 / pid 被重用 / 会话已被 /clear 取代
         acc.retain(|pid, (sid, start)| {
@@ -497,7 +565,7 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         // 首轮（tick==1，诊断块已 fetch_add 过所以从 1 起）两路都跑：否则启动后那段时间只能靠
         // mtime 启发式（易错位），正是「刚开客户端就下发」最容易配错的窗口。
         let unpaired = processes.iter().any(|p| !acc.contains_key(&p.pid));
-        let maintain = tick == 1 || tick % 20 == 0;
+        let maintain = tick == 1 || tick.is_multiple_of(20);
         let mut env_n = 0usize;
         let mut file_n = 0usize;
         let mut added = 0usize;
@@ -713,7 +781,10 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
             }
         }
         // 持久化（节流每 8 轮 ~12s）：写盘先于覆盖内存，写的是本轮真实配对（终端锚→会话）
-        if SCAN_TICKS.load(std::sync::atomic::Ordering::Relaxed) % 8 == 0 {
+        if SCAN_TICKS
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .is_multiple_of(8)
+        {
             save_anchor_pairs(&state.config.data_dir, &new_anchors);
         }
         *ANCHOR_PAIRS.lock().unwrap() = Some(new_anchors);
@@ -752,11 +823,11 @@ pub fn attach_machine(tasks: &mut [Task], machine_id: &str, hostname: &str, plat
 
 #[cfg(test)]
 mod upload_dir_tests {
-    use super::safe_upload_dir;
+    use super::safe_upload_dir_within;
 
     /// AM_UPLOAD_ROOT 是进程级全局状态，而 cargo test 默认多线程并行跑：
     /// 不串行化的话，几个用例会互相踩对方的 set/remove —— 谁先 remove，
-    /// 别人的 safe_upload_dir 就读到 fallback 的家目录，随机挂。
+    /// 别人的 safe_upload_dir_within 就读到 fallback 的家目录，随机挂。
     static ROOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn with_root<T>(root: &str, f: impl FnOnce() -> T) -> T {
@@ -772,12 +843,12 @@ mod upload_dir_tests {
     fn accepts_paths_inside_root() {
         with_root("/tmp/amroot", || {
             assert_eq!(
-                safe_upload_dir("/tmp/amroot/a/b").unwrap(),
+                safe_upload_dir_within("/tmp/amroot/a/b", &[]).unwrap(),
                 std::path::PathBuf::from("/tmp/amroot/a/b")
             );
             // 相对路径按 root 解析
             assert_eq!(
-                safe_upload_dir("a/b").unwrap(),
+                safe_upload_dir_within("a/b", &[]).unwrap(),
                 std::path::PathBuf::from("/tmp/amroot/a/b")
             );
         });
@@ -786,14 +857,14 @@ mod upload_dir_tests {
     #[test]
     fn rejects_paths_outside_root() {
         with_root("/tmp/amroot", || {
-            assert!(safe_upload_dir("/root/.ssh").is_err());
-            assert!(safe_upload_dir("/etc/cron.d").is_err());
+            assert!(safe_upload_dir_within("/root/.ssh", &[]).is_err());
+            assert!(safe_upload_dir_within("/etc/cron.d", &[]).is_err());
             // 穿越回上层
-            assert!(safe_upload_dir("/tmp/amroot/../../etc").is_err());
-            assert!(safe_upload_dir("../../etc").is_err());
+            assert!(safe_upload_dir_within("/tmp/amroot/../../etc", &[]).is_err());
+            assert!(safe_upload_dir_within("../../etc", &[]).is_err());
             // 前缀相同但不是子目录
-            assert!(safe_upload_dir("/tmp/amroot-evil").is_err());
-            assert!(safe_upload_dir("").is_err());
+            assert!(safe_upload_dir_within("/tmp/amroot-evil", &[]).is_err());
+            assert!(safe_upload_dir_within("", &[]).is_err());
         });
     }
 
@@ -801,7 +872,7 @@ mod upload_dir_tests {
     fn normalizes_dot_segments_inside_root() {
         with_root("/tmp/amroot", || {
             assert_eq!(
-                safe_upload_dir("/tmp/amroot/a/../b").unwrap(),
+                safe_upload_dir_within("/tmp/amroot/a/../b", &[]).unwrap(),
                 std::path::PathBuf::from("/tmp/amroot/b")
             );
         });
@@ -844,6 +915,7 @@ mod anchor_tests {
             command: "claude".into(),
             shell_pid: shell,
             shell_start,
+            shared_host: false,
         }
     }
 

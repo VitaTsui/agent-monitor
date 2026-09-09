@@ -37,6 +37,14 @@ export interface PortalMessage {
    * 单看内容说明不了什么（孤零零一个「1」），问题本身又不在流里 —— 不进对话流。
    */
   fromSelect?: boolean;
+  /**
+   * **这一步跑砸了**（只出现在 `role === "tool_result"` 上）。
+   *
+   * 后端只在为真时下发这个键（`am-core` `model.rs` 的 `MessageBrief::is_error`），
+   * 所以「缺失」就是「没出错」，不必和 `false` 区分。老版客户端上报的数据里没有
+   * 这个键，执行链退回改前的样子（每一步都不标失败），不会报错。
+   */
+  isError?: boolean;
 }
 
 /** AskUserQuestion 的一道题 */
@@ -111,6 +119,13 @@ interface IPortalTaskData {
    * 人早在终端上选完了，那份只能当记录看。）用户选完即由后续 hook 清除。
    */
   pendingSelect?: SelectPayload;
+  /**
+   * 用户给这个会话起的名字。有它就盖过自动标题（见 _utils/sessionNote 的 sessionTitle）。
+   *
+   * 挂在**终端窗口**上而不是会话 id 上，`/clear`、`--resume`、hub 重启都不丢；
+   * 没起过名字时后端下发 null。
+   */
+  note?: string | null;
 }
 export type PortalTaskData = Partial<IPortalTaskData>;
 
@@ -154,6 +169,17 @@ export interface SessionHistoryItem {
   project: string;
   title: string;
   provider: string;
+  /**
+   * 用户给这个终端起的名字。**没起过名字时后端连字段都不下发**（不是 null）——
+   * 备注不落盘，是读取时按 anchor 现 join 上去的（见 hub 的 history::with_note）。
+   * 所以判空只能靠 falsy，不能靠 `"note" in e`。
+   */
+  note?: string;
+  /**
+   * 备注的 join 键（machineId|终端锚）。纯内部字段，不渲染 ——
+   * 存量记录没有它，读回来是空串，于是匹配不到任何备注、回落到 title。
+   */
+  anchor?: string;
 }
 
 /**
@@ -173,6 +199,15 @@ export const getPortalTaskMessages = async (id: string, limit?: number) => {
   return await get<ListRes<PortalMessage>>(`/monitor/tasks/${id}/messages`, {
     params: { limit },
   });
+};
+
+/**
+ * 设置或清除会话备注。传空串 = 清除，恢复自动标题。
+ *
+ * 超长（>100 字）后端报 400 而不是静默截断，msg 里带实际字数，直接展示即可。
+ */
+export const setPortalTaskNote = async (id: string, note: string) => {
+  return await post<{ note: string | null }>(`/monitor/tasks/${id}/note`, { note });
 };
 
 export interface SlashCommand {

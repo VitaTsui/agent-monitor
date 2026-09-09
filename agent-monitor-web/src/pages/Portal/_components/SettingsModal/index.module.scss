@@ -1,92 +1,31 @@
-$oat: var(--card); // 面板面，不是品牌淡染
-$border: color-mix(in srgb, var(--foreground) 9%, transparent);
-$text: var(--foreground);
-$muted: var(--muted-foreground);
-$accent: var(--primary);
-$hover: color-mix(in srgb, var(--foreground) 6%, transparent);
+@use "@hsu-react/ui/es/styles/responsive" as r;
 
+/**
+ * 设置弹窗的骨架。
+ *
+ * 桌面：960 宽的居中弹窗，左栏 190 常驻 ＋ 右侧内容列（内容列自己滚）。
+ * 移动端：弹窗被 styles/antd-overload.scss 统一改成底部 sheet，这里再按
+ * iOS 设置式分两级 —— 一级是菜单列表，二级是分栏内容，由 `.atMenu` 决定露哪一半。
+ */
 .SettingsModal {
-  .paneHead {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 4px;
-  }
-
-  // 接入他人电脑：独立入口卡片
-  .connectEntry {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-top: 18px;
-    padding: 14px 16px;
-    border: 1px solid color-mix(in srgb, var(--primary) 22%, transparent);
-    border-radius: var(--radius-lg);
-    background: var(--muted);
-    cursor: pointer;
-    transition: all 0.18s;
-
-    &:hover {
-      border-color: color-mix(in srgb, var(--primary) 50%, transparent);
-      box-shadow: 0 4px 14px color-mix(in srgb, var(--primary) 15%, transparent);
-    }
-
-    .connectEntryIcon {
-      flex: none;
-      width: 38px;
-      height: 38px;
-      border-radius: var(--radius);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: var(--text-lg);
-      color: var(--primary-foreground);
-      background: $accent;
-    }
-
-    .connectEntryText {
-      flex: 1;
-      min-width: 0;
-
-      .connectEntryTitle {
-        font-size: var(--text-md);
-        font-weight: 600;
-        color: $text;
-      }
-
-      .connectEntryDesc {
-        margin-top: 2px;
-        font-size: var(--text-sm);
-        color: $muted;
-      }
-    }
-
-    .connectEntryArrow {
-      flex: none;
-      font-size: var(--text-base);
-      color: $muted;
-    }
-  }
-
-  :global(.ant-modal-container) {
-    padding: 0;
-    overflow: hidden;
-    border-radius: var(--radius-lg);
-  }
-
-  // antd 给 .ant-modal-body 留了默认的左右内边距，会在弹窗最外侧留出两道空隙，
-  // 左侧导航的底色够不到左边缘、右侧内容也够不到右边缘。这里的 layout 要自己
-  // 铺满整个弹窗，故清零。
   :global(.ant-modal-body) {
     padding: 0;
   }
 
-  .layout {
-    display: flex;
-    height: 640px;
-    max-height: calc(100vh - 120px);
-    position: relative;
+  // 没有标题栏（见 index.tsx 的 title={null}），关闭钮要浮在内容右上角 ——
+  // 否则 antd 会按「无 header」把它排进文档流里，把内容顶下去一截
+  :global(.ant-modal-close) {
+    top: 10px;
+    inset-inline-end: 12px;
+    z-index: 2;
   }
+}
+
+/* 固定高度而不是随内容伸缩：七个分栏内容长短差得远，跟着变高会让弹窗在
+   切分栏时上下跳。730 在矮屏上会顶出视口，所以与视口高取小。 */
+.body {
+  display: flex;
+  height: min(730px, calc(100vh - 120px));
 
   // 移动端二级头部：桌面隐藏
   .mobileHead {
@@ -97,152 +36,145 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
     display: none;
   }
 
-  // 身份 pill：仅移动端 sheet 用（桌面隐藏）
+  // 身份 pill：仅移动端用（桌面隐藏）
   .identityPill {
     display: none;
   }
+}
 
-  // 右上角关闭按钮（弹窗无标题栏，需要显式的关闭入口）
-  .closeBtn {
-    position: absolute;
-    top: 12px;
-    right: 14px;
-    z-index: 2;
-    width: 30px;
-    height: 30px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: var(--radius);
-    cursor: pointer;
-    color: $muted;
-    font-size: var(--text-md);
+/* 左侧分类导航（对齐 claude.ai 设置页）。
+   选中态是一层低调的填充，不是浮起来的白色卡片。 */
+.nav {
+  flex: none;
+  width: 190px;
+  padding: 18px 8px;
+  border-right: 1px solid var(--overlay-2);
+  overflow-y: auto;
+}
 
-    &:hover {
-      background: $hover;
-      color: $text;
+.navTitle {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--foreground);
+  padding: 4px 10px 14px;
+}
+
+.navItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: var(--text-md);
+  color: var(--foreground);
+  margin-bottom: 2px;
+
+  :global(.anticon) {
+    font-size: var(--text-lg);
+    color: var(--muted-foreground);
+  }
+
+  &:hover {
+    background: var(--overlay-1);
+  }
+
+  &.active {
+    background: var(--overlay-2);
+    font-weight: 500;
+
+    :global(.anticon) {
+      color: var(--foreground);
     }
   }
 
-  // 左侧分类导航（对齐 claude.ai 设置弹窗）
-  // claude 的选中态是一层低调的填充，不是浮起来的白色卡片；
-  // 标题用 15px 半粗，与对话页侧栏的层级保持一致。
-  .nav {
-    width: 200px;
-    min-width: 200px;
-    background: $oat;
-    border-right: 1px solid $border;
-    padding: 18px 8px;
-
-    .navTitle {
-      font-size: var(--text-md);
-      font-weight: 600;
-      color: $text;
-      padding: 4px 10px 14px;
-    }
-
-    .navItem {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 8px 10px;
-      border-radius: var(--radius);
-      cursor: pointer;
-      font-size: var(--text-md);
-      color: $text;
-      margin-bottom: 2px;
-
-      :global(.anticon) {
-        font-size: var(--text-lg);
-        color: $muted;
-      }
-
-      &:hover {
-        background: $hover;
-      }
-
-      &.active {
-        background: color-mix(in srgb, var(--foreground) 9%, transparent);
-        font-weight: 500;
-
-        :global(.anticon) {
-          color: $text;
-        }
-      }
-
-      // 只让标题占满剩余空间；彩色图标 chip 与角标各自保持原宽
-      .navLabel {
-        flex: 1;
-        min-width: 0;
-      }
-    }
+  &:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: -2px;
   }
 
-  // 右侧内容：可滚动但不显示滚动条轨道
-  .content {
+  // 只让标题占满剩余空间；图标与角标各自保持原宽
+  .navLabel {
     flex: 1;
     min-width: 0;
-    overflow-y: auto;
-    padding: 24px 26px;
-    background: var(--card);
-    scrollbar-width: none;
+  }
+}
 
-    &::-webkit-scrollbar {
-      display: none;
+/* 内容列。左右各 24 —— 960 减去左栏 190 与那条 1px 线，正好剩 720 的阅读列。
+   顶部 28 是给右上角关闭钮让位。 */
+.panel {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 28px 24px 24px;
+}
+
+// 分栏首次加载（懒加载切块落地）时的占位，避免内容列瞬间塌成 0 高
+.panelLoading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 120px;
+}
+
+// ============================================================
+// 移动端：底部 sheet ＋ iOS 设置式两级
+// ============================================================
+@include r.down(md) {
+  .SettingsModal {
+    /* **给一个确定的高度**，而不是让内容把 sheet 撑起来。
+     *
+     * 根因：全局那条 `.ant-modal-container { min-height: 40dvh }`
+     * （styles/antd-overload.scss）是所有弹窗的**地板**，不是设置的身高。
+     * 设置在移动端是 iOS 式两级：第一级只是一列七行菜单，约 290 高 ——
+     * 撑不到地板，于是 sheet 精确地停在 40dvh（390×844 下实测 338px），
+     * 一张半屏都不到的卡片里放着整个设置。第二级（如「设备」）内容一多又
+     * 会窜到 92dvh，同一个弹窗在两级之间高度翻倍。
+     *
+     * 桌面端本来就是定高（上面的 `height: min(730px, 100vh - 120px)`），
+     * 理由一样：几个分栏内容长短不一，跟着内容变高会让弹窗在切分栏时上下跳。
+     * 移动端沿用同一条规则，只是把上限换成视口比例。 */
+    :global(.ant-modal-container) {
+      height: min(720px, 92dvh);
+    }
+
+    // sheet 自带顶部抓手条与安全区内边距（antd-overload），这里只负责两级切换
+    :global(.ant-modal-body) {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
     }
   }
 
-  // 移动端：iOS 设置式两级界面 —— 一级=菜单列表，二级=分区内容（固定
-  // 头部：返回 + 标题 + 关闭，内容区单独滚动，关闭钮永远可达）
-  @media (max-width: 760px) {
-    // 固定全屏：不同分栏内容高度不同会让抽屉式 sheet「高高低低变来变去」，
-    // 这里锁死为整屏高度，切换分栏时高度不再跳动，也不再露出顶部背景间隙。
-    :global(.ant-modal-container) {
-      height: 100dvh !important;
-      max-height: 100dvh !important;
-      min-height: 100dvh !important;
-      border-radius: 0 !important;
-      padding-top: env(safe-area-inset-top) !important;
+  .body {
+    flex: 1;
+    min-height: 0;
+    height: auto;
+    flex-direction: column;
+    overflow: hidden;
 
-      // 全屏页不需要底部抽屉的顶部抓手条
-      &::before {
-        display: none !important;
-      }
-    }
-
-    // 弹窗 body 自身不滚动：否则会连着头部一起滚（antd-overload 给移动端 body 挂了
-    // overflow-y:auto）。改为 body 不滚、只让内部 .content 单独滚，头部才能真正钉住。
-    :global(.ant-modal-body) {
-      overflow: hidden !important;
-    }
-
-    .layout {
-      flex-direction: column;
-      height: 100%;
-      overflow: hidden;
-    }
-
-    // 固定头部（不随内容滚动）
+    // 固定头部（不随内容滚动）：左侧返回 / 居中标题 / 右侧关闭
     .mobileHead {
       display: flex;
       align-items: center;
       justify-content: center;
       position: relative;
       flex: none;
-      height: 48px;
-      border-bottom: 0.5px solid color-mix(in srgb, var(--foreground) 14%, transparent);
+      height: 44px;
+      margin-bottom: 4px;
 
       .mobileHeadTitle {
         font-size: 18px;
         font-weight: 650;
-        color: $text;
+        color: var(--foreground);
       }
 
       .mobileBack {
         position: absolute;
-        left: 6px;
+        left: 0;
         top: 0;
-        height: 48px;
+        height: 44px;
         display: flex;
         align-items: center;
         gap: 3px;
@@ -261,634 +193,188 @@ $hover: color-mix(in srgb, var(--foreground) 6%, transparent);
           }
         }
       }
-    }
 
-    // 关闭钮：右上角白色圆形按钮（左上角留给二级页的「返回」，互不冲突）
-    .closeBtn {
-      top: 7px;
-      right: 12px;
-      left: auto;
-      width: 34px;
-      height: 34px;
-      border-radius: 50%;
-      background: var(--card);
-      color: $text;
-      font-size: var(--text-md);
-      box-shadow: 0 1px 4px color-mix(in srgb, var(--foreground) 16%, transparent);
-      z-index: 3;
-
-      &:hover {
-        background: var(--card);
-        color: $text;
-      }
-    }
-
-    // 一级：iOS 设置式分组列表（灰底页面 + 白色圆角分组卡 + 彩色图标 + 分隔线）
-    .nav {
-      flex: 1;
-      width: 100%;
-      min-width: 0;
-      border-right: none;
-      background: #f2f3f5; // iOS 分组列表页面底色
-      padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
-      overflow-y: auto;
-
-      .navTitle {
-        display: none;
-      }
-
-      // Claude sheet 顶部身份 pill：白色圆角行，头像 + 名字 + chevron
-      .identityPill {
+      // 关闭：右上角。移动端 antd 自带的关闭钮是 display:none（见
+      // styles/antd-overload.scss），sheet 的关闭靠下滑手势与这一枚
+      .mobileClose {
+        position: absolute;
+        right: 0;
+        top: 0;
+        width: 44px;
+        height: 44px;
         display: flex;
         align-items: center;
-        gap: 12px;
-        padding: 12px 14px;
-        margin-bottom: 18px;
-        background: var(--card);
-        border-radius: var(--radius-lg);
+        justify-content: center;
+        color: var(--muted-foreground);
+        font-size: var(--text-lg);
         cursor: pointer;
 
-        .identityAvatar {
-          flex: none;
-          width: 34px;
-          height: 34px;
-          border-radius: 50%;
-          background: $accent;
-          color: var(--primary-foreground);
-          font-size: var(--text-md);
-          font-weight: 600;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-        }
-
-        .identityName {
-          flex: 1;
-          min-width: 0;
-          font-size: var(--text-lg);
-          font-weight: 600;
-          color: $text;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .identityArrow {
-          flex: none;
-          color: var(--border);
-          font-size: var(--text-md);
-        }
-
         &:active {
-          background: var(--muted);
-        }
-      }
-
-      // 整组做成一张白色圆角卡
-      .navList {
-        background: var(--card);
-        border-radius: var(--radius-lg);
-        overflow: hidden;
-      }
-
-      .navItem {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 12px 14px;
-        font-size: 16.5px;
-        border-radius: 0;
-        margin: 0;
-
-        // 分隔线：从图标右侧起（iOS 惯例，内缩到文字对齐），最后一项无线
-        position: relative;
-
-        &:not(:last-child)::after {
-          content: "";
-          position: absolute;
-          left: 52px;
-          right: 0;
-          bottom: 0;
-          height: 0.5px;
-          background: color-mix(in srgb, var(--foreground) 12%, transparent);
-        }
-
-        // Claude 风格：单色细线图标（不是 iOS 的彩色圆角块）
-        .navIcon {
-          flex: none;
-          width: 26px;
-          height: 26px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          background: transparent;
-          color: var(--muted-foreground);
-
-          :global(.anticon) {
-            font-size: 21px;
-            color: var(--muted-foreground);
-          }
-        }
-
-        .navLabel {
-          flex: 1;
-          min-width: 0;
-        }
-
-        .navChevron {
-          display: inline-flex;
-          flex: none;
-          margin-left: auto;
-          color: var(--border);
-          font-size: var(--text-lg);
-        }
-
-        // 一级抽屉式列表无持久选中态：进二级返回后不该有项还高亮
-        &.active {
-          background: transparent;
-          font-weight: 400;
-
-          .navChevron {
-            color: var(--border);
-          }
-
-          .navIcon :global(.anticon) {
-            color: var(--muted-foreground);
-          }
-        }
-
-        &:active {
-          background: color-mix(in srgb, var(--foreground) 6%, transparent);
-        }
-      }
-    }
-
-    .content {
-      flex: 1;
-      min-height: 0;
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
-      padding: 16px 16px calc(20px + env(safe-area-inset-bottom));
-
-      // 顶部固定头部已显示分区标题，内容区再来一个大标题是重复 —— 隐藏
-      .paneTitle {
-        display: none;
-      }
-    }
-
-    // 设备卡片：窄屏下操作按钮换行到设备信息下方，不再横向挤压设备名
-    .device {
-      flex-direction: column;
-      align-items: stretch;
-
-      .devActions {
-        flex-wrap: wrap;
-        justify-content: flex-end;
-        gap: 6px;
-        margin-top: 6px;
-
-        // 收小胶囊：之前偏大、和「删除」文字按钮不协调；紧凑些更均衡，仍够触控。
-        // 注意要用 !important 盖过 antd-overload 里移动端弹窗按钮的 min-height:42px。
-        .actBtn,
-        .shareBtn,
-        .trustBtn {
-          height: 28px !important;
-          min-height: 28px !important;
-          padding-inline: 12px !important;
-          font-size: var(--text-sm) !important;
-          border-radius: 999px !important;
-        }
-
-        .delBtn {
-          height: 28px !important;
-          min-height: 28px !important;
-          padding-inline: 8px !important;
-          font-size: var(--text-sm) !important;
-        }
-      }
-    }
-
-    // 视图切换
-    .layout.mobileMenu .content {
-      display: none;
-    }
-
-    .layout.mobileContent .nav {
-      display: none;
-    }
-  }
-
-  .pane {
-    .paneTitle {
-      font-size: 18px;
-      font-weight: 600;
-      color: $text;
-      margin-bottom: 18px;
-    }
-  }
-
-  // 账户：全宽信息卡，避免右侧大片留白。
-  // 用中性描边而非彩色描边 —— claude 的设置卡片不靠主色抢注意力。
-  .account {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    margin-bottom: 22px;
-    padding: 16px 18px;
-    border: 1px solid $border;
-    border-radius: var(--radius-lg);
-
-    .avatar {
-      width: 48px;
-      height: 48px;
-      min-width: 48px;
-      border-radius: 50%;
-      background: $accent;
-      color: var(--primary-foreground);
-      font-size: 20px;
-      font-weight: 600;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .accName {
-      font-size: var(--text-md);
-      font-weight: 600;
-      color: $text;
-    }
-
-    .accMeta {
-      margin-top: 3px;
-      font-size: 12.5px;
-      color: $muted;
-    }
-  }
-
-  // 设备管理
-  .hint {
-    font-size: var(--text-sm);
-    color: color-mix(in srgb, var(--foreground) 60%, transparent);
-    background: color-mix(in srgb, var(--primary) 6%, transparent);
-    border-radius: var(--radius);
-    padding: 10px 12px;
-    line-height: 1.6;
-    margin-bottom: 16px;
-
-    code {
-      background: color-mix(in srgb, var(--foreground) 7%, transparent);
-      border-radius: 4px;
-      padding: 0 4px;
-      font-size: var(--text-xs);
-    }
-  }
-
-  .section {
-    margin-bottom: 18px;
-
-    .sectionTitle {
-      font-size: var(--text-base);
-      font-weight: 600;
-      color: color-mix(in srgb, var(--foreground) 60%, transparent);
-      margin-bottom: 8px;
-    }
-  }
-
-  .device {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    padding: 10px 12px;
-    border: 1px solid $border;
-    border-radius: var(--radius-lg);
-    margin-bottom: 8px;
-
-    .devInfo {
-      min-width: 0;
-
-      .devName {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        font-size: var(--text-base);
-        font-weight: 600;
-        color: $text;
-        flex-wrap: wrap;
-      }
-
-      .devMeta {
-        margin-top: 4px;
-        font-size: var(--text-xs);
-        color: $muted;
-      }
-    }
-
-    // 本机客户端 · 监控范围：与设备行同一视觉语言（圆角卡片行）
-
-    .devActions {
-      display: flex;
-      gap: 6px;
-      white-space: nowrap;
-      align-items: center;
-
-      // 统一按钮：小胶囊，默认描边低调，各自 hover 表意
-      .actBtn,
-      .shareBtn,
-      .trustBtn {
-        height: 28px;
-        border-radius: var(--radius-full);
-        padding-inline: 14px;
-        font-size: var(--text-sm);
-        transition: all 0.18s;
-      }
-
-      // 撤销信任 / 断开：中性描边，hover 转警示
-      .actBtn {
-        color: $muted;
-        border-color: $border;
-        background: transparent;
-
-        &:hover {
-          color: var(--destructive);
-          border-color: var(--destructive-subtle);
-          background: var(--destructive-subtle);
-        }
-      }
-
-      // 协助共享：主题色描边，hover 填充
-      .shareBtn {
-        color: $accent;
-        border-color: color-mix(in srgb, var(--primary) 45%, transparent);
-        background: transparent;
-
-        &:hover {
-          color: var(--primary-foreground);
-          border-color: $accent;
-          background: $accent;
-        }
-      }
-
-      // 信任：主色实心
-      .trustBtn {
-        box-shadow: 0 2px 6px color-mix(in srgb, var(--primary) 25%, transparent);
-      }
-
-      // 删除：极低调，hover 才显红
-      .delBtn {
-        color: $muted;
-
-        &:hover {
-          color: var(--destructive);
+          color: var(--foreground);
         }
       }
     }
   }
 
-  // 更新进度（版本行内）
-  .updateProgress {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 4px;
-    max-width: 320px;
-
-    :global(.ant-progress) {
-      flex: 1;
-      margin: 0;
-    }
-
-    .updateProgressText {
-      flex: none;
-      font-size: var(--text-xs);
-      color: $muted;
-      white-space: nowrap;
-    }
-  }
-
-  // 检查更新：主题色胶囊描边，悬停填充
-  .checkUpdateBtn {
-    height: 26px;
-    border-radius: var(--radius-full);
-    padding-inline: 14px;
-    font-size: var(--text-sm);
-    color: $accent;
-    border-color: color-mix(in srgb, var(--primary) 45%, transparent);
-    background: transparent;
-    transition: all 0.2s;
-
-    &:hover {
-      color: var(--primary-foreground);
-      border-color: $accent;
-      background: $accent;
-    }
-  }
-
-  // 有新版时的「更新」按钮：实心主题色 + 白字（胶囊形），文字清晰不与底色同色。
-  // 强制白字（含内层 span），避免组件库主题把文字色设成主题色而与底色重合。
-  .updateNowBtn {
-    height: 26px;
-    border-radius: var(--radius-full);
-    padding-inline: 14px;
-    font-size: var(--text-sm);
-    background: $accent !important;
-    border-color: $accent !important;
-
-    &,
-    span,
-    :global(.anticon) {
-      color: var(--primary-foreground) !important;
-    }
-
-    &:hover,
-    &:focus {
-      background: var(--primary-hover) !important;
-      border-color: var(--primary-hover) !important;
-    }
-  }
-
-  .termScope {
-    margin-top: 12px;
-
-    .termScopeTitle {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: var(--text-base);
-      font-weight: 600;
-      color: $text;
-      margin-bottom: 8px;
-
-      &::before {
-        content: "";
-        width: 3px;
-        height: 12px;
-        border-radius: 2px;
-        background: $accent;
-      }
-    }
-
-    .termScopeRow {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 9px 12px;
-      border: 1px solid $border;
-      border-radius: var(--radius);
-      margin-bottom: 6px;
-      transition: border-color 0.15s, background 0.15s;
-
-      &:hover {
-        border-color: color-mix(in srgb, var(--primary) 35%, transparent);
-        background: color-mix(in srgb, var(--primary) 4%, transparent);
-      }
-
-      .termScopeName {
-        font-size: var(--text-base);
-        color: $text;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-    }
-
-    .termScopeEmpty {
-      padding: 14px 12px;
-      border: 1px dashed $border;
-      border-radius: var(--radius);
-      font-size: var(--text-sm);
-      color: $muted;
-      text-align: center;
-    }
-
-    .termScopeHint {
-      margin-top: 2px;
-      font-size: var(--text-xs);
-      color: $muted;
-    }
-  }
-
-  // 关于
-  .about {
-    text-align: center;
-    padding: 20px 0;
-
-    .aboutLogo {
-      width: 60px;
-      height: 60px;
-      border-radius: var(--radius-lg);
-      background: $accent;
-      color: var(--primary-foreground);
-      font-size: 28px;
-      font-weight: 700;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      margin: 0 auto 14px;
-    }
-
-    .aboutName {
-      font-size: var(--text-lg);
-      font-weight: 600;
-      color: $text;
-      margin-bottom: 8px;
-    }
-
-    .aboutDesc {
-      font-size: var(--text-base);
-      color: $muted;
-      line-height: 1.7;
-      max-width: 380px;
-      margin: 0 auto;
-    }
-  }
-
-  // 额度
-  .quotaRow {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 12px;
-
-    .quotaLabel {
-      font-size: var(--text-base);
-      color: color-mix(in srgb, var(--foreground) 70%, transparent);
-      min-width: 110px;
-    }
-  }
-
-  .quotaUsed {
-    font-size: var(--text-sm);
-    color: $muted;
-  }
-
-  .quotaInput {
-    // 拉满剩余宽度，别在行尾留大片空白
+  /* 一级：iOS 设置式分组列表（整组一张圆角卡 ＋ 项间分隔线）。
+     卡片底走 --overlay-1（前景色的 6% 叠加）而不是 --card —— sheet 本身
+     已经是 --card 了，再铺一层同色就看不出分组。 */
+  .nav {
     flex: 1;
+    width: 100%;
+    min-width: 0;
+    border-right: none;
+    padding: 0 0 8px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
-  // 用量百分比进度条
-  .quotaProgress {
-    margin: 6px 0 8px;
+  .navTitle {
+    display: none;
   }
-}
 
-// 安全防护
-.SettingsModal {
-  .guardRow {
+  // Claude sheet 顶部身份 pill：圆角行，头像 + 名字 + chevron。
+  // 必须落在 `.nav` 里面 —— 桌面那条 `.body .identityPill { display: none }`
+  // 是两级选择器，顶层单类压不过它
+  .nav .identityPill {
     display: flex;
     align-items: center;
     gap: 12px;
+    padding: 12px 14px;
     margin-bottom: 18px;
+    background: var(--overlay-1);
+    border-radius: var(--radius-lg);
+    cursor: pointer;
 
-    .guardLabel {
-      font-size: var(--text-base);
-      color: color-mix(in srgb, var(--foreground) 75%, transparent);
+    .identityAvatar {
+      flex: none;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      background: var(--primary);
+      color: var(--primary-foreground);
+      font-size: var(--text-md);
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .identityName {
+      flex: 1;
+      min-width: 0;
+      font-size: var(--text-lg);
+      font-weight: 600;
+      color: var(--foreground);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .identityArrow {
+      flex: none;
+      color: var(--border);
+      font-size: var(--text-md);
+    }
+
+    &:active {
+      background: var(--overlay-2);
     }
   }
 
-  .builtinPatterns {
+  // 整组做成一张圆角卡
+  .navList {
+    background: var(--overlay-1);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+
+  .navItem {
     display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    font-size: 16.5px;
+    border-radius: 0;
+    margin: 0;
 
-    .patternTag {
-      font-family: "SF Mono", Menlo, Consolas, monospace;
-      font-size: var(--text-xs);
-      margin: 0;
+    // 分隔线：从图标右侧起（iOS 惯例，内缩到文字对齐），最后一项无线
+    position: relative;
+
+    &:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      left: 52px;
+      right: 0;
+      bottom: 0;
+      height: 0.5px;
+      background: color-mix(in srgb, var(--foreground) 12%, transparent);
+    }
+
+    // Claude 风格：单色细线图标（不是 iOS 的彩色圆角块）
+    .navIcon {
+      flex: none;
+      width: 26px;
+      height: 26px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      color: var(--muted-foreground);
+
+      :global(.anticon) {
+        font-size: 21px;
+        color: var(--muted-foreground);
+      }
+    }
+
+    .navLabel {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .navChevron {
+      display: inline-flex;
+      flex: none;
+      margin-left: auto;
+      color: var(--border);
+      font-size: var(--text-lg);
+    }
+
+    // 一级列表无持久选中态：进二级返回后不该有项还高亮
+    &.active {
+      background: transparent;
+      font-weight: 400;
+
+      .navChevron {
+        color: var(--border);
+      }
+
+      .navIcon :global(.anticon) {
+        color: var(--muted-foreground);
+      }
+    }
+
+    &:hover {
+      background: transparent;
+    }
+
+    &:active {
+      background: var(--overlay-1);
     }
   }
 
-  .guardSave {
-    margin-top: 10px;
+  .panel {
+    padding: 0;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  // 视图切换：一级只露菜单，二级只露内容
+  .atMenu .panel {
+    display: none;
+  }
+
+  .body:not(.atMenu) .nav {
+    display: none;
   }
 }
-
-// 弹窗内控件统一 Claude 色调
-.SettingsModal {
-  :global(.ant-btn-primary) {
-    background: $accent !important;
-    border-color: $accent !important;
-
-    &:hover:not(:disabled) {
-      background: var(--primary-hover) !important;
-      border-color: var(--primary-hover) !important;
-    }
-  }
-
-  :global(.ant-switch-checked) {
-    background: $accent !important;
-  }
-
-  // hsu-ui TextArea 包裹层的深色边框调淡
-  :global([class*="textarea--"]) {
-    border-color: color-mix(in srgb, var(--foreground) 18%, transparent) !important;
-    border-radius: var(--radius);
-
-    &:focus-within {
-      border-color: color-mix(in srgb, var(--primary) 50%, transparent) !important;
-    }
-  }
-}
-

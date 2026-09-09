@@ -47,6 +47,7 @@
 
 - **macOS**：`bash scripts/package-macos.sh` 产出 `target/release/bundle/终端任务监控.app`
   （ad-hoc 签名，双击即用，不占 Dock），同时产出自更新用的 `target/dist/agent-monitor-mac.zip`。
+  里面是 arm64 + x86_64 的 universal 二进制（`lipo` 合的），Apple 芯片与 Intel 共用一个包。
 - **Windows**：`bash scripts/package-windows.sh` 产出 `target/dist/AgentMonitor-<版本>-setup.exe`
   （NSIS 中文安装向导，可选安装位置 / 桌面图标 / 开机自启；在 mac 上交叉构建需
   `cargo install cargo-xwin` 与 `brew install makensis`）。
@@ -172,13 +173,13 @@ $env:AM_HUB_URL="http://<hub-ip>:8383"; .\agent-monitor.exe
 
 | 平台 | 产物 |
 | --- | --- |
-| macOS (Apple Silicon) | `agent-monitor-<版本>-macos-arm64.zip` —— 解压得到 `终端任务监控.app` |
+| macOS (Apple Silicon / Intel) | `agent-monitor-<版本>-macos-universal.zip` —— 解压得到 `终端任务监控.app`（universal 二进制，两种芯片通用） |
 | Windows (x64) | `agent-monitor-<版本>-windows-x64.exe` —— NSIS 中文安装向导 |
 
 每个产物配一份同名 `.sha256`，下载后可核对：
 
 ```bash
-shasum -a 256 -c agent-monitor-<版本>-macos-arm64.zip.sha256   # macOS / Linux
+shasum -a 256 -c agent-monitor-<版本>-macos-universal.zip.sha256   # macOS / Linux
 ```
 
 > Releases 上的包只作**备份下载**；客户端内的自动更新走自建服务器，与这里无关。

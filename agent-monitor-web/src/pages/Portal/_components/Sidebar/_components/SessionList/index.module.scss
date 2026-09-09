@@ -1,0 +1,191 @@
+.sessionList {
+  padding-bottom: 8px;
+}
+
+// 终端类型分组
+.termGroup {
+  // 纯分组标签：会话直接铺开，这里不再可点，故无 cursor / hover / 焦点态
+  /* 二级标签（项目名）：比上面的分组标签(13)矮一档，也不带任何操作 ——
+     它不是一个分组，只是一个断点。原来是 11px，比令牌最小档还小一号 */
+  .termTitle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px 2px;
+    font-size: var(--text-sm);
+    line-height: 16px;
+    color: var(--muted-foreground);
+    user-select: none;
+
+    .termCount {
+      color: color-mix(in srgb, var(--foreground) 35%, transparent);
+    }
+  }
+}
+
+// 会话项（Claude 最近对话式）
+/* 行高 32、圆角 8 —— 侧栏里所有行（设备、会话、查看全部、账户）同一档。
+   原来是 padding 撑出来的 ~31.6，每行都跟旁边差一点点，一列扫下去是错位的 */
+.session {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  // 触摸屏不套 :hover —— 否则移动端首触只落 hover 态、需再点一次才触发 onClick
+  // （经典 sticky-hover），表现为「点两次才打开会话」。仅指针设备保留悬停反馈。
+  @media (hover: hover) {
+    &:hover {
+      background: var(--overlay-1);
+    }
+  }
+
+  &.active {
+    background: var(--overlay-2);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+
+  .dot {
+    width: 7px;
+    height: 7px;
+    min-width: 7px;
+    border-radius: 50%;
+    background: var(--subtle-foreground);
+
+    // 「执行中」走主色（墨黑 / 暗色下近白）＋ 光晕，不是绿色 ——
+    // 绿是「成功」的语义。全项目一个口径：SessionPanels、TerminalFeed 同此。
+    &.running {
+      background: var(--primary);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent);
+    }
+    &.idle {
+      background: var(--warning);
+    }
+    &.paused {
+      background: var(--destructive);
+    }
+    &.finished {
+      background: var(--subtle-foreground);
+    }
+  }
+
+  // 号位徽标：与钉钉「#N」是同一个编号。人在手机上看网页、用钉钉下发，
+  // 这个号是两端唯一的对照物，所以放在最显眼的行首（状态点之后）。
+  .sessSlot {
+    flex: none;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--primary) 12%, transparent);
+    color: var(--primary);
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11.5px;
+    line-height: 18px;
+    text-align: center;
+  }
+
+  .sessBody {
+    flex: 1;
+    min-width: 0;
+
+    // 标题 + 右侧状态徽标同一行
+    .sessRow {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .sessName {
+      flex: 1;
+      min-width: 0;
+      // 与设备行、查看全部同档（14）：侧栏一列扫下去只有一个正文字号
+      font-size: var(--text-md);
+      color: var(--foreground);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    // 状态徽标：与右侧会话面板的 statusChip 同一套配色
+    .sessStatus {
+      flex: none;
+      padding: 0 7px;
+      border-radius: var(--radius-full);
+      font-size: var(--text-xs);
+      line-height: 17px;
+      // 两个字的状态在窄侧栏里会被折成两行（「执行 / 中」），胶囊也就跟着裂开
+      white-space: nowrap;
+      background: color-mix(in srgb, var(--foreground) 7%, transparent);
+      color: var(--muted-foreground);
+
+      // 「执行中」走主色而不是绿：绿留给「成功」。不加粗 —— 侧栏就这么宽，
+      // 加粗把胶囊撑出容器、末字被裁掉；深浅差已经够把它和其余状态分开。
+      &.running {
+        background: color-mix(in srgb, var(--primary) 12%, transparent);
+        color: var(--primary);
+      }
+
+      &.idle {
+        background: color-mix(in srgb, var(--warning) 16%, transparent);
+        color: var(--warning);
+      }
+
+      &.paused {
+        background: color-mix(in srgb, var(--destructive) 14%, transparent);
+        color: var(--destructive);
+      }
+
+      &.finished {
+        background: color-mix(in srgb, var(--foreground) 7%, transparent);
+        color: var(--muted-foreground);
+      }
+    }
+  }
+
+  // 悬停才出现且才占位：常态 display:none，状态徽标右侧不再留白
+  &:hover .splitBtn {
+    display: flex;
+  }
+
+  // 悬浮式拆分按钮：绝对定位盖在行右端，出现时不挤压布局；
+  // 带底色胶囊与轻投影，避免与状态徽标视觉重叠
+  .splitBtn {
+    display: none;
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+    color: var(--muted-foreground);
+    // 必须不透明：按钮悬浮在状态徽标之上，半透明底会让下层文字
+    // 透出来叠在图标上。取「行悬停底色叠在侧栏底色上」的实色近似值
+    background: var(--muted);
+    box-shadow: 0 1px 3px color-mix(in srgb, var(--foreground) 15%, transparent);
+
+    &:hover {
+      color: var(--primary);
+      background: var(--accent);
+    }
+  }
+}
+
+.emptyList {
+  padding: 40px 16px;
+  text-align: center;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+  line-height: 1.7;
+}

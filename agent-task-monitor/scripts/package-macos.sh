@@ -8,9 +8,13 @@
 #   bash scripts/package-macos.sh                      # config.txt 里留占位令牌
 #   AM_AGENT_TOKEN=xxx bash scripts/package-macos.sh   # 直接写入真实上报令牌
 #
-# 两个容易踩空的点：
+# 三个容易踩空的点：
 #   - 构建目标是工作区里的 am-client 包（服务端代码在 am-hub，客户端里不含）；
-#   - AM_DEFAULT_HUB_URL 必须在编译时传入：hub 地址编译进二进制，零配置开箱即用。
+#   - AM_DEFAULT_HUB_URL 必须在编译时传入：hub 地址编译进二进制，零配置开箱即用；
+#   - 产出的是 arm64 + x86_64 的 universal 二进制，Intel Mac 也能直接跑。
+#     不做「两个架构两个包」是因为自更新写死去下固定名 agent-monitor-mac.zip
+#     （client/src/desktop.rs 的 do_self_update），按架构拆包会让 Intel 机器
+#     自更新到跑不起来的 arm64 应用。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -25,12 +29,25 @@ HUB_URL="${AM_HUB_URL:-https://monitor.vita-llm.com}"
 VERSION=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
 OUT="target/release/bundle/$APP_NAME.app"
 
-echo "▸ cargo build -p am-client --release（内置默认 hub: ${HUB_URL}）"
-AM_DEFAULT_HUB_URL="${HUB_URL}" cargo build -p am-client --release
+ARCHS=(aarch64-apple-darwin x86_64-apple-darwin)
+
+# rustup 自带的 target 只有宿主那一个，另一个架构的 std 得先装上，否则直接编不动。
+for t in "${ARCHS[@]}"; do
+  rustup target add "$t" >/dev/null
+done
+
+for t in "${ARCHS[@]}"; do
+  echo "▸ cargo build -p am-client --release --target ${t}（内置默认 hub: ${HUB_URL}）"
+  AM_DEFAULT_HUB_URL="${HUB_URL}" cargo build -p am-client --release --target "$t"
+done
 
 rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
-cp target/release/agent-monitor "$OUT/Contents/MacOS/$EXE_NAME"
+# lipo 把两个架构合成一个 universal 可执行文件：一个包同时覆盖 Apple 芯片与 Intel。
+lipo -create -output "$OUT/Contents/MacOS/$EXE_NAME" \
+  "target/aarch64-apple-darwin/release/agent-monitor" \
+  "target/x86_64-apple-darwin/release/agent-monitor"
+echo "▸ universal 二进制: $(lipo -archs "$OUT/Contents/MacOS/$EXE_NAME")"
 
 if [[ -f client/icons/icon.icns ]]; then
   cp client/icons/icon.icns "$OUT/Contents/Resources/icon.icns"

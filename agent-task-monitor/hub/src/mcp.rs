@@ -318,7 +318,7 @@ async fn call_tool(
     }
 }
 
-/// 会话寻址：号位或会话 id 都收。数字一律按号位解析（与钉钉的「@9」同源）。
+/// 会话寻址：号位或会话 id 都收。数字一律按号位解析（与钉钉的「#9」同源）。
 async fn resolve(state: &SharedState, user: &str, sess: &str) -> Result<String, String> {
     let s = sess.trim();
     if s.chars().all(|c| c.is_ascii_digit()) && !s.is_empty() {

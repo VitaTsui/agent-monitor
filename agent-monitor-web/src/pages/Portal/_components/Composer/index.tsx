@@ -3,6 +3,9 @@ import React, { useEffect, useRef, useState } from "react";
 import { Chat, Input, Modal } from "@hsu-react/ui";
 import { message } from "@hsu-react/ui";
 import { reaction } from "mobx";
+import { useNavigate } from "react-router-dom";
+
+import { isMobileViewport } from "@/utils/breakpoint";
 import {
   DeleteOutlined,
   EditOutlined,
@@ -22,8 +25,8 @@ import {
   uploadPortalFile,
 } from "@/services/apis/portal";
 import { CONFIRM_WORD, DangerHit, checkDanger } from "../../_utils/dangerCheck";
+import { historyPath } from "../../_utils/portalNav";
 import PortalStore from "../../PortalStore";
-import HistoryModal from "../HistoryModal";
 import styles from "./index.module.scss";
 
 /**
@@ -85,11 +88,12 @@ const DIR_POLL_DELAYS = [
 
 const Composer: React.FC<ComposerProps> = (props) => {
   const { taskId, disabled, disabledHint, onSend, machineId, cwd } = props;
+  const navigate = useNavigate();
   const offHint = disabledHint || "该会话无存活进程，无法发布";
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   const [uploading, setUploading] = useState(false);
   // 会话历史弹窗（与当前会话状态无关，任何时候都能翻）
-  const [historyOpen, setHistoryOpen] = useState(false);
+
   // 斜杠命令：仅当输入以「/」开头且未含空格时弹出（Claude Code 终端式），
   // null=不在命令模式，字符串=「/」之后已输入的过滤词
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
@@ -218,7 +222,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
           return;
         }
       }
-      const isMobile = window.matchMedia("(max-width: 760px)").matches;
+      const isMobile = isMobileViewport();
       if (isMobile && e.key === "Enter" && !e.shiftKey && !composing) {
         e.stopPropagation();
       }
@@ -866,7 +870,9 @@ const Composer: React.FC<ComposerProps> = (props) => {
               />
             ),
             type: "text" as const,
-            onClick: () => setHistoryOpen(true),
+            // 远程往来现在是一页（/portal/history/:taskId），不再是弹窗 ——
+            // 几十屏的往来记录塞不进 720 宽的框，刷新也留不住
+            onClick: () => navigate(historyPath(taskId)),
           },
           ...(cwd && !disabled
             ? [
@@ -1261,13 +1267,6 @@ const Composer: React.FC<ComposerProps> = (props) => {
           )}
         </div>
       </Modal>
-
-      {/* 会话历史：已结束会话的最终产出 */}
-      <HistoryModal
-        open={historyOpen}
-        onClose={() => setHistoryOpen(false)}
-        taskId={taskId}
-      />
     </div>
   );
 };

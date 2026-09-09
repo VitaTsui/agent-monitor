@@ -1,99 +1,84 @@
-import React, { useEffect, useState } from "react";
+import React, { Suspense, lazy, useEffect, useMemo, useState } from "react";
 
-import { Input } from "@hsu-react/ui";
-import { Badge, ConfigProvider, Modal, Popover, Tooltip } from "antd";
-import { useNativeBack } from "./_hooks/useNativeBack";
-import { useApkUpdateCheck } from "./_hooks/useApkUpdateCheck";
-import { useClientUpdateToast } from "./_hooks/useClientUpdateToast";
-import { usePaneGrid } from "./_hooks/usePaneGrid";
-import { claimPairDevice, getMe } from "@/services/apis/portal";
 import { message as antdMessage } from "@hsu-react/ui";
-import {
-  CodeOutlined,
-  ControlOutlined,
-  DownOutlined,
-  EllipsisOutlined,
-  LaptopOutlined,
-  LogoutOutlined,
-  PauseCircleOutlined,
-  PlayCircleOutlined,
-  SafetyOutlined,
-  SearchOutlined,
-  SettingOutlined,
-  SplitCellsOutlined,
-  StopOutlined,
-  SyncOutlined,
-  ThunderboltOutlined,
-} from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
+import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
-import { getAccessToken, getUserInfo, removeToken, setUserInfo } from "@/utils/auth";
+import { claimPairDevice, getMe } from "@/services/apis/portal";
+import {
+  getAccessToken,
+  getUserInfo,
+  removeToken,
+  setUserInfo,
+} from "@/utils/auth";
 import {
   clientSilentLogin,
   inDesktopClient,
-  inNativeShell,
   localMachineId,
 } from "@/utils/clientAuth";
 import PortalStore from "./PortalStore";
+import { useApkUpdateCheck } from "./_hooks/useApkUpdateCheck";
+import { useClientUpdateToast } from "./_hooks/useClientUpdateToast";
+import { useIsMobile } from "./_hooks/useIsMobile";
+import { useNativeBack } from "./_hooks/useNativeBack";
 import { ShareReceiveModal } from "./_hooks/useShareReceive";
-import ChatPane from "./_components/ChatPane";
-import ScrollText from "./_components/ScrollText";
-import SettingsModal from "./_components/SettingsModal";
-import type { SettingsTab } from "./_components/SettingsModal";
+import MobileBar from "./_components/MobileBar";
+import RightPane from "./_components/RightPane";
+import SearchPalette from "./_components/SearchPalette";
+import SessionStatePane from "./_components/SessionStatePane";
+import Sidebar from "./_components/Sidebar";
+import { PortalUserContext, PortalUserInfo } from "./_context/portalUser";
+import { PORTAL_BASE, SettingsTab, portalBackTarget } from "./_utils/portalNav";
 import styles from "./index.module.scss";
 
-/** 侧栏折叠图标：面板 + 左栏分隔线（对标 VS Code / ChatGPT 的侧栏切换，
- *  取代过于「后管菜单」的汉堡折叠图标）。折叠态把分隔线挪到更左，暗示会收窄。 */
-const SidebarIcon: React.FC<{ folded?: boolean }> = ({ folded }) => (
-  <svg
-    width="21"
-    height="21"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="1.9"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    aria-hidden
-  >
-    <rect x="3" y="4.5" width="18" height="15" rx="2.6" />
-    <line x1={folded ? "8" : "9.5"} y1="4.5" x2={folded ? "8" : "9.5"} y2="19.5" />
-  </svg>
-);
+// 设置弹窗整块懒加载：里面的配置同步 / 机器人接入 / 设备管理都是首屏用不到的重块
+const SettingsModal = lazy(() => import("./_components/SettingsModal"));
 
-const STATUS_LABEL: Record<string, string> = {
-  running: "执行中",
-  idle: "等待输入",
-  paused: "已暂停",
-  finished: "已结束",
-};
-
+/**
+ * 前台的**壳**：移动端顶栏 ＋ 侧栏 ＋ 一个高度有界的内容区 ＋ `<Outlet />`。
+ *
+ * 这里曾经是 786 行：侧栏、顶栏、会话网格、放大布局、用户菜单、设置弹窗全挤在
+ * 一个组件里。现在侧栏 / 顶栏 / 会话网格 / 用户菜单 / 设置各自成组件或视图。
+ *
+ * 现在会话网格与远程往来**由地址决定**（见 router.config.tsx 的 `/portal` 子路由），
+ * 本组件只保留「所有子页面都需要的东西」：登录态自检、轮询生命周期、设备配对认领、
+ * 更新提醒、抽屉开合、设置弹窗开合、Android 返回键。
+ *
+ * 设置是**弹窗**不是地址：它是一次性动作（改完就走），不需要发链接、也不需要
+ * 前进后退。代价是刷新会丢当前分栏、浏览器后退关不掉它 —— 这是明确取舍。
+ */
 const Portal: React.FC = observer(() => {
-  const {
-    deviceList,
-    selectedMachineId,
-    selectMachine,
-    selectedGroups,
-    pendingCount,
-    openIds,
-    openTasks,
-    keyword,
-    setKeyword,
-    init,
-    refresh,
-    loadDevices,
-    stopPolling,
-    select,
-    control,
-    syncMessages,
-    splitOpen,
-    focusedId,
-    setFocused,
-  } = PortalStore;
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>("account");
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const { init, refresh, loadDevices, stopPolling, select } = PortalStore;
+
   // 客户端窗口内标出「本机」（浏览器里为 null，不标）
   const [localId, setLocalId] = useState<string | null>(null);
+  const [siderFolded, setSiderFolded] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  // 移动端：侧栏抽屉开合
+  const [mobileNav, setMobileNav] = useState(false);
+  const isMobile = useIsMobile();
+  // 设置弹窗：开合与当前分栏。分栏放在壳里而不是弹窗内部 —— 返回键要靠它
+  // 判断「退到一级菜单」还是「关掉弹窗」，两处各存一份就会不同步。
+  // `null` = 移动端停在一级菜单（桌面无此态，弹窗按「账户」渲染）。
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
+  // 首次打开后就不再卸载：卸载会掐掉 antd 的关闭动画（移动端是底部 sheet，更明显）
+  const [settingsMounted, setSettingsMounted] = useState(false);
+  // 命令面板（⌘K）。开合放在壳上而不是面板里 —— 面板没开的时候它自己不在树上，
+  // 监听不到任何键；侧栏那颗搜索按钮也要能开它。
+  const [searchOpen, setSearchOpen] = useState(false);
+  // 用 state 承载用户信息：每次加载调 /monitor/me 刷新（含实时 isSuper），
+  // 这样管理员改了别人的权限，对方不必重新登录、下次加载即生效。
+  const [user, setUser] = useState<PortalUserInfo>(
+    () => (getUserInfo() as PortalUserInfo) ?? {},
+  );
+
+  // 会话页（index 路由）才显示移动端顶栏：设置 / 历史都自带固定头部，
+  // 两个头叠一起就是双层导航栏
+  const atSessions = pathname.replace(/\/+$/, "") === PORTAL_BASE;
+
   useEffect(() => {
     localMachineId().then((id) => {
       setLocalId(id);
@@ -103,37 +88,14 @@ const Portal: React.FC = observer(() => {
       }
     });
   }, []);
-  const [siderFolded, setSiderFolded] = useState(false);
-  const [userMenuOpen, setUserMenuOpen] = useState(false);
-  // 移动端：侧栏抽屉开合
-  const [mobileNav, setMobileNav] = useState(false);
-  // 移动端：顶栏「⋯」操作菜单与代码改动弹窗
-  const [mobileActs, setMobileActs] = useState(false);
-  const [isMobile, setIsMobile] = useState(
-    () => window.matchMedia("(max-width: 760px)").matches,
-  );
 
   // 移动端强制展开侧栏内容：桌面折叠态下缩窄窗口时，
   // CSS 会把抽屉撑到 84vw，但折叠态 JSX 不渲染内容 → 空白抽屉，这里在 JS 层纠正
   useEffect(() => {
-    const mq = window.matchMedia("(max-width: 760px)");
-    const sync = () => {
-      setIsMobile(mq.matches);
-      if (mq.matches) {
-        setSiderFolded(false);
-      }
-    };
-    sync();
-    mq.addEventListener("change", sync);
-    return () => mq.removeEventListener("change", sync);
-  }, []);
-
-  // 移动端选中会话后自动收起抽屉
-  const selectSession = (id: string) => {
-    select(id);
-    setMobileNav(false);
-  };
-
+    if (isMobile) {
+      setSiderFolded(false);
+    }
+  }, [isMobile]);
 
   // 本页完全响应式，豁免 index.scss 里给后管布局设的 min-width:960px
   // （窗口拖窄到 960 以下时那条会造成整页横滚、右上角控制键被推出可视区）
@@ -157,6 +119,17 @@ const Portal: React.FC = observer(() => {
     };
   }, [mobileNav]);
 
+  /* 换页就收起抽屉。
+   *
+   * 移动端的抽屉是「推开内容」式的：开着的时候整块内容被右移 320px。此前每一处
+   * 会导航的入口（选会话、开设置）都各自手写了一次 `setMobileNav(false)`，
+   * 「换了页要收起来」从来不是一条规则、而是三处巧合 —— 侧栏新增「查看全部会话」
+   * 这个入口时立刻现形：跳过去了，抽屉还开着，新页面被推在屏幕外。
+   * 收成一条 effect，之后再加入口就不必记得补这一行。 */
+  useEffect(() => {
+    setMobileNav(false);
+  }, [pathname]);
+
   // 前台需登录：无 token 时，客户端窗口先用设备令牌静默续登（客户端登录
   // 态永不过期），浏览器（或续登失败）才跳登录页并带回跳地址
   useEffect(() => {
@@ -179,13 +152,14 @@ const Portal: React.FC = observer(() => {
     // 刷新当前用户信息（含实时 isSuper）：改了权限无需重新登录，下次加载即生效
     getMe()
       .then((res) => {
-        if (res.code === 0 && res.data) {
+        // 拦截器已保证是业务信封；这里只确认 data 确实是一条用户记录，
+        // 不让形状不对的 payload 覆盖掉本地已有的登录用户信息。
+        if (res.code === 0 && res.data?.username) {
           setUserInfo(res.data);
           setUser(res.data);
         }
       })
       .catch(() => void 0);
-
 
     return () => {
       stopPolling();
@@ -196,6 +170,25 @@ const Portal: React.FC = observer(() => {
   useApkUpdateCheck();
   // 客户端窗口内右下角的新版本提醒（浏览器里空转）
   useClientUpdateToast();
+  /* 全局命令面板：⌘K / Ctrl+K 开，Esc 关（Esc 由 Modal 自己接）。
+   *
+   * 带修饰键，所以在输入框（对话框、备注、搜索行）里聚焦时也不会被当成正常输入误触发；
+   * `preventDefault` 挡掉浏览器自己的 ⌘K（Chrome 聚焦地址栏搜索）。
+   * 挂 window 上是因为入口有三个：这个键、侧栏头部那颗按钮、移动端顶栏那颗。 */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        // **开关**，不是只管开：同一个键既然能唤起它，就得能收回去。只管开的话，
+        // 一旦焦点不在弹窗里（Esc 走的是弹窗自己的按键通道），这个遮罩就没有
+        // 键盘出路了 —— 页面点不动、Esc 又不响应，只能刷新。
+        setSearchOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // 客户端窗口内：Cmd/Ctrl+R 刷新页面（webview 默认不绑，站点发新版可手动拉最新）
   useEffect(() => {
     if (!inDesktopClient()) return;
@@ -219,18 +212,24 @@ const Portal: React.FC = observer(() => {
     const clean = () => {
       params.delete("pair");
       const q = params.toString();
-      window.history.replaceState(null, "", window.location.pathname + (q ? `?${q}` : ""));
+      window.history.replaceState(
+        null,
+        "",
+        window.location.pathname + (q ? `?${q}` : ""),
+      );
     };
     claimPairDevice(code)
       .then((res) => {
         if (res.code === 0) {
           antdMessage.success(
-            `已绑定本机「${res.data?.hostname ?? ""}」到你的账号，终端会话马上出现`
+            `已绑定本机「${res.data?.hostname ?? ""}」到你的账号，终端会话马上出现`,
           );
           refresh();
           loadDevices();
         } else {
-          antdMessage.warning(res.msg || "配对码无效或已过期，请重启客户端重试");
+          antdMessage.warning(
+            res.msg || "配对码无效或已过期，请重启客户端重试",
+          );
         }
       })
       .catch(() => antdMessage.error("绑定失败，请检查网络后重启客户端重试"))
@@ -238,57 +237,57 @@ const Portal: React.FC = observer(() => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 原生壳（Android）的返回键：优先关掉当前浮层，都没有才交还系统语义。
-  // 不接管的话按返回会直接退出整个 App。浏览器里此钩子空转。
+  // 原生壳（Android）的返回键：从内到外一层层退 —— 抽屉 → 用户菜单 →
+  // 设置（移动端先退到一级菜单，再关弹窗）→ 退一层路由，都没有才交还系统语义。
+  //
+  // 「退一层路由」不能写成 `history.back()`：从推送/深链直接进 /portal/history/xxx 时
+  // 历史里没有上一条，`canGoBack` 为 false，系统语义会直接退出整个 App。
+  // 按地址算目标（portalBackTarget）才是确定的一层。浏览器里此钩子空转。
   useNativeBack(() => {
-    if (mobileNav) {
-      setMobileNav(false);
+    if (searchOpen) {
+      setSearchOpen(false);
       return true;
     }
-    if (settingsOpen) {
-      setSettingsOpen(false);
+    if (mobileNav) {
+      setMobileNav(false);
       return true;
     }
     if (userMenuOpen) {
       setUserMenuOpen(false);
       return true;
     }
+    if (settingsOpen) {
+      // 移动端是 iOS 式两级：二级分栏先退回一级菜单，一级菜单才关弹窗
+      if (isMobile && settingsTab) {
+        setSettingsTab(null);
+      } else {
+        setSettingsOpen(false);
+      }
+      return true;
+    }
+    const target = portalBackTarget(pathname);
+    if (target) {
+      navigate(target);
+      return true;
+    }
     return false;
   });
 
-  if (!getAccessToken()) {
-    return null;
-  }
-
-  const paneCount = openTasks.length;
-  // 放大的那一格。两道门槛：
-  //   多格 —— 单格本来就占满，再「放大」没意义，还会渲染出「主区 + 空右列」；
-  //   非移动端 —— 手机上主区要跟 320px 的右列分一块 390px 的屏，主区只剩个缝；
-  //     更要命的是移动端把 paneHeader 整个隐藏了（见样式），进去就没有还原按钮，出不来。
-  const focusedTask =
-    paneCount > 1 && !isMobile
-      ? openTasks.find((t) => t.id === focusedId)
-      : undefined;
-  // 横向还是纵向拆分、一行摆几个，全按网格容器的实际宽高算（见 usePaneGrid）
-  const {
-    ref: paneGridRef,
-    cols: paneCols,
-    rows: paneRows,
-    lastSpan: paneLastSpan,
-  } = usePaneGrid(paneCount);
-  // 用 state 承载用户信息：每次加载调 /monitor/me 刷新（含实时 isSuper），
-  // 这样管理员改了别人的权限，对方不必重新登录、下次加载即生效。
-  const [user, setUser] = useState<{
-    nickname?: string;
-    username?: string;
-    isSuper?: boolean;
-  }>(() => (getUserInfo() as { nickname?: string; username?: string; isSuper?: boolean }) ?? {});
-  const nickname = user.nickname ?? user.username ?? "";
+  // 移动端选中会话后自动收起抽屉；在子页面（设置/历史）里点会话则回会话页
+  const selectSession = (id: string) => {
+    select(id);
+    setMobileNav(false);
+    if (!atSessions) {
+      navigate(PORTAL_BASE);
+    }
+  };
 
   const openSettings = (tab: SettingsTab) => {
+    setUserMenuOpen(false);
+    setMobileNav(false);
+    setSettingsMounted(true);
     setSettingsTab(tab);
     setSettingsOpen(true);
-    setUserMenuOpen(false);
   };
 
   const onLogout = () => {
@@ -296,498 +295,97 @@ const Portal: React.FC = observer(() => {
     window.location.href = "/login?redirect=%2Fportal";
   };
 
-  const userMenu = (
-    <div className={styles.userMenu}>
-      <div className={styles.userMenuEmail}>{user.username}</div>
-      <div className={styles.userMenuAccount}>
-        <span className={styles.userMenuAvatar}>{nickname.slice(0, 1) || "U"}</span>
-        <span className={styles.userMenuName}>{nickname}</span>
-      </div>
-      <div className={styles.userMenuDivider} />
-      <div className={styles.userMenuItem} onClick={() => openSettings("account")}>
-        <SettingOutlined />
-        <span>设置</span>
-      </div>
-      <div className={styles.userMenuItem} onClick={() => openSettings("devices")}>
-        <LaptopOutlined />
-        <span>设备管理</span>
-        {pendingCount ? (
-          <Badge count={pendingCount} size="small" className={styles.userMenuBadge} />
-        ) : null}
-      </div>
-      <div className={styles.userMenuItem} onClick={() => openSettings("security")}>
-        <SafetyOutlined />
-        <span>安全防护</span>
-      </div>
-      {/* 后台管理只在浏览器里显示：客户端 / 移动端原生壳内隐藏（那里开新标签打不开后管） */}
-      {user.isSuper && !inNativeShell() ? (
-        <div
-          className={styles.userMenuItem}
-          onClick={() => {
-            window.open("/admin", "_blank");
-            setUserMenuOpen(false);
-          }}
-        >
-          <ControlOutlined />
-          <span>后台管理</span>
-        </div>
-      ) : null}
-      <div className={styles.userMenuDivider} />
-      <div className={styles.userMenuItem} onClick={onLogout}>
-        <LogoutOutlined />
-        <span>退出登录</span>
-      </div>
-    </div>
-  );
+  const userValue = useMemo(() => user, [user]);
 
+  if (!getAccessToken()) {
+    return null;
+  }
+
+  // 本页不再自己给一份 antd 主题：主色 / 链接色 / 实心控件前景统一由 router/Routes.tsx
+  // 的 ConfigProvider 按当前明暗下发（值来自 styles/primary.ts，与 tokens.scss 同步）。
   return (
-    // Portal 路由挂在全局 Theme 之外，所以这里自己给一份主题；
-    // ConfigProvider 走 React context，portal 出去的弹窗一样生效。
-    //
-    // 主色与 styles/tokens.scss 的 --primary 保持一致（shadcn 默认的单色墨黑）。
-    // 必须是字面量：antd 要由它派生 10 级色板，给 var() 算不出来。
-    // colorLink 单独给：antd 的链接色不跟随 colorPrimary，不设的话「修改」「重置密码」
-    // 这类 link 按钮会留在默认蓝上，整站只剩它们是彩色。
-    <ConfigProvider
-      theme={{ token: { colorPrimary: "#18181b", colorLink: "#18181b" } }}
-    >
-    <div className={styles.Portal}>
-      {/* 移动端顶部栏（仅窄屏显示） */}
-      <div className={styles.mobileBar}>
-        <span
-          className={styles.mobileMenuBtn}
-          role="button"
-          tabIndex={0}
-          aria-label="打开/收起会话列表"
-          onClick={() => setMobileNav((v) => !v)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              setMobileNav(true);
-            }
-          }}
-        >
-          <SidebarIcon folded={!mobileNav} />
-        </span>
-        <span className={styles.mobileTitle}>
-          {openTasks[0] ? (
-            <span
-              className={`${styles.mobileStatusDot} ${
-                styles[openTasks[0].status ?? ""] ?? ""
-              }`}
-            />
-          ) : null}
-          {openTasks[0]?.title ||
-            openTasks[0]?.prompt ||
-            openTasks[0]?.projectName ||
-            "终端任务监控"}
-        </span>
-        {/* 正在跑的时候「中断」提到一级：手机上想停一下是最急的操作，
-            埋在 ⋯ 里要点两次、还要在小菜单里瞄准。不跑时不占位。 */}
-        {openTasks[0] && openTasks[0].status === "running" && openTasks[0].pid ? (
-          <span
-            className={styles.mobileStopBtn}
-            role="button"
-            aria-label="中断当前任务"
-            onClick={() => control(openTasks[0]!.id ?? "", "interrupt")}
-          >
-            <ThunderboltOutlined />
-          </span>
-        ) : null}
-        {openTasks[0] ? (
-          <Popover
-            open={mobileActs}
-            onOpenChange={setMobileActs}
-            trigger="click"
-            placement="bottomRight"
-            arrow={false}
-            overlayClassName={styles.mobileActsPop}
-            content={
-              <div className={styles.mobileActsMenu}>
-                {(() => {
-                  const t0 = openTasks[0]!;
-                  const id0 = t0.id ?? "";
-                  const paused = t0.status === "paused";
-                  // 空闲时中断没有可断的东西，点了看不出任何变化，人会反复戳 ——
-                  // 等下一轮真跑起来时那几下反而把新任务打断了（同 ChatPane）
-                  const canInterrupt = !!t0.pid && t0.status === "running";
-                  const act = (fn: () => void) => () => {
-                    setMobileActs(false);
-                    fn();
-                  };
-                  return (
-                    <>
-                      <div className={styles.mobileActItem} onClick={act(() => syncMessages(id0))}>
-                        <SyncOutlined /> 重新同步
-                      </div>
-                      <div
-                        className={styles.mobileActItem}
-                        onClick={act(() => control(id0, paused ? "resume" : "pause"))}
-                      >
-                        {paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
-                        {paused ? " 恢复" : " 暂停"}
-                      </div>
-                      <div
-                        className={`${styles.mobileActItem} ${
-                          canInterrupt ? "" : styles.disabled
-                        }`}
-                        onClick={canInterrupt ? act(() => control(id0, "interrupt")) : undefined}
-                      >
-                        <ThunderboltOutlined /> 中断
-                        {/* 条目名保持动作，不可用的缘由另起一行小字 ——
-                            把状态描述塞进名字里，读着就不像个能点的东西 */}
-                        {canInterrupt ? null : (
-                          <span className={styles.actWhy}>当前没在执行</span>
-                        )}
-                      </div>
-                      {/* 终止 = 杀进程，这一轮的上下文就没了。桌面端一直有二次确认，
-                          移动端却是一点就执行 —— 而手指在紧挨着的菜单项上更容易滑错。 */}
-                      <div
-                        className={`${styles.mobileActItem} ${styles.danger}`}
-                        onClick={act(() =>
-                          Modal.confirm({
-                            title: "确定终止该任务进程？",
-                            content: "终端里这一轮的上下文会一起结束，无法恢复。",
-                            okText: "终止",
-                            cancelText: "取消",
-                            okButtonProps: { danger: true },
-                            onOk: () => control(id0, "stop"),
-                          }),
-                        )}
-                      >
-                        <StopOutlined /> 终止进程
-                      </div>
-                    </>
-                  );
-                })()}
-              </div>
-            }
-          >
-            <span className={styles.mobileMoreBtn} role="button" aria-label="会话操作">
-              <EllipsisOutlined />
-            </span>
-          </Popover>
-        ) : null}
-      </div>
+    <PortalUserContext.Provider value={userValue}>
+      <div className={styles.Portal}>
+        {atSessions && (
+          <MobileBar
+            navOpen={mobileNav}
+            onToggleNav={() => setMobileNav((v) => !v)}
+            onOpenSearch={() => setSearchOpen(true)}
+          />
+        )}
 
-      {/* 移动端抽屉遮罩 */}
-      {mobileNav && (
-        <div
-          className={styles.mobileBackdrop}
-          onClick={() => setMobileNav(false)}
+        {/* 移动端抽屉遮罩 */}
+        {mobileNav && (
+          <div
+            className={styles.mobileBackdrop}
+            onClick={() => setMobileNav(false)}
+          />
+        )}
+
+        <Sidebar
+          folded={siderFolded}
+          onToggleFold={() => setSiderFolded(!siderFolded)}
+          isMobile={isMobile}
+          underTopBar={atSessions}
+          localId={localId}
+          user={user}
+          userMenuOpen={userMenuOpen}
+          onUserMenuOpenChange={setUserMenuOpen}
+          onSelectSession={selectSession}
+          onOpenSettings={openSettings}
+          onOpenSearch={() => setSearchOpen(true)}
+          onLogout={onLogout}
         />
-      )}
 
-      <aside
-        className={`${styles.sider} ${siderFolded ? styles.folded : ""}`}
-      >
-        <div className={styles.siderHeader}>
-          <div className={styles.brand}>
-            <span className={styles.logo}>
-              <CodeOutlined />
-            </span>
-            {!siderFolded && <span className={styles.brandName}>终端任务监控</span>}
-          </div>
-          <Tooltip title={siderFolded ? "展开侧栏" : "收起侧栏"} placement="right">
-            <span
-              className={styles.foldBtn}
-              role="button"
-              tabIndex={0}
-              aria-label={siderFolded ? "展开侧栏" : "收起侧栏"}
-              aria-expanded={!siderFolded}
-              onClick={() => setSiderFolded(!siderFolded)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  setSiderFolded(!siderFolded);
-                }
-              }}
-            >
-              <SidebarIcon folded={siderFolded} />
-            </span>
-          </Tooltip>
+        {/* 命令面板。它只是**现有入口的另一种打开方式**：会话、设备、
+            「查看全部会话」、设置各分栏、外观三态，逐条都能在界面上找到对应的地方。
+            侧栏原来那个筛当前设备的搜索框已经撤掉，不留两套搜索。 */}
+        <SearchPalette
+          open={searchOpen}
+          onClose={() => setSearchOpen(false)}
+          onSelectSession={selectSession}
+          onOpenSettings={openSettings}
+        />
+
+        {/* 正文 ＋ 右栏并排的那一行。右栏给的条件有三条：
+            **会话页** —— 设置/历史都是自带固定头部的整页内容，右边再钉一栏会话
+              状态既对不上也没地方摆；
+            **宽屏** —— 一块 390 宽的屏摆不下第三栏，状态卡退回对话流末尾
+              （见 ChatPane）；
+            **至少开着一格** —— 一格没开时那栏没有主语，摆一条「暂无」在空问候语
+              旁边只是白占三成宽。 */}
+        <div
+          className={`${styles.contentRow} ${mobileNav ? styles.mainPushed : ""}`}
+        >
+          <main className={styles.main}>
+            <Outlet />
+          </main>
+
+          {atSessions &&
+            !isMobile &&
+            PortalStore.rightPaneOpen &&
+            PortalStore.openTasks.length > 0 && (
+              <RightPane>
+                <SessionStatePane />
+              </RightPane>
+            )}
         </div>
 
-        {!siderFolded && (
-          <>
-            <div className={styles.siderSearch}>
-              <Input
-                className={styles.search}
-                placeholder="搜索会话 / 项目"
-                prefix={<SearchOutlined className={styles.searchIcon} />}
-                allowClear
-                value={keyword}
-                onChange={(value) => setKeyword(value)}
-              />
-            </div>
-
-            <div className={styles.siderScroll}>
-              {/* 设备 */}
-              <div className={styles.sectionLabel}>设备</div>
-              <div className={styles.deviceBar}>
-                {deviceList.length === 0 ? (
-                  <div className={styles.noDevice}>暂无设备</div>
-                ) : (
-                  deviceList.map((d) => (
-                    <div
-                      key={d.machineId}
-                      className={`${styles.deviceTab} ${
-                        d.machineId === selectedMachineId ? styles.active : ""
-                      }`}
-                      role="button"
-                      tabIndex={0}
-                      aria-pressed={d.machineId === selectedMachineId}
-                      onClick={() => selectMachine(d.machineId)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          selectMachine(d.machineId);
-                        }
-                      }}
-                      title={`${d.hostname} · ${d.platformDsr}${d.running > 0 ? ` · ${d.running} 执行中` : ""}`}
-                    >
-                      {/* 统一用电脑图标(像 iOS 设备列表)，不再在名称前加平台 emoji */}
-                      <LaptopOutlined />
-                      <ScrollText
-                        className={styles.deviceTabName}
-                        active={d.machineId === selectedMachineId}
-                        plain={d.hostname}
-                        text={
-                          <>
-                            {d.hostname}
-                            {d.machineId === localId ? (
-                              <span className={styles.localTag}>本机</span>
-                            ) : null}
-                          </>
-                        }
-                      />
-                      <span className={styles.deviceTabStat}>{d.count} 会话</span>
-                      {d.running > 0 ? (
-                        <span className={styles.deviceTabDot} />
-                      ) : null}
-                    </div>
-                  ))
-                )}
-              </div>
-
-              {/* 会话 */}
-              <div className={styles.sectionLabel}>会话</div>
-              <div className={styles.sessionList}>
-                {selectedGroups.length === 0 ? (
-                  <div className={styles.emptyList}>
-                    该设备暂无活跃会话。请确认 agent-task-monitor
-                    正在该设备上运行，且已在设备管理中信任。
-                  </div>
-                ) : (
-                  selectedGroups.map((g) => {
-                    return (
-                      <div key={g.key} className={styles.termGroup}>
-                        {/* 分组标签：会话直接铺开，不做展开收起 */}
-                        <div className={styles.termTitle}>
-                          <span>{g.title}</span>
-                          <span className={styles.termCount}>{g.tasks.length}</span>
-                        </div>
-                        {g.tasks.map((t) => (
-                            <div
-                              key={t.id}
-                              className={`${styles.session} ${
-                                openIds.includes(t.id ?? "") ? styles.active : ""
-                              }`}
-                              role="button"
-                              tabIndex={0}
-                              aria-current={openIds.includes(t.id ?? "")}
-                              onClick={() => selectSession(t.id ?? "")}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter" || e.key === " ") {
-                                  e.preventDefault();
-                                  selectSession(t.id ?? "");
-                                }
-                              }}
-                            >
-                              <span
-                                className={`${styles.dot} ${
-                                  styles[t.status ?? ""] ?? ""
-                                }`}
-                              />
-                              {/* 号位：与钉钉「@N」同一个编号，在手机上照着这个号下发 */}
-                              {t.slot != null && (
-                                <Tooltip title={`钉钉里发「@${t.slot} 内容」即下发到这个终端`}>
-                                  <span className={styles.sessSlot}>{t.slot}</span>
-                                </Tooltip>
-                              )}
-                              <div className={styles.sessBody}>
-                                {/* 标题 + 右侧状态徽标同一行；来源等杂项不再展示 */}
-                                <div className={styles.sessRow}>
-                                  <ScrollText
-                                    className={styles.sessName}
-                                    active={openIds.includes(t.id ?? "")}
-                                    plain={t.title || t.prompt || t.projectName || "新会话"}
-                                    text={t.title || t.prompt || t.projectName || "新会话"}
-                                  />
-                                  <span
-                                    className={`${styles.sessStatus} ${
-                                      styles[t.status ?? ""] ?? ""
-                                    }`}
-                                  >
-                                    {STATUS_LABEL[t.status ?? ""] ?? t.statusDsr}
-                                  </span>
-                                </div>
-                              </div>
-                              {/* 移动端窄屏不支持拆分并排，去掉拆分按钮，只单会话查看 */}
-                              {!isMobile && (
-                                <Tooltip title="拆分显示">
-                                  <SplitCellsOutlined
-                                    className={styles.splitBtn}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      splitOpen(t.id ?? "");
-                                    }}
-                                  />
-                                </Tooltip>
-                              )}
-                            </div>
-                          ))}
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-          </>
+        {settingsMounted && (
+          <Suspense fallback={null}>
+            <SettingsModal
+              open={settingsOpen}
+              tab={settingsTab}
+              isMobile={isMobile}
+              onTabChange={setSettingsTab}
+              onClose={() => setSettingsOpen(false)}
+            />
+          </Suspense>
         )}
-        {siderFolded && <div className={styles.siderScroll} />}
 
-        {/* 底部用户区（Claude 式） */}
-        <Popover
-          open={userMenuOpen}
-          onOpenChange={(o) => {
-            // 移动端：不弹菜单，直接进整屏设置（Claude App 式头像入口）。
-            // 不再顺手收起侧栏——点头像只是开设置，设置浮在上层，关掉后侧栏仍在，
-            // 避免「点头像侧栏莫名收起」的观感。
-            if (o && window.matchMedia("(max-width: 760px)").matches) {
-              openSettings("account");
-              return;
-            }
-            setUserMenuOpen(o);
-          }}
-          content={userMenu}
-          trigger="click"
-          placement="topLeft"
-          arrow={false}
-          overlayClassName={styles.userMenuOverlay}
-        >
-          {/* Popover 的 click 触发挂在本元素注入的 onClick 上，键盘路径合成一次
-              click 即可复用；不加 role/tabIndex 的话，设置/设备管理/安全防护/
-              后台管理/退出登录全部无法用键盘抵达（它们没有别的入口）。 */}
-          <div
-            className={styles.userRow}
-            title="账户与设置"
-            role="button"
-            tabIndex={0}
-            aria-label="账户与设置"
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                e.currentTarget.click();
-              }
-            }}
-          >
-            <span className={styles.userAvatar}>{nickname.slice(0, 1) || "U"}</span>
-            {!siderFolded && (
-              <>
-                <div className={styles.userText}>
-                  <div className={styles.userName}>{nickname}</div>
-                  <div className={styles.userPlan}>
-                    {user.isSuper ? "超级管理员" : "普通用户"}
-                  </div>
-                </div>
-                <Badge count={pendingCount} size="small">
-                  <DownOutlined className={styles.userChevron} />
-                </Badge>
-              </>
-            )}
-          </div>
-        </Popover>
-      </aside>
-
-      <main className={`${styles.main} ${mobileNav ? styles.mainPushed : ""}`}>
-        {paneCount === 0 ? (
-          <div className={styles.mainEmpty}>
-            <div className={styles.greeting}>
-              <span className={styles.greetLogo}>
-                <CodeOutlined />
-              </span>
-              你好，{nickname}
-            </div>
-            <div className={styles.greetSub}>
-              <span className={styles.descDesktop}>从左侧选择一个终端会话查看执行内容</span>
-              <span className={styles.descMobile}>点左上角菜单，选择一个终端会话查看</span>
-            </div>
-            <div className={`${styles.hint} ${styles.descDesktop}`}>
-              点击会话右侧的 <SplitCellsOutlined /> 可并排显示多个任务
-            </div>
-          </div>
-        ) : focusedTask ? (
-          /* 放大模式：主区一格撑满，其余缩成右侧一列只读卡片。
-             不走自适应网格 —— 那套是在「几格平分」的前提下算的，这里的诉求正相反：
-             一格独大、其余只求瞥得见。 */
-          <div className={styles.focusLayout}>
-            <div className={styles.focusMain}>
-              <ChatPane
-                key={focusedTask.id}
-                task={focusedTask}
-                closable={paneCount > 1}
-              />
-            </div>
-            <div className={styles.focusSide}>
-              {openTasks
-                .filter((t) => t.id !== focusedTask.id)
-                .map((t) => (
-                  <div
-                    key={t.id}
-                    className={`${styles.focusCard} ${
-                      t.pendingSelect?.questions?.length
-                        ? styles.focusCardAlert
-                        : ""
-                    }`}
-                  >
-                    <ChatPane
-                      task={t}
-                      closable={paneCount > 1}
-                      compact
-                      onActivate={() => setFocused(t.id ?? "")}
-                    />
-                  </div>
-                ))}
-            </div>
-          </div>
-        ) : (
-          <div
-            ref={paneGridRef}
-            className={styles.paneGrid}
-            data-last-span={paneLastSpan}
-            style={
-              {
-                "--pane-cols": paneCols,
-                "--pane-rows": paneRows,
-              } as React.CSSProperties
-            }
-          >
-            {openTasks.map((t) => (
-              <ChatPane key={t.id} task={t} closable={paneCount > 1} />
-            ))}
-          </div>
-        )}
-      </main>
-
-      <SettingsModal
-        open={settingsOpen}
-        initialTab={settingsTab}
-        onClose={() => setSettingsOpen(false)}
-      />
-      <ShareReceiveModal />
-    </div>
-    </ConfigProvider>
+        <ShareReceiveModal />
+      </div>
+    </PortalUserContext.Provider>
   );
 });
 

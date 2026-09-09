@@ -1,0 +1,85 @@
+@use "@hsu-react/ui/es/styles/responsive" as r;
+@use "@/styles/chatMarkdown" as md;
+// 配色与 Composer 保持一致（同一屏内的组件，色板不该各写各的）。
+// 滚动容器是 views.module.scss 的 .fixedBody，本文件不再自己开一个高度受限的
+// 内滚区 —— 那是弹窗时代的产物（62vh），页面化之后由页面骨架统一管。
+
+/* 本页直接挂在壳的 main 下（移动端顶栏只在会话页显示），所以状态栏安全区
+   由它自己让 —— 设置的分栏页外面还有一层设置壳的固定头部，那边不该重复让 */
+@include r.down(md) {
+  .headSafe {
+    padding-top: env(safe-area-inset-top);
+  }
+}
+
+.hint {
+  font-size: var(--text-sm);
+  color: var(--muted-foreground);
+  padding-bottom: 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
+  margin-bottom: 8px;
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  padding: 40px 0;
+}
+
+// 我发的靠右
+.rowUser {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  margin-bottom: 10px;
+}
+
+// 它回的靠左
+.rowAgent {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.bubbleUser {
+  /* 正文排版走共享基线 —— 与会话对话流**同一套**（styles/_chatMarkdown.scss）。
+     原来这里自己写了一份：标题 h1–h6 一律 13.5px/600（等于没有层级）、
+     列表左内边距 18、表格 12px。同一段内容在会话页和这里是两种排版，
+     而这一页恰恰是「回看那段对话」。 */
+  @include md.chat-markdown;
+
+  max-width: 78%;
+  padding: 10px 14px;
+  border-radius: 12px 12px 2px 12px;
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  // 长串（URL/路径）要能断行，别把气泡撑破
+  word-break: break-word;
+  overflow-wrap: anywhere;
+
+  // 气泡里的代码块自己横向滚动
+  :global(.markdown-body) pre {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}
+
+.bubbleAgent {
+  @extend .bubbleUser;
+  border-radius: 12px 12px 12px 2px;
+  background: color-mix(in srgb, var(--foreground) 5%, transparent);
+}
+
+.time {
+  margin-top: 3px;
+  font-size: var(--text-xs);
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+}
+
+@include r.down(md) {
+  // 手机屏窄，气泡放宽些才不至于一行没几个字
+  .bubbleUser {
+    max-width: 92%;
+  }
+}

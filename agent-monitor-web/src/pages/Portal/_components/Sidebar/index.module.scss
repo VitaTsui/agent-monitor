@@ -1,0 +1,291 @@
+@use "@hsu-react/ui/es/styles/responsive" as r;
+// 颜色一律直接写 styles/tokens.scss 的令牌：侧栏面 --card、描边与按下底 --overlay-2、
+// hover 底 --overlay-1。
+//
+// 本文件只管侧栏这个框：品牌头（含搜索/收起两颗）、滚动区、底部账户行、移动端抽屉形态。
+// 设备行与会话行各自成组件（_components/DeviceList、_components/SessionList），
+// 样式跟着组件走 —— 原来这三块连同用户菜单、移动端顶栏一起挤在 Portal 那份
+// 1036 行的巨石里。
+
+// ---------- 左侧栏（Claude 式） ----------
+.Sidebar {
+  width: 288px;
+  min-width: 288px;
+  display: flex;
+  flex-direction: column;
+  // 侧栏取画布色(--background #fafafa / #09090b)、主区取面色(--card #ffffff / #18181b)。
+  // 原来两者反着：侧栏是白面、主区是灰画布，于是「更靠前的那一层」反而是背景色，
+  // 一眼看去像内容区被压在侧栏底下。参照实现是侧栏沉、主区浮。
+  background: var(--background);
+  // 描边用实色 --border(#e4e4e7 / #27272a) 而不是 --overlay-2(9% 混色)：
+  // 这条线两侧是两种确定的面，不需要「叠在任意底上都成立」的半透明墨，
+  // 半透明反而让它在浅色下淡到几乎看不见
+  border-right: 1px solid var(--border);
+  transition: width 0.2s ease, min-width 0.2s ease;
+
+  &.folded {
+    width: 60px;
+    min-width: 60px;
+
+    .siderHeader {
+      flex-direction: column;
+      gap: 10px;
+    }
+  }
+
+  .siderHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 14px 8px;
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+
+      .logo {
+        width: 28px;
+        height: 28px;
+        min-width: 28px;
+        border-radius: var(--radius);
+        background: var(--primary);
+        color: var(--primary-foreground);
+        font-size: var(--text-md);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .brandName {
+        font-size: var(--text-md);
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+    }
+
+    /* 头部右侧那两颗（搜索、收起）：同一档方按钮。
+       它们都是**对整个侧栏**的操作 —— 找东西、把它收起来，摆在与品牌同一行。 */
+    .headBtn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: var(--text-md);
+      color: var(--muted-foreground);
+      cursor: pointer;
+      padding: 4px;
+      border-radius: var(--radius-sm);
+
+      &:hover {
+        background: var(--overlay-1);
+        color: var(--foreground);
+      }
+    }
+
+    .foldBtn {
+      @extend .headBtn;
+    }
+  }
+
+  // 左右 14：与上面的品牌头同一条竖线。原来是 8，
+  // 于是侧栏里两块内容有两个不同的左缘
+  .siderScroll {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 14px 8px;
+  }
+
+  /* 分组标签：13 / 行高 16 / 常规字重 / 次级灰。
+     原来是 11px ＋ 字重 600 ＋ 额外字距 —— 小两档又重一档，三种手段方向相反，
+     读起来是个被压扁的标签。它只是一行小灰字，不需要靠加粗争地位。 */
+  .sectionLabel {
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 16px;
+    color: var(--muted-foreground);
+    padding: 18px 10px 6px;
+    user-select: none;
+  }
+
+  /* 列表末尾的「查看全部会话」：与会话行同高(32)、同圆角(8)，
+     颜色比会话标题弱一档 —— 它是列表的最后一行，不是一颗按钮 */
+  .viewAll {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 32px;
+    margin-top: 2px;
+    padding: 0 10px;
+    border-radius: var(--radius);
+    color: var(--muted-foreground);
+    font-size: var(--text-md);
+    cursor: pointer;
+
+    &:hover {
+      background: var(--overlay-1);
+      color: var(--foreground);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--primary);
+      outline-offset: 2px;
+    }
+
+    .viewAllIcon {
+      flex: none;
+      font-size: var(--text-md);
+    }
+  }
+
+  // 底部用户区
+  /* 40 高、**单行**：原来是「30 的头像 ＋ 上下各 8 的内边距」＝ 50 高，里面还塞了
+     两行字（昵称 ＋ 角色）。侧栏里所有行都是 32，只有它高出 18px 又多一行，
+     钉在底部像块垫脚石。角色（超级管理员 / 普通用户）挪进点开的用户菜单里 ——
+     它是一条一天看一次的信息，不该常驻在最显眼的底栏。 */
+  .userRow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 40px;
+    margin: 8px 14px;
+    padding: 0 8px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    border-top: none;
+
+    &:hover {
+      background: var(--overlay-1);
+    }
+
+    .userAvatar {
+      width: 26px;
+      height: 26px;
+      min-width: 26px;
+      border-radius: 50%;
+      background: var(--primary);
+      color: var(--primary-foreground);
+      font-size: var(--text-base);
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .userText {
+      flex: 1;
+      min-width: 0;
+
+      .userName {
+        font-size: var(--text-md);
+        font-weight: 500;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    }
+
+    .userChevron {
+      font-size: var(--text-xs);
+      color: var(--muted-foreground);
+    }
+  }
+
+  // 键盘可达元素的焦点可见性（role=button 的 span/div）。
+  // 设备行 / 会话行的同款规则跟着各自的组件走（_components/*）。
+  .headBtn:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+    border-radius: var(--radius);
+  }
+}
+
+// 用户菜单弹层由 Portal 壳 portal 到 body，overlayClassName 需从本模块导出
+.userMenuOverlay {
+  :global(.ant-popover-inner) {
+    padding: 4px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--overlay-2);
+    box-shadow: 0 4px 24px color-mix(in srgb, var(--foreground) 12%, transparent);
+  }
+}
+
+@include r.down(md) {
+  // 侧栏「推移内容」式（对标 Claude App）：侧栏常驻左侧，由内容整体右移露出，
+  // 而不是盖在内容之上。`--drawer-w` 由 Portal 壳在 .Portal 上定义并向下继承。
+  .Sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    // 在内容之下：内容盖住它，右移时才露出
+    z-index: 1;
+    width: calc(var(--drawer-w) + env(safe-area-inset-left));
+    min-width: 0;
+    // 移动端不要侧栏右侧描边：推开后它与内容之间会多出一条明显分界线
+    border-right: none;
+    // 状态栏/灵动岛与左侧圆角让位，内容不被系统 UI 压住
+    padding-top: env(safe-area-inset-top);
+    padding-left: env(safe-area-inset-left);
+    padding-bottom: max(0px, calc(env(safe-area-inset-bottom) - 8px));
+    // 顶栏在场时（会话页）侧栏从顶栏下沿起，不占那 48px。
+    // 顶栏是 82% 毛玻璃、故意盖住侧栏头部那颗搜索按钮（它在顶栏里另开了一颗），
+    // 但「盖住」对半透明不成立 —— 侧栏的品牌名与搜索图标会从顶栏底下透上来，
+    // 和顶栏自己的图标叠成两层字。让位才是真盖住；给顶栏加不透明底会改掉毛玻璃设计。
+    // 状态栏安全区已由顶栏消化，这里不再重复留白。
+    &.underBar {
+      top: var(--mobilebar-h);
+      padding-top: 0;
+
+      // 品牌名与搜索按钮顶栏里都已经有一份，让位之后两份会上下摞着同时露出来。
+      // 头部整块不渲染：顶栏承担的就是它，之前那 48px 也不再白占。
+      .siderHeader {
+        display: none;
+      }
+    }
+
+    // 移动端强制展开态（忽略桌面折叠）
+    &.folded {
+      width: var(--drawer-w);
+      min-width: 0;
+    }
+
+    // 桌面折叠按钮在移动端隐藏（用顶部栏汉堡）
+    .siderHeader .foldBtn {
+      display: none;
+    }
+
+    // 侧栏底部用户区 → 悬浮圆头像（Claude App 式）
+    .userRow {
+      // 头像离左边远一点(16 + 左安全区)，不贴边
+      margin: 10px 14px calc(10px + env(safe-area-inset-bottom))
+        calc(16px + env(safe-area-inset-left));
+      padding: 0;
+      width: 46px;
+      height: 46px;
+      border-radius: 50%;
+      justify-content: center;
+      background: transparent;
+
+      &:hover {
+        background: transparent;
+      }
+
+      .userAvatar {
+        width: 46px;
+        height: 46px;
+        min-width: 46px;
+        font-size: 18px;
+        box-shadow: 0 4px 14px color-mix(in srgb, var(--primary) 35%, transparent);
+      }
+
+      .userText,
+      .userChevron,
+      :global(.ant-badge) {
+        display: none;
+      }
+    }
+  }
+}

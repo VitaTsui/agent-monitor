@@ -1,0 +1,174 @@
+@use "@hsu-react/ui/es/styles/responsive" as r;
+
+// 放大模式：主区一格独大 + 右侧一列只读卡片。
+// 右列给固定宽度而非百分比 —— 它的作用是「瞥一眼其余会话」，宽度需求跟总宽无关；
+// 按比例分的话宽屏上会白占一大片。
+.focusLayout {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 1px;
+  background: var(--overlay-2);
+}
+
+.focusMain {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+
+  > * {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+// 右侧卡片列：整列滚动，卡片各自固定高度（等高才好扫视，内容多的那个
+// 自己在卡片内滚，不去挤别人的地方）。列本身给内边距，卡片才有地方"浮"起来 ——
+// 贴着边的话投影会被裁掉，圆角也显不出来。
+.focusSide {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  box-sizing: border-box;
+  background: var(--card);
+}
+
+.focusCard {
+  flex: none;
+  height: 248px;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  border: 1px solid color-mix(in srgb, var(--foreground) 7%, transparent);
+  // 静止只给一层极淡的投影：一列卡片各自重投影会显脏，浮起来的事交给 hover
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 4%, transparent);
+  transition: box-shadow 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
+
+  @media (hover: hover) {
+    &:hover {
+      // 上浮 + 加深投影：卡片整体可点，位移比换色更能说明「点我换到主区」
+      transform: translateY(-2px);
+      border-color: color-mix(in srgb, var(--primary) 30%, transparent);
+      box-shadow: 0 6px 16px color-mix(in srgb, var(--foreground) 10%, transparent);
+    }
+  }
+}
+
+// 有选择卡等着作答：整张卡描主色边并微微发光，让它在一列里跳出来。
+// 这是「非看不可」的状态 —— 不作答那个终端就一直干等着。
+//
+// 类名由本视图自己挂（见 index.tsx），不能写成 `.focusCard:has(待选类)` ——
+// 那个类属于 ChatPane 模块，CSS Modules 会把两边 hash 成不同名字，
+// 选择器永远匹配不上，且编译不报错、静默失效。
+.focusCardAlert {
+  border-color: color-mix(in srgb, var(--primary) 60%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 12%, transparent);
+
+  @media (hover: hover) {
+    &:hover {
+      border-color: color-mix(in srgb, var(--primary) 75%, transparent);
+    }
+  }
+}
+
+.paneGrid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  gap: 1px;
+  background: var(--overlay-2);
+  // 行列数由 usePaneGrid 按容器实际宽高算出，经 --pane-cols/--pane-rows 传进来；
+  // 未测量前（首帧）退化成单格，不会闪出错误布局。
+  //
+  // 一律 minmax(0, 1fr)：grid 的 `1fr` 实为 `minmax(auto, 1fr)`，列的最小尺寸
+  // 会被内容的 min-content 顶开 —— 会话里一行长代码/宽表格就能把整个页面撑出
+  // 横向滚动条。行同理（长内容会顶开行高，把输入框挤出屏幕）。
+  grid-template-columns: repeat(var(--pane-cols, 1), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--pane-rows, 1), minmax(0, 1fr));
+
+  // 末行没排满时（如 3 格分 2 列），最后一格跨完剩余列，免得右边空一块。
+  // 列数上限就是 MAX_PANES，枚举到 4 即可。
+  &[data-last-span="2"] > *:last-child {
+    grid-column: span 2;
+  }
+
+  &[data-last-span="3"] > *:last-child {
+    grid-column: span 3;
+  }
+
+  &[data-last-span="4"] > *:last-child {
+    grid-column: span 4;
+  }
+}
+
+.mainEmpty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+
+  /* 40 / 行高 64：这一屏本来就空，28px 压不住，字号一小整块空态就散了。
+     行高给足是因为它旁边还站着一枚 40 的方形 logo —— 行盒比图标矮时，
+     两者的基线对不上，文字会显得往上飘。 */
+  .greeting {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 40px;
+    line-height: 64px;
+    font-weight: 500;
+    color: var(--foreground);
+
+    .greetLogo {
+      width: 40px;
+      height: 40px;
+      border-radius: var(--radius-lg);
+      background: var(--primary);
+      color: var(--primary-foreground);
+      font-size: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+  }
+
+  .greetSub {
+    font-size: var(--text-md);
+    color: var(--muted-foreground);
+  }
+
+  .hint {
+    font-size: var(--text-sm);
+    color: color-mix(in srgb, var(--foreground) 40%, transparent);
+  }
+}
+
+// 空态文案的桌面/移动分支：默认桌面显示、移动隐藏；≤md 反转
+.descMobile {
+  display: none;
+}
+
+@include r.down(md) {
+  /* 窄屏收到 28：40px 的问候语在 390 宽下要占掉八成宽度 */
+  .mainEmpty .greeting {
+    font-size: 28px;
+    line-height: 44px;
+  }
+
+  .descDesktop {
+    display: none;
+  }
+
+  .descMobile {
+    display: inline;
+  }
+}

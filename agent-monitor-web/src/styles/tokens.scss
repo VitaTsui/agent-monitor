@@ -61,16 +61,38 @@
   --warning: var(--vita-warning);
   --warning-subtle: #fffbeb;
 
+  // ---- 叠加墨：跟着 --foreground 走的半透明层 ----
+  // 描边、hover 底、选中底都用它，而不是实色的 --border / --accent：这些元素会叠在
+  // 画布(--background)、卡片(--card)、终端底(--term-bg) 三种不同的面上，实色只在其中
+  // 一种面上对得住，半透明的墨三种面上都是同一份对比度。
+  // 收在这里之前，前台九个 scss 各写各的 color-mix，同一条分隔线出现过 6/8/9/10/12%
+  // 五个百分比 —— 那不是设计，是抄漏。
+  --overlay-1: color-mix(in srgb, var(--foreground) 6%, transparent); // hover 底
+  --overlay-2: color-mix(in srgb, var(--foreground) 9%, transparent); // 描边 / 选中·按下底
+
+  // ---- 等宽字体 ----
+  // 终端输出、会话 id、命令行这些「按列对齐才读得懂」的地方用它。
+  // 同样是收口：原来五个 scss 各自写了一份，其中两份漏了 Linux 的 Liberation Mono。
+  //
+  // **必须带中文兜底**：行内代码里常夹着中文（文件名、字段说明），而前面这几支
+  // 西文等宽字都没有中文字形，中文会一路回退到浏览器默认字体 —— 那是比例字且字宽
+  // 极大，表现成「一句话中间的字忽然被撑开一截」。
+  --font-mono: "SF Mono", Menlo, Consolas, "Liberation Mono", "PingFang SC",
+    "Microsoft YaHei", monospace;
+
   // ---- 描边 / 聚焦 ----
   --border: var(--vita-border);
   --border-weak: var(--vita-border-weak);
   --input: var(--vita-border);
   --ring: var(--vita-primary);
 
-  // ---- 圆角：deepseek-harness 的档位（6 / 8 / 12，胶囊 999）----
-  --radius-sm: 6px;
-  --radius: 8px;
-  --radius-lg: 12px;
+  // ---- 圆角 ----
+  // 值不再另抄一份：组件库的 --vita-radius-* 就是 6 / 8 / 12 这三档，
+  // 抄一遍就意味着改圆角要改两处、还会悄悄跑偏。
+  // --radius-full 是本项目独有的一档（胶囊），组件库没有对应物。
+  --radius-sm: var(--vita-radius-sm);
+  --radius: var(--vita-radius);
+  --radius-lg: var(--vita-radius-lg);
   --radius-full: 999px;
 
   // ---- 字号：以 12 / 13 / 14 为主，比 antd 默认更紧 ----
@@ -92,13 +114,6 @@
   --term-amber: #f0c674; // 警告、待输入
   --term-green: #67a579; // 成功、已完成
 
-  // ---- 间距：4px 网格 ----
-  --space-1: 4px;
-  --space-2: 6px;
-  --space-3: 8px;
-  --space-4: 12px;
-  --space-5: 16px;
-  --space-6: 24px;
 }
 
 // 暗色只覆盖会变的那些。--card / --popover 在 shadcn 暗色下比 background 亮一档，

@@ -427,6 +427,19 @@ pub async fn resolve_scan_user(
     Ok((user_id.to_string(), nick))
 }
 
+/// 出网前脱敏：把正文和「完整内容.txt」附件一起过一遍 crate::redact。
+///
+/// **判据不在这儿**——一个字节的判断都没有，全部委托给 `redact_secrets`，
+/// 与入库脱敏（crate::history::prepare_content）共用同一套形态判据。
+/// 单独成函数只为把「两份同源内容都得清」这条不变量钉住并可测：
+/// `full` 是**未截断的原文**，只清正文等于白清。
+fn redact_outbound(text: &str, full: Option<&str>) -> (String, Option<String>) {
+    (
+        crate::redact::redact_secrets(text),
+        full.map(crate::redact::redact_secrets),
+    )
+}
+
 /// 通过企业应用机器人 OTO 接口，主动把一条文本发给某个用户（staffId）。
 /// full 非空且比正文长时，额外把完整内容作为 .txt 文件发在下面（正文被截断的兜底）。
 pub async fn push_oto(
@@ -441,9 +454,12 @@ pub async fn push_oto(
         return Err("空 staffId".into());
     }
     let token = access_token(&app.app_key, &app.app_secret, now_ms).await?;
+    // 出网前脱敏（见 redact_outbound）：接在这里是因为下面的降级/分片/附件上传
+    // 全从这两个变量派生，清一次就够，不必散到三个 oto_send 调用点上。
+    let (text, full) = redact_outbound(text, full);
     // 私聊是「远程继续会话」的主通道，同样要先降级 + 分片：agent 的结果里表格和代码围栏
     // 最多，手机端渲染不了。完整原文仍由下面的 .txt 附件兜底，降级只影响正文可读性。
-    let md = crate::mdfmt::downgrade_for_dingtalk(text);
+    let md = crate::mdfmt::downgrade_for_dingtalk(&text);
     let chunks = crate::mdfmt::chunk_text(&md, crate::mdfmt::DINGTALK_MAX_LEN);
     // msgParam 是 JSON 字符串（钉钉要求）；sampleMarkdown 让结果里的 md 正常渲染
     // （手机端正常；桌面端 OTO 可能显示成代码块，属客户端差异）。
@@ -476,7 +492,7 @@ pub async fn push_oto(
         }
     }
     // 内容太长被截断：把完整内容作为文件补发（失败只记日志，不影响正文已送达）
-    if let Some(full) = full {
+    if let Some(full) = &full {
         match upload_media(
             &token,
             "完整内容.txt",
@@ -713,5 +729,51 @@ mod tests {
         );
         assert!(!retryable(StatusCode::NOT_FOUND));
         assert!(!retryable(StatusCode::BAD_REQUEST));
+    }
+
+    /// 造一段够长的 PEM 主体（判据只看形态，内容无意义）
+    fn pem_block() -> String {
+        let body = (0..3)
+            .map(|i| format!("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC{i:015}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----")
+    }
+
+    /// 机器人推送这条出口也必须脱敏：正文和「完整内容.txt」附件**两份都要清**。
+    /// 附件是未截断的原文，漏了它等于正文白清。
+    #[test]
+    fn oto_redacts_body_and_attachment() {
+        let text = format!("会话产出：\n{}\n（完）", pem_block());
+        let full = format!(
+            "完整原文：\n{}\ntoken=ghp_{}",
+            pem_block(),
+            "a1B2c3D4e5".repeat(3) + "abcdef"
+        );
+        let (got_text, got_full) = redact_outbound(&text, Some(full.as_str()));
+        assert_eq!(got_text, "会话产出：\n[REDACTED:private-key]\n（完）");
+        assert_eq!(
+            got_full.unwrap(),
+            "完整原文：\n[REDACTED:private-key]\ntoken=[REDACTED:github-token]"
+        );
+    }
+
+    /// **硬要求**：谈论密钥的正常文本，出网这条路上同样一个字节都不许改。
+    /// 机器人回复里最常见的就是这类句子（「核验 0 命中」之类），改花了就是帮倒忙。
+    #[test]
+    fn oto_never_touches_text_that_merely_talks_about_keys() {
+        let cases = [
+            "核验：`BEGIN PRIVATE KEY` 0 命中",
+            "报告里不许出现 -----BEGIN PRIVATE KEY----- 这种东西",
+            "已核对 sk-ant- 开头的 key 未泄露；ghp_ 前缀的令牌也没有。",
+            "私钥请放 .env，不要贴进对话。",
+        ];
+        for c in cases {
+            let (t, f) = redact_outbound(c, Some(c));
+            assert_eq!(t, c, "正文被误伤：{c}");
+            assert_eq!(f.unwrap(), c, "附件被误伤：{c}");
+        }
+        // 没有附件时不该凭空造出一份
+        assert_eq!(redact_outbound("一切正常", None).1, None);
     }
 }

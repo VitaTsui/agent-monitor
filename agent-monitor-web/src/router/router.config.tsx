@@ -3,11 +3,24 @@ import App from "@/App";
 import Home from "@/pages/Home";
 import Login from "@/pages/Login";
 import Portal from "@/pages/Portal";
-import { ReactNode } from "react";
+import PortalSuspense from "./_components/PortalSuspense";
+import { ReactNode, lazy } from "react";
 import { Navigate, RouteObject } from "react-router-dom";
 
 // 详情/子页面（带路由参数，不在后端菜单里）在此显式注册为后管子路由。
 // 示例：const FooDetail = lazy(() => import("@/pages/foo/Detail"));
+
+/**
+ * 前台 `/portal` 出口下的视图。
+ *
+ * 只有两个：会话网格与远程往来。**设置不在这里** —— 它是弹窗，由壳持有
+ * `settingsOpen / settingsTab` 两份 state 驱动（见 pages/Portal/index.tsx）。
+ *
+ * 懒加载：远程往来只有点进去才看得到，静态引进来会跟着会话页一起进首屏。
+ */
+const PanesView = lazy(() => import("@/pages/Portal/_views/PanesView"));
+const SessionsView = lazy(() => import("@/pages/Portal/_views/SessionsView"));
+const HistoryView = lazy(() => import("@/pages/Portal/_views/HistoryView"));
 
 /**
  * MetaType 路由元信息
@@ -99,7 +112,8 @@ const Router: RouteType[] = [
     },
   },
   {
-    // 前台：终端任务监控对话页（页面内自校验登录态，未登录跳 /login）
+    // 前台：终端任务监控对话页（页面内自校验登录态，未登录跳 /login）。
+    // Portal 是壳（侧栏 ＋ 顶栏 ＋ 出口），下面每个视图各有真实地址。
     path: "/portal",
     element: <Portal />,
     meta: {
@@ -107,6 +121,40 @@ const Router: RouteType[] = [
       noAuth: true,
       noTabsView: true,
     },
+    children: [
+      {
+        index: true,
+        element: (
+          <PortalSuspense>
+            <PanesView />
+          </PortalSuspense>
+        ),
+        meta: { title: "任务监控", noAuth: true, noTabsView: true },
+      },
+      {
+        /* 全部会话。侧栏按「设备 → 项目」分组、只列当前设备下的那些，
+           跨设备的全量在这一页。它同时补上了 `/portal/history` 这个洞 ——
+           在此之前只有 `history/:taskId` 有页面，父路径直接 404 */
+        path: "history",
+        element: (
+          <PortalSuspense>
+            <SessionsView />
+          </PortalSuspense>
+        ),
+        meta: { title: "全部会话", noAuth: true, noTabsView: true },
+      },
+      {
+        /* 远程往来。原来是 720 宽的弹窗 —— 一条会话的往来动辄几十屏，
+           弹窗里读不了，刷新就没了，链接也发不出去 */
+        path: "history/:taskId",
+        element: (
+          <PortalSuspense>
+            <HistoryView />
+          </PortalSuspense>
+        ),
+        meta: { title: "远程往来", noAuth: true, noTabsView: true },
+      },
+    ],
   },
   {
     // 根路径：产品官网首页（公开，无需登录）

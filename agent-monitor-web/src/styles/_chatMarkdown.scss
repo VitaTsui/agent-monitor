@@ -1,0 +1,224 @@
+// 对话正文的排版基线。**多处共用**：会话对话流里的助手正文与方案卡、
+// 「远程往来」历史页里的两侧气泡。
+//
+// 用法（挂在**包住 `Markdown.Views` 的那个元素**上，不是 Markdown 自己）：
+//
+//   @use "@/styles/chatMarkdown" as md;
+//   .assistantText { @include md.chat-markdown; }
+//
+// 为什么抽出来：此前对话流在 TerminalFeed 里写了 30 行局部覆盖，
+// **h1–h4 一律 13px/700** —— 四级标题一个字号，长回答里的层级全平了；
+// 而历史页连这层都没有，走组件库默认（14px、段距 0、表格是网格）。
+// 同一段内容，在对话流里和在历史页里是两套排版。
+//
+// 为什么挂在包裹元素上而不是 Markdown 根节点：组件库 `.MarkdownViews`
+// 自己写了 `display:flex; row-gap:10px`，还有 `.MarkdownViews ul li`
+// (0,1,2) 这类后代规则。挂同一个元素的话两边同特异度，只能靠 `!important`
+// 压 —— 打包顺序不可控，那个 `!important` 就成了必需品。挂在外层之后，
+// 本文件所有选择器天然多一层类，规则冲突用特异度就解决了。
+//
+// 为什么钩 `.markdown-body` 而不是 `.MarkdownViews`：组件库这个组件走 CSS
+// Modules，根节点上的类名在库的构建里就被哈希成了 `MarkdownViews--MCh2A`
+// 之类，消费方写 `:global(.MarkdownViews)` **一条都匹配不上**（实测：
+// row-gap 仍是 10px、h1 还是浏览器默认的 2em）。同一行代码里它还额外挂了
+// 一个**没进 CSS Modules 的字面量** `markdown-body`
+// （`Markdown/Views/index.js:150`）—— 那才是稳定的、可供外部挂样式的钩子。
+
+// 等宽字体栈走令牌 `--font-mono`（tokens.scss）——它已带中文兜底：
+// 行内代码里常夹着中文（文件名、字段说明），裸 monospace 在 macOS 上
+// 解析成 Courier 那一类，没有中文字形，中文会回退到一个字宽极大的字体，
+// 看着就是「一句话中间的字忽然被撑开」。
+
+@mixin chat-markdown {
+  color: var(--foreground);
+  // 16/1.5：正文该大、行高该收。原来是 12.5px 等宽塞在终端卡里 ——
+  // 那是命令输出的排版，不是给人读一段话用的。
+  font-size: 16px;
+  line-height: 1.5;
+
+  :global(.markdown-body) {
+    // 组件库根节点的 `row-gap: 10px` 会给下面每一档块级间距无条件 +10
+    // （段距 12 显示成 22）。间距在本文件里统一说了算。
+    row-gap: 0;
+    color: inherit;
+    font-size: inherit;
+    line-height: inherit;
+
+    // 段距 12（首段 0、margin-bottom 恒为 0）。
+    // 走 margin-top 而不是 bottom：整块的首段不该顶着上面的东西留白，
+    // 用 bottom 的话最后一段会在块尾多出一段空。
+    p {
+      margin: 12px 0 0;
+      // 单换行要显示出来靠它（组件库同权重规则赌加载顺序，这里显式写死）
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+
+    // 标题比段落多留一档（20 vs 12）：它是分节的记号，
+    // 贴着上一段会被读成那一段的一部分
+    h1,
+    h2,
+    h3,
+    h4,
+    h5,
+    h6 {
+      margin: 20px 0 8px;
+      font-weight: 600;
+      line-height: 1.35;
+    }
+
+    // 字号阶：以正文 16 为基准，h1 +6、h2 +2、h3 齐平、h4 起降一档。
+    // 原来四级全是 13px/700，等于没有层级。
+    h1 {
+      font-size: 22px;
+    }
+
+    h2 {
+      font-size: 18px;
+    }
+
+    h3 {
+      font-size: 16px;
+    }
+
+    h4,
+    h5,
+    h6 {
+      font-size: 14px;
+    }
+
+    // 一段内容的第一个块不留上边距，否则每块正文都会顶出一截空白
+    > :first-child {
+      margin-top: 0;
+    }
+
+    ul,
+    ol {
+      margin: 12px 0 0;
+      padding-left: 32px;
+    }
+
+    li {
+      padding-left: 8px;
+      // 组件库给 `.MarkdownViews ul li` 写了 `margin-bottom: 5px`，
+      // 叠在下面的 `li + li` 上就是 4 + 5 两份。条目间距只留一份
+      margin-bottom: 0;
+    }
+
+    li + li {
+      margin-top: 4px;
+    }
+
+    // 行内代码：`.9em` 跟着所在行的字号走，压在正文里不会忽大忽小。
+    // 底色用 `--overlay-1`（跟着 --foreground 走的半透明叠加墨）而不是实色，
+    // 这样压在画布、卡片、气泡三种面上都是同一档对比度，暗色下也自动成立。
+    code {
+      padding: 1px 4px;
+      border-radius: var(--radius-sm);
+      background: var(--overlay-1);
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+    }
+
+    pre {
+      margin: 16px 0 0;
+      overflow-x: auto;
+
+      code {
+        padding: 0;
+        background: transparent;
+      }
+    }
+
+    // 无语言标记的代码块：组件库只输出 <pre><code>，这里自绘盒子。
+    // 带语言标记的它自己渲染成一个带边框与复制顶栏的 <div>，外层 pre
+    // 不能再套一层盒子，否则双重包裹 —— 用**结构**（有没有子 div）区分，
+    // 不去钩它那个被哈希掉的类名。
+    pre:not(:has(> div)) {
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--muted);
+    }
+
+    blockquote {
+      margin: 16px 0 0;
+      padding-left: 12px;
+      border-left: 3px solid var(--border);
+      color: var(--muted-foreground);
+    }
+
+    // 表格与正文同号，并且是**一张有外框的卡**：外框 1px + 圆角 8，
+    // 内部只有横向发丝线。原来是每个单元格各画一圈边框的网格，
+    // 夹在一段正文中间像张报表。
+    //
+    // `separate` + `border-spacing: 0`，不是 `collapse`：collapse 下
+    // 单元格边框会合并到表格上，**外层圆角裁不住它们**（overflow:hidden
+    // 也没用，collapse 的边框不参与裁剪），表头灰底会方方正正盖住上面两个角。
+    // 所以四个角各自设一次。
+    table {
+      width: 100%;
+      margin: 16px 0 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      border-collapse: separate;
+      border-spacing: 0;
+    }
+
+    thead tr:first-child th:first-child {
+      border-start-start-radius: calc(var(--radius) - 1px);
+    }
+
+    thead tr:first-child th:last-child {
+      border-start-end-radius: calc(var(--radius) - 1px);
+    }
+
+    tbody tr:last-child td:first-child {
+      border-end-start-radius: calc(var(--radius) - 1px);
+    }
+
+    tbody tr:last-child td:last-child {
+      border-end-end-radius: calc(var(--radius) - 1px);
+    }
+
+    // 表头与表体之间也要有线，否则灰底一停内容就直接开始
+    thead th {
+      border-bottom: 1px solid var(--border);
+    }
+
+    th,
+    td {
+      padding: 7px 12px;
+      border: none;
+      text-align: left;
+    }
+
+    // 行间线画在 td 上，最后一行不画
+    tbody tr + tr td {
+      border-top: 1px solid var(--border);
+    }
+
+    th {
+      background: var(--muted);
+      // 600 太重，一行表头会比正文的加粗还抢眼
+      font-weight: 500;
+    }
+
+    a {
+      color: var(--foreground);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+
+    img {
+      max-width: 100%;
+    }
+
+    hr {
+      margin: 16px 0 0;
+      border: none;
+      border-top: 1px solid var(--border);
+    }
+  }
+}

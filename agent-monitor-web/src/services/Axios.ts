@@ -285,7 +285,7 @@ axios.interceptors.response.use(
   (err) => {
     if (!err?.response) return Promise.reject(err);
 
-    const { status, config, statusText } = err.response;
+    const { status, config, statusText, data } = err.response;
 
     if (status === 401) {
       // 标记为静默的请求（如登录页探测钉钉开关）401 时不跳登录，仅向上抛错
@@ -294,7 +294,13 @@ axios.interceptors.response.use(
       }
       return Promise.reject(err);
     } else {
-      const errorText = codeMessage[status] || statusText;
+      // 服务端自己说了原因就照原话展示。按状态码查表得到的是「发出的请求有错误」
+      // 这类放之四海皆准的废话，而后端在业务信封里给的往往是「备注最长 100 个字，
+      // 当前 104 个」—— 后者才是用户照着能改对的那句。
+      const errorText =
+        (typeof data?.msg === "string" && data.msg.trim()) ||
+        codeMessage[status] ||
+        statusText;
 
       errMsg(status, config.url, errorText);
 
@@ -333,6 +339,41 @@ export interface ResType<T = unknown> {
   code: number;
   msg?: string;
 }
+
+/**
+ * 响应体不是 `{ code, data }` 业务信封时抛出，带上足以定位的现场信息
+ * （请求地址 / content-type / 正文开头），避免只报一句含糊的「请求失败」。
+ */
+export class InvalidResponseError extends Error {
+  constructor(
+    public readonly url: string,
+    public readonly contentType: string,
+    public readonly preview: string
+  ) {
+    super(
+      `服务端返回了非预期内容（不是 { code, data } 业务 JSON）：${url}` +
+        `；content-type: ${contentType || "未知"}；正文开头: ${preview}`
+    );
+    this.name = "InvalidResponseError";
+  }
+}
+
+/** 非业务信封的提示：HTTP 状态可能是 200，套用 errMsg 的「请求错误 xxx」会误导 */
+const badPayloadMsg = debounce((url: string, description: string) => {
+  notification.error({
+    title: `响应格式错误：${window.decodeURIComponent(url)}`,
+    description,
+  });
+});
+
+/** 把任意响应体压成一行短预览，供报错定位用 */
+const previewBody = (data: unknown): string => {
+  const text =
+    typeof data === "string" ? data : JSON.stringify(data) ?? String(data);
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > 120 ? `${oneLine.slice(0, 120)}…` : oneLine;
+};
+
 const response = <T>(res: AxiosResponse<ResType<T>>): ResType<T> => {
   const data = res.data;
 
@@ -350,11 +391,29 @@ const response = <T>(res: AxiosResponse<ResType<T>>): ResType<T> => {
     };
   }
 
-  if (data.code === undefined) {
-    return {
-      data: data as unknown as T,
-      code: 0,
-    };
+  // 必须是带数字 code 的业务信封，否则一律判失败。
+  // hub 对未注册的 GET 路径会回落到 SPA index.html（HTTP 200 + text/html），
+  // 旧版 hub 上任何新接口都长这样；这里若放行，整页 HTML 会被当作
+  // `{ code: 0, data: "<!doctype html>…" }` 交给上层，`res.code === 0 && res.data`
+  // 判断通过，脏数据被写进本地缓存。
+  if (Typeof(data) !== "object" || typeof data?.code !== "number") {
+    const url = res.config?.url ?? "";
+    const contentType = String(
+      (res.headers as unknown as Record<string, unknown>)?.["content-type"] ?? ""
+    );
+    const error = new InvalidResponseError(
+      url,
+      contentType,
+      previewBody(data)
+    );
+    console.error(error);
+    badPayloadMsg(
+      url,
+      `服务端未返回业务 JSON（content-type: ${
+        contentType || "未知"
+      }）。常见原因：接口路径不存在，被回落成了页面 HTML。`
+    );
+    throw error;
   }
 
   if (data.code === 401 && !skipAuthRedirect(res.config)) {

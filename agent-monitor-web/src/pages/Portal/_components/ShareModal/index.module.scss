@@ -132,7 +132,7 @@
       align-items: center;
       justify-content: space-between;
       padding: 7px 12px;
-      border: 1px solid color-mix(in srgb, var(--foreground) 9%, transparent);
+      border: 1px solid var(--overlay-2);
       border-radius: var(--radius);
       margin-bottom: 6px;
       font-size: var(--text-base);

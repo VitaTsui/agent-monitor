@@ -50,3 +50,7 @@ windows-sys = { version = "0.59", features = [
 [target.'cfg(target_os = "macos")'.dependencies]
 # NSProcessInfo.beginActivity 关掉 App Nap（后台托盘态定时器不被系统压到 ~60s）
 objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString"] }
+# 桌面客户端撰写框注入（appinject）要直接调 Accessibility API：CFString/CFArray 这些
+# 基础类型走 core-foundation-sys，AX 那几个函数在模块里自己 extern 声明。
+# 这个 crate 本来就在依赖树里（tauri 传递依赖），加的只是一条显式依赖边。
+core-foundation-sys = "0.8"

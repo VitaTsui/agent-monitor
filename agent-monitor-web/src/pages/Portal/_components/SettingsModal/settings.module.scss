@@ -1,0 +1,219 @@
+@use "@hsu-react/ui/es/styles/responsive" as r;
+
+/**
+ * 七个设置分栏共用的排版件（分栏标题、说明条、分节标题、一行一件事、按钮胶囊）。
+ *
+ * 弹窗骨架（左栏 / 内容列 / 移动端两级）在 index.module.scss，这里只管
+ * 「一个分栏里长什么样」。数值对齐参照站的设置弹窗：分栏标题 15、行标题 14、
+ * 说明 12、行内边距 12/0、行与行之间只画一条分隔线。
+ */
+
+// 分栏标题。移动端由弹窗的固定头部显示，这里整块隐藏，避免两个标题
+.paneTitle {
+  margin-bottom: 12px;
+  color: var(--foreground);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 20px;
+
+  @include r.down(md) {
+    display: none;
+  }
+}
+
+// 账户：全宽信息卡，避免右侧大片留白。
+// 用中性描边而非彩色描边 —— claude 的设置卡片不靠主色抢注意力。
+.account {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 22px;
+  padding: 16px 18px;
+  border: 1px solid var(--overlay-2);
+  border-radius: var(--radius-lg);
+
+  .avatar {
+    width: 48px;
+    height: 48px;
+    min-width: 48px;
+    border-radius: 50%;
+    background: var(--primary);
+    color: var(--primary-foreground);
+    font-size: 20px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .accName {
+    font-size: var(--text-md);
+    font-weight: 600;
+    color: var(--foreground);
+  }
+
+  .accMeta {
+    margin-top: 3px;
+    font-size: 12.5px;
+    color: var(--muted-foreground);
+  }
+}
+
+// 分栏顶部的说明条
+.hint {
+  font-size: var(--text-sm);
+  color: color-mix(in srgb, var(--foreground) 60%, transparent);
+  background: color-mix(in srgb, var(--primary) 6%, transparent);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  line-height: 1.6;
+  margin-bottom: 16px;
+
+  code {
+    background: color-mix(in srgb, var(--foreground) 7%, transparent);
+    border-radius: 4px;
+    padding: 0 4px;
+    font-size: var(--text-xs);
+  }
+}
+
+.section {
+  margin-bottom: 18px;
+
+  .sectionTitle {
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: color-mix(in srgb, var(--foreground) 60%, transparent);
+    margin-bottom: 8px;
+  }
+}
+
+/**
+ * 通用「一行一件事」：左侧标题 ＋ 说明，右侧控件。
+ *
+ * 原来每行是一张 `radius: 12` 的描边卡片 —— 一屏十几张小卡，边框把内容切得
+ * 到处是框。改成参照站那种：行**不画框**，只在相邻两行之间画一条淡分隔线。
+ */
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+
+  & + .row {
+    border-top: 1px solid var(--overlay-2);
+  }
+
+  .rowInfo {
+    flex: 1;
+    min-width: 0;
+
+    .rowTitle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: var(--text-md);
+      color: var(--foreground);
+      line-height: 1.5;
+      flex-wrap: wrap;
+    }
+
+    .rowDesc {
+      margin-top: 2px;
+      font-size: var(--text-sm);
+      color: var(--muted-foreground);
+      line-height: 1.5;
+    }
+  }
+
+  .rowActions {
+    display: flex;
+    gap: 6px;
+    white-space: nowrap;
+    align-items: center;
+    flex-shrink: 0;
+
+    // 统一按钮：小胶囊，默认描边低调，各自 hover 表意
+    .actBtn,
+    .shareBtn,
+    .trustBtn {
+      height: 28px;
+      border-radius: var(--radius-full);
+      padding-inline: 14px;
+      font-size: var(--text-sm);
+      transition: all 0.18s;
+    }
+
+    // 撤销信任 / 断开：中性描边，hover 转警示
+    .actBtn {
+      color: var(--muted-foreground);
+      border-color: var(--overlay-2);
+      background: transparent;
+
+      &:hover {
+        color: var(--destructive);
+        border-color: var(--destructive-subtle);
+        background: var(--destructive-subtle);
+      }
+    }
+
+    // 协助共享：主题色描边，hover 填充
+    .shareBtn {
+      color: var(--primary);
+      border-color: color-mix(in srgb, var(--primary) 45%, transparent);
+      background: transparent;
+
+      &:hover {
+        color: var(--primary-foreground);
+        border-color: var(--primary);
+        background: var(--primary);
+      }
+    }
+
+    // 信任：主色实心
+    .trustBtn {
+      box-shadow: 0 2px 6px color-mix(in srgb, var(--primary) 25%, transparent);
+    }
+
+    // 删除：极低调，hover 才显红
+    .delBtn {
+      color: var(--muted-foreground);
+
+      &:hover {
+        color: var(--destructive);
+      }
+    }
+  }
+
+  // 窄屏：操作按钮换行到设备信息下方，不再横向挤压设备名
+  @include r.down(md) {
+    flex-direction: column;
+    align-items: stretch;
+
+    .rowActions {
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 6px;
+      margin-top: 6px;
+
+      // 收小胶囊：之前偏大、和「删除」文字按钮不协调
+      .actBtn,
+      .shareBtn,
+      .trustBtn {
+        height: 28px;
+        min-height: 28px;
+        padding-inline: 12px;
+        font-size: var(--text-sm);
+        border-radius: var(--radius-full);
+      }
+
+      .delBtn {
+        height: 28px;
+        min-height: 28px;
+        padding-inline: 8px;
+        font-size: var(--text-sm);
+      }
+    }
+  }
+}

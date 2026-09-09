@@ -21,6 +21,10 @@ pub struct Config {
     pub agent_token: String,
 }
 
+/// 一次目录列举的结果：(子目录, 文件, agent 实际据以列举的绝对根)。
+/// 三元组含义写在 MachineEntry::dir_cache 上，这里只为给它一个名字。
+pub type DirListing = (Vec<String>, Vec<String>, String);
+
 /// hub 侧维护的一台机器（含 hub 本机）
 pub struct MachineEntry {
     pub hostname: String,
@@ -59,7 +63,7 @@ pub struct MachineEntry {
     ///
     /// root 必须一路带到网页：只有 agent 知道会话此刻在哪，hub 自己那份是旧快照。
     /// 网页拿它当上传落点与相对路径的基准。
-    pub dir_cache: HashMap<(String, String), (Vec<String>, Vec<String>, String)>,
+    pub dir_cache: HashMap<(String, String), DirListing>,
     /// task_id → (浏览期间**钉住**的根, 最近一次确认时间)。
     ///
     /// 根必须在一次浏览里保持不变：会话的 cwd 每一轮都在动（实测同一会话 60 条记录里
@@ -295,6 +299,10 @@ pub async fn save_sessions(state: &SharedState) {
     let _ = std::fs::rename(&tmp, &path);
 }
 
+/// 一次性图片外链的内容：(字节, MIME, 放入时刻)。
+/// 用途与三重收窄写在 AppState::pub_images 上，这里只为给它一个名字。
+pub type PubImage = (Vec<u8>, String, Instant);
+
 pub struct AppState {
     pub config: Config,
     /// 全部上报机器（key = machine_id）
@@ -321,7 +329,7 @@ pub struct AppState {
     /// 服务器**来拉，那台机器带不了我们的登录态，所以这个地址必然免鉴权。
     /// 三重收窄：高熵随机 token（猜不出）、**取走即删**（一次性）、
     /// 到期自动清（见 PUB_IMAGE_TTL_SECS）。全程只在内存，不落盘。
-    pub pub_images: RwLock<HashMap<String, (Vec<u8>, String, Instant)>>,
+    pub pub_images: RwLock<HashMap<String, PubImage>>,
     pub started_at: chrono::DateTime<chrono::Local>,
     /// 会话表有未落盘变更（tick 循环定期 flush 到 sessions.json）
     pub sessions_dirty: std::sync::atomic::AtomicBool,
@@ -330,7 +338,11 @@ pub struct AppState {
     pub history: RwLock<Vec<crate::history::HistoryEntry>>,
     /// 历史有未落盘变更（tick 循环定期 flush 到 history.json）
     pub history_dirty: std::sync::atomic::AtomicBool,
-    /// 机器人会话号位（「@2 / 发 2 / 暂停 2」里的 2）：用户名 → 号位表。
+    /// 会话备注：用户名 → (号位锚 → 备注)。用户给会话起的名字，挂在**终端窗口**上，
+    /// 跨 `/clear`、`--resume`、hub 重启都不变 —— 见 crate::notes。
+    /// 改动即刻落盘（低频人工动作，攒着刷会「改完名字重启就没了」），故不设脏标。
+    pub notes: RwLock<crate::notes::NoteStore>,
+    /// 机器人会话号位（「#2 / 发 2 / 暂停 2」里的 2）：用户名 → 号位表。
     /// 号绑定终端窗口而非列表位置，跨排序变化与 hub 重启都不变 —— 见 crate::slots。
     pub bot_slots: RwLock<HashMap<String, crate::slots::SlotTable>>,
     /// 号位表有未落盘变更（tick 循环定期 flush 到 bot_slots.json）
@@ -339,7 +351,7 @@ pub struct AppState {
     /// 钉钉「监控」：user → 其监控中的多个会话（每会话一份）。支持同时监控多个、单独停止。
     pub bot_monitors: RwLock<HashMap<String, Vec<BotMonitor>>>,
     /// 连续对话「待确认」的内容：用户名 → (原文, 暂存时刻秒)。
-    /// 锁定的会话冷却后（久未对话），第一条不带 `@` 的消息不直接下发，先回一句确认、把内容
+    /// 锁定的会话冷却后（久未对话），第一条不带 `#` 的消息不直接下发，先回一句确认、把内容
     /// 存在这里；用户回「确认」就发它，省得重打一遍。短期数据，不落盘。
     pub bot_sticky_pending: RwLock<HashMap<String, (String, u64)>>,
     /// 配置同步基线：账号 → 其「配置源」设备的在管配置。见 crate::configsync。
@@ -455,12 +467,14 @@ impl AppState {
         let (tx, _) = broadcast::channel(64);
         // 会话持久化：重启不掉线（网页 / 移动端 / 客户端一体生效）
         let sessions = load_sessions(&config.data_dir);
-        // 号位持久化：hub 重启后「@2」还是同一个终端（重启丢表正是序号错位的成因之一）
+        // 号位持久化：hub 重启后「#2」还是同一个终端（重启丢表正是序号错位的成因之一）
         let slots = crate::slots::load(&config.data_dir);
         // 会话历史持久化：hub 重启后仍能回看之前派出去的活的结果
         let history = crate::history::load(&config.data_dir);
         // 配置基线持久化：hub 重启后镜像机不必等源机重传一遍全部配置
         let configs = crate::configsync::ConfigStore::load(&config.data_dir);
+        // 备注持久化：hub 重启后用户给会话起的名字还在
+        let notes = crate::notes::load(&config.data_dir);
         Arc::new(Self {
             machines: RwLock::new(HashMap::new()),
             tokens: RwLock::new(sessions),
@@ -478,6 +492,7 @@ impl AppState {
             sessions_dirty: std::sync::atomic::AtomicBool::new(false),
             history: RwLock::new(history),
             history_dirty: std::sync::atomic::AtomicBool::new(false),
+            notes: RwLock::new(notes),
             bot_slots: RwLock::new(slots),
             bot_slots_dirty: std::sync::atomic::AtomicBool::new(false),
             bot_monitors: RwLock::new(HashMap::new()),
@@ -666,7 +681,7 @@ pub async fn tick_loop(state: SharedState) {
     let mut tick: u64 = 0;
     loop {
         tick = tick.wrapping_add(1);
-        if tick % 400 == 0 {
+        if tick.is_multiple_of(400) {
             {
                 let mut map = state.tokens.write().await;
                 let before = map.len();
@@ -678,13 +693,13 @@ pub async fn tick_loop(state: SharedState) {
             state.pair_codes.write().await.retain(|_, e| !e.expired());
         }
         // 会话变更定期落盘（~60s 一次）：登录/登出/活动续期都只标脏，这里统一写
-        if tick % 40 == 0 && state.sessions_dirty.swap(false, Ordering::Relaxed) {
+        if tick.is_multiple_of(40) && state.sessions_dirty.swap(false, Ordering::Relaxed) {
             save_sessions(&state).await;
         }
         // 固定名安装包对齐（~60s 一次）：发版只上传版本化的包，客户端自更新却固定去下
         // agent-monitor-setup.exe。不对齐的话客户端会把旧包装了又装（见 sync_fixed_installer）。
         // 放 spawn_blocking：拷 11MB 是同步文件 IO，别占着 tick 所在的 worker。
-        if tick % 40 == 0 {
+        if tick.is_multiple_of(40) {
             let dir = std::env::var("AM_DOWNLOADS_DIR")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| state.config.data_dir.join("downloads"));
@@ -695,16 +710,16 @@ pub async fn tick_loop(state: SharedState) {
             }
         }
         // 机器人号位同上：分配/回收只标脏，这里统一写（丢一轮也只是号位重排一次）
-        if tick % 40 == 0 && state.bot_slots_dirty.swap(false, Ordering::Relaxed) {
+        if tick.is_multiple_of(40) && state.bot_slots_dirty.swap(false, Ordering::Relaxed) {
             crate::slots::save(&state).await;
         }
         // 交互历史同上。它是「人不在电脑前时唯一能回看的记录」，重启就丢等于没有，
         // 所以这里跟号位同频落盘（~60s），丢的最多是最后一分钟的几条。
-        if tick % 40 == 0 && state.history_dirty.swap(false, Ordering::Relaxed) {
+        if tick.is_multiple_of(40) && state.history_dirty.swap(false, Ordering::Relaxed) {
             crate::history::save(&state).await;
         }
         // 设备离线边沿检测（每 ~3s）：曾在线、现超阈值未上报 → 推「离线」
-        if tick % 2 == 0 {
+        if tick.is_multiple_of(2) {
             let mut offline_events = Vec::new();
             {
                 let reg = state.registry.read().await;

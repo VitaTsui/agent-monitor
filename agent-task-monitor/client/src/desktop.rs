@@ -389,7 +389,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             // agent 模式启动即后台，初始就用 Accessory —— 若先 Regular 再切，
             // set_activation_policy 走事件循环代理，Dock 图标会闪现一下才消失。
             #[cfg(target_os = "macos")]
-            let _ = app.set_activation_policy(if background_launch && !need_onboard {
+            app.set_activation_policy(if background_launch && !need_onboard {
                 tauri::ActivationPolicy::Accessory
             } else {
                 tauri::ActivationPolicy::Regular
@@ -974,7 +974,14 @@ fn client_auth(
     // try_read 而非 blocking_read：Tauri 命令可能跑在异步运行时线程上，
     // blocking_* 在那里会 panic（配对引导曾因此崩过）。此锁竞争极短，
     // 偶发拿不到就让页面下次重试。
-    let token = ctx.state.device_token.try_read().ok()?.clone()?;
+    let token = ctx
+        .state
+        .device_token
+        .try_read()
+        .ok()?
+        .as_ref()?
+        .value
+        .clone();
     Some(serde_json::json!({
         "machineId": ctx.state.config.machine_id,
         "deviceToken": token,
@@ -1046,8 +1053,9 @@ pub(crate) fn image_mime(b: &[u8]) -> &'static str {
 /// —— 用户无需再手动去找并删除那个文件（静默续登拿到 401 时页面会调这里）。
 #[tauri::command]
 async fn clear_device_token(ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>) -> Result<(), String> {
-    *ctx.state.device_token.write().await = None;
-    crate::secrets::clear(&ctx.state.config.data_dir);
+    // 清除策略统一在 AppState 里：暂用令牌（旧版共用条目）只丢内存不删钥匙串，
+    // 免得把同一台 Mac 上另一个实例的令牌一起抹掉。
+    ctx.state.invalidate_device_token().await;
     tracing::info!("设备令牌被判无效，已清除本地令牌，将自动重新配对");
     Ok(())
 }

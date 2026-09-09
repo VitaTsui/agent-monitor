@@ -4,8 +4,18 @@ const ReactRefreshWebpackPlugin = require("@pmmmwh/react-refresh-webpack-plugin"
 const ForkTsCheckerWebpackPlugin = require("fork-ts-checker-webpack-plugin");
 const MiniCssExtractPlugin = require("mini-css-extract-plugin");
 
+// .env.dev 不入库（带本机代理目标与登录密钥），干净 clone 里没有这个文件。
+// dotenv 缺文件时 parsed 给的是 {} 不是 undefined，不拦一道的话 dev-server 照常
+// 起来、只是没有 /api 代理也没有登录密钥，然后在浏览器里以各种奇怪方式失败。
 const envPath = path.resolve(__dirname, `../.env/.env.dev`);
-const envConfig = require("dotenv").config({ path: envPath }).parsed;
+const dotenvResult = require("dotenv").config({ path: envPath });
+const envConfig = dotenvResult.parsed || {};
+if (dotenvResult.error) {
+  throw new Error(
+    `缺少 ${envPath}。先 cp .env/.env.dev.example .env/.env.dev，` +
+      `再按 docs/local-dev-setup.md 第一节把 CRYPTO_KEY / RSA_PUB_KEY 换成本机 hub 打印的值。`
+  );
+}
 
 const definePlugin = {};
 const api_proxy = {};

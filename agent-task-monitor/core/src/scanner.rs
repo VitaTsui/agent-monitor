@@ -13,6 +13,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct SessionSummary {
     /// 会话来源代理：claude / codex …（决定消息解析器与进程配对）
     pub provider: String,
+    /// 这条会话来自**桌面客户端**而非终端 CLI（ChatGPT 桌面版的 Codex、
+    /// Claude 桌面版的本地代理）。两处判据都取自上游自己写下的事实，不是猜的：
+    /// codex 看 `session_meta.payload.originator`，claude 看会话文件在不在桌面客户端
+    /// 的本地代理目录树里。只影响展示名与配对方式，解析器是同一套。
+    pub desktop: bool,
     pub session_id: String,
     /// 项目目录编码名（~/.claude/projects 下的目录名），配对进程用
     pub project_key: String,
@@ -94,6 +99,9 @@ pub struct SessionScanner {
     projects_dir: PathBuf,
     /// Codex CLI 会话根目录（~/.codex/sessions），不存在则跳过
     codex_dir: PathBuf,
+    /// Claude 桌面版本地代理的会话根目录，不存在则跳过（= 没装/没用过桌面版，
+    /// 行为与本次改动前完全一致）
+    claude_desktop_dir: PathBuf,
     cache: HashMap<PathBuf, CacheEntry>,
     /// 每个会话的「当前状态」重放进度（任务清单 / 后台任务）
     state_cache: HashMap<PathBuf, SessionState>,
@@ -119,6 +127,105 @@ const HISTORY_WINDOW_MS: u64 = 7 * 24 * 3600 * 1000;
 const TAIL_BYTES: u64 = 4 * 1024 * 1024;
 /// 头部读取大小（拿初始 cwd / 提示词 / 开始时间）
 const HEAD_BYTES: usize = 256 * 1024;
+/// codex 写在 `session_meta.payload.originator` 里的「ChatGPT 桌面版」标记。
+/// 本机实测另两种取值 `codex_exec` / `codex-tui` 都是 CLI。
+const CODEX_DESKTOP_ORIGINATOR: &str = "Codex Desktop";
+/// Claude 桌面版本地代理（Cowork）给每条会话开一个隔离的家目录：
+/// `<根>/<组织 id>/<用户 id>/local_<会话 uuid>/.claude/projects/<项目名>/<uuid>.jsonl`。
+/// 里面那份 jsonl 就是标准 Claude Code 格式，用同一套解析器。
+/// 两层 id 是上游私有实现、随时可能变，所以这里不写死层数，见 [`claude_desktop_roots`]。
+const CLAUDE_DESKTOP_SESSION_PREFIX: &str = "local_";
+/// 本地代理根目录名。既用来拼绝对路径（见 [`claude_desktop_dir`]），也当作
+/// [`claude_local_agent_session_id`] 的锚点 —— 少了它，任何叫 `local_xxx` 的
+/// 普通目录都会被当成会话 id。
+const CLAUDE_DESKTOP_ROOT_DIR: &str = "local-agent-mode-sessions";
+/// 从本地代理根往下找 `local_*` 的最大深度（实测在第 2 层；留一层余量）。
+const CLAUDE_DESKTOP_MAX_DEPTH: usize = 3;
+
+// 关于会话目录旁边那份 `local_<uuid>.json`（含 `title`/`cwd`/`lastActivityAt`/
+// `isAgentCompleted`）：**故意不读**。
+//
+// 它能给的 title/cwd/起止时间，jsonl 里本来就有，同一套解析器已经拿到了；剩下唯一
+// 有诱惑力的是 `isAgentCompleted` —— 名字看着像「这条会话跑完了没有」，实测**不是**。
+// 本机 11 条真实会话里只有 2 条带这个字段，两条都是 `false`，而它们的 `audit.jsonl`
+// 末行都是 `{"type":"result","subtype":"success","stop_reason":"end_turn"}`：回合明明
+// 已经正常收尾，字段却仍是 `false`。照它判活性，等于把早就结束的会话永远显示成
+// 「执行中」—— 正是要避免的那类假状态。
+//
+// 所以活性仍只有一个来源：**有没有配到活着的进程**。本地代理跑在宿主机上时
+// （`hostLoopMode`）就是一个普通的 claude 进程，按 cwd 正常配对；跑在 VM 里时
+// 宿主机上根本没有对应进程，如实显示「已结束」，不拿一个语义没验证的字段去凑。
+
+/// 从本地代理根 `root` 下找出全部 `.claude/projects`（实现见
+/// [`SessionScanner::claude_desktop_roots`] 的说明）。
+fn claude_desktop_roots(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > CLAUDE_DESKTOP_MAX_DEPTH {
+            return;
+        }
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let is_session = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(CLAUDE_DESKTOP_SESSION_PREFIX));
+            if is_session {
+                let projects = p.join(".claude").join("projects");
+                if projects.is_dir() {
+                    out.push(projects);
+                }
+                // 会话家目录里不会再嵌一个会话家目录，不必往下走
+                continue;
+            }
+            walk(&p, depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    if root.is_dir() {
+        walk(root, 0, &mut out);
+    }
+    out
+}
+
+/// Claude 桌面版本地代理的会话根目录。
+///
+/// Electron 的 userData 根：macOS `~/Library/Application Support/Claude`、
+/// Windows `%APPDATA%\\Claude`、Linux `~/.config/Claude` —— 正是 `dirs::config_dir()`
+/// 各平台的取值。取不到家目录就给一个必然不存在的路径，调用方按「目录不存在」处理。
+fn claude_desktop_dir() -> PathBuf {
+    dirs::config_dir()
+        .map(|c| c.join("Claude").join(CLAUDE_DESKTOP_ROOT_DIR))
+        .unwrap_or_else(|| PathBuf::from("/nonexistent"))
+}
+
+/// 从一个路径里取出 Claude 桌面版本地代理的**会话 id**（形如 `local_<uuid>`），
+/// 认不出来就返回 None。
+///
+/// 这个 id 不是我们发明的编号，是上游自己给会话的主键：会话隔离家目录就叫这个名字
+/// （`<根>/<组织>/<用户>/local_<uuid>/…`），桌面客户端内部也用它当路由参数
+/// （app.asar 里 `dispatchNavigate(\`/cowork/${sessionId}\`)`）。正因为两处是同一个值，
+/// 客户端才能拿磁盘上的路径去比对「窗口里此刻开着的是哪条会话」
+/// （见 `client::appinject::SessionRef`）。
+///
+/// 判据是**两段路径都要在**：先出现根目录名 `local-agent-mode-sessions`，其后才认
+/// `local_` 打头的那一段。只认前缀会把任何用户目录里叫 `local_xxx` 的文件夹误当成会话。
+pub fn claude_local_agent_session_id(path: &str) -> Option<String> {
+    let mut seen_root = false;
+    for seg in path.split(['/', '\\']) {
+        if seg == CLAUDE_DESKTOP_ROOT_DIR {
+            seen_root = true;
+            continue;
+        }
+        if seen_root && seg.starts_with(CLAUDE_DESKTOP_SESSION_PREFIX) {
+            return Some(seg.to_string());
+        }
+    }
+    None
+}
 
 impl SessionScanner {
     pub fn new(projects_dir: PathBuf) -> Self {
@@ -128,6 +235,7 @@ impl SessionScanner {
         Self {
             projects_dir,
             codex_dir,
+            claude_desktop_dir: claude_desktop_dir(),
             cache: HashMap::new(),
             state_cache: HashMap::new(),
         }
@@ -141,8 +249,33 @@ impl SessionScanner {
     pub fn scan(&mut self) -> Vec<SessionSummary> {
         let now_ms = now_ms();
         let mut out = Vec::new();
-        let Ok(projects) = fs::read_dir(&self.projects_dir) else {
-            return out;
+        // Claude Code CLI 会话（~/.claude/projects）
+        self.scan_projects_root(&self.projects_dir.clone(), false, &mut out, now_ms);
+        // Claude 桌面版本地代理会话：每条会话一个隔离家目录，里面是同样的
+        // `.claude/projects/<项目>/<uuid>.jsonl` —— 同一套解析器，只是换个根。
+        // 目录不存在（没装桌面版/没用过本地代理）时下面这行返回空表，等于没这段。
+        for root in self.claude_desktop_roots() {
+            self.scan_projects_root(&root, true, &mut out, now_ms);
+        }
+        // Codex CLI 会话（~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl）
+        self.scan_codex_into(&mut out, now_ms);
+        out.sort_by_key(|b| std::cmp::Reverse(b.mtime_ms));
+        out
+    }
+
+    /// 扫一个 `projects` 根：`<root>/<项目目录>/<会话 uuid>.jsonl`。
+    ///
+    /// `desktop` 决定这批会话算不算桌面客户端来源 —— 文件内容一模一样，区别只在它躺在
+    /// 哪个根下面，解析器认不出来，只有调用方知道。
+    fn scan_projects_root(
+        &mut self,
+        root: &Path,
+        desktop: bool,
+        out: &mut Vec<SessionSummary>,
+        now_ms: u64,
+    ) {
+        let Ok(projects) = fs::read_dir(root) else {
+            return;
         };
         for project in projects.flatten() {
             let pdir = project.path();
@@ -175,14 +308,22 @@ impl SessionScanner {
                     .unwrap_or(0);
                 if let Some(mut summary) = self.summarize(&path, meta.len(), mtime_ms) {
                     summary.created_ms = created_ms;
+                    summary.desktop = desktop;
                     out.push(summary);
                 }
             }
         }
-        // Codex CLI 会话（~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl）
-        self.scan_codex_into(&mut out, now_ms);
-        out.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
-        out
+    }
+
+    /// Claude 桌面版本地代理下的全部 `projects` 根。
+    ///
+    /// 目录树是上游私有实现（`<根>/<组织 id>/<用户 id>/local_<会话 uuid>/.claude/projects`，
+    /// 两层 id 随时可能加减），所以这里不写死层数：从根往下最多 [`CLAUDE_DESKTOP_MAX_DEPTH`]
+    /// 层找名字以 `local_` 开头、且底下确实有 `.claude/projects` 的目录。
+    /// 层数或命名一旦变了就一个都找不到 → 返回空表 → 与没有这段代码时表现一致，
+    /// 不会报错、也不会把别处的会话误收进来。
+    fn claude_desktop_roots(&self) -> Vec<PathBuf> {
+        claude_desktop_roots(&self.claude_desktop_dir)
     }
 
     /// 递归收集 Codex 会话摘要（7 天窗口，带同一套 mtime/size 缓存）
@@ -251,6 +392,7 @@ impl SessionScanner {
         let mut cwd = String::new();
         let mut started_at = None;
         let mut prompt = String::new();
+        let mut originator = String::new();
         for line in head_txt.lines() {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 continue;
@@ -264,6 +406,9 @@ impl SessionScanner {
                         .map(String::from);
                     if let Some(c) = p.and_then(|p| p.get("cwd")).and_then(Value::as_str) {
                         cwd = c.to_string();
+                    }
+                    if let Some(o) = p.and_then(|p| p.get("originator")).and_then(Value::as_str) {
+                        originator = o.to_string();
                     }
                     started_at = p
                         .and_then(|p| p.get("timestamp"))
@@ -286,7 +431,7 @@ impl SessionScanner {
         let session_id = session_id.or_else(|| {
             path.file_stem()?
                 .to_str()?
-                .rsplitn(6, '-')
+                .rsplit('-')
                 .next()
                 .map(String::from)
         })?;
@@ -328,6 +473,10 @@ impl SessionScanner {
 
         let summary = SessionSummary {
             provider: "codex".into(),
+            // `originator` 是 codex 自己写进 session_meta 的来源标记，本机实测三种取值：
+            // `Codex Desktop`（ChatGPT 桌面版）、`codex_exec`、`codex-tui`（都是 CLI）。
+            // 上游哪天改了名字，这里认不出来 → 当成 CLI 会话，即本次改动前的行为。
+            desktop: originator == CODEX_DESKTOP_ORIGINATOR,
             session_id,
             project_key: encode_path(&cwd),
             // codex 的 cwd 取自 session_meta，一条会话只有一个值、不存在漂移，
@@ -500,6 +649,7 @@ impl SessionScanner {
                 role: "todos".into(),
                 content: m,
                 timestamp: ts.clone(),
+                is_error: false,
             });
         }
         if let Some(m) = bgtasks {
@@ -507,6 +657,7 @@ impl SessionScanner {
                 role: "bgtasks".into(),
                 content: m,
                 timestamp: ts,
+                is_error: false,
             });
         }
         Ok(out)
@@ -645,6 +796,11 @@ pub fn build_tasks(
     // 按 (provider, cwd-key) 分组：各 provider 的会话只与同类进程配对
     let mut proc_by_key: HashMap<(String, String), Vec<&ProcessInfo>> = HashMap::new();
     for p in processes {
+        // 共享宿主进程（桌面客户端的 app-server）不按 cwd 配：它一个进程托着多条会话，
+        // 自己的 cwd 恒为 `/`，跟哪条会话都对不上。它走下面的桌面配对层。
+        if p.shared_host {
+            continue;
+        }
         proc_by_key
             .entry((p.agent.clone(), encode_path(&p.cwd)))
             .or_default()
@@ -675,7 +831,7 @@ pub fn build_tasks(
     // 活着的长会话会被死会话挤掉：配不到进程 → 判为 Finished → 从列表里消失，
     // 而那个死会话反倒顶着 pid 一直显示「等待输入」，内容永远不更新。
     for list in sess_by_key.values_mut() {
-        list.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+        list.sort_by_key(|b| std::cmp::Reverse(b.mtime_ms));
     }
 
     let mut pid_of_session: HashMap<&str, &ProcessInfo> = HashMap::new();
@@ -774,7 +930,7 @@ pub fn build_tasks(
                 .iter()
                 .rev()
                 .filter(|p| !paired_pids.contains(&p.pid))
-                .map(|p| *p)
+                .copied()
                 .collect();
             let mut free_sess: Vec<&SessionSummary> = sess
                 .iter()
@@ -782,7 +938,7 @@ pub fn build_tasks(
                     !pid_of_session.contains_key(s.session_id.as_str())
                         && !released.contains(s.session_id.as_str())
                 })
-                .map(|s| *s)
+                .copied()
                 .collect();
 
             // ① 命令行 --resume <id>：恢复指定会话（创建于很久前，靠命令行认出）。
@@ -826,8 +982,7 @@ pub fn build_tasks(
                         continue;
                     }
                     let diff = s.created_ms as i64 - p_ms;
-                    if diff >= -CREATE_BACK_MS
-                        && diff <= CREATE_FWD_MS
+                    if (-CREATE_BACK_MS..=CREATE_FWD_MS).contains(&diff)
                         && (s.created_ms as i64) < best_created
                     {
                         best_created = s.created_ms as i64;
@@ -884,9 +1039,9 @@ pub fn build_tasks(
             // 安全性完全由上面的 mtime>=启动 约束保证，与活跃间隔无关；会话集合本身已卡 7 天窗口。
             let mut free_sess: Vec<&SessionSummary> = free_sess.into_iter().collect();
             // 新进程优先认领新会话：按启动时间降序，避免老进程抢走更晚的会话文件
-            free_procs.sort_by(|a, b| b.start_time.cmp(&a.start_time));
+            free_procs.sort_by_key(|b| std::cmp::Reverse(b.start_time));
             for p in free_procs {
-                let p_start_ms = (p.start_time as u64).saturating_mul(1000);
+                let p_start_ms = p.start_time.saturating_mul(1000);
                 // free_sess 已按 mtime 降序：第一条满足「mtime≥启动」的即该进程可认领的最新会话
                 if let Some(pos) = free_sess.iter().position(|s| s.mtime_ms >= p_start_ms) {
                     let s = free_sess.remove(pos);
@@ -922,6 +1077,33 @@ pub fn build_tasks(
         }
     }
 
+    // ⑥ 桌面客户端：共享宿主进程 ↔ 它这一轮托着的会话。
+    //
+    // 前面几层全是「一进程一会话、cwd 即项目」的终端模型，桌面客户端不是这样：
+    // ChatGPT 桌面版只有一个 `codex … app-server`，同时托着界面上的每一条对话，
+    // 而且它的 cwd 恒为 `/`。所以这里既不比 cwd、也不做一一对应，改问两件事：
+    // 会话自己说了它来自桌面客户端（`originator`），以及**这条会话在本次 App 运行期间
+    // 被写过**（mtime ≥ 宿主进程启动）。
+    //
+    // 后一条就是 tier④ 那个「会话最后写入不能早于进程启动」的约束，用意也一样：
+    // 上次开 App 时留下的旧对话，这次没碰过，不该顶着 pid 显示成「等待输入」。
+    for h in processes.iter().filter(|p| p.shared_host) {
+        let host_start_ms = h.start_time.saturating_mul(1000);
+        for s in sessions {
+            if !s.desktop || s.provider != h.agent {
+                continue;
+            }
+            if s.mtime_ms < host_start_ms {
+                continue;
+            }
+            if pid_of_session.contains_key(s.session_id.as_str()) {
+                continue;
+            }
+            pid_of_session.insert(s.session_id.as_str(), h);
+            paired_pids.insert(h.pid);
+        }
+    }
+
     let mut tasks = Vec::new();
     for s in sessions {
         let proc_info = pid_of_session
@@ -951,7 +1133,11 @@ pub fn build_tasks(
             platform: String::new(),
             platform_dsr: String::new(),
             provider: s.provider.clone(),
-            provider_dsr: crate::model::provider_dsr(&s.provider),
+            provider_dsr: if s.desktop {
+                crate::model::provider_dsr_desktop(&s.provider)
+            } else {
+                crate::model::provider_dsr(&s.provider)
+            },
             title: if s.title.is_empty() {
                 s.prompt.clone()
             } else {
@@ -995,6 +1181,12 @@ pub fn build_tasks(
     // 判断条件等价，每个未配对进程会重复出现两次。
     for p in processes {
         if paired_pids.contains(&p.pid) {
+            continue;
+        }
+        // 共享宿主进程本身不是一条会话：它 cwd 恒为 `/`，给它发一张占位卡就是
+        // 「同一个终端号下多出一条空会话」那个老毛病的翻版。桌面客户端此刻没有活动会话
+        // （或会话都是上次运行留下的）时，它就该一张卡都不出。
+        if p.shared_host {
             continue;
         }
         // 被系统挂起（非我方暂停）的占位进程判为孤儿，前台会过滤掉
@@ -1279,6 +1471,9 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
 
     Some(SessionSummary {
         provider: "claude".into(),
+        // 解析器只认文件内容，认不出这份 jsonl 躺在哪个根下 —— 由 scan 的调用方按扫描根
+        // 覆写（桌面客户端本地代理的会话文件格式与 CLI 完全一样，见 scan_projects_root）。
+        desktop: false,
         session_id: session_id.to_string(),
         project_key,
         cwd: if canonical_cwd.is_empty() {
@@ -1506,6 +1701,7 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 role: "user".into(),
                 content: t,
                 timestamp: ts,
+                is_error: false,
             }),
             "assistant" => {
                 let mut buf = String::new();
@@ -1521,6 +1717,7 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     role: "assistant".into(),
                     content: truncate(t, FLOW_TEXT_MAX),
                     timestamp: ts,
+                    is_error: false,
                 })
             }
             _ => None, // developer 等注入角色不进对话流
@@ -1542,6 +1739,7 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 role: "tool".into(),
                 content,
                 timestamp: ts,
+                is_error: false,
             })
         }
         "function_call_output" | "custom_tool_call_output" => {
@@ -1550,6 +1748,7 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 role: "tool_result".into(),
                 content: truncate(out.trim(), 400),
                 timestamp: ts,
+                is_error: false,
             })
         }
         _ => None,
@@ -1586,6 +1785,7 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     role: "user".into(),
                     content: text,
                     timestamp: ts,
+                    is_error: false,
                 });
             }
             // tool_result：展示简要执行结果
@@ -1597,6 +1797,12 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                             role: "tool_result".into(),
                             content: truncate(&text, 400),
                             timestamp: ts,
+                            // 这一步是不是跑砸了 —— 记录里本来就有，别再丢一次。
+                            // 缺这个键（老记录 / 别的形态）按「没出错」算，与改前一致。
+                            is_error: item
+                                .get("is_error")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
                         });
                     }
                 }
@@ -1654,6 +1860,7 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     role: "plan".into(),
                     content: truncate(p.trim(), FLOW_TEXT_MAX),
                     timestamp: ts,
+                    is_error: false,
                 });
             }
             // 交互式选择卡片：整份 input（questions/options）序列化给前端
@@ -1662,6 +1869,7 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     role: "select".into(),
                     content: truncate(&inp.to_string(), 4000),
                     timestamp: ts,
+                    is_error: false,
                 });
             }
             if !text_buf.trim().is_empty() {
@@ -1669,12 +1877,14 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     role: "assistant".into(),
                     content: truncate(text_buf.trim(), FLOW_TEXT_MAX),
                     timestamp: ts,
+                    is_error: false,
                 })
             } else if !tools.is_empty() {
                 Some(MessageBrief {
                     role: "tool".into(),
                     content: truncate(&tools.join(" | "), 400),
                     timestamp: ts,
+                    is_error: false,
                 })
             } else {
                 None
@@ -1737,6 +1947,25 @@ struct BgTask {
     /// 起跑时刻（会话记录里的 ISO8601 时间戳），前端据此算耗时；拿不到就空串
     #[serde(rename = "startedAt")]
     started_at: String,
+    /// 完成通知里的 `<summary>` 原文 —— 这是**唯一**说得出「为什么是这个收场」的字段。
+    ///
+    /// 实测本机 466 份会话记录、1431 条去重后的 `<task-notification>`：
+    /// `<summary>` 出现 1412 次，非 completed 的 141 条里 138 条有它，缺的 3 条
+    /// 全是 `__orphan_summary__` 那种合成通知（本就没有单条任务的收尾信息）。
+    /// 形态固定为一行，长度中位数 75、p90 243、最长 926 字符，例如：
+    /// - `Background command "…" failed with exit code 137`
+    /// - `Agent "…" failed: Agent stalled: no progress for 600s (stream watchdog did not recover)`
+    /// - `Agent "…" failed: Agent terminated early due to an API error: …（error type rate_limit, HTTP 429, request id …）`
+    /// - `Agent "…" was stopped by Claude` / `Background command "…" was stopped`
+    ///
+    /// **原样下发，不做任何解析**：退出码、限流原因、卡死时长都嵌在这句话里，
+    /// 而这句话是上游随时会改的英文文案。去里面抠 `exit code (\d+)` 就是拿字面量
+    /// 当接口用，上游改一版就整条哑掉；下发原文则最多是措辞变了，信息不会丢。
+    ///
+    /// 只有通知带过来才有值；[`Self::reconciled`] 靠磁盘改判状态时会清掉它 ——
+    /// 那时这句话描述的已经不是当前状态了。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
     /// 最近一条完成通知的时刻（epoch 毫秒，0 = 还没收到）。只用于与磁盘对齐时
     /// 判「这条通知是不是已经过期」（子会话被唤醒续跑了），不外发。
     #[serde(skip)]
@@ -1747,7 +1976,10 @@ struct BgTask {
 ///
 /// 同样是跨记录的状态：
 /// - 启动：tool_use 只给得出展示名，任务号与种类都要等它的 tool_result 才成形；
-/// - 结束：后续某条 user 记录里的 <task-notification> 带 <task-id> 与 <status>。
+/// - 结束：两条互斥的信号，缺一条就有一整类任务永远停在「执行中」——
+///   - 跑到自己结束 → 某条记录里的 `<task-notification>` 带 `<task-id>` 与 `<status>`
+///     （**不保证排在起跑记录之后**，见 [`Self::early`]）；
+///   - 被主动停掉 → `TaskStop` 那次调用的结果，见 [`stopped_task_id`]，此后没有通知。
 ///
 /// **种类判定只认 `toolUseResult` 里的结构化字段**（`agentId` / `backgroundTaskId`），
 /// 不看工具名、也不看入参：工具名是会变的（`Task` 早已改叫 `Agent`），
@@ -1757,7 +1989,24 @@ struct BgTask {
 struct BgTracker {
     /// tool_use_id -> (展示名, 起跑时刻)（等 tool_result 定种类、回填任务号）
     pending: HashMap<String, (String, String)>,
+    /// 早到的完成通知：tool_use_id -> (任务号, 终态, 通知时刻)。
+    ///
+    /// **记录文件不是按时间戳排的**：完成通知是一条 `queue-operation`，落盘时机与
+    /// 那次工具调用的 `tool_result` 记录彼此独立，后者常常晚好几行才补上。
+    /// 实测本机 4 例（`brbmfiatf` 通知在 :3971、起跑记录在 :3975；`b02t05203`
+    /// 通知在 :5414、起跑记录在 :5573，两者时间戳还差 4.5 分钟），通知先到时
+    /// [`Self::on_notification`] 找不到条目就把它丢了，条目随后建出来永远停在「执行中」。
+    /// 故先按 `<tool-use-id>` 存着，等配对的 `tool_result` 到达时补上。
+    early: HashMap<String, EarlyDone>,
     items: Vec<BgTask>,
+}
+
+/// 早到的完成通知：等配对的 `tool_result` 到达时回填给条目。
+struct EarlyDone {
+    task_id: String,
+    status: String,
+    summary: Option<String>,
+    ended_ms: u64,
 }
 
 impl BgTracker {
@@ -1819,6 +2068,18 @@ impl BgTracker {
             return;
         };
         let started = self.pending.remove(use_id);
+        // 主动停止（TaskStop）不发完成通知，收尾信号只有这条结果本身
+        if let Some(id) = stopped_task_id(meta) {
+            if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
+                t.status = "stopped".into();
+                // TaskStop 的结果里只有 "Successfully stopped task: <id> (<命令>)"，
+                // 复述了 id 与命令、说不出别的（实测 20 条形态一致），当不了原因；
+                // 上一轮跑的那句更是过期了，一并清掉。
+                t.summary = None;
+                t.ended_ms = iso_to_ms(ts).unwrap_or(0);
+            }
+            return;
+        }
         // 只有 toolUseResult 交出任务号的，才是「还在后台跑着」的任务：
         //   agentId          → 异步子代理
         //   backgroundTaskId → 后台命令
@@ -1826,6 +2087,13 @@ impl BgTracker {
         let Some((id, kind)) = bg_identity(meta) else {
             return;
         };
+        // 这次起跑的完成通知先落盘了？（见 [`Self::early`]）任务号对得上才认，
+        // 免得把上一轮同号任务的终态套到复活的这条上。
+        let done = self
+            .early
+            .remove(use_id)
+            .filter(|d| d.task_id == id)
+            .map(|d| (d.status, d.summary, d.ended_ms));
         let (label, started_at) = match started {
             Some((l, t)) => (l, t),
             // tool_use 落在重放窗口之外（极少见）：退回结果里的说明，时间用当前这条
@@ -1837,21 +2105,24 @@ impl BgTracker {
                 ts.to_string(),
             ),
         };
+        let (status, summary, ended_ms) = done.unwrap_or_else(|| ("running".to_string(), None, 0));
         // 同一个子代理被唤醒续跑时会再来一条结果：原地复活，别堆重复条目
         if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
             t.label = label;
-            t.status = "running".into();
+            t.status = status;
+            t.summary = summary;
             t.started_at = started_at;
-            t.ended_ms = 0;
+            t.ended_ms = ended_ms;
             return;
         }
         self.items.push(BgTask {
             id,
             label,
-            status: "running".into(),
+            status,
             kind: kind.to_string(),
             started_at,
-            ended_ms: 0,
+            summary,
+            ended_ms,
         });
     }
 
@@ -1875,16 +2146,49 @@ impl BgTracker {
         // 实测：c7d3a592-…jsonl:88 的通知只报了 af93b9ce77aec80b3，正文里引用到本段
         // 源码，结果把并行跑着的 a33f6420ca1247a8d 一并抹成 completed。
         let ended_ms = iso_to_ms(ts).unwrap_or(0);
+        // 孤儿汇总要先认出来：它那句 `<summary>` 讲的是「上一轮整批没留下收尾记录」，
+        // 对同一条通知里点名的任务也一样不成立，所以得在分派原因之前就判掉。
         let mut is_orphan_summary = false;
+        {
+            let mut scan = text;
+            while let Some(id) = tag_value(scan, "task-id") {
+                if id.starts_with("__orphan_summary__") {
+                    is_orphan_summary = true;
+                    break;
+                }
+                let Some(pos) = scan.find("</task-id>") else {
+                    break;
+                };
+                scan = &scan[pos + "</task-id>".len()..];
+            }
+        }
+        // 收尾原因。上界取 300：实测非 completed 的 138 条 summary，p90 = 243、
+        // 最长 926（限流那句会带上 request id 与模型名），300 能把 p90 完整收下，
+        // 又不至于让一条卡片的文案顶到千字。
+        let summary = (!is_orphan_summary)
+            .then(|| tag_value(text, "summary").map(|s| truncate(&s, 300)))
+            .flatten();
+        // 通知里的 `<tool-use-id>` 就是起跑那次调用的 tool_use_id —— 起跑记录还没轮到时
+        // 靠它把终态存下来（见 [`Self::early`]）。孤儿汇总没有这个标签，也不需要。
+        let use_id = tag_value(text, "tool-use-id");
         let mut rest = text;
         while let Some(id) = tag_value(rest, "task-id") {
             // "__orphan_summary__:*" 是内部扫描标记，不是真任务
-            if id.starts_with("__orphan_summary__") {
-                is_orphan_summary = true;
-            } else if !id.starts_with("__") {
+            if !id.starts_with("__") {
                 if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
                     t.status = status.clone();
+                    t.summary = summary.clone();
                     t.ended_ms = ended_ms;
+                } else if let Some(u) = &use_id {
+                    self.early.insert(
+                        u.clone(),
+                        EarlyDone {
+                            task_id: id.clone(),
+                            status: status.clone(),
+                            summary: summary.clone(),
+                            ended_ms,
+                        },
+                    );
                 }
             }
             let Some(pos) = rest.find("</task-id>") else {
@@ -1896,6 +2200,7 @@ impl BgTracker {
             for t in self.items.iter_mut() {
                 if t.status == "running" {
                     t.status = status.clone();
+                    t.summary = None;
                     t.ended_ms = ended_ms;
                 }
             }
@@ -1908,7 +2213,9 @@ impl BgTracker {
     /// （父进程被打断/退出、机器重启时就没了）——一旦缺席，条目会永远停在「执行中」。
     /// 而子会话自己那份记录是硬事实，收尾形态还是固定的，见 [`SubAgentTail`]。
     ///
-    /// 两种对齐，都只针对子代理（`kind == "agent"`），后台命令没有这份记录：
+    /// 两种对齐，都只针对子代理（`kind == "agent"`），后台命令没有这份记录 ——
+    /// 也不需要：后台命令的两条收尾信号（完成通知、`TaskStop` 结果）都在父记录里，
+    /// 只要两条都认全就没有无上界的条目（实测详见 [`BgTracker`] 与 [`stopped_task_id`]）。
     /// - 清单说在跑、它自己却早已收尾 → 落终态（父记录漏了那条通知）；
     /// - 清单说已结束、它却在通知很久之后还在写 → 那条通知过期了（子会话被唤醒续跑，
     ///   通知正文自己写着 "the same task-id may notify more than once"），改按记录判。
@@ -1947,14 +2254,19 @@ impl BgTracker {
             match tail_of(&t.id) {
                 // 结果已经交回去了，静置够久就是真跑完了 —— 父记录漏了那条通知而已
                 Some(SubAgentTail::Finished) if idle_ms > SUBAGENT_SETTLE_MS => {
-                    t.status = "completed".into()
+                    t.status = "completed".into();
+                    t.summary = None;
                 }
                 // 停在半路：正常是在等一个慢工具，久到不像话就是被 kill 在半路了
                 Some(SubAgentTail::Midflight) if idle_ms > SUBAGENT_ABANDON_MS => {
-                    t.status = "stopped".into()
+                    t.status = "stopped".into();
+                    t.summary = None;
                 }
                 // 还在写：在跑（对续跑的条目就是从终态翻回来）
-                Some(_) => t.status = "running".into(),
+                Some(_) => {
+                    t.status = "running".into();
+                    t.summary = None;
+                }
                 None => {}
             }
         }
@@ -1991,6 +2303,23 @@ fn bg_identity(meta: Option<&Value>) -> Option<(String, &'static str)> {
         }
     }
     None
+}
+
+/// 从 `toolUseResult` 认出「这次调用是主动停掉了一个后台任务」，返回被停的任务号。
+///
+/// **`TaskStop` 停掉的任务不会再发 `<task-notification>`** —— 这条结果就是它唯一的
+/// 收尾信号。实测本机 17 条永远停在「执行中」的后台命令里，13 条正是这么来的
+/// （`83fd6036…jsonl:3414` 停掉 `bwqopavu5`、`460884c8…jsonl:27790` 停掉
+/// `b19cm04gi`，等等），全文再无第二处提到它们。
+///
+/// 判据同样只取结构化字段：`task_id` + `task_type` 这一对只有停止结果才给
+/// （实测 20 条，形态清一色 `command,message,task_id,task_type`），
+/// 不去正文里匹配 "Successfully stopped" 那句话 —— 那句话是会改的。
+fn stopped_task_id(meta: Option<&Value>) -> Option<String> {
+    let m = meta?;
+    m.get("task_type").and_then(Value::as_str)?;
+    let id = m.get("task_id").and_then(Value::as_str)?;
+    (!id.is_empty()).then(|| id.to_string())
 }
 
 /// 「已交回结果」的静置窗口：收尾形态还要静这么久才作数。
@@ -2232,6 +2561,7 @@ impl TodoTracker {
             role: "todos".into(),
             content: serde_json::to_string(&self.items).ok()?,
             timestamp: ts.to_string(),
+            is_error: false,
         })
     }
 }
@@ -2798,6 +3128,197 @@ mod bg_tests {
         assert_eq!(t.items.len(), 1, "应是原地更新而非追加一条");
         assert_eq!(t.items[0].status, "completed");
     }
+
+    /// TaskStop 的结果（`task_id` + `task_type`）
+    fn stop_result(use_id: &str, task_id: &str, task_type: &str) -> Value {
+        result_with(
+            use_id,
+            "{\"message\":\"Successfully stopped task\"}",
+            serde_json::json!({
+                "message": format!("Successfully stopped task: {task_id} (yarn start)"),
+                "task_id": task_id, "task_type": task_type, "command": "yarn start"
+            }),
+        )
+    }
+
+    /// 主动停掉的后台命令此后不会再发通知 —— 停止结果就是它的收尾信号。
+    /// 实测本机 13 条永远停在「执行中」的后台命令就是这么来的
+    /// （如 `83fd6036…jsonl:3414` 停掉 `bwqopavu5`）。
+    #[test]
+    fn task_stop_ends_background_command() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "起 dev server"));
+        t.observe(&bg_result("u1", "b1"));
+        assert_eq!(t.items[0].status, "running");
+
+        t.observe(&bg_use("u2", "TaskStop", "停掉它"));
+        t.observe(&stop_result("u2", "b1", "local_bash"));
+        assert_eq!(t.items.len(), 1, "停止结果不该新建条目");
+        assert_eq!(t.items[0].status, "stopped");
+        assert!(
+            t.items[0].ended_ms > 0,
+            "收尾时刻要落下来，否则复活判定会误翻"
+        );
+    }
+
+    /// 子代理同样可以被主动停掉（实测 20 条停止结果里 5 条是 `local_agent`）
+    #[test]
+    fn task_stop_ends_async_agent() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Agent", "审查后端"));
+        t.observe(&agent_result("u1", "a1"));
+        t.observe(&stop_result("u2", "a1", "local_agent"));
+        assert_eq!(t.items[0].status, "stopped");
+    }
+
+    /// 停的不是清单里的任务时，不许凭空造条目
+    #[test]
+    fn task_stop_of_unknown_task_adds_nothing() {
+        let mut t = BgTracker::default();
+        t.observe(&stop_result("u1", "bzzz", "local_bash"));
+        assert!(t.items.is_empty());
+    }
+
+    /// 记录文件不按时间戳排：完成通知那行常常落在起跑那行之前。
+    /// 实测 `83fd6036…jsonl` 通知在 :3971、起跑记录在 :3975，
+    /// `383ed76b…jsonl` 更是差了 159 行、时间戳差 4.5 分钟。
+    /// 通知先到时必须按 `<tool-use-id>` 存着，等起跑记录到了补上。
+    #[test]
+    fn notification_ahead_of_launch_still_ends_task() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "起 dev server"));
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>u1</tool-use-id>\n<status>completed</status>\n</task-notification>",
+        ));
+        assert!(t.items.is_empty(), "此刻条目还没成形");
+
+        t.observe(&bg_result("u1", "b1"));
+        assert_eq!(t.items.len(), 1);
+        assert_eq!(t.items[0].status, "completed", "早到的通知要补回来");
+        assert!(t.items[0].ended_ms > 0);
+    }
+
+    /// 早到的通知只认任务号对得上的那次起跑 —— 同号任务再起一次时不许套用旧终态
+    #[test]
+    fn early_notification_only_applies_to_its_own_task() {
+        let mut t = BgTracker::default();
+        t.observe(&notification(
+            "<task-notification>\n<task-id>bold</task-id>\n<tool-use-id>u1</tool-use-id>\n<status>failed</status>\n</task-notification>",
+        ));
+        t.observe(&bg_use("u1", "Bash", "起 dev server"));
+        t.observe(&bg_result("u1", "bnew"));
+        assert_eq!(t.items[0].status, "running", "任务号对不上就别套");
+    }
+
+    /// 失败原因就是通知里的 `<summary>` 原文 —— 界面能说出「为什么」全靠它。
+    /// 样本取自本机真实记录：后台命令带退出码、子代理带限流/卡死的原话。
+    #[test]
+    fn failure_summary_is_carried_verbatim() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "Start web dev server"));
+        t.observe(&bg_result("u1", "byk6o6vis"));
+        t.observe(&notification(
+            "<task-notification>\n<task-id>byk6o6vis</task-id>\n<status>failed</status>\n<summary>Background command \"Start web dev server\" failed with exit code 137</summary>\n</task-notification>",
+        ));
+        assert_eq!(t.items[0].status, "failed");
+        assert_eq!(
+            t.items[0].summary.as_deref(),
+            Some("Background command \"Start web dev server\" failed with exit code 137"),
+            "退出码嵌在这句话里，原样带出去，不去抠数字"
+        );
+
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u2", "Agent", "Deploy third release"));
+        t.observe(&agent_result("u2", "a1111111111111111"));
+        t.observe(&notification(
+            "<task-notification>\n<task-id>a1111111111111111</task-id>\n<status>failed</status>\n<summary>Agent \"Deploy third release\" failed: Agent stalled: no progress for 600s (stream watchdog did not recover)</summary>\n</task-notification>",
+        ));
+        assert_eq!(
+            t.items[0].summary.as_deref(),
+            Some(
+                "Agent \"Deploy third release\" failed: Agent stalled: no progress for 600s (stream watchdog did not recover)"
+            )
+        );
+    }
+
+    /// 通知不带 `<summary>` 时行为与改前一致：状态照落，原因留空（不编一个出来）
+    #[test]
+    fn notification_without_summary_leaves_reason_empty() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "起 dev server"));
+        t.observe(&bg_result("u1", "b1"));
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b1</task-id>\n<status>failed</status>\n</task-notification>",
+        ));
+        assert_eq!(t.items[0].status, "failed");
+        assert_eq!(t.items[0].summary, None);
+        // 没有原因时该字段整个不下发，前端拿到的就是 undefined
+        let json = serde_json::to_string(&t.items[0]).unwrap();
+        assert!(!json.contains("summary"), "为空时不该出现在报文里：{json}");
+    }
+
+    /// 早到的通知（起跑记录还没轮到）也要把原因存住，等条目成形时一并补上
+    #[test]
+    fn early_notification_carries_its_summary() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "Poll windows build again"));
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b6a9qfb2x</task-id>\n<tool-use-id>u1</tool-use-id>\n<status>failed</status>\n<summary>Background command \"Poll windows build again\" failed with exit code 1</summary>\n</task-notification>",
+        ));
+        t.observe(&bg_result("u1", "b6a9qfb2x"));
+        assert_eq!(t.items[0].status, "failed");
+        assert_eq!(
+            t.items[0].summary.as_deref(),
+            Some("Background command \"Poll windows build again\" failed with exit code 1")
+        );
+    }
+
+    /// 孤儿汇总那句 summary 讲的是「上一轮整批没留下收尾记录」，不对应任何一条任务，
+    /// 挂上去就成了一句人人都有、谁也不对应的假原因。
+    #[test]
+    fn orphan_summary_does_not_become_a_per_task_reason() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "甲"));
+        t.observe(&bg_result("u1", "b5eauqs4i"));
+        t.observe(&bg_use("u2", "Bash", "漏网的 dev server"));
+        t.observe(&bg_result("u2", "bvvgsfndf"));
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b5eauqs4i</task-id>\n<task-id>__orphan_summary__:shell</task-id>\n<status>stopped</status>\n<summary>No completion record was found for this background shell command from the previous session.</summary>\n</task-notification>",
+        ));
+        assert!(t.items.iter().all(|i| i.status == "stopped"));
+        assert!(
+            t.items.iter().all(|i| i.summary.is_none()),
+            "整批的说明不该冒充单条任务的原因"
+        );
+    }
+
+    /// 主动停掉（TaskStop）没有原因可说 —— 它的 message 只复述 id 与命令；
+    /// 上一轮跑留下的那句更是过期的，必须清掉。
+    #[test]
+    fn task_stop_clears_stale_reason() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "起 dev server"));
+        t.observe(&bg_result("u1", "b1"));
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b1</task-id>\n<status>failed</status>\n<summary>Background command \"起 dev server\" failed with exit code 1</summary>\n</task-notification>",
+        ));
+        assert!(t.items[0].summary.is_some());
+        t.observe(&stop_result("u9", "b1", "shell"));
+        assert_eq!(t.items[0].status, "stopped");
+        assert_eq!(t.items[0].summary, None, "状态改了，旧原因就过期了");
+    }
+
+    /// 通知没带 tool-use-id（孤儿汇总、MCP 任务）时维持原样：只作用于已成形的条目
+    #[test]
+    fn notification_without_tool_use_id_is_not_buffered() {
+        let mut t = BgTracker::default();
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>",
+        ));
+        t.observe(&bg_use("u1", "Bash", "起 dev server"));
+        t.observe(&bg_result("u1", "b1"));
+        assert_eq!(t.items[0].status, "running");
+    }
 }
 
 #[cfg(test)]
@@ -2852,6 +3373,7 @@ mod subagent_tests {
             status: status.into(),
             kind: "agent".into(),
             started_at: "2026-09-08T02:55:52.284Z".into(),
+            summary: Some("Agent \"子会话\" failed: Agent stalled".into()),
             ended_ms,
         }
     }
@@ -2876,6 +3398,32 @@ mod subagent_tests {
             t.items[0].status, "running",
             "判定不写回状态，续跑时才翻得回来"
         );
+    }
+
+    /// 靠磁盘改判状态时，通知里那句原因就过期了 —— 它说的是「failed」，
+    /// 而这里判出来的是「completed」，留着就成了自相矛盾的一张卡。
+    #[test]
+    fn reconcile_clears_the_stale_reason_when_it_overrides_status() {
+        let mut t = BgTracker::default();
+        // agent() 造出来就带一句 failed 的原因
+        t.items.push(agent("a1", "failed", 0));
+        let now = 12 * HOUR;
+        // 通知之后很久还在写 → 是被唤醒续跑了，终态与原因都作废
+        let out = t.reconciled(&writes("a1", now - 60_000), now, &|_| {
+            Some(SubAgentTail::Midflight)
+        });
+        assert_eq!(out[0].status, "running");
+        assert_eq!(out[0].summary, None, "翻回执行中就不该再挂着失败原因");
+
+        // 父记录漏了通知、子会话自己早已交回结果 → 判 completed，旧原因同样作废
+        let mut t = BgTracker::default();
+        t.items.push(agent("a2", "running", 0));
+        t.items[0].summary = Some("Agent \"x\" failed: 过期的原因".into());
+        let out = t.reconciled(&writes("a2", now - 8 * HOUR), now, &|_| {
+            Some(SubAgentTail::Finished)
+        });
+        assert_eq!(out[0].status, "completed");
+        assert_eq!(out[0].summary, None);
     }
 
     /// 流式写入途中，最后一条常常正好是 thinking / text（assistant 按内容块拆条落盘），
@@ -3349,6 +3897,7 @@ mod pairing_tests {
     fn sess(id: &str, started: &str, mtime_ms: u64) -> SessionSummary {
         SessionSummary {
             provider: "claude".into(),
+            desktop: false,
             session_id: id.into(),
             project_key: "-proj".into(),
             cwd: "/proj".into(),
@@ -3386,6 +3935,7 @@ mod pairing_tests {
             command: "claude".into(),
             shell_pid: None,
             shell_start: None,
+            shared_host: false,
         }
     }
 
@@ -3932,6 +4482,83 @@ mod user_text_tests {
     }
 }
 
+/// `tool_result` 的成败标记（`is_error`）能不能原样带到前端。
+///
+/// 这几条盯的是**下发形态**而不只是字段值：为真时键要在、为假与缺失时
+/// 整个键都不出现（见 `MessageBrief::is_error` 的说明）。只断言字段值的话，
+/// 哪天 `skip_serializing_if` 被摘掉，两万多条 `isError: false` 会悄悄
+/// 涌进每次轮询，测试却照样绿。
+#[cfg(test)]
+mod tool_result_error_tests {
+    use super::*;
+
+    /// 真实形态：`type=user` 的记录里挂一个 `tool_result` 块
+    fn result_entry(err: Option<bool>) -> Value {
+        let mut item = serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": "toolu_01",
+            "content": "npm ERR! code ELIFECYCLE"
+        });
+        if let Some(e) = err {
+            item["is_error"] = Value::Bool(e);
+        }
+        serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-09-09T10:00:00Z",
+            "message": { "content": [item] }
+        })
+    }
+
+    fn wire(v: &Value) -> Value {
+        serde_json::to_value(entry_to_brief(v).expect("这条应当进对话流")).unwrap()
+    }
+
+    #[test]
+    fn failed_step_carries_is_error() {
+        let m = entry_to_brief(&result_entry(Some(true))).expect("tool_result 应当进对话流");
+        assert_eq!(m.role, "tool_result");
+        assert!(m.is_error, "记录里写着 is_error=true，这一步就是跑砸的");
+        assert_eq!(
+            wire(&result_entry(Some(true)))["isError"],
+            Value::Bool(true),
+            "为真时必须下发 isError，否则前端标不出失败的那一步"
+        );
+    }
+
+    /// 为假：字段值是 false，且**键整个不出现** —— 少数派才占带宽
+    #[test]
+    fn successful_step_omits_the_key() {
+        let m = entry_to_brief(&result_entry(Some(false))).expect("tool_result 应当进对话流");
+        assert!(!m.is_error);
+        assert!(
+            wire(&result_entry(Some(false))).get("isError").is_none(),
+            "为假时不该下发这个键"
+        );
+    }
+
+    /// 缺字段（老记录 / 别的形态）：行为与改前一致 —— 不出错、不出键
+    #[test]
+    fn missing_field_behaves_as_before() {
+        let m = entry_to_brief(&result_entry(None)).expect("tool_result 应当进对话流");
+        assert!(!m.is_error);
+        assert_eq!(m.content, "npm ERR! code ELIFECYCLE");
+        assert!(wire(&result_entry(None)).get("isError").is_none());
+    }
+
+    /// 别的 role 一律不带这个键：它只描述「一次工具调用的收场」
+    #[test]
+    fn other_roles_never_carry_it() {
+        let v = serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-09-09T10:00:00Z",
+            "message": { "content": "把服务启动" }
+        });
+        let w = wire(&v);
+        assert_eq!(w["role"], "user");
+        assert!(w.get("isError").is_none());
+    }
+}
+
 #[cfg(test)]
 mod codex_tests {
     use super::*;
@@ -4003,6 +4630,7 @@ mod codex_tests {
         let now = now_ms();
         let mk = |provider: &str, id: &str, key: &str| SessionSummary {
             provider: provider.into(),
+            desktop: false,
             session_id: id.into(),
             project_key: key.into(),
             cwd: format!("/w/{key}"),
@@ -4037,6 +4665,7 @@ mod codex_tests {
             command: agent.into(),
             shell_pid: None,
             shell_start: None,
+            shared_host: false,
         };
         let sessions = vec![mk("claude", "c1", "-w-app"), mk("codex", "x1", "-w-app")];
         let procs = vec![
@@ -4124,6 +4753,7 @@ mod codex_tests {
             command: "claude".into(),
             shell_pid: None,
             shell_start: None,
+            shared_host: false,
         }];
         let tasks = build_tasks(
             &[],
@@ -4321,5 +4951,304 @@ mod short_name_tests {
         assert_eq!(short_name("/Users/x/proj/"), "proj");
         assert_eq!(short_name("/Users/x/proj"), "proj");
         assert_eq!(short_name(r"D:\cursor\"), "cursor");
+    }
+}
+
+#[cfg(test)]
+mod desktop_session_tests {
+    use super::*;
+    use crate::model::TaskStatus;
+
+    fn sess(provider: &str, id: &str, desktop: bool, cwd: &str, mtime_ms: u64) -> SessionSummary {
+        SessionSummary {
+            provider: provider.into(),
+            desktop,
+            session_id: id.into(),
+            project_key: encode_path(cwd),
+            cwd: cwd.into(),
+            live_cwd: cwd.into(),
+            shell_cwd: cwd.into(),
+            title: id.into(),
+            prompt: String::new(),
+            last_action: String::new(),
+            turn_ended: true,
+            cleared: false,
+            started_at: None,
+            last_active_at: None,
+            version: None,
+            git_branch: None,
+            mtime_ms,
+            created_ms: mtime_ms,
+            line_count: 1,
+            used_tokens_5h: 0,
+            queued_inputs: Vec::new(),
+            select_answered_ms: None,
+        }
+    }
+
+    /// ChatGPT 桌面版的共享宿主：cwd 恒为 `/`、无 tty、一个进程托着全部桌面会话。
+    fn host(pid: u32, start_time: u64) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            agent: "codex".into(),
+            tty: String::new(),
+            cwd: "/".into(),
+            ide: crate::model::IdeKind::Desktop,
+            ide_name: "ChatGPT".into(),
+            start_time,
+            cpu_usage: 0.0,
+            memory: 0,
+            command: "/Applications/ChatGPT.app/Contents/Resources/codex -c features.code_mode_host=true app-server".into(),
+            shell_pid: None,
+            shell_start: None,
+            shared_host: true,
+        }
+    }
+
+    /// Claude 桌面版本地代理跑在宿主机上时（`hostLoopMode`）的进程形态：装在应用包里的
+    /// claude、没有 tty、cwd 就是那条会话的工作目录 —— 一进程一会话，与终端会话同构。
+    fn cowork_proc(pid: u32, cwd: &str, start_time: u64) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            agent: "claude".into(),
+            tty: String::new(),
+            cwd: cwd.into(),
+            ide: crate::model::IdeKind::Desktop,
+            ide_name: "Claude".into(),
+            start_time,
+            cpu_usage: 0.0,
+            memory: 0,
+            command: "…/Claude/claude-code/2.1.260/claude.app/Contents/MacOS/claude".into(),
+            shell_pid: None,
+            shell_start: None,
+            shared_host: false,
+        }
+    }
+
+    fn build(sessions: &[SessionSummary], procs: &[ProcessInfo]) -> Vec<Task> {
+        let paused: Box<dyn Fn(u32) -> bool> = Box::new(|_| false);
+        build_tasks(
+            sessions,
+            procs,
+            &paused,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        )
+    }
+
+    /// Claude 桌面版本地代理不走共享宿主那条路：它跑在宿主机上时是「一进程一会话、
+    /// cwd 即工作目录」，与终端会话同构，直接用既有的按 cwd 配对层（tier①）——
+    /// 唯一的区别是它没有 tty，那道闸门由 [`crate::model::IdeKind::Desktop`] 放行。
+    /// 不为它另起一套配对逻辑，是为了不让两套判断并存。
+    #[test]
+    fn cowork_session_pairs_by_cwd_without_tty() {
+        let now = now_ms();
+        let cwd = "/Users/u/Library/Application Support/Claude/local-agent-mode-sessions/o/u/local_a/outputs";
+        let procs = vec![cowork_proc(700, cwd, now / 1000 - 300)];
+        let sessions = vec![sess("claude", "k1", true, cwd, now - 3_000)];
+        let tasks = build(&sessions, &procs);
+        assert_eq!(tasks.len(), 1, "不该多出一张未配对进程的占位卡");
+        assert_eq!(tasks[0].pid, Some(700));
+        assert_eq!(tasks[0].status, TaskStatus::Idle);
+        assert_eq!(tasks[0].provider_dsr, "Claude 桌面版");
+        assert_eq!(tasks[0].ide_dsr, "Claude");
+    }
+
+    /// 桌面会话配到共享宿主：不比 cwd（宿主的 cwd 是 `/`，跟谁都对不上），
+    /// 一个宿主同时托多条会话，状态不再一律「已结束」。
+    #[test]
+    fn desktop_sessions_pair_with_shared_host() {
+        let now = now_ms();
+        let start = now / 1000 - 600;
+        let procs = vec![host(900, start)];
+        let sessions = vec![
+            sess("codex", "d1", true, "/w/a", now - 10_000),
+            sess("codex", "d2", true, "/w/b", now - 20_000),
+        ];
+        let tasks = build(&sessions, &procs);
+        assert_eq!(tasks.len(), 2, "共享宿主不额外生成占位卡");
+        for t in &tasks {
+            assert_eq!(t.pid, Some(900), "{} 该配到桌面宿主", t.id);
+            assert_eq!(t.status, TaskStatus::Idle);
+            assert_eq!(t.provider_dsr, "ChatGPT 桌面版");
+        }
+    }
+
+    /// 上次开 App 时留下、这次没碰过的旧对话不该顶着 pid 显示成「等待输入」。
+    /// 判据与 tier④ 一致：会话最后写入必须不早于宿主进程启动。
+    #[test]
+    fn stale_desktop_sessions_stay_finished() {
+        let now = now_ms();
+        let start = now / 1000 - 60; // 宿主 1 分钟前才起来
+        let procs = vec![host(900, start)];
+        let sessions = vec![sess("codex", "old", true, "/w/a", now - 3_600_000)];
+        let tasks = build(&sessions, &procs);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].pid, None);
+        assert_eq!(tasks[0].status, TaskStatus::Finished);
+    }
+
+    /// 回归：桌面客户端没有活动会话时，共享宿主进程一张卡都不该出。
+    /// 当初把 `codex app-server` 整个挡掉，就是因为它会冒出一条
+    /// 「（会话尚未产生记录）」的空会话卡。
+    #[test]
+    fn shared_host_never_becomes_placeholder_card() {
+        let now = now_ms();
+        let procs = vec![host(900, now / 1000 - 60)];
+        assert!(build(&[], &procs).is_empty(), "宿主自己不是一条会话");
+        // 只有终端 CLI 会话时也一样：宿主不掺和，也不去抢 CLI 会话
+        let cli = vec![sess("codex", "c1", false, "/w/a", now - 5_000)];
+        let tasks = build(&cli, &procs);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].pid, None, "CLI 会话不能被桌面宿主认领");
+        assert_eq!(tasks[0].provider_dsr, "Codex");
+    }
+
+    /// 桌面宿主只认自己那个 provider 的桌面会话。
+    #[test]
+    fn shared_host_does_not_cross_providers() {
+        let now = now_ms();
+        let procs = vec![host(900, now / 1000 - 600)];
+        let sessions = vec![sess("claude", "k1", true, "/w/a", now - 5_000)];
+        let tasks = build(&sessions, &procs);
+        assert_eq!(tasks[0].pid, None, "claude 桌面会话不该配到 codex 宿主");
+        assert_eq!(tasks[0].provider_dsr, "Claude 桌面版");
+    }
+
+    fn mk_desktop_tree(root: &Path, session: &str, project: &str, jsonl: &str) {
+        let dir = root
+            .join("org-uuid")
+            .join("user-uuid")
+            .join(session)
+            .join(".claude")
+            .join("projects")
+            .join(project);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format!("{jsonl}.jsonl")), "").unwrap();
+    }
+
+    /// Claude 桌面版本地代理：两层 id 之下的 `local_*/.claude/projects` 能被找出来。
+    #[test]
+    fn finds_claude_desktop_projects_roots() {
+        let root = std::env::temp_dir().join(format!("am-cowork-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        mk_desktop_tree(&root, "local_aaa", "-sessions-x", "s1");
+        mk_desktop_tree(&root, "local_bbb", "-sessions-y", "s2");
+        // 干扰项：同层的非会话目录、以及没有 .claude/projects 的会话目录
+        fs::create_dir_all(root.join("org-uuid").join("user-uuid").join("spaces")).unwrap();
+        fs::create_dir_all(root.join("org-uuid").join("user-uuid").join("local_ccc")).unwrap();
+        let mut got = claude_desktop_roots(&root);
+        got.sort();
+        assert_eq!(got.len(), 2, "只收有 .claude/projects 的会话目录: {got:?}");
+        assert!(got[0].ends_with("local_aaa/.claude/projects"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 上游把目录层级换掉（或压根没装桌面版）时安静降级：找不到就是空表，不报错。
+    #[test]
+    fn missing_or_changed_layout_degrades_quietly() {
+        let missing = std::env::temp_dir().join(format!("am-cowork-none-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&missing);
+        assert!(
+            claude_desktop_roots(&missing).is_empty(),
+            "目录不存在 = 什么都不加"
+        );
+
+        // 层级变深超出回溯上限 → 找不到，退回改动前的行为
+        let deep = std::env::temp_dir().join(format!("am-cowork-deep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&deep);
+        let nested = deep.join("a").join("b").join("c").join("d").join("e");
+        mk_desktop_tree(&nested, "local_aaa", "-sessions-x", "s1");
+        assert!(claude_desktop_roots(&deep).is_empty());
+        // 会话目录改名（不再是 local_ 前缀）→ 同样只是找不到
+        let renamed = std::env::temp_dir().join(format!("am-cowork-ren-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&renamed);
+        mk_desktop_tree(&renamed, "agent_aaa", "-sessions-x", "s1");
+        assert!(claude_desktop_roots(&renamed).is_empty());
+        for d in [&missing, &deep, &renamed] {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+
+    /// 从路径里认会话 id：必须**先**看到本地代理根目录名，才认 `local_` 那一段。
+    /// 这个 id 要拿去跟窗口 URL 比对（见 client 的 appinject），认错等于发错会话。
+    #[test]
+    fn reads_local_agent_session_id_from_path() {
+        // 实测取值：进程 cwd 落在会话隔离家目录的 outputs 里
+        let cwd = "/Users/u/Library/Application Support/Claude/local-agent-mode-sessions/\
+                   dc6589d7-9da7-40ac-8c88-213585132c2c/26eaaf4d-6fa9-4370-9096-75398c87927c/\
+                   local_18c6b796-a156-4546-a70e-0dd4da930073/outputs";
+        assert_eq!(
+            claude_local_agent_session_id(cwd).as_deref(),
+            Some("local_18c6b796-a156-4546-a70e-0dd4da930073")
+        );
+        // 会话文件所在目录同样认得出（同一个 local_ 段）
+        let jsonl = "/Users/u/Library/Application Support/Claude/local-agent-mode-sessions/o/u/\
+                     local_abc/.claude/projects/-x/s1.jsonl";
+        assert_eq!(
+            claude_local_agent_session_id(jsonl).as_deref(),
+            Some("local_abc")
+        );
+        // Windows 反斜杠
+        assert_eq!(
+            claude_local_agent_session_id(
+                r"C:\Users\u\AppData\Roaming\Claude\local-agent-mode-sessions\o\u\local_win\outputs"
+            )
+            .as_deref(),
+            Some("local_win")
+        );
+        // 没有根目录名 → 不认。用户自己有个叫 local_xxx 的项目目录不该被当成桌面会话。
+        assert_eq!(
+            claude_local_agent_session_id("/Users/u/code/local_something/src"),
+            None
+        );
+        // 根目录名在 local_ 段**之后**出现也不认（顺序是判据的一部分）
+        assert_eq!(
+            claude_local_agent_session_id("/tmp/local_x/local-agent-mode-sessions"),
+            None
+        );
+        // 终端 CLI 会话的 cwd → 不认，调用方据此退回「宿主上只能有一条会话」
+        assert_eq!(claude_local_agent_session_id("/Users/u/code/proj"), None);
+        assert_eq!(claude_local_agent_session_id(""), None);
+    }
+
+    /// 桌面版本地代理的 jsonl 走的是**同一套** Claude Code 解析器，只是换个扫描根；
+    /// 出来的会话带桌面标记与桌面展示名。
+    #[test]
+    fn desktop_projects_root_reuses_claude_parser() {
+        let root = std::env::temp_dir().join(format!("am-cowork-scan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let proj = root
+            .join("org")
+            .join("user")
+            .join("local_zzz")
+            .join(".claude")
+            .join("projects")
+            .join("-sessions-demo");
+        fs::create_dir_all(&proj).unwrap();
+        let line = serde_json::json!({
+            "type": "user",
+            "cwd": "/sessions/demo",
+            "sessionId": "sid-1",
+            "timestamp": "2026-09-09T10:00:00.000Z",
+            "message": { "role": "user", "content": "跑个本地代理" }
+        });
+        fs::write(proj.join("sid-1.jsonl"), format!("{line}\n")).unwrap();
+
+        let mut sc = SessionScanner::new(root.join("no-cli-projects"));
+        let mut out = Vec::new();
+        let roots = claude_desktop_roots(&root);
+        assert_eq!(roots.len(), 1);
+        sc.scan_projects_root(&roots[0], true, &mut out, now_ms());
+        assert_eq!(out.len(), 1, "本地代理会话该被同一套解析器读出来");
+        assert!(out[0].desktop);
+        assert_eq!(out[0].provider, "claude");
+        assert_eq!(out[0].cwd, "/sessions/demo");
+        assert_eq!(
+            crate::model::provider_dsr_desktop(&out[0].provider),
+            "Claude 桌面版"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }

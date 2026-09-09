@@ -1,9 +1,11 @@
 [package]
 name = "am-core"
-version = "0.2.0"
-edition = "2021"
+# 跟 workspace 版本走，和 am-hub / am-client 一致。这个 crate 不发 crates.io，
+# 只被同工作区的两个 crate 以 path 依赖，独立版本号没有任何消费者、只会漂。
+version.workspace = true
+edition.workspace = true
 description = "agent-monitor 共享核心：模型、进程、会话解析"
-license = "MIT"
+license.workspace = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,60 @@
+// 右栏内容：一行头 + 一列按会话分节的状态卡。
+// 卡片本身的规格在 SessionPanels 里，这里只管栏内的排布。
+
+.SessionStatePane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  // 与对话格头部同高：两栏的头顶在一条线上，右栏才不像是硬贴上去的
+  padding: 10px 12px 10px 16px;
+  border-bottom: 1px solid var(--overlay-2);
+}
+
+.title {
+  color: var(--foreground);
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.group + .group {
+  margin-top: 16px;
+}
+
+// 会话名：只在并排多格时出现，用来分清这几张卡是哪一格的
+.groupTitle {
+  margin-bottom: 8px;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+// 抹掉「接在对话流末尾」才需要的上边距：栏里它是第一块内容
+.panels {
+  margin-top: 0;
+}
+
+.empty {
+  padding: 24px 8px;
+  color: var(--muted-foreground);
+  font-size: var(--text-base);
+  line-height: 1.7;
+  text-align: center;
+}
