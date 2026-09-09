@@ -98,7 +98,12 @@ jobs:
         with:
           workspaces: agent-task-monitor
 
-      # Tauri 在 Linux 上要 webkit2gtk 才编得动。
+      # Tauri 在 Linux 上要 webkit2gtk 才编得动，而 webkit2gtk 只来自 Ubuntu 官方源。
+      # runner 镜像里还预置了 Google Chrome / Docker / 微软等第三方源，无差别
+      # `apt-get update` 会把它们全拉一遍，其中任何一个坏掉都会让这一步整体退 100
+      # （实测就是 Chrome 源的 Packages.gz 哈希对不上）。所以 update 之前先把所有
+      # 不指向 ubuntu.com 的源摘掉——只留这个 job 真正需要的。
+      # 注意这不是「忽略失败」：Ubuntu 官方源自己出问题照样报错，装不上包也照样红。
       # `-y` 只回答「要不要装」，回答不了 dpkg 装到一半弹出的配置问题——
       # 那些问题在没有终端的 runner 上永远等不到答案，noninteractive 让它们走默认值。
       - name: Linux 构建依赖
@@ -107,6 +112,7 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          sudo grep -rLE 'ubuntu\.com' /etc/apt/sources.list.d | sudo xargs -r rm -f
           sudo -E apt-get update
           sudo -E apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
