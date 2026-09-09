@@ -109,6 +109,11 @@ jobs:
           name: web-dist
           path: agent-monitor-web/dist
           retention-days: 1
+          # dist 里 175 个 vendor chunk 的文件名以点开头（.pnpm-xxx.chunk.js —— 名字取自
+          # pnpm 的 node_modules/.pnpm 路径），而 upload-artifact 默认丢掉所有隐藏文件：
+          # 不开这个开关，传上去的 dist 只剩 main.js，index.html 引的 chunk 全 404，
+          # 而且上传步骤一声不吭地成功。
+          include-hidden-files: true
 
   package:
     name: 安装包 (${{ matrix.target }})
