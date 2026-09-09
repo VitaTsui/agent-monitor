@@ -230,6 +230,22 @@
     padding-top: env(safe-area-inset-top);
     padding-left: env(safe-area-inset-left);
     padding-bottom: max(0px, calc(env(safe-area-inset-bottom) - 8px));
+    // 顶栏在场时（会话页）侧栏从顶栏下沿起，不占那 48px。
+    // 顶栏是 82% 毛玻璃、故意盖住侧栏头部那颗搜索按钮（它在顶栏里另开了一颗），
+    // 但「盖住」对半透明不成立 —— 侧栏的品牌名与搜索图标会从顶栏底下透上来，
+    // 和顶栏自己的图标叠成两层字。让位才是真盖住；给顶栏加不透明底会改掉毛玻璃设计。
+    // 状态栏安全区已由顶栏消化，这里不再重复留白。
+    &.underBar {
+      top: var(--mobilebar-h);
+      padding-top: 0;
+
+      // 品牌名与搜索按钮顶栏里都已经有一份，让位之后两份会上下摞着同时露出来。
+      // 头部整块不渲染：顶栏承担的就是它，之前那 48px 也不再白占。
+      .siderHeader {
+        display: none;
+      }
+    }
+
     // 移动端强制展开态（忽略桌面折叠）
     &.folded {
       width: var(--drawer-w);

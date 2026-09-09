@@ -24,8 +24,10 @@
     position: relative;
     display: flex;
     align-items: center;
-    height: calc(48px + env(safe-area-inset-top));
-    min-height: calc(48px + env(safe-area-inset-top));
+    // 高度由 Portal 壳的 --mobilebar-h 统一定义：侧栏要按同一个数让位，
+    // 两处各写一遍字面量就会在改高度时错开半条缝
+    height: var(--mobilebar-h);
+    min-height: var(--mobilebar-h);
     padding: env(safe-area-inset-top) calc(12px + env(safe-area-inset-right)) 0
       calc(12px + env(safe-area-inset-left));
     background: color-mix(in srgb, var(--card) 82%, transparent);

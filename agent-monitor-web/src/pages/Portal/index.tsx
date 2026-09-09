@@ -326,6 +326,7 @@ const Portal: React.FC = observer(() => {
           folded={siderFolded}
           onToggleFold={() => setSiderFolded(!siderFolded)}
           isMobile={isMobile}
+          underTopBar={atSessions}
           localId={localId}
           user={user}
           userMenuOpen={userMenuOpen}

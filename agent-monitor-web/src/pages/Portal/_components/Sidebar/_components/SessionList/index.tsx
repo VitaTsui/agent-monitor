@@ -24,15 +24,19 @@ interface SessionListProps {
 /** 侧栏的会话列表（按终端类型分组）。 */
 const SessionList: React.FC<SessionListProps> = observer((props) => {
   const { isMobile, onSelect } = props;
-  const { selectedGroups, openIds, splitOpen } = PortalStore;
+  const { selectedGroups, openIds, splitOpen, deviceList, selectedMachineId } =
+    PortalStore;
 
   if (selectedGroups.length === 0) {
-    return (
-      <div className={styles.emptyList}>
-        该设备暂无活跃会话。请确认 agent-task-monitor
-        正在该设备上运行，且已在设备管理中信任。
-      </div>
-    );
+    // 空列表有三种成因，各自该做的事完全不同，混成一句就在骗人：
+    // 浏览器进来不自动选设备（见 PortalStore.selectedMachineId），此时会话全在、
+    // 设备也全在线，却被告知「确认客户端在运行」—— 用户会去排查一台根本没坏的机器。
+    const hint = !deviceList.length
+      ? "还没有设备上报会话。请确认 agent-task-monitor 正在运行，且已在设备管理中信任。"
+      : !selectedMachineId
+        ? "在上方「设备」里点一台，这里就会列出它的会话。"
+        : "这台设备当前没有活跃会话。在它的终端里开一个，就会出现在这里。";
+    return <div className={styles.emptyList}>{hint}</div>;
   }
 
   return (

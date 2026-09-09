@@ -41,6 +41,9 @@ interface SidebarProps {
   folded: boolean;
   onToggleFold: () => void;
   isMobile: boolean;
+  /** 移动端顶栏是否在场（仅会话页）。在场时侧栏从顶栏下沿起，把那 48px 让出来 ——
+   *  顶栏是半透明毛玻璃，侧栏留在底下会透出来跟顶栏的图标叠字。 */
+  underTopBar: boolean;
   /** 客户端窗口内的本机 machineId（浏览器里为 null，不标「本机」） */
   localId: string | null;
   user: PortalUserInfo;
@@ -61,6 +64,7 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
     folded,
     onToggleFold,
     isMobile,
+    underTopBar,
     localId,
     user,
     userMenuOpen,
@@ -76,7 +80,11 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
   const nickname = user.nickname ?? user.username ?? "";
 
   return (
-    <aside className={`${styles.Sidebar} ${folded ? styles.folded : ""}`}>
+    <aside
+      className={`${styles.Sidebar} ${folded ? styles.folded : ""} ${
+        underTopBar ? styles.underBar : ""
+      }`}
+    >
       <div className={styles.siderHeader}>
         <div className={styles.brand}>
           <span className={styles.logo}>
