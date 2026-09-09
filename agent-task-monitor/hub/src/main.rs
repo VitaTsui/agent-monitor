@@ -12,6 +12,7 @@ mod dingtalk_stream;
 mod history;
 mod mcp;
 mod mdfmt;
+mod notes;
 mod oauth;
 mod redact;
 mod registry;

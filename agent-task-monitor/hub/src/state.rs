@@ -338,6 +338,10 @@ pub struct AppState {
     pub history: RwLock<Vec<crate::history::HistoryEntry>>,
     /// 历史有未落盘变更（tick 循环定期 flush 到 history.json）
     pub history_dirty: std::sync::atomic::AtomicBool,
+    /// 会话备注：用户名 → (号位锚 → 备注)。用户给会话起的名字，挂在**终端窗口**上，
+    /// 跨 `/clear`、`--resume`、hub 重启都不变 —— 见 crate::notes。
+    /// 改动即刻落盘（低频人工动作，攒着刷会「改完名字重启就没了」），故不设脏标。
+    pub notes: RwLock<crate::notes::NoteStore>,
     /// 机器人会话号位（「#2 / 发 2 / 暂停 2」里的 2）：用户名 → 号位表。
     /// 号绑定终端窗口而非列表位置，跨排序变化与 hub 重启都不变 —— 见 crate::slots。
     pub bot_slots: RwLock<HashMap<String, crate::slots::SlotTable>>,
@@ -469,6 +473,8 @@ impl AppState {
         let history = crate::history::load(&config.data_dir);
         // 配置基线持久化：hub 重启后镜像机不必等源机重传一遍全部配置
         let configs = crate::configsync::ConfigStore::load(&config.data_dir);
+        // 备注持久化：hub 重启后用户给会话起的名字还在
+        let notes = crate::notes::load(&config.data_dir);
         Arc::new(Self {
             machines: RwLock::new(HashMap::new()),
             tokens: RwLock::new(sessions),
@@ -486,6 +492,7 @@ impl AppState {
             sessions_dirty: std::sync::atomic::AtomicBool::new(false),
             history: RwLock::new(history),
             history_dirty: std::sync::atomic::AtomicBool::new(false),
+            notes: RwLock::new(notes),
             bot_slots: RwLock::new(slots),
             bot_slots_dirty: std::sync::atomic::AtomicBool::new(false),
             bot_monitors: RwLock::new(HashMap::new()),

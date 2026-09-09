@@ -135,6 +135,8 @@ pub fn router(state: SharedState) -> Router {
             "/monitor/tasks/:id/slash-commands",
             get(task_slash_commands),
         )
+        // 会话备注（用户给会话起的名字；空串 = 清除）
+        .route("/monitor/tasks/:id/note", post(set_task_note))
         .route("/monitor/tasks/:id/control", post(control_task))
         .route("/monitor/tasks/:id/input", post(input_task))
         .route("/monitor/tasks/:id/termkey", post(termkey_task))
@@ -745,20 +747,75 @@ async fn with_slots(state: &SharedState, user: &str, tasks: &[am_core::model::Ta
             .into_iter()
             .map(|(t, no)| (crate::slots::anchor_of(&t), no))
             .collect();
+    let mut out = with_notes(state, user, tasks).await;
+    for (v, t) in out.iter_mut().zip(tasks) {
+        if let Some(obj) = v.as_object_mut() {
+            // 查不到 = 该会话还没进过号位表（罕见），给 null 让前端不显示徽标
+            obj.insert(
+                "slot".into(),
+                json!(by_anchor.get(&crate::slots::anchor_of(t))),
+            );
+        }
+    }
+    out
+}
+
+/// 给会话补上「备注」（用户自己起的名字）。挂在号位锚上，所以 `/clear`、`--resume`
+/// 换掉会话 id 之后仍能对上 —— 见 crate::notes。没起过名字的给 null。
+async fn with_notes(state: &SharedState, user: &str, tasks: &[am_core::model::Task]) -> Vec<Value> {
+    let notes = crate::notes::map_for(state, user).await;
     tasks
         .iter()
         .map(|t| {
             let mut v = serde_json::to_value(t).unwrap_or_else(|_| json!({}));
             if let Some(obj) = v.as_object_mut() {
-                // 查不到 = 该会话还没进过号位表（罕见），给 null 让前端不显示徽标
-                obj.insert(
-                    "slot".into(),
-                    json!(by_anchor.get(&crate::slots::anchor_of(t))),
-                );
+                obj.insert("note".into(), json!(notes.get(&crate::slots::anchor_of(t))));
             }
             v
         })
         .collect()
+}
+
+#[derive(Deserialize)]
+struct NoteReq {
+    /// 新备注；空串 / 全空白 = 清除。
+    ///
+    /// 用 `Option` 而不是 `#[serde(default)]`：字段缺失和空串必须区分开 —— 前者是调用方
+    /// 写错了字段名，若也当成空串处理，一次拼写错误就会**静默清掉**用户起的名字。
+    note: Option<String>,
+}
+
+/// POST /monitor/tasks/:id/note —— 设置或清除会话备注。
+///
+/// 只认登录态（Authorization）：备注是用户私有的，可见性沿用 `tasks_for` 的归属判定 ——
+/// 看得见这个会话才改得了它的备注，改的也只是**自己那份**。
+async fn set_task_note(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<NoteReq>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let task = state
+        .tasks_for(&user)
+        .await
+        .into_iter()
+        .find(|t| t.id == id);
+    let Some(task) = task else {
+        return err(404, "任务不存在");
+    };
+    let Some(raw) = req.note else {
+        return err(400, "缺少 note 字段（清除备注请传空串）");
+    };
+    let text = match crate::notes::normalize(&raw) {
+        Ok(t) => t,
+        Err(m) => return err(400, &m),
+    };
+    let anchor = crate::slots::anchor_of(&task);
+    let saved = crate::notes::set(&state, &user, &anchor, &text).await;
+    ok(json!({ "note": saved }))
 }
 
 // ---------- vita-admin Query 格式（后管 Panel.List 用） ----------
@@ -830,7 +887,7 @@ async fn page_tasks(
         .take(page_size)
         .collect();
     ok(json!({
-        "list": items,
+        "list": with_notes(&state, &user, &items).await,
         "page": { "pageNum": page_num, "pageSize": page_size, "total": total }
     }))
 }
@@ -936,7 +993,10 @@ async fn task_detail(
     };
     let tasks = state.tasks_for(&user).await;
     match tasks.into_iter().find(|t| t.id == id) {
-        Some(t) => ok(serde_json::to_value(t).unwrap_or(Value::Null)),
+        Some(t) => match with_notes(&state, &user, &[t]).await.pop() {
+            Some(v) => ok(v),
+            None => err(404, "任务不存在"),
+        },
         None => err(404, "任务不存在"),
     }
 }
