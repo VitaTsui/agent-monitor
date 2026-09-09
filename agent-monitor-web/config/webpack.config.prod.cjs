@@ -56,6 +56,34 @@ const normalizePath = (inputPath) => {
   return path.normalize(inputPath).replace(/\\/g, "/");
 };
 
+// 从模块所在目录推出它属于哪个 npm 包，用作 vendor chunk 名。
+//
+// 必须从「最后一个」node_modules 往后取：pnpm 的物理布局是
+//   node_modules/.pnpm/<pkg>@<ver>/node_modules/<pkg>/…
+// 从头匹配只会取到 ".pnpm" 这一段，于是全部 vendor 落进同一个名为 ".pnpm" 的组，
+// 再被 maxSize 切成一堆 ".pnpm-xxxxxxxx.chunk.js" —— 以点开头的文件会被任何按
+// 「点开头 = 隐藏文件」处理的工具静默丢掉（GitHub Actions 的 upload-artifact
+// 默认就丢，且丢完仍报成功，桌面客户端因此拿到过残缺的前端产物）。
+// 取最后一个 node_modules 之后的段，pnpm 嵌套布局与 npm/yarn 扁平布局都成立。
+const NODE_MODULES = "/node_modules/";
+const packageNameOf = (context) => {
+  if (!context) return undefined;
+  const p = context.replace(/\\/g, "/");
+  const i = p.lastIndexOf(NODE_MODULES);
+  if (i < 0) return undefined;
+  const segments = p.slice(i + NODE_MODULES.length).split("/");
+  // scoped 包占两段（@scope/name），普通包一段
+  const raw = segments[0]?.startsWith("@")
+    ? segments.slice(0, 2).join("/")
+    : segments[0];
+  // 取不到、或仍以点开头（.pnpm / .bin 这类内部目录）时返回 undefined，
+  // 交给 webpack 用 chunk id 命名 —— 数字 id 同样不会以点开头
+  if (!raw || raw.startsWith(".")) return undefined;
+  // @scope/name -> scope-name；其余文件名非法字符统一换成 -
+  const name = raw.replace(/^@/, "").replace(/[^A-Za-z0-9_.-]+/g, "-");
+  return name && !name.startsWith(".") ? name : undefined;
+};
+
 // 获取规范化的 cwd
 const cwd = normalizePath(process.cwd());
 
@@ -114,11 +142,7 @@ const config = {
         vendors: {
           test: /[\\/]node_modules[\\/]/,
           name(module) {
-            const packageName = module.context.match(
-              /[\\/]node_modules[\\/](.*?)([\\/]|$)/
-            )?.[1];
-            // 匹配不到包名时返回 undefined，交给 webpack 用 chunk id 命名（避免出现字面量 "undefined"）
-            return packageName ? packageName.replace("@", "") : undefined;
+            return packageNameOf(module.context);
           },
           minSize: 20 * 1024,
           maxSize: 200 * 1024,
