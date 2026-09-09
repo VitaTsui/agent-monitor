@@ -214,21 +214,27 @@ jobs:
         with:
           fetch-depth: 0
 
+      # 落在 release-assets/ 而不是 assets/：本仓根目录**本来就有** assets/
+      # （图标源文件 assets/brand/），上一步的 checkout 已经把它铺在工作区里。
+      # 下载到同名目录会把两者混在一起，下面的 `release-assets/*` 就会 glob 到
+      # assets/brand 这个目录，gh 上传目录直接报 `read assets/brand: is a directory`
+      # 并让整个 release 作业失败（0.11.59 首次实际跑到这一步时就是这么挂的：
+      # 0.11.57/0.11.58 一个走 dry_run、一个 tag 已存在被 skip，都没真正执行过）。
       - uses: actions/download-artifact@v8
         with:
           pattern: package-*
           merge-multiple: true
-          path: assets
+          path: release-assets
 
       - name: 创建 Release 并挂上安装包
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ls -la assets
+          ls -la release-assets
           # tag 在这一刻才打：前面任一端没构建出包，这一步压根不会执行，
           # 于是不会留下一个空的 Latest。
           gh release create "${{ needs.version.outputs.tag }}" \
             --generate-notes \
             --target "${{ github.sha }}" \
             --latest \
-            assets/*
+            release-assets/*
