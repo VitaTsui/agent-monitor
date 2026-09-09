@@ -39,6 +39,10 @@ pub fn enabled() -> bool {
 }
 
 /// 注入结果：说清到底做到了哪一步，调用方据此写日志/提示，不许含糊成「成功」。
+///
+/// 非 macOS 上这条路径整个不存在，两个变体都构造不出来，`-D warnings` 会判它们死。
+/// 不是真的多余，所以按平台放行，而不是把类型删了让调用方那边散着写字符串。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Injected {
     /// 文本已写进撰写框并回读校验通过，且已按下发送键、撰写框已清空。
@@ -49,6 +53,9 @@ pub enum Injected {
 }
 
 /// 注入失败的原因。分类是为了让调用方能区分「该降级」与「该告诉用户别再试」。
+///
+/// 同 [`Injected`]：非 macOS 上只构造得出 `Other`，其余变体按平台放行。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub enum InjectError {
     /// 没拿到辅助功能授权（AXIsProcessTrusted == false）。用户要去系统设置里勾。
@@ -177,6 +184,10 @@ mod imp {
     const AX_OK: AxError = 0;
     /// Chromium 分支（ChatGPT.app）不认 `AXManualAccessibility`，返回这个码，属正常。
     const AX_ATTR_UNSUPPORTED: AxError = -25205;
+    /// 元素句柄已失效（kAXErrorInvalidUIElement）。App 内部一导航，之前那棵树上的
+    /// 元素就全被销毁了，而后台状态下我们手里那棵是**导航前的旧快照**——
+    /// 找得到「撰写框」，一写就报这个码。见 [`inject`] 里对它的处理。
+    const AX_INVALID_ELEMENT: AxError = -25202;
     const AXVALUE_CGPOINT: u32 = 1;
     const AXVALUE_CGSIZE: u32 = 2;
 
@@ -645,6 +656,23 @@ mod imp {
         ""
     }
 
+    /// 对外入口：跑 [`attempt`]，只有在它报「句柄失效」时**再跑一趟**。
+    ///
+    /// 这不是「重试到看起来成功为止」：`-25202` 是一个含义明确、且可恢复的错误
+    /// ——「你手里这个元素已经不存在了」，正确的应对就是重新解析一次句柄。所以
+    /// 只对这一个错误码重试，只重试一次，其余任何失败都原样上报。
+    pub fn inject(
+        host_pid: u32,
+        text: &str,
+        submit: bool,
+    ) -> Result<(Injected, String), InjectError> {
+        match attempt(host_pid, text, submit) {
+            Ok(v) => Ok(v),
+            Err((e, false)) => Err(e),
+            Err((_, true)) => attempt(host_pid, text, submit).map_err(|(e, _)| e),
+        }
+    }
+
     fn diag_line(n: &Node) -> String {
         format!(
             "{}[desc={:?} title={:?} {:.0},{:.0} {:.0}x{:.0} 可写={}]",
@@ -652,32 +680,40 @@ mod imp {
         )
     }
 
-    pub fn inject(
+    /// 跑一趟完整的「定位 → 查草稿 → 写入 → 回读 → （可选）提交」。
+    ///
+    /// 失败时第二个返回值是「句柄失效，重走一遍多半就好了」——只有 [`inject`] 关心它。
+    fn attempt(
         host_pid: u32,
         text: &str,
         submit: bool,
-    ) -> Result<(Injected, String), InjectError> {
+    ) -> Result<(Injected, String), (InjectError, bool)> {
         if unsafe { AXIsProcessTrusted() } == 0 {
-            return Err(InjectError::NotTrusted);
+            return Err((InjectError::NotTrusted, false));
         }
         let app = app_element(host_pid);
         let manual = enable_manual_accessibility(&app);
         if manual != AX_OK && manual != AX_ATTR_UNSUPPORTED {
             // 不是「不支持」而是别的错，说明这个 App 的 AX 通道本身有问题，早报早好。
-            return Err(InjectError::Other(format!(
-                "打开可访问性树失败 AXError={manual}"
-            )));
+            return Err((
+                InjectError::Other(format!("打开可访问性树失败 AXError={manual}")),
+                false,
+            ));
         }
         std::thread::sleep(Duration::from_millis(120));
-        let win = target_window(&app)
-            .ok_or_else(|| InjectError::Other(format!("进程 {host_pid} 没有可见窗口")))?;
+        let win = target_window(&app).ok_or_else(|| {
+            (
+                InjectError::Other(format!("进程 {host_pid} 没有可见窗口")),
+                false,
+            )
+        })?;
         let wp = attr_point(win.get(), "AXPosition").unwrap_or_default();
         let ws = attr_size(win.get(), "AXSize").unwrap_or_default();
 
         let (fields, visited, capped) = collect(win.get(), &["AXTextArea", "AXTextField"]);
         let Some(composer) = pick_composer(&fields, wp.y, ws.h) else {
             let listed: Vec<String> = fields.iter().take(8).map(diag_line).collect();
-            return Err(InjectError::ComposerNotFound {
+            return Err((InjectError::ComposerNotFound {
                 diag: format!(
                     "遍历 {visited} 个节点{}，找到 {} 个文本域：[{}]；期望 role=AXTextArea 且 AXValue 可写，\
                      description 命中 {:?} 之一，或全树唯一，或位于窗口下半部最靠下的那个",
@@ -686,7 +722,7 @@ mod imp {
                     listed.join(", "),
                     COMPOSER_DESC
                 ),
-            });
+            }, false));
         };
         let cel = composer.el.get();
         let cbox = (composer.x, composer.y, composer.h);
@@ -702,9 +738,12 @@ mod imp {
             std::thread::sleep(Duration::from_millis(150));
             let v = attr_string(cel, "AXValue").unwrap_or_default();
             if !composer_is_empty(cel, &v) {
-                return Err(InjectError::DraftPresent {
-                    preview: truncate(v.trim_start_matches('\n'), 20),
-                });
+                return Err((
+                    InjectError::DraftPresent {
+                        preview: truncate(v.trim_start_matches('\n'), 20),
+                    },
+                    false,
+                ));
             }
         }
 
@@ -718,8 +757,21 @@ mod imp {
         let key = CfStr::new("AXValue");
         let val = CfStr::new(text);
         let err = unsafe { AXUIElementSetAttributeValue(cel, key.get(), val.get() as CFTypeRef) };
+        if err == AX_INVALID_ELEMENT {
+            // 句柄失效：手里这棵树是导航前的旧快照。刚才这次写虽然失败了，但它是个**会改
+            // 状态**的请求，已经把被节流的渲染进程踢醒 —— 交给 `inject` 重走一遍，
+            // 那一遍拿到的就是新树。整趟从头再来（含草稿判定），不是接着这半截往下写：
+            // 新页面上可能正躺着用户的草稿。
+            return Err((
+                InjectError::Other("撰写框句柄已失效（页面刚跳转）".into()),
+                true,
+            ));
+        }
         if err != AX_OK {
-            return Err(InjectError::Other(format!("写入撰写框失败 AXError={err}")));
+            return Err((
+                InjectError::Other(format!("写入撰写框失败 AXError={err}")),
+                false,
+            ));
         }
 
         // 回读校验。每轮先踢醒再读 —— 只读不写永远拿不到新值（见 `wake` 的说明）。
@@ -742,11 +794,14 @@ mod imp {
             // 里面躺着的只有我们刚写的那份。
             let empty = CfStr::new("");
             unsafe { AXUIElementSetAttributeValue(cel, key.get(), empty.get() as CFTypeRef) };
-            return Err(InjectError::VerifyFailed {
-                wrote: text.chars().count(),
-                read_back: last.clone(),
-                hint: verify_hint(text, &last),
-            });
+            return Err((
+                InjectError::VerifyFailed {
+                    wrote: text.chars().count(),
+                    read_back: last.clone(),
+                    hint: verify_hint(text, &last),
+                },
+                false,
+            ));
         }
         let wrote_msg = format!("已写入 {} 字符并回读校验通过", text.chars().count());
 
