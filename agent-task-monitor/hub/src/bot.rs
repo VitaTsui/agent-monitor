@@ -1713,10 +1713,11 @@ async fn list_history(state: &SharedState, username: &str, arg: &str) -> String 
         if e.session_id != last_session {
             last_session = e.session_id.clone();
             let slot = e.slot.map(|n| format!("{n} 号 · ")).unwrap_or_default();
-            let title: String = if e.title.is_empty() {
-                e.provider.clone()
-            } else {
-                e.title.clone()
+            // 起过名字就显示名字 —— 与网页/移动端历史页同一个口径（见 crate::history）
+            let title: String = match e.note.as_deref().filter(|n| !n.is_empty()) {
+                Some(n) => n.to_string(),
+                None if e.title.is_empty() => e.provider.clone(),
+                None => e.title.clone(),
             };
             lines.push(format!(
                 "\n—— {slot}{} · {} ——",
@@ -2213,8 +2214,9 @@ pub(crate) async fn queue_command(
     // 把它挡在历史外了，钉钉与 MCP 这两条却一直照记不误 —— 同一件事该是同一个口径。
     if matches!(action, ControlAction::Input) && !is_answer {
         if let Some(content) = text {
-            let slot =
-                crate::slots::slot_of(state, username, &crate::slots::anchor_of(&task)).await;
+            // 锚一次算好，两处都用：查号位、以及记进历史（备注按它现算，见 crate::history）
+            let anchor = crate::slots::anchor_of(&task);
+            let slot = crate::slots::slot_of(state, username, &anchor).await;
             crate::history::append(
                 state,
                 crate::history::HistoryEntry {
@@ -2230,6 +2232,8 @@ pub(crate) async fn queue_command(
                     project: task.project_name.clone(),
                     title: task.title.clone(),
                     provider: task.provider_dsr.clone(),
+                    anchor,
+                    note: None, // 读取时现填，不落盘
                 },
             )
             .await;

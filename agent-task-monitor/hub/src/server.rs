@@ -1405,7 +1405,9 @@ async fn input_task(
                     // 所以要单独记一次，否则网页发的任务不会出现在聊天记录里。
                     // 选择卡的作答除外（见 InputReq::from_select）。
     if !req.from_select {
-        let slot = crate::slots::slot_of(&state, &user, &crate::slots::anchor_of(&task)).await;
+        // 锚一次算好，两处都用：查号位、以及记进历史（备注按它现算，见 crate::history）
+        let anchor = crate::slots::anchor_of(&task);
+        let slot = crate::slots::slot_of(&state, &user, &anchor).await;
         crate::history::append(
             &state,
             crate::history::HistoryEntry {
@@ -1421,6 +1423,8 @@ async fn input_task(
                 project: task.project_name.clone(),
                 title: task.title.clone(),
                 provider: task.provider_dsr.clone(),
+                anchor,
+                note: None, // 读取时现填，不落盘
             },
         )
         .await;
@@ -3201,8 +3205,8 @@ async fn report(
     let mut pending_sets: Vec<(String, String)> = Vec::new(); // (会话 id, 终端锚)
     let mut pending_removes: Vec<String> = Vec::new();
     // 会话结束时要落的历史记录（同样块内收集、块后写，避开借用冲突）
-    // (记录, 终端锚) —— 号位要在锁外查，见下方 pending_history 处理
-    let mut history_records: Vec<(crate::history::HistoryEntry, String)> = Vec::new();
+    // 号位要在锁外查，锚就在条目自己的 anchor 字段上，见下方 pending_history 处理
+    let mut history_records: Vec<crate::history::HistoryEntry> = Vec::new();
     if let Some(owner) = &notify_owner {
         use crate::dingtalk::{EventKind, NotifyEvent};
         let old: std::collections::HashMap<&str, TaskStatus> = entry
@@ -3297,33 +3301,32 @@ async fn report(
         };
         // 造一条 assistant 侧的交互记录（任务完成 / 会话结束时的结果）。
         // 正文优先用完整原文（推送里被截断时 full 有值），否则退回展示版并去掉「最后结果」抬头。
-        // 号位要 await 才能查，所以这里带回终端锚，等锁释放后再补。
+        // 号位要 await 才能查，锁释放后按条目自带的 anchor 补。
         let make_reply = |t: &am_core::model::Task,
                           owner: &str,
                           full: Option<&str>,
                           shown: &str|
-         -> (crate::history::HistoryEntry, String) {
+         -> crate::history::HistoryEntry {
             let content = match full {
                 Some(f) => f.to_string(),
                 None => shown.trim_start_matches("\n\n**最后结果**\n\n").to_string(),
             };
-            (
-                crate::history::HistoryEntry {
-                    id: crate::history::new_id(),
-                    owner: owner.to_string(),
-                    session_id: t.id.clone(),
-                    role: "assistant".into(),
-                    content,
-                    at: crate::state::now_secs(),
-                    source: String::new(),
-                    slot: None, // 锁外补
-                    hostname: t.hostname.clone(),
-                    project: t.project_name.clone(),
-                    title: t.title.clone(),
-                    provider: t.provider_dsr.clone(),
-                },
-                crate::slots::anchor_of(t),
-            )
+            crate::history::HistoryEntry {
+                id: crate::history::new_id(),
+                owner: owner.to_string(),
+                session_id: t.id.clone(),
+                role: "assistant".into(),
+                content,
+                at: crate::state::now_secs(),
+                source: String::new(),
+                slot: None, // 锁外补
+                hostname: t.hostname.clone(),
+                project: t.project_name.clone(),
+                title: t.title.clone(),
+                provider: t.provider_dsr.clone(),
+                anchor: crate::slots::anchor_of(t),
+                note: None, // 读取时现填，不落盘
+            }
         };
         let now_selecting: std::collections::HashSet<String> = tasks
             .iter()
@@ -3697,10 +3700,10 @@ async fn report(
     .await;
 
     // 会话历史：锁已释放，这里统一落（record 内部去重 + 截断 + 标脏，tick 循环负责写盘）
-    for (mut rec, anchor) in pending_history {
+    for mut rec in pending_history {
         // 补号位，让历史里的编号与钉钉的「#N」对得上。会话可能已结束、活跃列表里查不到，
         // 所以按终端锚直接查表（锚要过保留期才回收，多数情况仍在）。
-        rec.slot = crate::slots::slot_of(&state, &rec.owner, &anchor).await;
+        rec.slot = crate::slots::slot_of(&state, &rec.owner, &rec.anchor).await;
         crate::history::append(&state, rec).await;
     }
 

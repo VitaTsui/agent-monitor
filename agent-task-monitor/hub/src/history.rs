@@ -50,6 +50,23 @@ pub struct HistoryEntry {
     /// 代理展示名（Claude Code / Codex …）
     #[serde(default)]
     pub provider: String,
+    /// 号位锚（`machine_id|sh:{shell_pid}@{shell_start}`）——这条记录出自**哪个终端窗口**。
+    ///
+    /// 存的是**身份**不是名字：备注在读取时按它现算（见 [`list_for`]），所以用户改名之后，
+    /// 这个终端的所有历史记录跟着一起变。会话 id 做不到这件事 —— `/clear`、`--resume`
+    /// 各换一次新 id，而备注挂在终端窗口上（见 crate::notes）。
+    ///
+    /// 0.11.55 之前写入的存量记录没有这个字段，为空串，永远匹配不到备注（备注表的键都带
+    /// `machine|` 前缀），于是回落到 `title` —— 与改动前的表现完全一致。
+    #[serde(default)]
+    pub anchor: String,
+    /// 用户给这个终端起的名字，**读取时现填**。
+    ///
+    /// 唯一存储在 crate::notes，这里既不落盘也不进内存表：只有 [`list_for`] 返回的那份
+    /// 拷贝上有值（`#[serde(skip_serializing_if)]` 保证内存里的 `None` 不会写进
+    /// history.json）。历史里再存一份备注就成了两套数据，改名后必然对不上。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// 从数据目录加载（读不到/解析失败都当空：历史丢了不影响任何功能）
@@ -90,6 +107,9 @@ fn prepare_content(content: &str) -> String {
 pub async fn append(state: &SharedState, mut e: HistoryEntry) {
     e.content = prepare_content(&e.content);
     e.title = e.title.chars().take(200).collect();
+    // 备注只在读取时现填（见 list_for）。入库这一路强制清空，把「历史里不存备注副本」
+    // 从口头约定变成代码保证：否则哪天有人把 list_for 的返回值又塞回来，改名就再也不生效了。
+    e.note = None;
     if e.content.trim().is_empty() {
         return; // 空内容不入流，免得聊天记录里出现空气泡
     }
@@ -119,6 +139,10 @@ pub async fn list_for(
     session: Option<&str>,
     limit: usize,
 ) -> Vec<HistoryEntry> {
+    // 备注**现查现填**，不用入库时的快照：用户的诉求是「历史里显示我起的名字」，起名是给这个
+    // 终端贴标签，不是记录「它当时叫什么」。快照式存储会让同一个终端的历史里混着新旧两个名字。
+    // 先取（map_for 内部取完读锁就还），再拿 history 锁，避免两把锁嵌套。
+    let notes = crate::notes::map_for(state, owner).await;
     let h = state.history.read().await;
     let mine: Vec<&HistoryEntry> = h
         .iter()
@@ -126,7 +150,21 @@ pub async fn list_for(
         .filter(|e| session.is_none_or(|s| e.session_id == s))
         .collect();
     let start = mine.len().saturating_sub(limit);
-    mine[start..].iter().map(|e| (*e).clone()).collect()
+    mine[start..]
+        .iter()
+        .map(|e| with_note((*e).clone(), &notes))
+        .collect()
+}
+
+/// 把**当前**备注贴到取出的记录上：锚对得上就用用户起的名字，对不上给 `None`（前端回落 title）。
+///
+/// 锚为空的存量记录在这里自然落空 —— 备注表的键都带 `machine|` 前缀，空串匹配不到任何一条。
+fn with_note(
+    mut e: HistoryEntry,
+    notes: &std::collections::HashMap<String, String>,
+) -> HistoryEntry {
+    e.note = notes.get(&e.anchor).cloned();
+    e
 }
 
 #[cfg(test)]
@@ -147,6 +185,8 @@ mod tests {
             project: "p".into(),
             title: "t".into(),
             provider: "Claude Code".into(),
+            anchor: "m1|sh:42@1700".into(),
+            note: None,
         }
     }
 
@@ -208,5 +248,67 @@ mod tests {
     fn keeps_ordinary_content_intact() {
         let text = "核验：`BEGIN PRIVATE KEY` 0 命中";
         assert_eq!(prepare_content(text), text);
+    }
+
+    fn notes_of(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// 改名后**旧记录跟着变** —— 这正是选「读取时现算」而不是「写入时快照」的理由：
+    /// 同一条记录换一份备注表就换一个名字，同一个终端的历史不会新旧名字混排。
+    #[test]
+    fn note_follows_rename_on_read() {
+        let e = entry("e1", "user", 1);
+        let first = with_note(e.clone(), &notes_of(&[("m1|sh:42@1700", "支付重构")]));
+        assert_eq!(first.note.as_deref(), Some("支付重构"));
+        let renamed = with_note(e.clone(), &notes_of(&[("m1|sh:42@1700", "退款对账")]));
+        assert_eq!(
+            renamed.note.as_deref(),
+            Some("退款对账"),
+            "改名要立刻反映到旧记录"
+        );
+        let cleared = with_note(e, &notes_of(&[]));
+        assert_eq!(cleared.note, None, "清除备注后该回落到 title");
+    }
+
+    /// 别的终端的备注不能串到这条记录上（锚不同 = 不同终端窗口）
+    #[test]
+    fn other_terminal_note_does_not_leak() {
+        let got = with_note(
+            entry("e1", "user", 1),
+            &notes_of(&[("m1|sh:99@1700", "别人的名字")]),
+        );
+        assert_eq!(got.note, None);
+    }
+
+    /// 存量记录（0.11.55 之前写入，没有 anchor 字段）：读回来 anchor 为空、
+    /// 即便用户已经起了名字也匹配不到，表现与改动前一致 —— 显示自动标题。
+    #[test]
+    fn legacy_entry_without_anchor_falls_back_to_title() {
+        let legacy = r#"{"id":"a","owner":"u","sessionId":"s","role":"user","content":"c",
+            "at":1,"hostname":"h","project":"p","title":"自动标题"}"#;
+        let e: HistoryEntry = serde_json::from_str(legacy).expect("旧格式必须还能读回来");
+        assert_eq!(e.anchor, "", "旧记录没有锚");
+        assert_eq!(e.title, "自动标题");
+        let got = with_note(e, &notes_of(&[("m1|sh:42@1700", "支付重构")]));
+        assert_eq!(got.note, None, "空锚不能匹配到任何备注");
+    }
+
+    /// 备注**不落盘**：内存里的记录 note 恒为 None，序列化出来连字段都没有。
+    /// 历史里再存一份备注就是两套数据，改名后必然对不上。
+    #[test]
+    fn note_is_never_persisted() {
+        let txt = serde_json::to_string(&entry("e1", "user", 1)).unwrap();
+        assert!(
+            !txt.contains("\"note\""),
+            "history.json 不该出现 note 字段：{txt}"
+        );
+        assert!(
+            txt.contains("\"anchor\":\"m1|sh:42@1700\""),
+            "锚必须落盘：{txt}"
+        );
     }
 }
