@@ -98,6 +98,20 @@ jobs:
             libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
             librsvg2-dev libxdo-dev libssl-dev patchelf
 
+      # hub/src/main.rs:28 用 include_str! 在**编译期**嵌入 keys/rsa_private.pem，
+      # 而 keys/ 按 .gitignore:12 不入库 —— 干净检出（CI、以及任何人 clone 之后）
+      # 编不过 am-hub，报「couldn't read hub/src/../../keys/rsa_private.pem」。
+      # 这里现生成一把**一次性**开发密钥把编译喂过去；CI 不跑登录流程，密钥内容无所谓。
+      #
+      # TODO(agent-monitor): 真正的修法是别在编译期嵌私钥——改成运行时读
+      # AM_RSA_KEY_PATH、缺省时进程内现生成一把。归属密钥处理那条线，不在本工作流里绕。
+      - name: 生成一次性开发密钥
+        shell: bash
+        run: |
+          mkdir -p keys
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out keys/rsa_private.pem
+          openssl rsa -in keys/rsa_private.pem -pubout -out keys/rsa_public.pem
+
       # 格式与平台无关，跑一遍就够。
       - name: 格式检查
         if: startsWith(matrix.os, 'ubuntu')
