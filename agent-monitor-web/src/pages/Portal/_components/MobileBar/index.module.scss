@@ -1,0 +1,204 @@
+@use "@hsu-react/ui/es/styles/responsive" as r;
+
+// ---------- 移动端顶部栏（默认桌面隐藏） ----------
+.mobileBar {
+  display: none;
+}
+
+@keyframes mobilePulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@include r.down(md) {
+  // 原生壳（Android 15 起窗口强制延伸到系统栏下）里，不让开状态栏就会被
+  // 时钟/电量压住；env() 需要 index.html 的 viewport-fit=cover 才有非 0 值。
+  // 浏览器里 env() 为 0，等价于原样，不影响桌面/移动网页。
+  .mobileBar {
+    // iOS 导航栏质感：毛玻璃半透明 + 细分隔线 + 居中标题
+    position: relative;
+    display: flex;
+    align-items: center;
+    height: calc(48px + env(safe-area-inset-top));
+    min-height: calc(48px + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) calc(12px + env(safe-area-inset-right)) 0
+      calc(12px + env(safe-area-inset-left));
+    background: color-mix(in srgb, var(--card) 82%, transparent);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-bottom: 0.5px solid color-mix(in srgb, var(--foreground) 16%, transparent);
+    z-index: 5;
+
+    .mobileMenuBtn {
+      font-size: 21px;
+      color: var(--primary);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      margin-left: -8px;
+      border-radius: var(--radius);
+
+      &:active {
+        background: color-mix(in srgb, var(--foreground) 8%, transparent);
+      }
+
+      &:focus-visible {
+        outline: 2px solid var(--primary);
+        outline-offset: 2px;
+      }
+    }
+
+    // 右上角「⋯」操作按钮（与汉堡钮同规格）
+    .mobileMoreBtn {
+      margin-left: auto;
+      margin-right: -8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      font-size: 22px;
+      color: var(--primary);
+      border-radius: var(--radius);
+      cursor: pointer;
+
+      &:active {
+        background: color-mix(in srgb, var(--foreground) 8%, transparent);
+      }
+    }
+
+    // 「中断」快捷键（仅执行中出现）：告警色，与旁边的 ⋯ 区分开，
+    // 手指目标同样 40px（iOS 可点下限）
+    .mobileStopBtn {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      font-size: 19px;
+      color: var(--destructive);
+      border-radius: var(--radius);
+      cursor: pointer;
+
+      &:active {
+        background: color-mix(in srgb, var(--destructive) 10%, transparent);
+      }
+
+      // 它已经把右侧空间占住了，后面的 ⋯ 不该再推一次
+      + .mobileMoreBtn {
+        margin-left: 0;
+      }
+    }
+
+    // 标题绝对居中（iOS 导航栏惯例），两侧按钮不挤位
+    .mobileTitle {
+      position: absolute;
+      left: 50%;
+      top: env(safe-area-inset-top);
+      height: 48px;
+      line-height: 48px;
+      transform: translateX(-50%);
+      max-width: 55vw;
+      font-size: 16.5px;
+      font-weight: 600;
+      color: var(--foreground);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+
+      .mobileStatusDot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-right: 7px;
+        vertical-align: middle;
+        background: var(--border);
+
+        &.running {
+          background: var(--success);
+          animation: mobilePulse 1.4s ease-in-out infinite;
+        }
+        &.idle {
+          background: var(--warning);
+        }
+        &.paused {
+          background: var(--subtle-foreground);
+        }
+      }
+    }
+  }
+}
+
+// 顶栏「⋯」下拉菜单（Popover portal 到 body，样式须顶层）
+// Popover 自带 12px 内边距，菜单再包一层就四边过厚 —— 压到 4px
+.mobileActsPop {
+  :global(.ant-popover-inner) {
+    padding: 4px;
+    border-radius: var(--radius-lg);
+  }
+}
+
+.mobileActsMenu {
+  display: flex;
+  flex-direction: column;
+  min-width: 148px;
+
+  .mobileActItem {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 9px 11px;
+    border-radius: var(--radius);
+    font-size: 14.5px;
+    color: var(--foreground);
+    cursor: pointer;
+
+    &:active {
+      background: color-mix(in srgb, var(--foreground) 7%, transparent);
+    }
+
+    :global(.anticon) {
+      font-size: var(--text-lg);
+      color: var(--muted-foreground);
+    }
+
+    &.danger {
+      color: var(--destructive);
+
+      :global(.anticon) {
+        color: var(--destructive);
+      }
+    }
+
+    // 不可用的缘由：跟在动作名后面的小字
+    .actWhy {
+      margin-left: auto;
+      font-size: 11.5px;
+      color: color-mix(in srgb, var(--foreground) 30%, transparent);
+    }
+
+    // 不可用（如空闲时的「中断」）：连按下反馈也去掉，免得看着像点了没生效
+    &.disabled {
+      color: color-mix(in srgb, var(--foreground) 32%, transparent);
+      cursor: default;
+
+      &:active {
+        background: transparent;
+      }
+
+      :global(.anticon) {
+        color: color-mix(in srgb, var(--foreground) 28%, transparent);
+      }
+    }
+  }
+}

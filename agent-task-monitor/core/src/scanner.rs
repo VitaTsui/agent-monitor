@@ -13,6 +13,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct SessionSummary {
     /// 会话来源代理：claude / codex …（决定消息解析器与进程配对）
     pub provider: String,
+    /// 这条会话来自**桌面客户端**而非终端 CLI（ChatGPT 桌面版的 Codex、
+    /// Claude 桌面版的本地代理）。两处判据都取自上游自己写下的事实，不是猜的：
+    /// codex 看 `session_meta.payload.originator`，claude 看会话文件在不在桌面客户端
+    /// 的本地代理目录树里。只影响展示名与配对方式，解析器是同一套。
+    pub desktop: bool,
     pub session_id: String,
     /// 项目目录编码名（~/.claude/projects 下的目录名），配对进程用
     pub project_key: String,
@@ -94,6 +99,9 @@ pub struct SessionScanner {
     projects_dir: PathBuf,
     /// Codex CLI 会话根目录（~/.codex/sessions），不存在则跳过
     codex_dir: PathBuf,
+    /// Claude 桌面版本地代理的会话根目录，不存在则跳过（= 没装/没用过桌面版，
+    /// 行为与本次改动前完全一致）
+    claude_desktop_dir: PathBuf,
     cache: HashMap<PathBuf, CacheEntry>,
     /// 每个会话的「当前状态」重放进度（任务清单 / 后台任务）
     state_cache: HashMap<PathBuf, SessionState>,
@@ -119,6 +127,76 @@ const HISTORY_WINDOW_MS: u64 = 7 * 24 * 3600 * 1000;
 const TAIL_BYTES: u64 = 4 * 1024 * 1024;
 /// 头部读取大小（拿初始 cwd / 提示词 / 开始时间）
 const HEAD_BYTES: usize = 256 * 1024;
+/// codex 写在 `session_meta.payload.originator` 里的「ChatGPT 桌面版」标记。
+/// 本机实测另两种取值 `codex_exec` / `codex-tui` 都是 CLI。
+const CODEX_DESKTOP_ORIGINATOR: &str = "Codex Desktop";
+/// Claude 桌面版本地代理（Cowork）给每条会话开一个隔离的家目录：
+/// `<根>/<组织 id>/<用户 id>/local_<会话 uuid>/.claude/projects/<项目名>/<uuid>.jsonl`。
+/// 里面那份 jsonl 就是标准 Claude Code 格式，用同一套解析器。
+/// 两层 id 是上游私有实现、随时可能变，所以这里不写死层数，见 [`claude_desktop_roots`]。
+const CLAUDE_DESKTOP_SESSION_PREFIX: &str = "local_";
+/// 从本地代理根往下找 `local_*` 的最大深度（实测在第 2 层；留一层余量）。
+const CLAUDE_DESKTOP_MAX_DEPTH: usize = 3;
+
+// 关于会话目录旁边那份 `local_<uuid>.json`（含 `title`/`cwd`/`lastActivityAt`/
+// `isAgentCompleted`）：**故意不读**。
+//
+// 它能给的 title/cwd/起止时间，jsonl 里本来就有，同一套解析器已经拿到了；剩下唯一
+// 有诱惑力的是 `isAgentCompleted` —— 名字看着像「这条会话跑完了没有」，实测**不是**。
+// 本机 11 条真实会话里只有 2 条带这个字段，两条都是 `false`，而它们的 `audit.jsonl`
+// 末行都是 `{"type":"result","subtype":"success","stop_reason":"end_turn"}`：回合明明
+// 已经正常收尾，字段却仍是 `false`。照它判活性，等于把早就结束的会话永远显示成
+// 「执行中」—— 正是要避免的那类假状态。
+//
+// 所以活性仍只有一个来源：**有没有配到活着的进程**。本地代理跑在宿主机上时
+// （`hostLoopMode`）就是一个普通的 claude 进程，按 cwd 正常配对；跑在 VM 里时
+// 宿主机上根本没有对应进程，如实显示「已结束」，不拿一个语义没验证的字段去凑。
+
+/// 从本地代理根 `root` 下找出全部 `.claude/projects`（实现见
+/// [`SessionScanner::claude_desktop_roots`] 的说明）。
+fn claude_desktop_roots(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > CLAUDE_DESKTOP_MAX_DEPTH {
+            return;
+        }
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let is_session = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(CLAUDE_DESKTOP_SESSION_PREFIX));
+            if is_session {
+                let projects = p.join(".claude").join("projects");
+                if projects.is_dir() {
+                    out.push(projects);
+                }
+                // 会话家目录里不会再嵌一个会话家目录，不必往下走
+                continue;
+            }
+            walk(&p, depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    if root.is_dir() {
+        walk(root, 0, &mut out);
+    }
+    out
+}
+
+/// Claude 桌面版本地代理的会话根目录。
+///
+/// Electron 的 userData 根：macOS `~/Library/Application Support/Claude`、
+/// Windows `%APPDATA%\\Claude`、Linux `~/.config/Claude` —— 正是 `dirs::config_dir()`
+/// 各平台的取值。取不到家目录就给一个必然不存在的路径，调用方按「目录不存在」处理。
+fn claude_desktop_dir() -> PathBuf {
+    dirs::config_dir()
+        .map(|c| c.join("Claude").join("local-agent-mode-sessions"))
+        .unwrap_or_else(|| PathBuf::from("/nonexistent"))
+}
 
 impl SessionScanner {
     pub fn new(projects_dir: PathBuf) -> Self {
@@ -128,6 +206,7 @@ impl SessionScanner {
         Self {
             projects_dir,
             codex_dir,
+            claude_desktop_dir: claude_desktop_dir(),
             cache: HashMap::new(),
             state_cache: HashMap::new(),
         }
@@ -141,8 +220,33 @@ impl SessionScanner {
     pub fn scan(&mut self) -> Vec<SessionSummary> {
         let now_ms = now_ms();
         let mut out = Vec::new();
-        let Ok(projects) = fs::read_dir(&self.projects_dir) else {
-            return out;
+        // Claude Code CLI 会话（~/.claude/projects）
+        self.scan_projects_root(&self.projects_dir.clone(), false, &mut out, now_ms);
+        // Claude 桌面版本地代理会话：每条会话一个隔离家目录，里面是同样的
+        // `.claude/projects/<项目>/<uuid>.jsonl` —— 同一套解析器，只是换个根。
+        // 目录不存在（没装桌面版/没用过本地代理）时下面这行返回空表，等于没这段。
+        for root in self.claude_desktop_roots() {
+            self.scan_projects_root(&root, true, &mut out, now_ms);
+        }
+        // Codex CLI 会话（~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl）
+        self.scan_codex_into(&mut out, now_ms);
+        out.sort_by_key(|b| std::cmp::Reverse(b.mtime_ms));
+        out
+    }
+
+    /// 扫一个 `projects` 根：`<root>/<项目目录>/<会话 uuid>.jsonl`。
+    ///
+    /// `desktop` 决定这批会话算不算桌面客户端来源 —— 文件内容一模一样，区别只在它躺在
+    /// 哪个根下面，解析器认不出来，只有调用方知道。
+    fn scan_projects_root(
+        &mut self,
+        root: &Path,
+        desktop: bool,
+        out: &mut Vec<SessionSummary>,
+        now_ms: u64,
+    ) {
+        let Ok(projects) = fs::read_dir(root) else {
+            return;
         };
         for project in projects.flatten() {
             let pdir = project.path();
@@ -175,14 +279,22 @@ impl SessionScanner {
                     .unwrap_or(0);
                 if let Some(mut summary) = self.summarize(&path, meta.len(), mtime_ms) {
                     summary.created_ms = created_ms;
+                    summary.desktop = desktop;
                     out.push(summary);
                 }
             }
         }
-        // Codex CLI 会话（~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl）
-        self.scan_codex_into(&mut out, now_ms);
-        out.sort_by_key(|b| std::cmp::Reverse(b.mtime_ms));
-        out
+    }
+
+    /// Claude 桌面版本地代理下的全部 `projects` 根。
+    ///
+    /// 目录树是上游私有实现（`<根>/<组织 id>/<用户 id>/local_<会话 uuid>/.claude/projects`，
+    /// 两层 id 随时可能加减），所以这里不写死层数：从根往下最多 [`CLAUDE_DESKTOP_MAX_DEPTH`]
+    /// 层找名字以 `local_` 开头、且底下确实有 `.claude/projects` 的目录。
+    /// 层数或命名一旦变了就一个都找不到 → 返回空表 → 与没有这段代码时表现一致，
+    /// 不会报错、也不会把别处的会话误收进来。
+    fn claude_desktop_roots(&self) -> Vec<PathBuf> {
+        claude_desktop_roots(&self.claude_desktop_dir)
     }
 
     /// 递归收集 Codex 会话摘要（7 天窗口，带同一套 mtime/size 缓存）
@@ -251,6 +363,7 @@ impl SessionScanner {
         let mut cwd = String::new();
         let mut started_at = None;
         let mut prompt = String::new();
+        let mut originator = String::new();
         for line in head_txt.lines() {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 continue;
@@ -264,6 +377,9 @@ impl SessionScanner {
                         .map(String::from);
                     if let Some(c) = p.and_then(|p| p.get("cwd")).and_then(Value::as_str) {
                         cwd = c.to_string();
+                    }
+                    if let Some(o) = p.and_then(|p| p.get("originator")).and_then(Value::as_str) {
+                        originator = o.to_string();
                     }
                     started_at = p
                         .and_then(|p| p.get("timestamp"))
@@ -328,6 +444,10 @@ impl SessionScanner {
 
         let summary = SessionSummary {
             provider: "codex".into(),
+            // `originator` 是 codex 自己写进 session_meta 的来源标记，本机实测三种取值：
+            // `Codex Desktop`（ChatGPT 桌面版）、`codex_exec`、`codex-tui`（都是 CLI）。
+            // 上游哪天改了名字，这里认不出来 → 当成 CLI 会话，即本次改动前的行为。
+            desktop: originator == CODEX_DESKTOP_ORIGINATOR,
             session_id,
             project_key: encode_path(&cwd),
             // codex 的 cwd 取自 session_meta，一条会话只有一个值、不存在漂移，
@@ -645,6 +765,11 @@ pub fn build_tasks(
     // 按 (provider, cwd-key) 分组：各 provider 的会话只与同类进程配对
     let mut proc_by_key: HashMap<(String, String), Vec<&ProcessInfo>> = HashMap::new();
     for p in processes {
+        // 共享宿主进程（桌面客户端的 app-server）不按 cwd 配：它一个进程托着多条会话，
+        // 自己的 cwd 恒为 `/`，跟哪条会话都对不上。它走下面的桌面配对层。
+        if p.shared_host {
+            continue;
+        }
         proc_by_key
             .entry((p.agent.clone(), encode_path(&p.cwd)))
             .or_default()
@@ -921,6 +1046,33 @@ pub fn build_tasks(
         }
     }
 
+    // ⑥ 桌面客户端：共享宿主进程 ↔ 它这一轮托着的会话。
+    //
+    // 前面几层全是「一进程一会话、cwd 即项目」的终端模型，桌面客户端不是这样：
+    // ChatGPT 桌面版只有一个 `codex … app-server`，同时托着界面上的每一条对话，
+    // 而且它的 cwd 恒为 `/`。所以这里既不比 cwd、也不做一一对应，改问两件事：
+    // 会话自己说了它来自桌面客户端（`originator`），以及**这条会话在本次 App 运行期间
+    // 被写过**（mtime ≥ 宿主进程启动）。
+    //
+    // 后一条就是 tier④ 那个「会话最后写入不能早于进程启动」的约束，用意也一样：
+    // 上次开 App 时留下的旧对话，这次没碰过，不该顶着 pid 显示成「等待输入」。
+    for h in processes.iter().filter(|p| p.shared_host) {
+        let host_start_ms = h.start_time.saturating_mul(1000);
+        for s in sessions {
+            if !s.desktop || s.provider != h.agent {
+                continue;
+            }
+            if s.mtime_ms < host_start_ms {
+                continue;
+            }
+            if pid_of_session.contains_key(s.session_id.as_str()) {
+                continue;
+            }
+            pid_of_session.insert(s.session_id.as_str(), h);
+            paired_pids.insert(h.pid);
+        }
+    }
+
     let mut tasks = Vec::new();
     for s in sessions {
         let proc_info = pid_of_session
@@ -950,7 +1102,11 @@ pub fn build_tasks(
             platform: String::new(),
             platform_dsr: String::new(),
             provider: s.provider.clone(),
-            provider_dsr: crate::model::provider_dsr(&s.provider),
+            provider_dsr: if s.desktop {
+                crate::model::provider_dsr_desktop(&s.provider)
+            } else {
+                crate::model::provider_dsr(&s.provider)
+            },
             title: if s.title.is_empty() {
                 s.prompt.clone()
             } else {
@@ -994,6 +1150,12 @@ pub fn build_tasks(
     // 判断条件等价，每个未配对进程会重复出现两次。
     for p in processes {
         if paired_pids.contains(&p.pid) {
+            continue;
+        }
+        // 共享宿主进程本身不是一条会话：它 cwd 恒为 `/`，给它发一张占位卡就是
+        // 「同一个终端号下多出一条空会话」那个老毛病的翻版。桌面客户端此刻没有活动会话
+        // （或会话都是上次运行留下的）时，它就该一张卡都不出。
+        if p.shared_host {
             continue;
         }
         // 被系统挂起（非我方暂停）的占位进程判为孤儿，前台会过滤掉
@@ -1278,6 +1440,9 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
 
     Some(SessionSummary {
         provider: "claude".into(),
+        // 解析器只认文件内容，认不出这份 jsonl 躺在哪个根下 —— 由 scan 的调用方按扫描根
+        // 覆写（桌面客户端本地代理的会话文件格式与 CLI 完全一样，见 scan_projects_root）。
+        desktop: false,
         session_id: session_id.to_string(),
         project_key,
         cwd: if canonical_cwd.is_empty() {
@@ -3494,6 +3659,7 @@ mod pairing_tests {
     fn sess(id: &str, started: &str, mtime_ms: u64) -> SessionSummary {
         SessionSummary {
             provider: "claude".into(),
+            desktop: false,
             session_id: id.into(),
             project_key: "-proj".into(),
             cwd: "/proj".into(),
@@ -3531,6 +3697,7 @@ mod pairing_tests {
             command: "claude".into(),
             shell_pid: None,
             shell_start: None,
+            shared_host: false,
         }
     }
 
@@ -4148,6 +4315,7 @@ mod codex_tests {
         let now = now_ms();
         let mk = |provider: &str, id: &str, key: &str| SessionSummary {
             provider: provider.into(),
+            desktop: false,
             session_id: id.into(),
             project_key: key.into(),
             cwd: format!("/w/{key}"),
@@ -4182,6 +4350,7 @@ mod codex_tests {
             command: agent.into(),
             shell_pid: None,
             shell_start: None,
+            shared_host: false,
         };
         let sessions = vec![mk("claude", "c1", "-w-app"), mk("codex", "x1", "-w-app")];
         let procs = vec![
@@ -4269,6 +4438,7 @@ mod codex_tests {
             command: "claude".into(),
             shell_pid: None,
             shell_start: None,
+            shared_host: false,
         }];
         let tasks = build_tasks(
             &[],
@@ -4466,5 +4636,262 @@ mod short_name_tests {
         assert_eq!(short_name("/Users/x/proj/"), "proj");
         assert_eq!(short_name("/Users/x/proj"), "proj");
         assert_eq!(short_name(r"D:\cursor\"), "cursor");
+    }
+}
+
+#[cfg(test)]
+mod desktop_session_tests {
+    use super::*;
+    use crate::model::TaskStatus;
+
+    fn sess(provider: &str, id: &str, desktop: bool, cwd: &str, mtime_ms: u64) -> SessionSummary {
+        SessionSummary {
+            provider: provider.into(),
+            desktop,
+            session_id: id.into(),
+            project_key: encode_path(cwd),
+            cwd: cwd.into(),
+            live_cwd: cwd.into(),
+            shell_cwd: cwd.into(),
+            title: id.into(),
+            prompt: String::new(),
+            last_action: String::new(),
+            turn_ended: true,
+            cleared: false,
+            started_at: None,
+            last_active_at: None,
+            version: None,
+            git_branch: None,
+            mtime_ms,
+            created_ms: mtime_ms,
+            line_count: 1,
+            used_tokens_5h: 0,
+            queued_inputs: Vec::new(),
+            select_answered_ms: None,
+        }
+    }
+
+    /// ChatGPT 桌面版的共享宿主：cwd 恒为 `/`、无 tty、一个进程托着全部桌面会话。
+    fn host(pid: u32, start_time: u64) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            agent: "codex".into(),
+            tty: String::new(),
+            cwd: "/".into(),
+            ide: crate::model::IdeKind::Desktop,
+            ide_name: "ChatGPT".into(),
+            start_time,
+            cpu_usage: 0.0,
+            memory: 0,
+            command: "/Applications/ChatGPT.app/Contents/Resources/codex -c features.code_mode_host=true app-server".into(),
+            shell_pid: None,
+            shell_start: None,
+            shared_host: true,
+        }
+    }
+
+    /// Claude 桌面版本地代理跑在宿主机上时（`hostLoopMode`）的进程形态：装在应用包里的
+    /// claude、没有 tty、cwd 就是那条会话的工作目录 —— 一进程一会话，与终端会话同构。
+    fn cowork_proc(pid: u32, cwd: &str, start_time: u64) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            agent: "claude".into(),
+            tty: String::new(),
+            cwd: cwd.into(),
+            ide: crate::model::IdeKind::Desktop,
+            ide_name: "Claude".into(),
+            start_time,
+            cpu_usage: 0.0,
+            memory: 0,
+            command: "…/Claude/claude-code/2.1.260/claude.app/Contents/MacOS/claude".into(),
+            shell_pid: None,
+            shell_start: None,
+            shared_host: false,
+        }
+    }
+
+    fn build(sessions: &[SessionSummary], procs: &[ProcessInfo]) -> Vec<Task> {
+        let paused: Box<dyn Fn(u32) -> bool> = Box::new(|_| false);
+        build_tasks(
+            sessions,
+            procs,
+            &paused,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        )
+    }
+
+    /// Claude 桌面版本地代理不走共享宿主那条路：它跑在宿主机上时是「一进程一会话、
+    /// cwd 即工作目录」，与终端会话同构，直接用既有的按 cwd 配对层（tier①）——
+    /// 唯一的区别是它没有 tty，那道闸门由 [`crate::model::IdeKind::Desktop`] 放行。
+    /// 不为它另起一套配对逻辑，是为了不让两套判断并存。
+    #[test]
+    fn cowork_session_pairs_by_cwd_without_tty() {
+        let now = now_ms();
+        let cwd = "/Users/u/Library/Application Support/Claude/local-agent-mode-sessions/o/u/local_a/outputs";
+        let procs = vec![cowork_proc(700, cwd, now / 1000 - 300)];
+        let sessions = vec![sess("claude", "k1", true, cwd, now - 3_000)];
+        let tasks = build(&sessions, &procs);
+        assert_eq!(tasks.len(), 1, "不该多出一张未配对进程的占位卡");
+        assert_eq!(tasks[0].pid, Some(700));
+        assert_eq!(tasks[0].status, TaskStatus::Idle);
+        assert_eq!(tasks[0].provider_dsr, "Claude 桌面版");
+        assert_eq!(tasks[0].ide_dsr, "Claude");
+    }
+
+    /// 桌面会话配到共享宿主：不比 cwd（宿主的 cwd 是 `/`，跟谁都对不上），
+    /// 一个宿主同时托多条会话，状态不再一律「已结束」。
+    #[test]
+    fn desktop_sessions_pair_with_shared_host() {
+        let now = now_ms();
+        let start = now / 1000 - 600;
+        let procs = vec![host(900, start)];
+        let sessions = vec![
+            sess("codex", "d1", true, "/w/a", now - 10_000),
+            sess("codex", "d2", true, "/w/b", now - 20_000),
+        ];
+        let tasks = build(&sessions, &procs);
+        assert_eq!(tasks.len(), 2, "共享宿主不额外生成占位卡");
+        for t in &tasks {
+            assert_eq!(t.pid, Some(900), "{} 该配到桌面宿主", t.id);
+            assert_eq!(t.status, TaskStatus::Idle);
+            assert_eq!(t.provider_dsr, "ChatGPT 桌面版");
+        }
+    }
+
+    /// 上次开 App 时留下、这次没碰过的旧对话不该顶着 pid 显示成「等待输入」。
+    /// 判据与 tier④ 一致：会话最后写入必须不早于宿主进程启动。
+    #[test]
+    fn stale_desktop_sessions_stay_finished() {
+        let now = now_ms();
+        let start = now / 1000 - 60; // 宿主 1 分钟前才起来
+        let procs = vec![host(900, start)];
+        let sessions = vec![sess("codex", "old", true, "/w/a", now - 3_600_000)];
+        let tasks = build(&sessions, &procs);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].pid, None);
+        assert_eq!(tasks[0].status, TaskStatus::Finished);
+    }
+
+    /// 回归：桌面客户端没有活动会话时，共享宿主进程一张卡都不该出。
+    /// 当初把 `codex app-server` 整个挡掉，就是因为它会冒出一条
+    /// 「（会话尚未产生记录）」的空会话卡。
+    #[test]
+    fn shared_host_never_becomes_placeholder_card() {
+        let now = now_ms();
+        let procs = vec![host(900, now / 1000 - 60)];
+        assert!(build(&[], &procs).is_empty(), "宿主自己不是一条会话");
+        // 只有终端 CLI 会话时也一样：宿主不掺和，也不去抢 CLI 会话
+        let cli = vec![sess("codex", "c1", false, "/w/a", now - 5_000)];
+        let tasks = build(&cli, &procs);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].pid, None, "CLI 会话不能被桌面宿主认领");
+        assert_eq!(tasks[0].provider_dsr, "Codex");
+    }
+
+    /// 桌面宿主只认自己那个 provider 的桌面会话。
+    #[test]
+    fn shared_host_does_not_cross_providers() {
+        let now = now_ms();
+        let procs = vec![host(900, now / 1000 - 600)];
+        let sessions = vec![sess("claude", "k1", true, "/w/a", now - 5_000)];
+        let tasks = build(&sessions, &procs);
+        assert_eq!(tasks[0].pid, None, "claude 桌面会话不该配到 codex 宿主");
+        assert_eq!(tasks[0].provider_dsr, "Claude 桌面版");
+    }
+
+    fn mk_desktop_tree(root: &Path, session: &str, project: &str, jsonl: &str) {
+        let dir = root
+            .join("org-uuid")
+            .join("user-uuid")
+            .join(session)
+            .join(".claude")
+            .join("projects")
+            .join(project);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format!("{jsonl}.jsonl")), "").unwrap();
+    }
+
+    /// Claude 桌面版本地代理：两层 id 之下的 `local_*/.claude/projects` 能被找出来。
+    #[test]
+    fn finds_claude_desktop_projects_roots() {
+        let root = std::env::temp_dir().join(format!("am-cowork-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        mk_desktop_tree(&root, "local_aaa", "-sessions-x", "s1");
+        mk_desktop_tree(&root, "local_bbb", "-sessions-y", "s2");
+        // 干扰项：同层的非会话目录、以及没有 .claude/projects 的会话目录
+        fs::create_dir_all(root.join("org-uuid").join("user-uuid").join("spaces")).unwrap();
+        fs::create_dir_all(root.join("org-uuid").join("user-uuid").join("local_ccc")).unwrap();
+        let mut got = claude_desktop_roots(&root);
+        got.sort();
+        assert_eq!(got.len(), 2, "只收有 .claude/projects 的会话目录: {got:?}");
+        assert!(got[0].ends_with("local_aaa/.claude/projects"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 上游把目录层级换掉（或压根没装桌面版）时安静降级：找不到就是空表，不报错。
+    #[test]
+    fn missing_or_changed_layout_degrades_quietly() {
+        let missing = std::env::temp_dir().join(format!("am-cowork-none-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&missing);
+        assert!(
+            claude_desktop_roots(&missing).is_empty(),
+            "目录不存在 = 什么都不加"
+        );
+
+        // 层级变深超出回溯上限 → 找不到，退回改动前的行为
+        let deep = std::env::temp_dir().join(format!("am-cowork-deep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&deep);
+        let nested = deep.join("a").join("b").join("c").join("d").join("e");
+        mk_desktop_tree(&nested, "local_aaa", "-sessions-x", "s1");
+        assert!(claude_desktop_roots(&deep).is_empty());
+        // 会话目录改名（不再是 local_ 前缀）→ 同样只是找不到
+        let renamed = std::env::temp_dir().join(format!("am-cowork-ren-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&renamed);
+        mk_desktop_tree(&renamed, "agent_aaa", "-sessions-x", "s1");
+        assert!(claude_desktop_roots(&renamed).is_empty());
+        for d in [&missing, &deep, &renamed] {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+
+    /// 桌面版本地代理的 jsonl 走的是**同一套** Claude Code 解析器，只是换个扫描根；
+    /// 出来的会话带桌面标记与桌面展示名。
+    #[test]
+    fn desktop_projects_root_reuses_claude_parser() {
+        let root = std::env::temp_dir().join(format!("am-cowork-scan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let proj = root
+            .join("org")
+            .join("user")
+            .join("local_zzz")
+            .join(".claude")
+            .join("projects")
+            .join("-sessions-demo");
+        fs::create_dir_all(&proj).unwrap();
+        let line = serde_json::json!({
+            "type": "user",
+            "cwd": "/sessions/demo",
+            "sessionId": "sid-1",
+            "timestamp": "2026-09-09T10:00:00.000Z",
+            "message": { "role": "user", "content": "跑个本地代理" }
+        });
+        fs::write(proj.join("sid-1.jsonl"), format!("{line}\n")).unwrap();
+
+        let mut sc = SessionScanner::new(root.join("no-cli-projects"));
+        let mut out = Vec::new();
+        let roots = claude_desktop_roots(&root);
+        assert_eq!(roots.len(), 1);
+        sc.scan_projects_root(&roots[0], true, &mut out, now_ms());
+        assert_eq!(out.len(), 1, "本地代理会话该被同一套解析器读出来");
+        assert!(out[0].desktop);
+        assert_eq!(out[0].provider, "claude");
+        assert_eq!(out[0].cwd, "/sessions/demo");
+        assert_eq!(
+            crate::model::provider_dsr_desktop(&out[0].provider),
+            "Claude 桌面版"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }

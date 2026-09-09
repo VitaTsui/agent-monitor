@@ -1,0 +1,41 @@
+.guardRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+
+  .guardLabel {
+    font-size: var(--text-base);
+    color: color-mix(in srgb, var(--foreground) 75%, transparent);
+  }
+}
+
+.builtinPatterns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+
+  .patternTag {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: var(--text-xs);
+    margin: 0;
+  }
+}
+
+.guardSave {
+  margin-top: 10px;
+}
+
+// hsu-ui TextArea 包裹层的深色边框调淡。
+// 原来这条写在弹窗根上、还带 !important —— 那是被 antd-overload 的移动端弹窗规则
+// 逼出来的。页面化之后没有那层祖先，靠「局部类 + :global」的自然特异性就够。
+.patternEditor {
+  :global([class*="textarea--"]) {
+    border-color: color-mix(in srgb, var(--foreground) 18%, transparent);
+    border-radius: var(--radius);
+
+    &:focus-within {
+      border-color: color-mix(in srgb, var(--primary) 50%, transparent);
+    }
+  }
+}

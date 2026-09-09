@@ -1,17 +1,22 @@
 @use "@hsu-react/ui/es/styles/responsive" as r;
-// 配色与 Composer 保持一致（同一屏内的组件，色板不该各写各的）
+// 配色与 Composer 保持一致（同一屏内的组件，色板不该各写各的）。
+// 滚动容器是 views.module.scss 的 .fixedBody，本文件不再自己开一个高度受限的
+// 内滚区 —— 那是弹窗时代的产物（62vh），页面化之后由页面骨架统一管。
+
+/* 本页直接挂在壳的 main 下（移动端顶栏只在会话页显示），所以状态栏安全区
+   由它自己让 —— 设置的分栏页外面还有一层设置壳的固定头部，那边不该重复让 */
+@include r.down(md) {
+  .headSafe {
+    padding-top: env(safe-area-inset-top);
+  }
+}
 
 .hint {
   font-size: var(--text-sm);
   color: var(--muted-foreground);
   padding-bottom: 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
-
-  // 说明文字可压缩，切换按钮不许被挤变形
-  > span {
-    flex: 1;
-    min-width: 0;
-  }
+  margin-bottom: 8px;
 }
 
 .loading {
@@ -19,21 +24,6 @@
   justify-content: center;
   padding: 40px 0;
 }
-
-// 对话流：旧的在上、新的在下，与聊天记录读法一致。
-// 这里是唯一的滚动容器 —— 外面不能再套 Spin 之类会加 div 的组件，否则高度链断了滚不动。
-.stream {
-  height: 62vh;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 8px 2px 0;
-}
-
-// 换会话的分隔条：多个终端的往来混在一起时，得看得出这段是谁的
-
-// 号位徽标：与钉钉「@N」同一个编号
-
-
 
 // 我发的靠右
 .rowUser {
@@ -132,32 +122,7 @@
   font-family: var(--font-mono);
 }
 
-// 移动端（Capacitor 壳直接加载本页，所以这里就是手机上的样子）：
-// 720px 的弹窗在手机上会溢出，改为全屏 —— 且「人不在电脑前翻记录」正是这块的核心场景，
-// 值得占满整屏而不是挤在一个小卡片里。
 @include r.down(md) {
-  :global(.ant-modal-container) {
-    height: 100dvh !important;
-    max-height: 100dvh !important;
-    border-radius: 0 !important;
-    padding-top: env(safe-area-inset-top) !important;
-  }
-
-  .hint {
-    // 窄屏放不下「一行说明 + 切换」，说明退居次行
-    flex-wrap: wrap;
-    gap: 8px;
-
-    > span {
-      flex: 1 1 100%;
-    }
-  }
-
-  .stream {
-    // 全屏后按视口算高度：减去标题、说明、切换与安全区
-    height: calc(100dvh - 200px);
-  }
-
   // 手机屏窄，气泡放宽些才不至于一行没几个字
   .bubbleUser {
     max-width: 88%;

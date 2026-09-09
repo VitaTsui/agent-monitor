@@ -66,12 +66,14 @@ export function installSheetSwipe() {
     const shouldClose = dy > 130 || (dy > 60 && velocity > 0.5);
     if (shouldClose) {
       content.style.transform = "translateY(100%)";
-      // 优先点 antd 自带关闭钮；`closable={false}` 的弹窗没有它，退回业务自定义的
-      // 关闭入口（约定挂 data-sheet-close）—— 否则下滑动画播完却触发不了 onCancel，
-      // 弹窗又弹回来（表现为「下滑无法关闭」）。
+      // 点 antd 自带的关闭钮触发 onCancel。
+      //
+      // 这里原先还有一条 `[data-sheet-close]` 兜底，给 `closable={false}` 的弹窗用 ——
+      // 全项目只有前台的设置弹窗是那种，而设置在档 B 之后成了路由页（/portal/settings/*），
+      // 不再是弹窗。兜底随之没有任何生产者，留着就是一条永远走不到的分支。
+      // 将来若真出现 `closable={false}` 的 sheet，正路是让它照常渲染关闭钮。
       const modal = content.closest(".ant-modal");
-      const close = (modal?.querySelector(".ant-modal-close") ||
-        modal?.querySelector("[data-sheet-close]")) as HTMLElement | null;
+      const close = modal?.querySelector(".ant-modal-close") as HTMLElement | null;
       window.setTimeout(() => {
         close?.click();
         // 复位，供该 DOM 复用（antd 复用 wrap）

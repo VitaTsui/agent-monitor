@@ -847,6 +847,7 @@ mod anchor_tests {
             command: "claude".into(),
             shell_pid: shell,
             shell_start,
+            shared_host: false,
         }
     }
 

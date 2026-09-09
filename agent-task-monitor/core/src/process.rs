@@ -43,31 +43,39 @@ impl ProcessScanner {
             let Some(agent) = agent_kind(proc_.name(), proc_.cmd()) else {
                 continue;
             };
-            // 服务模式（`codex app-server` 等）不是终端会话：它由某个真会话拉起、
-            // tty 是继承来的，下面的 tty 判据挡不住，见 [`is_service_mode`]。
-            if is_service_mode(agent, proc_.cmd()) {
-                continue;
-            }
             let cwd = match proc_.cwd() {
                 Some(p) => p.to_string_lossy().to_string(),
                 None => continue,
             };
             let (ide, ide_name) = self.detect_ide(*pid);
+            // 桌面客户端（ChatGPT.app / Claude.app）拉起的代理：不是终端会话，但确实是
+            // 用户开的真会话，下面两条「只留终端会话」的判据都要给它让路。
+            let desktop = ide == IdeKind::Desktop;
+            // 服务模式（`codex app-server` 等）**在终端里**不是会话：它由某个真会话拉起、
+            // tty 是继承来的，下面的 tty 判据挡不住，见 [`is_service_mode`]。
+            // 但同一个子命令由桌面客户端拉起时，它就是那些桌面会话的宿主进程本身 ——
+            // 判据是父链（桌面客户端 vs 终端/IDE），不是命令行长什么样。
+            let shared_host = is_service_mode(agent, proc_.cmd());
+            if shared_host && !desktop {
+                continue;
+            }
             let tty = tty_path_of(pid.as_u32()).unwrap_or_default();
-            // 只监控「终端会话」：
-            // - unix：没有控制终端（TTY）的代理进程是 IDE 插件/后台服务 ——
-            //   典型如 Cursor 的 Codex 插件常驻进程，用户并没有开任何 codex
-            //   终端会话，却会被采集成一条「codex 终端」。
+            // 只监控「终端会话」与「桌面客户端会话」：
+            // - unix：没有控制终端（TTY）、又不是桌面客户端拉起的代理进程 = IDE 插件/
+            //   后台服务 —— 典型如 Cursor 的 Codex 插件常驻进程，用户并没有开任何 codex
+            //   终端会话，却会被采集成一条「codex 终端」。它的父链里有 IDE，
+            //   [`detect_ide`] 认得出来，于是 desktop 为假、照旧挡掉。
             #[cfg(unix)]
-            if tty.is_empty() {
+            if tty.is_empty() && !desktop {
                 continue;
             }
             // - Windows 拿不到 tty，改用父链启发式：终端里跑的代理其父链必有
             //   shell（powershell/cmd/bash…）；IDE 插件进程由扩展宿主直接拉起，
             //   父链没有 shell（实测 Cursor 的 Codex 插件即如此，cwd 还是
-            //   Cursor 安装目录）。
+            //   Cursor 安装目录）。桌面客户端识别目前只在 macOS 上成立（靠 .app 包），
+            //   Windows 上 desktop 恒为假 —— 行为与本次改动前完全一致。
             #[cfg(windows)]
-            if !self.has_shell_ancestor(*pid) {
+            if !self.has_shell_ancestor(*pid) && !desktop {
                 continue;
             }
             result.push(ProcessInfo {
@@ -83,6 +91,7 @@ impl ProcessScanner {
                 command: proc_.cmd().join(" "),
                 shell_pid: None,
                 shell_start: None,
+                shared_host,
             });
         }
         // 终端锚：各 agent 最近的 shell 祖先 (pid, start)（复用本轮 self.sys，不额外扫描）
@@ -106,30 +115,10 @@ impl ProcessScanner {
     /// 终端 shell 的 pid 跨 claude 的 /clear/--resume/重启都不变，用作配对稳定锚；start 一并
     /// 返回，供配对恢复时区分「同一个 shell」与「pid 被重用的新 shell」（Windows 会重用 pid）。
     fn nearest_shell(&self, pid: u32) -> Option<(u32, u64)> {
-        let is_shell = |n: &str| {
-            matches!(
-                n,
-                "powershell.exe"
-                    | "pwsh.exe"
-                    | "cmd.exe"
-                    | "bash.exe"
-                    | "nu.exe"
-                    | "wsl.exe"
-                    | "bash"
-                    | "zsh"
-                    | "sh"
-                    | "fish"
-                    | "nu"
-                    | "pwsh"
-                    | "powershell"
-                    | "-zsh"
-                    | "-bash"
-            )
-        };
         let mut cur = pid;
         for _ in 0..24 {
             let p = self.sys.process(Pid::from_u32(cur))?;
-            if is_shell(&p.name().to_lowercase()) {
+            if is_shell_name(&p.name().to_lowercase()) {
                 return Some((cur, p.start_time()));
             }
             match p.parent().map(|pp| pp.as_u32()) {
@@ -231,86 +220,129 @@ impl ProcessScanner {
     /// Windows 上 IDE 内嵌终端的父链是 claude → powershell/cmd → Code.exe，
     /// 若遇到 shell 就提前返回会把 IDE 内嵌终端误判成独立终端。
     fn detect_ide(&self, pid: Pid) -> (IdeKind, String) {
-        let mut chain: Vec<String> = Vec::new();
+        // (进程名, 可执行文件路径)。路径只有桌面客户端判据用得上（要认 .app 包），
+        // 名字判据照旧只看名字。
+        let mut chain: Vec<(String, String)> = Vec::new();
         let mut cur = pid.as_u32();
         for _ in 0..16 {
             if cur <= 1 {
                 break;
             }
-            let (name, parent) = match self.sys.process(Pid::from_u32(cur)) {
+            let (name, exe, parent) = match self.sys.process(Pid::from_u32(cur)) {
                 Some(proc_) => (
                     proc_.name().to_string(),
+                    proc_.cmd().first().cloned().unwrap_or_default(),
                     proc_
                         .parent()
                         .map(|pp| pp.as_u32())
                         .or_else(|| ppid_via_ps(cur)),
                 ),
                 // sysinfo 读不到（如 root 拥有的 login）时用 ps 兜底
-                None => (name_via_ps(cur).unwrap_or_default(), ppid_via_ps(cur)),
+                None => (
+                    name_via_ps(cur).unwrap_or_default(),
+                    String::new(),
+                    ppid_via_ps(cur),
+                ),
             };
-            if !name.is_empty() {
-                chain.push(name);
+            if !name.is_empty() || !exe.is_empty() {
+                chain.push((name, exe));
             }
             match parent {
                 Some(pp) if pp != cur => cur = pp,
                 _ => break,
             }
         }
-
-        for name in &chain {
-            let lower = name.to_lowercase();
-            if lower.contains("cursor") {
-                return (IdeKind::Cursor, "Cursor".into());
-            }
-            if lower.contains("code helper")
-                || lower == "code"
-                || lower == "code.exe"
-                || lower.contains("code - ")
-            {
-                return (IdeKind::Vscode, "VSCode".into());
-            }
-        }
-
-        // 终端模拟器（宿主应用）优先
-        for name in &chain {
-            let lower = name.to_lowercase();
-            let host = [
-                ("windowsterminal", "Windows Terminal"),
-                ("iterm", "iTerm"),
-                ("wezterm", "WezTerm"),
-                ("alacritty", "Alacritty"),
-                ("kitty", "kitty"),
-                ("warp", "Warp"),
-                ("ghostty", "Ghostty"),
-                ("tmux", "tmux"),
-                ("terminal", "Terminal"),
-                ("conhost", "Windows Console"),
-            ]
-            .iter()
-            .find(|(needle, _)| lower.contains(needle))
-            .map(|(_, label)| label.to_string());
-            if let Some(label) = host {
-                return (IdeKind::Terminal, label);
-            }
-        }
-
-        // 父链里没有终端宿主时，用 shell 本身兜底（Windows cmd/PowerShell 直开场景）
-        for name in &chain {
-            let lower = name.to_lowercase();
-            if lower == "powershell.exe"
-                || lower == "pwsh.exe"
-                || lower == "powershell"
-                || lower == "pwsh"
-            {
-                return (IdeKind::Terminal, "PowerShell".into());
-            }
-            if lower == "cmd.exe" || lower == "cmd" {
-                return (IdeKind::Terminal, "CMD".into());
-            }
-        }
-
-        (IdeKind::Other, "Unknown".into())
+        classify_chain(&chain)
     }
+}
+
+/// 由父进程链（链首 = 进程自己，往后是祖先）判定宿主类型。
+///
+/// 单独拆出来是为了能直接喂造好的链做测试 —— 判据全在链上，不需要真去起一个
+/// Cursor 插件宿主或 ChatGPT.app 才能验。
+fn classify_chain(chain: &[(String, String)]) -> (IdeKind, String) {
+    let names: Vec<&String> = chain.iter().map(|(n, _)| n).collect();
+
+    for name in &names {
+        let lower = name.to_lowercase();
+        if lower.contains("cursor") {
+            return (IdeKind::Cursor, "Cursor".into());
+        }
+        if lower.contains("code helper")
+            || lower == "code"
+            || lower == "code.exe"
+            || lower.contains("code - ")
+        {
+            return (IdeKind::Vscode, "VSCode".into());
+        }
+    }
+
+    // 终端模拟器（宿主应用）优先
+    for name in &names {
+        let lower = name.to_lowercase();
+        let host = [
+            ("windowsterminal", "Windows Terminal"),
+            ("iterm", "iTerm"),
+            ("wezterm", "WezTerm"),
+            ("alacritty", "Alacritty"),
+            ("kitty", "kitty"),
+            ("warp", "Warp"),
+            ("ghostty", "Ghostty"),
+            ("tmux", "tmux"),
+            ("terminal", "Terminal"),
+            ("conhost", "Windows Console"),
+        ]
+        .iter()
+        .find(|(needle, _)| lower.contains(needle))
+        .map(|(_, label)| label.to_string());
+        if let Some(label) = host {
+            return (IdeKind::Terminal, label);
+        }
+    }
+
+    // 桌面客户端：父链里既没有 IDE 也没有终端模拟器，却有一个 GUI 应用包**直接**托着
+    // 它 —— 这就是 ChatGPT.app / Claude.app 从自己进程里拉起代理的形态（实测
+    // `…/ChatGPT.app/Contents/Resources/codex … app-server` 的父进程正是
+    // `/Applications/ChatGPT.app/Contents/MacOS/ChatGPT`）。
+    //
+    // 两条边界，缺一条就会把终端会话认成桌面会话：
+    // - 跳过链首（进程自己）：代理二进制本身也可能装在 .app 里（实测 Claude 桌面版
+    //   本地代理跑的是 `…/claude-code/<ver>/claude.app/Contents/MacOS/claude`），
+    //   拿它当宿主就成了自己托自己。
+    // - 遇到 shell 就停：终端里跑的代理，父链一定是 代理 → shell → 终端应用，而终端
+    //   应用同样是个 `.app`。上面那份终端名单必然漏（Alacritty / kitty / WezTerm /
+    //   Hyper…），漏掉的就会在这里被认成「桌面客户端」，进而绕过 tty 判据 ——
+    //   在这种终端里跑 `codex mcp` 就又会冒出假会话卡。桌面客户端拉起的代理中间
+    //   没有 shell，这条判据不认名字、只认形态。
+    //
+    // 只在 macOS 成立：判据是 .app 包结构。别的平台走不到这里，返回 Unknown，
+    // 与本次改动前一致。
+    for (_, exe) in chain
+        .iter()
+        .skip(1)
+        .take_while(|(name, _)| !is_shell_name(&name.to_lowercase()))
+    {
+        if let Some(app) = app_bundle_name(exe) {
+            return (IdeKind::Desktop, app.to_string());
+        }
+    }
+
+    // 父链里没有终端宿主时，用 shell 本身兜底（Windows cmd/PowerShell 直开场景）
+    for name in &names {
+        let lower = name.to_lowercase();
+        if lower == "powershell.exe"
+            || lower == "pwsh.exe"
+            || lower == "powershell"
+            || lower == "pwsh"
+        {
+            return (IdeKind::Terminal, "PowerShell".into());
+        }
+        if lower == "cmd.exe" || lower == "cmd" {
+            return (IdeKind::Terminal, "CMD".into());
+        }
+    }
+
+    (IdeKind::Other, "Unknown".into())
 }
 
 /// 从 env 候选里挑出**可信**的「claude pid → session id」权威配对。
@@ -392,6 +424,50 @@ fn name_via_ps(_pid: u32) -> Option<String> {
     None
 }
 
+/// 进程名（已转小写）是不是一个交互式 shell。
+///
+/// 「父链里有没有 shell」是区分「终端里跑的会话」与「宿主程序直接拉起的代理」的判据，
+/// [`ProcessScanner::nearest_shell`] 与 [`ProcessScanner::detect_ide`] 共用这一份名单，
+/// 免得两处各写一份、哪天只改了一处。
+fn is_shell_name(lower: &str) -> bool {
+    matches!(
+        lower,
+        "powershell.exe"
+            | "pwsh.exe"
+            | "cmd.exe"
+            | "bash.exe"
+            | "nu.exe"
+            | "wsl.exe"
+            | "bash"
+            | "zsh"
+            | "sh"
+            | "fish"
+            | "nu"
+            | "pwsh"
+            | "powershell"
+            | "-zsh"
+            | "-bash"
+    )
+}
+
+/// 可执行文件路径若是某个 macOS 应用包的主程序，返回**最外层** `.app` 的名字。
+///
+/// 判据是包结构本身，不认任何具体应用名：路径里得有 `Contents/MacOS/` 这一段
+/// （GUI 应用主程序的固定落点），再取从左数第一个 `.app` 组件。取最外层是因为
+/// Electron 应用的子进程住在嵌套包里 —— `/Applications/ChatGPT.app/Contents/
+/// Frameworks/…/Codex (Renderer).app/Contents/MacOS/…` 该报「ChatGPT」，
+/// 不是「Codex (Renderer)」。
+///
+/// 非 macOS 的路径拿不到 `.app` + `Contents/MacOS`，一律 None。
+fn app_bundle_name(exe: &str) -> Option<&str> {
+    if !exe.contains("/Contents/MacOS/") {
+        return None;
+    }
+    exe.split('/')
+        .find_map(|c| c.strip_suffix(".app"))
+        .filter(|n| !n.is_empty())
+}
+
 /// 路径的基名（同时认 / 与 \，兼顾 Windows）
 fn base(s: &str) -> &str {
     s.rsplit(['/', '\\']).next().unwrap_or(s)
@@ -454,28 +530,59 @@ fn agent_kind(name: &str, cmd: &[String]) -> Option<&'static str> {
 /// 判据只看**第一个子命令**，不在整串命令行里找关键字：`codex "帮我看下 mcp"` 这种
 /// 提示词里带同名字样的绝不能被误挡。
 fn is_service_mode(agent: &str, cmd: &[String]) -> bool {
-    // 未来别的代理有同类服务模式（如 `xxx serve`）在这里加一行即可
-    let subs: &[&str] = match agent {
-        "codex" => &["app-server", "mcp", "mcp-server", "proto"],
+    // 未来别的代理有同类服务模式（如 `xxx serve`）在这里加一行即可。
+    //
+    // `value_opts` 是该代理**带独立取值**的全局选项。必须列全，否则选项的值会被当成
+    // 子命令：实测 ChatGPT 桌面版的命令行是
+    // `…/codex -c features.code_mode_host=true app-server --analytics-default-enabled`，
+    // 不跳过 `-c` 的值就会取到 `features.code_mode_host=true`，服务模式判不出来。
+    // 漏列一个只会漏挡、不会误挡，方向是安全的。
+    let (subs, value_opts): (&[&str], &[&str]) = match agent {
+        "codex" => (
+            &["app-server", "mcp", "mcp-server", "proto"],
+            &[
+                "-c",
+                "--config",
+                "-m",
+                "--model",
+                "-p",
+                "--profile",
+                "-s",
+                "--sandbox",
+                "-a",
+                "--ask-for-approval",
+                "-C",
+                "--cd",
+                "-i",
+                "--image",
+            ],
+        ),
         _ => return false,
     };
-    first_subcommand(cmd).is_some_and(|s| subs.contains(&s))
+    first_subcommand(cmd, value_opts).is_some_and(|s| subs.contains(&s))
 }
 
-/// 命令行里的第一个子命令：跳过可执行文件（node 包装再多跳一层脚本路径），
-/// 再取第一个不以 `-` 开头的裸参数。
+/// 命令行里的第一个子命令：跳过可执行文件（node 包装再多跳一层脚本路径）与所有选项，
+/// 再取第一个裸参数。`--opt=value` 自带值；`--opt value` 形态要连它的值一起跳过，
+/// 靠 `value_opts` 认（见 [`is_service_mode`]）。
 ///
-/// 取不到就是 None。注意「选项的值」也会被当成子命令候选（如 `codex -m gpt-5 …` 取到
-/// `gpt-5`）—— 这只会让 [`is_service_mode`] 漏挡，不会误挡，方向是安全的。
-fn first_subcommand(cmd: &[String]) -> Option<&str> {
+/// 取不到就是 None。不在 `value_opts` 里的取值选项，它的值仍会被当成子命令候选 ——
+/// 这只会让 [`is_service_mode`] 漏挡，不会误挡。
+fn first_subcommand<'a>(cmd: &'a [String], value_opts: &[&str]) -> Option<&'a str> {
     let skip = match cmd.first().map(|s| base(s)) {
         Some("node") | Some("node.exe") => 2,
         _ => 1,
     };
-    cmd.iter()
-        .skip(skip)
-        .find(|a| !a.starts_with('-'))
-        .map(String::as_str)
+    let mut rest = cmd.iter().skip(skip);
+    while let Some(a) = rest.next() {
+        if !a.starts_with('-') {
+            return Some(a);
+        }
+        if !a.contains('=') && value_opts.contains(&a.as_str()) {
+            rest.next();
+        }
+    }
+    None
 }
 
 /// 对指定 pid 执行控制动作。返回动作的中文描述。
@@ -1945,5 +2052,167 @@ mod ps1_encoding_tests {
             !err.contains("Add-Type"),
             "内嵌 C# 没编译过（多半又是脚本编码问题）：{err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod desktop_host_tests {
+    use super::{app_bundle_name, classify_chain, is_service_mode};
+    use crate::model::IdeKind;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// 应用包判据只看包结构：`Contents/MacOS/` + 最外层 `.app`。
+    #[test]
+    fn app_bundle_name_takes_outermost_app() {
+        assert_eq!(
+            app_bundle_name("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"),
+            Some("ChatGPT")
+        );
+        assert_eq!(
+            app_bundle_name("/Applications/Claude.app/Contents/MacOS/Claude"),
+            Some("Claude")
+        );
+        // Electron 子进程住在嵌套包里，报的仍该是外层应用
+        assert_eq!(
+            app_bundle_name(
+                "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/150.0.7871.124/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer)"
+            ),
+            Some("ChatGPT")
+        );
+    }
+
+    /// 不是应用包主程序的路径一律不认，免得把普通可执行文件当成桌面客户端。
+    #[test]
+    fn app_bundle_name_rejects_non_bundles() {
+        assert_eq!(app_bundle_name("/Users/x/.local/bin/codex"), None);
+        assert_eq!(app_bundle_name("/bin/zsh"), None);
+        // 包里的辅助工具不在 Contents/MacOS 下 —— 继续往父链上找就是了
+        assert_eq!(
+            app_bundle_name("/Applications/Claude.app/Contents/Helpers/disclaimer"),
+            None
+        );
+        assert_eq!(
+            app_bundle_name("C:\\Program Files\\ChatGPT\\ChatGPT.exe"),
+            None
+        );
+    }
+
+    /// 回归：ChatGPT 桌面版真实命令行里 `app-server` 前面隔着一个 `-c KEY=VAL`。
+    /// 不跳过选项的值就会取到 `features.code_mode_host=true`，服务模式判不出来 ——
+    /// 于是这个共享宿主进程会被当成普通会话进程，按 cwd（恒为 `/`）去配对、
+    /// 配不上就冒出一张「(会话尚未产生记录)」的空卡。
+    #[test]
+    fn option_values_are_not_subcommands() {
+        assert!(is_service_mode(
+            "codex",
+            &s(&[
+                "/Applications/ChatGPT.app/Contents/Resources/codex",
+                "-c",
+                "features.code_mode_host=true",
+                "app-server",
+                "--analytics-default-enabled",
+            ])
+        ));
+        // `--opt=value` 自带值，不能再吞掉下一个参数
+        assert!(is_service_mode(
+            "codex",
+            &s(&["codex", "--config=features.x=true", "app-server"])
+        ));
+        // 取值选项后面跟的是用户提示词时，提示词不该被当成子命令 —— 方向仍是「宁可漏挡」
+        assert!(
+            !is_service_mode("codex", &s(&["codex", "-m", "gpt-5", "帮我看下 mcp 配置"])),
+            "选项的值和提示词都不是子命令"
+        );
+    }
+
+    /// 造一条父进程链：链首是进程自己，往后是祖先。`(进程名, argv[0])`
+    fn chain(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(n, e)| (n.to_string(), e.to_string()))
+            .collect()
+    }
+
+    /// 实测链（ChatGPT 桌面版）：`61747 …/ChatGPT.app/Contents/Resources/codex … app-server`
+    /// 的父进程就是 `61487 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT`。
+    #[test]
+    fn chatgpt_desktop_chain_is_desktop() {
+        let (kind, name) = classify_chain(&chain(&[
+            (
+                "codex",
+                "/Applications/ChatGPT.app/Contents/Resources/codex",
+            ),
+            (
+                "ChatGPT",
+                "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+            ),
+        ]));
+        assert_eq!(kind, IdeKind::Desktop);
+        assert_eq!(name, "ChatGPT");
+    }
+
+    /// Claude 桌面版本地代理：代理二进制自己也在一个 `.app` 里，不能拿它当宿主
+    /// （否则「自己托自己」，任何装在 .app 里的 CLI 都会被认成桌面会话）。
+    #[test]
+    fn claude_desktop_chain_reports_outer_app_not_itself() {
+        let (kind, name) = classify_chain(&chain(&[
+            (
+                "claude",
+                "/Users/u/Library/Application Support/Claude/claude-code/2.1.260/claude.app/Contents/MacOS/claude",
+            ),
+            ("Claude", "/Applications/Claude.app/Contents/MacOS/Claude"),
+        ]));
+        assert_eq!(kind, IdeKind::Desktop);
+        assert_eq!(name, "Claude", "报外层宿主应用，不是代理自己那个 .app");
+    }
+
+    /// 核心回归：Cursor 的 Codex 插件宿主拉起的常驻进程 —— 父链里有 Cursor，
+    /// 判定必须停在 IDE，绝不能落到桌面客户端那条分支。落过去就会绕开 tty 判据，
+    /// 用户没开任何 codex 终端却冒出一张「codex 终端」假会话卡。
+    #[test]
+    fn cursor_plugin_host_is_ide_not_desktop() {
+        for exe in [
+            "/Applications/Cursor.app/Contents/Resources/app/extensions/codex/bin/codex",
+            "/Users/u/.cursor/extensions/openai.codex/bin/codex",
+        ] {
+            let (kind, name) = classify_chain(&chain(&[
+                ("codex", exe),
+                (
+                    "Cursor Helper (Plugin)",
+                    "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper (Plugin).app/Contents/MacOS/Cursor Helper (Plugin)",
+                ),
+                ("Cursor", "/Applications/Cursor.app/Contents/MacOS/Cursor"),
+            ]));
+            assert_eq!(kind, IdeKind::Cursor, "{exe}");
+            assert_eq!(name, "Cursor");
+        }
+    }
+
+    /// 名单外的终端应用（Hyper / Tabby 之流，同样是 `.app`）不能被认成桌面客户端：
+    /// 中间那个 shell 就是判据 —— 桌面客户端拉起的代理，父链里没有 shell。
+    /// 认错了就等于在这种终端里跑 `codex mcp` 又会冒出假会话卡。
+    #[test]
+    fn unlisted_terminal_app_is_not_desktop() {
+        let (kind, name) = classify_chain(&chain(&[
+            ("codex", "/opt/homebrew/bin/codex"),
+            ("-zsh", "-zsh"),
+            ("Hyper", "/Applications/Hyper.app/Contents/MacOS/Hyper"),
+        ]));
+        assert_ne!(kind, IdeKind::Desktop, "shell 之上的应用包不是桌面客户端");
+        assert_eq!((kind, name.as_str()), (IdeKind::Other, "Unknown"));
+    }
+
+    /// 名单内的终端仍走终端分支（.app 判据不能把它抢过去）。
+    #[test]
+    fn listed_terminal_stays_terminal() {
+        let (kind, name) = classify_chain(&chain(&[
+            ("codex", "/opt/homebrew/bin/codex"),
+            ("-zsh", "-zsh"),
+            ("iTerm2", "/Applications/iTerm.app/Contents/MacOS/iTerm2"),
+        ]));
+        assert_eq!(kind, IdeKind::Terminal);
+        assert_eq!(name, "iTerm");
     }
 }

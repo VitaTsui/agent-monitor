@@ -1,0 +1,177 @@
+// 更新进度（版本行内）
+.updateProgress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  max-width: 320px;
+
+  :global(.ant-progress) {
+    flex: 1;
+    margin: 0;
+  }
+
+  .updateProgressText {
+    flex: none;
+    font-size: var(--text-xs);
+    color: var(--muted-foreground);
+    white-space: nowrap;
+  }
+}
+
+// 检查更新：主题色胶囊描边，悬停填充
+.checkUpdateBtn {
+  height: 26px;
+  border-radius: var(--radius-full);
+  padding-inline: 14px;
+  font-size: var(--text-sm);
+  color: var(--primary);
+  border-color: color-mix(in srgb, var(--primary) 45%, transparent);
+  background: transparent;
+  transition: all 0.2s;
+
+  &:hover {
+    color: var(--primary-foreground);
+    border-color: var(--primary);
+    background: var(--primary);
+  }
+}
+
+// 有新版时的「更新」按钮：实心主题色 + 主色前景（胶囊形）。
+// 前景取 --primary-foreground 而不是写死白色 —— 暗色下主色翻成近白，白字会消失。
+.updateNowBtn {
+  height: 26px;
+  border-radius: var(--radius-full);
+  padding-inline: 14px;
+  font-size: var(--text-sm);
+  background: var(--primary);
+  border-color: var(--primary);
+
+  &,
+  span,
+  :global(.anticon) {
+    color: var(--primary-foreground);
+  }
+
+  &:hover,
+  &:focus {
+    background: var(--primary-hover);
+    border-color: var(--primary-hover);
+  }
+}
+
+.termScope {
+  margin-top: 12px;
+
+  .termScopeRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 12px;
+    border: 1px solid var(--overlay-2);
+    border-radius: var(--radius);
+    margin-bottom: 6px;
+    transition: border-color 0.15s, background 0.15s;
+
+    &:hover {
+      border-color: color-mix(in srgb, var(--primary) 35%, transparent);
+      background: color-mix(in srgb, var(--primary) 4%, transparent);
+    }
+
+    .termScopeName {
+      font-size: var(--text-base);
+      color: var(--foreground);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
+  .termScopeEmpty {
+    padding: 14px 12px;
+    border: 1px dashed var(--overlay-2);
+    border-radius: var(--radius);
+    font-size: var(--text-sm);
+    color: var(--muted-foreground);
+    text-align: center;
+  }
+
+  .termScopeHint {
+    margin-top: 2px;
+    font-size: var(--text-xs);
+    color: var(--muted-foreground);
+  }
+}
+
+// 接入他人电脑：独立入口卡片
+.connectEntry {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--primary) 22%, transparent);
+  border-radius: var(--radius-lg);
+  background: var(--muted);
+  cursor: pointer;
+  transition: all 0.18s;
+
+  &:hover {
+    border-color: color-mix(in srgb, var(--primary) 50%, transparent);
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--primary) 15%, transparent);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+
+  .connectEntryIcon {
+    flex: none;
+    width: 38px;
+    height: 38px;
+    border-radius: var(--radius);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--text-lg);
+    color: var(--primary-foreground);
+    background: var(--primary);
+  }
+
+  .connectEntryText {
+    flex: 1;
+    min-width: 0;
+
+    .connectEntryTitle {
+      font-size: var(--text-md);
+      font-weight: 600;
+      color: var(--foreground);
+    }
+
+    .connectEntryDesc {
+      margin-top: 2px;
+      font-size: var(--text-sm);
+      color: var(--muted-foreground);
+    }
+  }
+
+  .connectEntryArrow {
+    flex: none;
+    font-size: var(--text-base);
+    color: var(--muted-foreground);
+  }
+}
+
+// 「接入他人设备」弹窗里的说明与输入间距。
+// 原来是三处内联 style，其中颜色还写死了 #7c9096 —— 暗色下与卡片底几乎同色。
+.connectTip {
+  font-size: var(--text-xs);
+  color: var(--muted-foreground);
+  margin-bottom: 12px;
+}
+
+.connectInput {
+  margin-bottom: 10px;
+}

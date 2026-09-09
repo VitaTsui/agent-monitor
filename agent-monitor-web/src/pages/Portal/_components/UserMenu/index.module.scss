@@ -1,0 +1,88 @@
+// 用户下拉菜单：对齐 claude.ai 侧栏底部的账户菜单。
+// 关键是「轻」：claude 的账户行没有填充底色，只有 hover 才起底；
+// 分隔线短、字号 14px、图标 16px 且比文字更淡。
+.userMenu {
+  min-width: 248px;
+  padding: 4px;
+
+  .userMenuEmail {
+    padding: 8px 10px 6px;
+    font-size: var(--text-sm);
+    line-height: 1.2;
+    color: var(--muted-foreground);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .userMenuAccount {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 7px 10px;
+    border-radius: var(--radius);
+
+    .userMenuAvatar {
+      width: 28px;
+      height: 28px;
+      min-width: 28px;
+      border-radius: 50%;
+      background: var(--primary);
+      color: var(--primary-foreground);
+      font-size: var(--text-base);
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .userMenuName {
+      flex: 1;
+      min-width: 0;
+      font-size: var(--text-md);
+      line-height: 1.35;
+      font-weight: 500;
+      color: var(--foreground);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
+  .userMenuDivider {
+    height: 1px;
+    background: var(--overlay-2);
+    margin: 4px 10px;
+  }
+
+  .userMenuItem {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: var(--text-md);
+    line-height: 1.35;
+    color: var(--foreground);
+
+    :global(.anticon) {
+      font-size: var(--text-lg);
+      color: var(--muted-foreground);
+    }
+
+    &:hover {
+      background: var(--overlay-1);
+    }
+
+    // 注意：.anticon 也是 span，裸 span 选择器会把图标一起 flex:1 拉宽，
+    // 图形在拉宽的盒子里居中，看起来就是图标和文字隔了一大截。
+    span:not(:global(.anticon)) {
+      flex: 1;
+    }
+
+    .userMenuBadge {
+      flex: none;
+    }
+  }
+}

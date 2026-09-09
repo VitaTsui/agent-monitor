@@ -1,0 +1,74 @@
+// 设备选择
+.deviceBar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+
+  .noDevice {
+    font-size: var(--text-sm);
+    color: var(--muted-foreground);
+    padding: 8px;
+    text-align: center;
+  }
+
+  .deviceTab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: var(--text-base);
+    color: var(--foreground);
+
+    &:hover {
+      background: var(--overlay-1);
+    }
+
+    &.active {
+      background: var(--overlay-2);
+      font-weight: 500;
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--primary);
+      outline-offset: 2px;
+    }
+
+    .deviceTabName {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    // 「本机」徽标：客户端窗口里标出当前这台电脑
+    .localTag {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 0 5px;
+      border-radius: var(--radius-sm);
+      font-size: var(--text-xs);
+      line-height: 16px;
+      color: var(--primary-foreground);
+      background: var(--primary);
+      vertical-align: 1px;
+    }
+
+    .deviceTabStat {
+      flex: none;
+      font-size: var(--text-xs);
+      color: var(--muted-foreground);
+      white-space: nowrap;
+    }
+
+    .deviceTabDot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 16%, transparent);
+    }
+  }
+}

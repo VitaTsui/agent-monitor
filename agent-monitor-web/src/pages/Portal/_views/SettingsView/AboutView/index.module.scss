@@ -1,0 +1,33 @@
+.about {
+  text-align: center;
+  padding: 20px 0;
+
+  .aboutLogo {
+    width: 60px;
+    height: 60px;
+    border-radius: var(--radius-lg);
+    background: var(--primary);
+    color: var(--primary-foreground);
+    font-size: 28px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 14px;
+  }
+
+  .aboutName {
+    font-size: var(--text-lg);
+    font-weight: 600;
+    color: var(--foreground);
+    margin-bottom: 8px;
+  }
+
+  .aboutDesc {
+    font-size: var(--text-base);
+    color: var(--muted-foreground);
+    line-height: 1.7;
+    max-width: 380px;
+    margin: 0 auto;
+  }
+}

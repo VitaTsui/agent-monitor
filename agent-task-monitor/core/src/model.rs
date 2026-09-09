@@ -21,6 +21,9 @@ pub enum IdeKind {
     Cursor,
     Vscode,
     Terminal,
+    /// 桌面客户端（ChatGPT.app / Claude.app）拉起的代理进程：没有控制终端、
+    /// 父链里既没有 IDE 也没有终端模拟器，但有一个 GUI 应用包在托着它。
+    Desktop,
     Other,
 }
 
@@ -58,6 +61,14 @@ pub struct ProcessInfo {
     /// 错配到旧会话。配对恢复时须 pid + start 都对上才算同一 shell。
     #[serde(default)]
     pub shell_start: Option<u64>,
+    /// **共享宿主进程**：一个进程同时托着多条会话，它自己的 cwd 没有会话含义。
+    ///
+    /// 唯一来源是桌面客户端的服务端进程（实测 ChatGPT 桌面版的
+    /// `…/ChatGPT.app/Contents/Resources/codex … app-server`，cwd 恒为 `/`）。
+    /// 终端会话是「一进程一会话、cwd 即项目」，这条不是 —— 所以它不参与按 cwd 的
+    /// 配对，也绝不单独生成占位任务（那正是当初要把 app-server 整个挡掉的原因）。
+    #[serde(default)]
+    pub shared_host: bool,
 }
 
 /// 会话内一条简要消息（用于详情展示）
@@ -533,5 +544,18 @@ pub fn provider_dsr(provider: &str) -> String {
         "aider" => "Aider".into(),
         "opencode" => "OpenCode".into(),
         other => other.into(),
+    }
+}
+
+/// 桌面客户端会话的展示名。
+///
+/// 同一个 provider 既能从终端跑（Claude Code / Codex CLI），也能从桌面客户端跑
+/// （Claude 桌面版的本地代理、ChatGPT 桌面版的 Codex）。两者的会话文件格式一样、
+/// 控制方式却完全不同，列表里必须一眼看得出这条是从哪儿来的。
+pub fn provider_dsr_desktop(provider: &str) -> String {
+    match provider {
+        "claude" => "Claude 桌面版".into(),
+        "codex" => "ChatGPT 桌面版".into(),
+        other => format!("{} 桌面版", provider_dsr(other)),
     }
 }
