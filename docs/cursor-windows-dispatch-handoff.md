@@ -138,7 +138,7 @@ cargo test -p am-core --lib                                           # 33 个�
 2. `cargo zigbuild -p am-hub --release --target x86_64-unknown-linux-musl`（bin 名 `agent-task-monitor`）。
 3. `bash scripts/package-macos.sh`（出 `agent-monitor-mac.zip`）、`bash scripts/package-windows.sh`（出
    `AgentMonitor-<v>-setup.exe`，务必核对约 10.7MB，太小是 makensis 半包）。
-4. 部署到 `root@***REMOVED***`（hostname vultr，服务 User=agentmon）：
+4. 部署到 `<SSH_USER>@<PROD_HOST>`（服务 User=agentmon）：
    - **hub 必须覆盖到 systemd ExecStart 指向的 `/opt/agent-monitor/agent-task-monitor`**（别传成 `am-hub`！），
      用 `mv`（`cp` 会 ETXTBSY），chown agentmon，`systemctl restart agent-monitor`。
    - `/opt/agent-monitor/data/downloads/` 放：`agent-monitor-mac.zip`、**`agent-monitor-setup.exe`（固定名，

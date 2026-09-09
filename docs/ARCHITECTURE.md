@@ -207,7 +207,7 @@ sequenceDiagram
 
 ## 7. 部署
 
-**服务器**：`root@***REMOVED***`（Vultr Ubuntu 24.04，hostname `vultr`），域名 `monitor.vita-llm.com`。
+**服务器**：`<SSH_USER>@<PROD_HOST>`（Ubuntu 24.04），域名 `monitor.vita-llm.com`。
 
 ```mermaid
 graph LR

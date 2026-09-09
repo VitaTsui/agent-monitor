@@ -1,6 +1,12 @@
 # agent-monitor 部署指南（monitor.vita-llm.com）
 
-服务器 `***REMOVED***`（Ubuntu 24.04），域名 `monitor.vita-llm.com`。
+服务器 `<PROD_HOST>`（Ubuntu 24.04），域名 `monitor.vita-llm.com`。
+
+> 本文档中的 `<PROD_HOST>`（服务器 IP / 主机名）与 `<SSH_USER>`（SSH 登录用户）
+> 是占位符，**不入版本库**。真实值由部署者自持：`<PROD_HOST>` 见你的 VPS 控制台
+> 或本地 `~/.ssh/config`，`<SSH_USER>` 见同一处；密钥类真实值见本地 `deploy/env`
+> （从 `deploy/env.example` 复制后填写）。
+
 本目录含 Caddy/systemd 配置、一键安装脚本，以及部署所需的交叉编译二进制、
 生产密钥、前端构建。
 
@@ -15,10 +21,10 @@
 到 vita-llm.com 的 DNS 管理，加一条 A 记录：
 
 ```
-类型 A   主机 monitor   值 ***REMOVED***   TTL 默认
+类型 A   主机 monitor   值 <PROD_HOST>   TTL 默认
 ```
 
-`dig monitor.vita-llm.com +short` 能解析到 ***REMOVED*** 后再继续（否则 Caddy 签证书会失败）。
+`dig monitor.vita-llm.com +short` 能解析到 <PROD_HOST> 后再继续（否则 Caddy 签证书会失败）。
 
 ## 步骤 1 · 上传部署目录到服务器
 
@@ -27,15 +33,15 @@
 ```bash
 # 只传部署必需文件（排除 .txt 凭据与本地备份，凭据你自己另存 CREDENTIALS.txt）
 rsync -avz --exclude '*.txt' --exclude '*.bak' \
-  deploy/ root@***REMOVED***:/root/agent-monitor-deploy/
+  deploy/ <SSH_USER>@<PROD_HOST>:/root/agent-monitor-deploy/
 ```
 
-或用 scp：`scp -r deploy root@***REMOVED***:/root/agent-monitor-deploy`
+或用 scp：`scp -r deploy <SSH_USER>@<PROD_HOST>:/root/agent-monitor-deploy`
 
 ## 步骤 2 · 服务器上一键安装
 
 ```bash
-ssh root@***REMOVED***
+ssh <SSH_USER>@<PROD_HOST>
 cd /root/agent-monitor-deploy
 sudo bash install.sh
 ```
