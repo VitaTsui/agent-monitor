@@ -6,7 +6,8 @@ import { LeftOutlined } from "@ant-design/icons";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { SessionHistoryItem, getSessionHistory } from "@/services/apis/portal";
-import { PORTAL_BASE } from "../../_utils/portalNav";
+import { HISTORY_LIST_PATH } from "../../_utils/portalNav";
+import { historyTitle } from "../../_utils/sessionNote";
 import views from "../views.module.scss";
 import styles from "./index.module.scss";
 
@@ -52,6 +53,12 @@ const HistoryView: React.FC = () => {
   // 直接持有滚动容器：用 scrollIntoView 会把整页往上顶，改成设容器的 scrollTop
   const streamRef = useRef<HTMLDivElement>(null);
 
+  /* 页标题 = 这条会话的名字：备注 → 自动标题 → 供应商，兜底才是页面名。
+     取最后一条（最新的那条）—— 同一会话的每条记录带的都是**当前**备注，
+     取哪一条都一样，取最新的只是为了不依赖数组是否为空以外的假设。 */
+  const last = list[list.length - 1];
+  const title = last ? historyTitle(last, "远程往来") : "远程往来";
+
   useEffect(() => {
     if (!taskId) return;
     setLoading(true);
@@ -88,18 +95,20 @@ const HistoryView: React.FC = () => {
               className={views.headBtn}
               role="button"
               tabIndex={0}
-              aria-label="返回会话"
-              onClick={() => navigate(PORTAL_BASE)}
+              aria-label="返回全部会话"
+              onClick={() => navigate(HISTORY_LIST_PATH)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
-                  navigate(PORTAL_BASE);
+                  navigate(HISTORY_LIST_PATH);
                 }
               }}
             >
               <LeftOutlined />
             </span>
-            <span className={views.headTitle}>远程往来</span>
+            <span className={views.headTitle} title={title}>
+              {title}
+            </span>
           </div>
           <div className={styles.hint}>
             经钉钉 / 网页 / MCP 下发的任务与其结果。终端关掉、机器关机后仍可在此回看。

@@ -38,6 +38,11 @@ const UserMenu: React.FC<UserMenuProps> = (props) => {
       <div className={styles.userMenuAccount}>
         <span className={styles.userMenuAvatar}>{nickname.slice(0, 1) || "U"}</span>
         <span className={styles.userMenuName}>{nickname}</span>
+        {/* 角色。原来常驻在侧栏底部账户行的第二行 —— 那一行因此高出 18px，
+            而「我是不是超管」是一天看一次的信息，收进点开才见的菜单里正好 */}
+        <span className={styles.userMenuRole}>
+          {user.isSuper ? "超级管理员" : "普通用户"}
+        </span>
       </div>
       <div className={styles.userMenuDivider} />
       <div className={styles.userMenuItem} onClick={() => onOpenSettings("account")}>

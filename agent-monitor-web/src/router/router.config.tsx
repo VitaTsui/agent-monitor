@@ -19,6 +19,7 @@ import { Navigate, RouteObject } from "react-router-dom";
  * 懒加载：远程往来只有点进去才看得到，静态引进来会跟着会话页一起进首屏。
  */
 const PanesView = lazy(() => import("@/pages/Portal/_views/PanesView"));
+const SessionsView = lazy(() => import("@/pages/Portal/_views/SessionsView"));
 const HistoryView = lazy(() => import("@/pages/Portal/_views/HistoryView"));
 
 /**
@@ -129,6 +130,18 @@ const Router: RouteType[] = [
           </PortalSuspense>
         ),
         meta: { title: "任务监控", noAuth: true, noTabsView: true },
+      },
+      {
+        /* 全部会话。侧栏按「设备 → 项目」分组、只列当前设备下的那些，
+           跨设备的全量在这一页。它同时补上了 `/portal/history` 这个洞 ——
+           在此之前只有 `history/:taskId` 有页面，父路径直接 404 */
+        path: "history",
+        element: (
+          <PortalSuspense>
+            <SessionsView />
+          </PortalSuspense>
+        ),
+        meta: { title: "全部会话", noAuth: true, noTabsView: true },
       },
       {
         /* 远程往来。原来是 720 宽的弹窗 —— 一条会话的往来动辄几十屏，

@@ -21,14 +21,23 @@ export type SettingsTab =
   | "security"
   | "about";
 
+/** 全部会话（远程往来列表页）。侧栏那条「查看全部会话」的落点。 */
+export const HISTORY_LIST_PATH = `${PORTAL_BASE}/history`;
+
 export const historyPath = (taskId: string): string =>
   `${PORTAL_BASE}/history/${encodeURIComponent(taskId)}`;
 
 /**
  * 当前地址按「返回」应该去哪一层。返回 null = 已在最外层，返回键不该被消费。
  *
- * 前台只有「会话页」与「它的子页面（远程往来）」两层，所以除了会话页本身，
- * 任何地址的上一层都是会话页。
+ * 前台是三层：会话页 → 全部会话 → 某条会话的远程往来。逐层往上走，
+ * 页面里的返回按钮与浏览器 / Android 原生返回键必须落到同一个目标 ——
+ * 否则会出现「按钮回上一层、返回键直接回首页」这种两套行为并存。
  */
-export const portalBackTarget = (pathname: string): string | null =>
-  pathname.replace(/\/+$/, "") === PORTAL_BASE ? null : PORTAL_BASE;
+export const portalBackTarget = (pathname: string): string | null => {
+  const path = pathname.replace(/\/+$/, "");
+  if (path === PORTAL_BASE) return null;
+  // 远程往来详情（history/:taskId）的上一层是全部会话
+  if (path.startsWith(`${HISTORY_LIST_PATH}/`)) return HISTORY_LIST_PATH;
+  return PORTAL_BASE;
+};

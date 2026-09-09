@@ -1,4 +1,9 @@
 
+/* 这是一张**定高 420 的产品截图仿制品**，不是真界面：里面每一行都靠
+   「内边距 ＋ 一行文字」凑出高度，加起来正好填满 420。
+   所以它必须自带行高 —— 跟着正文的 1.6 走时，十几行各高出 3~4px，
+   累计溢出 12px，底部那条账户行被 `overflow: hidden` 切掉半行。
+   1.4 是 12px 小字在这种密排卡片里的常规值。 */
 .MockPortal {
   display: flex;
   height: 420px;
@@ -6,6 +11,7 @@
   border-radius: var(--radius-lg);
   overflow: hidden;
   font-size: var(--text-sm);
+  line-height: 1.4;
   color: var(--foreground);
   user-select: none;
 

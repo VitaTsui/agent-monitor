@@ -161,6 +161,17 @@ export interface SessionHistoryItem {
   project: string;
   title: string;
   provider: string;
+  /**
+   * 用户给这个终端起的名字。**没起过名字时后端连字段都不下发**（不是 null）——
+   * 备注不落盘，是读取时按 anchor 现 join 上去的（见 hub 的 history::with_note）。
+   * 所以判空只能靠 falsy，不能靠 `"note" in e`。
+   */
+  note?: string;
+  /**
+   * 备注的 join 键（machineId|终端锚）。纯内部字段，不渲染 ——
+   * 存量记录没有它，读回来是空串，于是匹配不到任何备注、回落到 title。
+   */
+  anchor?: string;
 }
 
 /**

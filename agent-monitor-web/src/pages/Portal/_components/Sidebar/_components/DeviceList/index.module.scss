@@ -11,14 +11,16 @@
     text-align: center;
   }
 
+  // 行高 32、圆角 8：与会话行、查看全部、底部账户同一档
   .deviceTab {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 7px 10px;
+    height: 32px;
+    padding: 0 10px;
     border-radius: var(--radius);
     cursor: pointer;
-    font-size: var(--text-base);
+    font-size: var(--text-md);
     color: var(--foreground);
 
     &:hover {

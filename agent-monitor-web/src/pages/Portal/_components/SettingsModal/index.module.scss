@@ -123,6 +123,22 @@
 // ============================================================
 @include r.down(md) {
   .SettingsModal {
+    /* **给一个确定的高度**，而不是让内容把 sheet 撑起来。
+     *
+     * 根因：全局那条 `.ant-modal-container { min-height: 40dvh }`
+     * （styles/antd-overload.scss）是所有弹窗的**地板**，不是设置的身高。
+     * 设置在移动端是 iOS 式两级：第一级只是一列七行菜单，约 290 高 ——
+     * 撑不到地板，于是 sheet 精确地停在 40dvh（390×844 下实测 338px），
+     * 一张半屏都不到的卡片里放着整个设置。第二级（如「设备」）内容一多又
+     * 会窜到 92dvh，同一个弹窗在两级之间高度翻倍。
+     *
+     * 桌面端本来就是定高（上面的 `height: min(730px, 100vh - 120px)`），
+     * 理由一样：几个分栏内容长短不一，跟着内容变高会让弹窗在切分栏时上下跳。
+     * 移动端沿用同一条规则，只是把上限换成视口比例。 */
+    :global(.ant-modal-container) {
+      height: min(720px, 92dvh);
+    }
+
     // sheet 自带顶部抓手条与安全区内边距（antd-overload），这里只负责两级切换
     :global(.ant-modal-body) {
       display: flex;

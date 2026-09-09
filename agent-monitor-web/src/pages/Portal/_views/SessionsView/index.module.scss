@@ -1,0 +1,136 @@
+@use "@hsu-react/ui/es/styles/responsive" as r;
+
+// 颜色一律走 styles/tokens.scss 的令牌，本文件不定义色值。
+
+/* 标题右边的条数。灰、常规字重 —— 它是注脚不是标题的一部分 */
+.count {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: var(--text-md);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 行的底色比内容列宽 12（左右各一条「排水沟」），文字仍与标题对齐 ——
+   与 views.module.scss 的 856/832 那一组是同一套算法 */
+.list {
+  display: flex;
+  flex-direction: column;
+  margin: 0 -12px;
+  padding: 0 12px;
+}
+
+/* 一行 39：内容 31 ＋ 上下各 4 的内边距。行与行之间一条极淡的分隔线，
+   画在内容宽度上、不跟着 hover 底色溢出去 */
+.row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 39px;
+  padding: 4px 12px;
+  margin: 0 -12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+
+  &::after {
+    content: "";
+    position: absolute;
+    left: 12px;
+    right: 12px;
+    bottom: 0;
+    height: 1px;
+    background: var(--overlay-1);
+  }
+
+  @media (hover: hover) {
+    &:hover {
+      background: var(--overlay-1);
+    }
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: -2px;
+  }
+}
+
+.rowMain {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* 状态点：与侧栏会话行同一套语义 —— 执行中走主色（墨黑/近白）＋光晕，
+   绿留给「成功」 */
+.dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--subtle-foreground);
+
+  &.running {
+    background: var(--primary);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent);
+  }
+
+  &.idle {
+    background: var(--warning);
+  }
+
+  &.paused {
+    background: var(--destructive);
+  }
+
+  &.finished {
+    background: var(--subtle-foreground);
+  }
+}
+
+.rowIcon {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: var(--text-lg);
+}
+
+.rowTitle {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--foreground);
+  font-size: var(--text-md);
+}
+
+.rowMeta {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+}
+
+.rowHost {
+  max-width: 140px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 状态那两个字比旁边的元信息重一档：它是这一行里唯一「还在变」的东西 */
+.rowStatus {
+  color: var(--foreground);
+}
+
+.rowTime {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 窄屏：主机名让位，一行里只留「状态 · 多久以前」，否则标题被挤到只剩几个字 */
+@include r.down(md) {
+  .rowHost {
+    display: none;
+  }
+}

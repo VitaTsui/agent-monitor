@@ -47,6 +47,14 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+
+    // 角色：跟在昵称后面的一枚小灰字，不换行不占额外高度
+    .userMenuRole {
+      flex: none;
+      font-size: var(--text-sm);
+      color: var(--muted-foreground);
+      white-space: nowrap;
+    }
   }
 
   .userMenuDivider {

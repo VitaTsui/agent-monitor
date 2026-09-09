@@ -116,11 +116,15 @@
   justify-content: center;
   gap: 10px;
 
+  /* 40 / 行高 64：这一屏本来就空，28px 压不住，字号一小整块空态就散了。
+     行高给足是因为它旁边还站着一枚 40 的方形 logo —— 行盒比图标矮时，
+     两者的基线对不上，文字会显得往上飘。 */
   .greeting {
     display: flex;
     align-items: center;
     gap: 12px;
-    font-size: 28px;
+    font-size: 40px;
+    line-height: 64px;
     font-weight: 500;
     color: var(--foreground);
 
@@ -154,8 +158,10 @@
 }
 
 @include r.down(md) {
+  /* 窄屏收到 28：40px 的问候语在 390 宽下要占掉八成宽度 */
   .mainEmpty .greeting {
-    font-size: 22px;
+    font-size: 28px;
+    line-height: 44px;
   }
 
   .descDesktop {

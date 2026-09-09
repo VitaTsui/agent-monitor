@@ -6,7 +6,7 @@
  * 顶栏还是旧标题」。
  */
 
-import { PortalTaskData } from "@/services/apis/portal";
+import { PortalTaskData, SessionHistoryItem } from "@/services/apis/portal";
 
 /**
  * 备注长度上限（**字符**数，中文一个字算一个）。与 hub 的 notes::NOTE_MAX_CHARS 一致。
@@ -44,3 +44,16 @@ export const noteLength = (raw: string): number => [...normalizeNote(raw)].lengt
  */
 export const sessionTitle = (t: PortalTaskData, fallback: string): string =>
   t.note || t.title || t.prompt || t.projectName || fallback;
+
+/**
+ * 一条远程往来记录属于哪个会话、显示什么名字。回退链与 [`sessionTitle`] 同序：
+ * 备注 → 自动标题 → 供应商。
+ *
+ * 备注由 hub 在读取时按 anchor 现查现填，**没起过名字时字段整个不下发**
+ * （不是 null），所以只能靠 falsy 判空。存量记录没有 anchor，匹配不到备注，
+ * 自然落到 title —— 这条链不需要为它们再开分支。
+ */
+export const historyTitle = (
+  e: Pick<SessionHistoryItem, "note" | "title" | "provider">,
+  fallback: string,
+): string => e.note || e.title || e.provider || fallback;

@@ -127,11 +127,24 @@ body,
   height: 100%;
 }
 
+/* 正文基准：字号与行高。
+ *
+ * 在这之前 `body` 从没被设过这两项 —— 浏览器默认的 `16px / normal`。
+ * 后果是两条：
+ *   1. 凡是没显式写字号的地方都比旁边的 antd 控件大两号（组件库把
+ *      `--vita-font-size: 14px` 给了 antd 的 fontSize 令牌，但那只作用于
+ *      antd 自己的类，项目手写的 div 一直继承 16px）；
+ *   2. `normal` 在中文下约等于 1.2，字与字之间几乎不留气口，整屏挤成一坨。
+ *
+ * 行高 1.6 是中文正文的常规区间（14 × 1.6 = 22.4px）。固定高度的控件
+ * （按钮/输入框 32px）由 `--vita-control-height` 定死，不受这里影响。 */
 body {
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-family: PingFangSC-Regular, PingFang SC;
+  font-size: var(--vita-font-size);
+  line-height: 1.6;
 }
 
 canvas {

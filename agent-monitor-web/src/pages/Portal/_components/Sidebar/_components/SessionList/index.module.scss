@@ -5,12 +5,15 @@
 // 终端类型分组
 .termGroup {
   // 纯分组标签：会话直接铺开，这里不再可点，故无 cursor / hover / 焦点态
+  /* 二级标签（项目名）：比上面的分组标签(13)矮一档，也不带任何操作 ——
+     它不是一个分组，只是一个断点。原来是 11px，比令牌最小档还小一号 */
   .termTitle {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 8px;
-    font-size: var(--text-xs);
+    padding: 8px 10px 2px;
+    font-size: var(--text-sm);
+    line-height: 16px;
     color: var(--muted-foreground);
     user-select: none;
 
@@ -21,12 +24,15 @@
 }
 
 // 会话项（Claude 最近对话式）
+/* 行高 32、圆角 8 —— 侧栏里所有行（设备、会话、查看全部、账户）同一档。
+   原来是 padding 撑出来的 ~31.6，每行都跟旁边差一点点，一列扫下去是错位的 */
 .session {
   position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px;
+  height: 32px;
+  padding: 0 10px;
   border-radius: var(--radius);
   cursor: pointer;
   // 触摸屏不套 :hover —— 否则移动端首触只落 hover 态、需再点一次才触发 onClick
@@ -100,7 +106,8 @@
     .sessName {
       flex: 1;
       min-width: 0;
-      font-size: var(--text-base);
+      // 与设备行、查看全部同档（14）：侧栏一列扫下去只有一个正文字号
+      font-size: var(--text-md);
       color: var(--foreground);
       overflow: hidden;
       text-overflow: ellipsis;
