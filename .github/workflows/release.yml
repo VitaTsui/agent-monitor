@@ -1,0 +1,61 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 打 tag 前要先知道有哪些 tag，浅克隆看不到。
+          fetch-depth: 0
+
+      - name: 读取版本号并检查 tag
+        id: ver
+        run: |
+          # 版本号只有一个来源：agent-task-monitor/Cargo.toml 的 [workspace.package]。
+          # 两个打包脚本（package-macos.sh / package-windows.sh）读的也是它。
+          VERSION=$(awk '
+            /^\[workspace\.package\]/ { in_sec = 1; next }
+            /^\[/                     { in_sec = 0 }
+            in_sec && /^version[[:space:]]*=/ {
+              gsub(/[",]/, "", $3); print $3; exit
+            }
+          ' agent-task-monitor/Cargo.toml)
+
+          if [ -z "$VERSION" ]; then
+            echo "::error::没能从 agent-task-monitor/Cargo.toml 的 [workspace.package] 读到版本号"
+            exit 1
+          fi
+
+          TAG="v$VERSION"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          # 版本号没动就重复推 main 是常事，重复建 Release 不是——静默跳过。
+          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "tag $TAG 已存在，跳过发布"
+          else
+            echo "将发布 $TAG"
+          fi
+
+      - name: 打 tag 并生成 Release
+        if: steps.ver.outputs.skip != 'true'
+        run: |
+          gh release create "${{ steps.ver.outputs.tag }}" \
+            --generate-notes \
+            --target "${{ github.ref_name }}" \
+            --latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # 安装包不在这里构建：Windows 包要 cargo-xwin + makensis，macOS 包要真机签名，
+      # 都由本地 scripts/package-*.sh 产出后用 `gh release upload` 挂到上面这个 Release。
+      # 客户端自更新走自建服务器，Releases 上的包只作备份下载。
