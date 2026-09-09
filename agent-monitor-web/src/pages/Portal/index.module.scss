@@ -18,15 +18,28 @@
   color: var(--foreground);
   overflow: hidden;
 
-  // ---------- 右侧内容区（路由出口） ----------
+  // ---------- 正文 ＋ 右栏（第三栏） ----------
+  // 侧栏之外的整块横向排布：正文列 → 8px 拖拽把手 → 右栏。
+  // 把手与右栏由 RightPane 自己渲染，这里只负责给它们一个 flex 行。
+  .contentRow {
+    flex: 1;
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  // ---------- 正文列（路由出口） ----------
   .main {
     flex: 1;
     display: flex;
     flex-direction: column;
+    // 右栏出现时正文要能被压窄，否则一段长代码就把右栏挤出去
     min-width: 0;
     // 列方向 flex 缺它会被内容撑开（iOS 整页滚动的根源之一）
     min-height: 0;
-    background: var(--background);
+    // 正文取面色(--card #ffffff / #18181b)、侧栏取画布色(--background)。
+    // 原来两者反着 —— 侧栏是白面、正文是灰画布，看着像内容被压在侧栏底下。
+    background: var(--card);
   }
 
   // 移动端抽屉遮罩（默认桌面隐藏）
@@ -43,12 +56,14 @@
     // 它是自定义属性、跨 CSS Module 照常继承。
     --drawer-w: min(84vw, 320px);
 
-    // 主区全宽 + 单列；不透明以盖住侧栏，推开时右移露出侧栏
-    .main {
+    // 主区全宽 + 单列；不透明以盖住侧栏，推开时右移露出侧栏。
+    // 推的是整行而不是 .main —— 窄屏不渲染右栏，这一行里就只有正文列
+    .contentRow {
       width: 100%;
       position: relative;
       z-index: 2;
-      background: var(--background);
+      // 与桌面正文列同色（面色）：这一层要不透明才盖得住底下的侧栏
+      background: var(--card);
       transition: transform 0.25s ease, border-radius 0.25s ease;
       will-change: transform;
 

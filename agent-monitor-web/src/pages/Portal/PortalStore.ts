@@ -28,6 +28,9 @@ import { getAccessToken } from "@/utils/auth";
 /** 拆分视图最多同时打开的会话数 */
 const MAX_PANES = 4;
 
+/** 右栏开合记在这个键上：关过一次就一直关着，不必每次进来再收一遍 */
+const RIGHT_PANE_KEY = "am.portal.rightPane.open";
+
 /** WS 断开后的重连退避（毫秒），逐次递增，封顶 10s */
 const WS_RETRY_MS = [1000, 2000, 5000, 10000];
 
@@ -70,6 +73,15 @@ const EMPTY_MESSAGES: PortalMessage[] = [];
 /** 同 EMPTY_MESSAGES：无队列时统一返回这一个空数组，别每次新建 */
 const EMPTY_HUB_QUEUED: { cmdId: string; text: string }[] = [];
 
+/** 上次把右栏关掉了吗。读不到（隐私模式 / 头一回来）一律按开着算 */
+const readRightPaneOpen = (): boolean => {
+  try {
+    return localStorage.getItem(RIGHT_PANE_KEY) !== "0";
+  } catch {
+    return true;
+  }
+};
+
 class PortalStore {
   private _tasks: PortalTaskData[] = [];
   private _devices: PortalDevice[] = [];
@@ -84,6 +96,14 @@ class PortalStore {
    * 其余缩成右侧一列只读卡片 —— 仍能瞥见它们的动静，又不抢地方。
    */
   private _focusedId = "";
+  /**
+   * 右栏（会话状态）开着没有。**默认开**。
+   *
+   * 这块内容原先钉在每一格对话流的末尾、一直看得见；搬进右栏后若默认收起，
+   * 「这个会话正在办什么」就退回到「先点一下才看得见」—— 那正是把它从悬浮胶囊
+   * 里挪出来时要解决的问题。默认开着、用户关掉才记一笔，才是不丢东西的换法。
+   */
+  private _rightPaneOpen = readRightPaneOpen();
   private _messagesById: Record<string, PortalMessage[]> = {};
   /**
    * hub 队列里待下发的输入（会话 id → 条目）。
@@ -294,6 +314,20 @@ class PortalStore {
   /** 放大某个会话；传空串或再点一次当前放大的那个＝还原成网格 */
   public setFocused = (id: string) => {
     this._focusedId = this._focusedId === id ? "" : id;
+  };
+
+  get rightPaneOpen() {
+    return this._rightPaneOpen;
+  }
+
+  /** 开/收右栏。开合是**全局**一份：右栏本身就按会话分节，一次列出所有打开的格 */
+  public toggleRightPane = () => {
+    this._rightPaneOpen = !this._rightPaneOpen;
+    try {
+      localStorage.setItem(RIGHT_PANE_KEY, this._rightPaneOpen ? "1" : "0");
+    } catch {
+      // 隐私模式下写不进去也无妨，下次回到默认（开着）
+    }
   };
 
   get openTasks() {

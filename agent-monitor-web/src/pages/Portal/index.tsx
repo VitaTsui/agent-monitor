@@ -16,13 +16,15 @@ import {
   inDesktopClient,
   localMachineId,
 } from "@/utils/clientAuth";
-import { MOBILE_QUERY, isMobileViewport } from "@/utils/breakpoint";
 import PortalStore from "./PortalStore";
 import { useApkUpdateCheck } from "./_hooks/useApkUpdateCheck";
 import { useClientUpdateToast } from "./_hooks/useClientUpdateToast";
+import { useIsMobile } from "./_hooks/useIsMobile";
 import { useNativeBack } from "./_hooks/useNativeBack";
 import { ShareReceiveModal } from "./_hooks/useShareReceive";
 import MobileBar from "./_components/MobileBar";
+import RightPane from "./_components/RightPane";
+import SessionStatePane from "./_components/SessionStatePane";
 import Sidebar from "./_components/Sidebar";
 import { PortalUserContext, PortalUserInfo } from "./_context/portalUser";
 import { PORTAL_BASE, SettingsTab, portalBackTarget } from "./_utils/portalNav";
@@ -55,7 +57,7 @@ const Portal: React.FC = observer(() => {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   // 移动端：侧栏抽屉开合
   const [mobileNav, setMobileNav] = useState(false);
-  const [isMobile, setIsMobile] = useState(isMobileViewport);
+  const isMobile = useIsMobile();
   // 设置弹窗：开合与当前分栏。分栏放在壳里而不是弹窗内部 —— 返回键要靠它
   // 判断「退到一级菜单」还是「关掉弹窗」，两处各存一份就会不同步。
   // `null` = 移动端停在一级菜单（桌面无此态，弹窗按「账户」渲染）。
@@ -86,17 +88,10 @@ const Portal: React.FC = observer(() => {
   // 移动端强制展开侧栏内容：桌面折叠态下缩窄窗口时，
   // CSS 会把抽屉撑到 84vw，但折叠态 JSX 不渲染内容 → 空白抽屉，这里在 JS 层纠正
   useEffect(() => {
-    const mq = window.matchMedia(MOBILE_QUERY);
-    const sync = () => {
-      setIsMobile(mq.matches);
-      if (mq.matches) {
-        setSiderFolded(false);
-      }
-    };
-    sync();
-    mq.addEventListener("change", sync);
-    return () => mq.removeEventListener("change", sync);
-  }, []);
+    if (isMobile) {
+      setSiderFolded(false);
+    }
+  }, [isMobile]);
 
   // 本页完全响应式，豁免 index.scss 里给后管布局设的 min-width:960px
   // （窗口拖窄到 960 以下时那条会造成整页横滚、右上角控制键被推出可视区）
@@ -119,6 +114,17 @@ const Portal: React.FC = observer(() => {
       window.removeEventListener("keydown", onKey);
     };
   }, [mobileNav]);
+
+  /* 换页就收起抽屉。
+   *
+   * 移动端的抽屉是「推开内容」式的：开着的时候整块内容被右移 320px。此前每一处
+   * 会导航的入口（选会话、开设置）都各自手写了一次 `setMobileNav(false)`，
+   * 「换了页要收起来」从来不是一条规则、而是三处巧合 —— 侧栏新增「查看全部会话」
+   * 这个入口时立刻现形：跳过去了，抽屉还开着，新页面被推在屏幕外。
+   * 收成一条 effect，之后再加入口就不必记得补这一行。 */
+  useEffect(() => {
+    setMobileNav(false);
+  }, [pathname]);
 
   // 前台需登录：无 token 时，客户端窗口先用设备令牌静默续登（客户端登录
   // 态永不过期），浏览器（或续登失败）才跳登录页并带回跳地址
@@ -301,11 +307,29 @@ const Portal: React.FC = observer(() => {
           onLogout={onLogout}
         />
 
-        <main
-          className={`${styles.main} ${mobileNav ? styles.mainPushed : ""}`}
+        {/* 正文 ＋ 右栏并排的那一行。右栏给的条件有三条：
+            **会话页** —— 设置/历史都是自带固定头部的整页内容，右边再钉一栏会话
+              状态既对不上也没地方摆；
+            **宽屏** —— 一块 390 宽的屏摆不下第三栏，状态卡退回对话流末尾
+              （见 ChatPane）；
+            **至少开着一格** —— 一格没开时那栏没有主语，摆一条「暂无」在空问候语
+              旁边只是白占三成宽。 */}
+        <div
+          className={`${styles.contentRow} ${mobileNav ? styles.mainPushed : ""}`}
         >
-          <Outlet />
-        </main>
+          <main className={styles.main}>
+            <Outlet />
+          </main>
+
+          {atSessions &&
+            !isMobile &&
+            PortalStore.rightPaneOpen &&
+            PortalStore.openTasks.length > 0 && (
+              <RightPane>
+                <SessionStatePane />
+              </RightPane>
+            )}
+        </div>
 
         {settingsMounted && (
           <Suspense fallback={null}>

@@ -1,11 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 
 import { CodeOutlined, SplitCellsOutlined } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
-import { MOBILE_QUERY, isMobileViewport } from "@/utils/breakpoint";
 import PortalStore from "../../PortalStore";
 import { usePortalUser } from "../../_context/portalUser";
+import { useIsMobile } from "../../_hooks/useIsMobile";
 import { usePaneGrid } from "../../_hooks/usePaneGrid";
 import ChatPane from "../../_components/ChatPane";
 import styles from "./index.module.scss";
@@ -19,15 +19,7 @@ import styles from "./index.module.scss";
  */
 const PanesView: React.FC = observer(() => {
   const { openTasks, focusedId, setFocused } = PortalStore;
-  const [isMobile, setIsMobile] = useState(isMobileViewport);
-
-  useEffect(() => {
-    const mq = window.matchMedia(MOBILE_QUERY);
-    const sync = () => setIsMobile(mq.matches);
-    sync();
-    mq.addEventListener("change", sync);
-    return () => mq.removeEventListener("change", sync);
-  }, []);
+  const isMobile = useIsMobile();
 
   const paneCount = openTasks.length;
   // 放大的那一格。两道门槛：

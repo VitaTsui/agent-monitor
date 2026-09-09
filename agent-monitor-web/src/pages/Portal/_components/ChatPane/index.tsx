@@ -11,6 +11,7 @@ import {
   MoreOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
+  ProfileOutlined,
   StopOutlined,
   SyncOutlined,
   ThunderboltOutlined,
@@ -25,6 +26,7 @@ import SessionPanels from "../SessionPanels";
 import SessionRename from "../SessionRename";
 import SubAgentChip from "../SubAgentChip";
 import { sessionTitle } from "../../_utils/sessionNote";
+import { useIsMobile } from "../../_hooks/useIsMobile";
 import styles from "./index.module.scss";
 
 interface ChatPaneProps {
@@ -79,7 +81,11 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     hubQueuedOf,
     focusedId,
     setFocused,
+    rightPaneOpen,
+    toggleRightPane,
   } = PortalStore;
+  // 状态卡去哪儿：宽屏进右栏，窄屏留在对话流末尾（那儿摆不下第三栏）
+  const isMobile = useIsMobile();
   const chatRef = useRef<HTMLDivElement>(null);
   const stickBottomRef = useRef(true);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -459,6 +465,18 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                     label: focusedId === id ? "还原为网格" : "放大这一格",
                     onClick: () => setFocused(id),
                   },
+                  // 右栏开关同样收进来：格子窄到折叠时它更需要 —— 那种宽度下
+                  // 正文与右栏抢地方，收放是高频动作
+                  ...(isMobile
+                    ? []
+                    : [
+                        {
+                          key: "rightPane",
+                          icon: <ProfileOutlined />,
+                          label: rightPaneOpen ? "收起会话状态栏" : "展开会话状态栏",
+                          onClick: toggleRightPane,
+                        },
+                      ]),
                   {
                     key: "sync",
                     icon: <SyncOutlined />,
@@ -520,6 +538,20 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                       focusedId === id ? <CompressOutlined /> : <ExpandOutlined />
                     }
                     onClick={() => setFocused(id)}
+                  />
+                </Tooltip>
+              ) : null}
+              {/* 右栏开关。照 VitaAgent 顶栏那枚 28×28 的面板钮
+                  （`web/src/pages/chat/index.tsx` 的 `panelBtn`）：亮起表示栏开着。
+                  窄屏不给 —— 那边没有第三栏，状态卡就在对话流里，开关无处可开。 */}
+              {!isMobile ? (
+                <Tooltip title={rightPaneOpen ? "收起会话状态栏" : "展开会话状态栏"}>
+                  <Button
+                    size="small"
+                    type="text"
+                    className={rightPaneOpen ? styles.paneBtnOn : undefined}
+                    icon={<ProfileOutlined />}
+                    onClick={toggleRightPane}
                   />
                 </Tooltip>
               ) : null}
@@ -603,13 +635,15 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
               />
             )}
 
-            {/* 清单 / 后台任务 / 子代理是「当前状态」而非时序事件 —— 但它们同样属于
-                这条会话，就排在对话流末尾、与正文同宽同侧，跟着一起滚。
-                原先是悬浮在本格右上角、默认收起成胶囊的浮层：浮层盖着对话，只好默认
-                收起，于是「这个会话正在办什么」这件最该被看到的事反而要先点一下。
+            {/* 清单 / 后台任务 / 子代理是「当前状态」而非时序事件 —— 所以宽屏把它们
+                放进右栏（见 SessionStatePane）：与正文并排、不跟着对话滚走，
+                往上翻历史时仍然看得见。
+
+                **窄屏才留在这儿**：一块 390 宽的屏摆不下第三栏，退回对话流末尾是
+                唯一的去处。同一份内容任何时候只出现在一处，不会两边都有。
 
                 紧凑卡片仍然不给 —— 它只有 320×260，摆下这些就没剩多少地方看内容了。 */}
-            {!compact && (
+            {!compact && isMobile && (
               <SessionPanels
                 messages={messages}
                 running={task.status === "running"}

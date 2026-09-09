@@ -20,8 +20,8 @@
       padding-right: 4px;
     }
   }
-  // 状态面板悬浮在本格内部而非整页：多个会话并排时，
-  // 各格的面板才会各自待在自己格子右侧，不会叠在一起。
+  // 「回到底部」那枚圆钮钉在本格内部而非整页：多格并排时，
+  // 各格的圆钮才会各自待在自己格子里，不会叠在一起。
   position: relative;
 
   // 居中内容列（Claude 式窄栏）。768 —— 页面骨架那个 832 是另一回事，别混用。
@@ -163,6 +163,13 @@
       display: flex;
       gap: 2px;
       white-space: nowrap;
+
+      // 右栏开关亮着的样子（照 VitaAgent 顶栏 `panelBtnOn`）：栏开着时
+      // 这枚钮要能一眼看出是「按下」的，否则用户不知道右边那栏是它管的
+      .paneBtnOn {
+        background: var(--overlay-2);
+        color: var(--foreground);
+      }
     }
   }
 

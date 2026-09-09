@@ -1,0 +1,49 @@
+// 右栏容器。照 VitaAgent 的 ViewerPane
+// （`web/src/pages/chat/_components/ViewerPane/index.module.scss`）：
+//   把手 8 宽 col-resize、中央 3×48 圆角小条 hover 才显；
+//   栏本身与正文之间只靠一条描边分开，不做浮卡 —— 本项目正文底是 --primary-subtle，
+//   右栏取 --card，两种面色已经分得开，再叠圆角投影只会多一层噪声。
+
+.sep {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 8px;
+  cursor: col-resize;
+  // 触屏上别让浏览器把拖动当成滚页
+  touch-action: none;
+  background: var(--background);
+
+  &:hover .handle,
+  &:active .handle {
+    opacity: 1;
+  }
+}
+
+.handle {
+  width: 3px;
+  height: 48px;
+  border-radius: 2px;
+  background: var(--muted-foreground);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.RightPane {
+  display: flex;
+  flex: 1 1 0%;
+  flex-direction: column;
+  // 不写这两行，栏里一段长内容就能把正文列挤没
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--overlay-2);
+  background: var(--card);
+  transition: flex-grow 0.2s ease;
+}
+
+// 拖的时候不要过渡，否则把手跟不上指针
+.dragging {
+  transition: none;
+}

@@ -10,14 +10,12 @@ import {
 
 import { PortalMessage } from "@/services/apis/portal";
 import {
-  aliveBgCommands,
   BG_LABEL,
   BgTask,
   fmtElapsed,
   isBgFailed,
-  parseLast,
-  TodoItem,
-  visibleSubAgents,
+  isEmptySessionState,
+  sessionStateOf,
 } from "../../_utils/sessionState";
 import styles from "./index.module.scss";
 
@@ -26,6 +24,8 @@ interface SessionPanelsProps {
   /** 会话是否正在运行：非运行时清单里的「进行中」降级为「未完成」，
       不再显示会动的进行态（会话都停了就没有正在做的任务）。 */
   running?: boolean;
+  /** 外层追加的类名。右栏里用它抹掉「接在对话流末尾」才需要的上边距。 */
+  className?: string;
 }
 
 interface CardProps {
@@ -41,7 +41,7 @@ interface CardProps {
  * 下面是一列用发丝线分隔的条目。
  *
  * **没有收起态**。原来是悬浮在右上角、默认收起成一枚胶囊的浮层 ——
- * 那是因为它盖在对话上，不收起就挡内容。现在它就排在对话流末尾、跟着一起滚，
+ * 那是因为它盖在对话上，不收起就挡内容。现在它待在右栏（窄屏是对话流末尾），
  * 不挡任何东西，也就没有理由再藏起来：要看会话在办什么，本来就该一眼看到。
  */
 const StateCard: React.FC<CardProps> = ({ icon, title, meta, children }) => (
@@ -92,22 +92,19 @@ const TaskRow: React.FC<{ task: BgTask; now: number }> = ({ task, now }) => {
 /**
  * 会话的「当前状态」：任务清单、后台任务、子代理三块。
  *
- * **排在对话流末尾**，跟着对话一起滚，与正文同宽同侧。原先是悬浮在本格右上角的
- * 浮层（`position:absolute; top:68; right:12; width:250`）——浮层盖着对话，
- * 只好默认收起成胶囊，于是「这个会话正在办什么」这件最该被看到的事，
- * 反倒需要先点一下才看得见。
+ * **宽屏在右栏**（`SessionStatePane`）：与正文并排、不滚走、不挡任何东西。
+ * **窄屏排在对话流末尾**：手机上摆不下第三栏，它跟着对话一起滚。
+ *
+ * 更早以前是悬浮在本格右上角的浮层（`position:absolute; top:68; right:12;
+ * width:250`）—— 浮层盖着对话，只好默认收起成胶囊，于是「这个会话正在办什么」
+ * 这件最该被看到的事，反倒需要先点一下才看得见。
  */
 const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
-  const { messages, running } = props;
+  const { messages, running, className } = props;
 
-  const allTodos = parseLast<TodoItem>(messages, "todos");
-
-  // 只看还没做完的：做完的条目没有关注价值，全做完时整块也就不显示了
-  const todos = allTodos.filter((t) => t.status !== "completed");
-  // 后台任务同理，只看还没正常跑完的 —— 跑砸/被终止的**要留着**（见 sessionState 的
-  // BG_DONE 说明）。按种类拆成「子代理」与「后台命令」两块。
-  const subAgents = visibleSubAgents(messages);
-  const bgTasks = aliveBgCommands(messages);
+  // 「有哪些东西要展示」只有一处定义（见 sessionStateOf）：右栏要先问同一个问题
+  // 才知道该不该给这条会话一个标题，两边各写一遍筛选条件迟早会对不上。
+  const { todos, bgTasks, subAgents } = sessionStateOf(messages);
 
   // 耗时要走字：只在真有后台任务时上表，且 tick 只驱动本组件重渲染。
   const ticking = bgTasks.length > 0 || subAgents.length > 0;
@@ -120,7 +117,7 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
     return () => window.clearInterval(timer);
   }, [ticking]);
 
-  if (!todos.length && !bgTasks.length && !subAgents.length) {
+  if (isEmptySessionState({ todos, bgTasks, subAgents })) {
     return null;
   }
 
@@ -138,7 +135,7 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
   };
 
   return (
-    <div className={styles.SessionPanels}>
+    <div className={`${styles.SessionPanels} ${className ?? ""}`}>
       {todos.length > 0 && (
         <StateCard
           icon={<CheckSquareOutlined />}

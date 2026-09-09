@@ -117,6 +117,35 @@ export const visibleSubAgents = (messages: PortalMessage[]): BgTask[] =>
 export const aliveBgCommands = (messages: PortalMessage[]): BgTask[] =>
   aliveBgTasks(messages).filter((t) => t.kind !== "agent");
 
+/** 一条会话此刻的「当前状态」：未完成的清单条目、活着的后台命令、子代理。 */
+export interface SessionState {
+  todos: TodoItem[];
+  bgTasks: BgTask[];
+  subAgents: BgTask[];
+}
+
+/**
+ * 取一条会话的当前状态。
+ *
+ * **这一份是唯一定义**：状态卡（`SessionPanels`）自己渲染它，右栏
+ * （`SessionStatePane`）还要先问「这条会话有没有东西可展示」才决定要不要给它一个
+ * 标题。两处各写一遍筛选条件，改一处漏一处就会出现「右栏列了标题、底下却空着」。
+ *
+ * 清单只留没做完的：做完的条目没有关注价值。后台任务同理只留没正常跑完的，
+ * 跑砸/被终止的**要留着**（理由见 `BG_DONE`）。
+ */
+export const sessionStateOf = (messages: PortalMessage[]): SessionState => ({
+  todos: parseLast<TodoItem>(messages, "todos").filter(
+    (t) => t.status !== "completed",
+  ),
+  bgTasks: aliveBgCommands(messages),
+  subAgents: visibleSubAgents(messages),
+});
+
+/** 这条会话此刻没有任何可展示的状态 —— 状态卡整块不渲染、右栏不给它标题 */
+export const isEmptySessionState = (s: SessionState): boolean =>
+  !s.todos.length && !s.bgTasks.length && !s.subAgents.length;
+
 /**
  * 耗时口语化：37秒 / 4分12秒 / 1小时3分。
  * 起跑时刻缺失或解析不了就返回空串（调用方据此不渲染这一段）。
