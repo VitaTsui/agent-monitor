@@ -53,42 +53,48 @@ function wrapRoutes(routes: RouteType[]): RouteType[] {
 }
 
 /**
- * 使用 webpack 的 require.context 动态导入所有页面组件
- * 这是 webpack 特有的功能，用于批量导入模块。
+ * 批量拿到 pages 下的所有页面组件，做成「路径 -> 懒加载组件」的表。
  *
- * 正则里排掉**任何以 `_` 开头的路径段**（`_components` / `_views` / `_hooks` /
- * `_utils` …）。这些是页面私有目录，后端菜单表的 url 永远不会指向它们，
- * 却会被 context 模块**同步**打进主包（下面 `r(key)` 是同步 require，
- * 外面套的 `lazy()` 只是包了个已解析的 Promise，并不产生分包）——
- * 于是前台按路由拆出去的那十条视图会原样留在首屏里，「懒加载」名存实亡。
- * 私有目录都由各自的消费方显式 import，排掉不影响任何一处引用。
+ * `import.meta.glob` 默认就是懒加载（值是 `() => import(...)`），每个页面各自成 chunk
+ * ——这正是 RouterContainer 里 <Suspense> 已经准备好接的形态。换成 `eager: true` 会把
+ * 整个 pages 目录连同它传递引入的富文本/表格/图表一起拉进首屏，代码分割就白做了。
+ *
+ * 从 webpack 的 `require.context("../pages/", true, /^\.\/(?:(?!_)[^/]+\/)*(?!_)[^/]+\.tsx$/)`
+ * 迁过来，两点必须对齐，否则后管的动态菜单会全部匹配不上：
+ * 1. 排掉**任何以 `_` 开头的路径段**（`_components` / `_views` / `_hooks` / `_utils` …）。
+ *    这些是页面私有目录，后端菜单表的 url 永远不会指向它们，由各自的消费方显式 import。
+ * 2. key 要去掉 `../pages/` 前缀与 `.tsx` 后缀并转小写，做成 `permit/user/index` 这种
+ *    形状 —— 菜单表里的 url 就是按这个形状比对的。
  */
-const pages = require.context(
-  "../pages/",
-  true,
-  /^\.\/(?:(?!_)[^/]+\/)*(?!_)[^/]+\.tsx$/
-);
+const pages = import.meta.glob<{ default: React.ComponentType }>([
+  "../pages/**/*.tsx",
+  // 排除写在 glob 里、而不是拿到结果再 filter：`import.meta.glob` 在**构建期**就为
+  // 每个命中项生成一条 `import()`，事后 filter 只是不往表里放，那些私有模块照样被
+  // 当成动态入口切成 chunk（实测会多出 useShareReceive / MobileBar / RightPane …）。
+  "!../pages/**/_*/**",
+  "!../pages/**/_*.tsx",
+]);
 
 /**
  * 将所有页面组件转换为懒加载组件映射表
- * @param r - webpack require.context 对象
+ * @param glob - import.meta.glob 的结果（路径 -> 动态 import 函数）
  * @returns 组件路径到懒加载组件的映射
  */
-function importAll(r: __WebpackModuleApi.RequireContext) {
+function importAll(
+  glob: Record<string, () => Promise<{ default: React.ComponentType }>>
+) {
   const modules: Record<
     string,
     React.LazyExoticComponent<React.ComponentType>
   > = {};
 
-  r.keys().forEach((key) => {
+  Object.entries(glob).forEach(([key, loader]) => {
     const normalizedKey = key
       .toLowerCase()
       .replace(/\.tsx$/, "")
-      .replace(/^\.\//, "");
+      .replace(/^\.\.\/pages\//, "");
 
-    // lazy() 需要一个返回 Promise 的函数
-    // webpack 的 require.context 返回的模块需要包装成 Promise
-    modules[normalizedKey] = lazy(() => Promise.resolve(r(key)));
+    modules[normalizedKey] = lazy(loader);
   });
 
   return modules;

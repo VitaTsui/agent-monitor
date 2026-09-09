@@ -20,7 +20,7 @@
 
 ## 技术栈约定
 
-- React 18 + TypeScript + MobX + webpack 5
+- React 18 + TypeScript + MobX + Vite 8
 - 样式一律 scss（`.module.scss`），项目内零 less
 - 列表页 store 继承 `ListPanelStore`、表单 store 继承 `FormModalStore`（`src/stores/basisStoreClass/`）
 - 入口 `src/index.tsx` 引入组件库全局样式 `@hsu-react/ui/es/styles/antd-overload.scss`；项目特有的 antd 覆盖增量放本地 `src/styles/antd-overload.scss`（在其后引入），不要整份拷贝组件库样式

@@ -10,7 +10,13 @@ import PageLoading from "../PageLoading";
 import { RouteType } from "../../router.config";
 import { debounce } from "lodash";
 import useBackTop from "@/hooks/useBackTop";
-import KeepAlive from "react-activation";
+// 用具名导入，不要 `import KeepAlive from "react-activation"`。
+// react-activation 只发 CJS（入口还用 `if (process.env.NODE_ENV)` 二选一地
+// `module.exports = require(...)`），标准 ESM 互操作下「默认导入」拿到的是整个
+// module.exports 对象，不是 exports.default —— webpack 会读 __esModule 帮你退到
+// .default，Vite / Node 不会。写成默认导入的话这里拿到的是个对象，React 直接抛
+// 「Element type is invalid … got: object」，整个后管白屏。
+import { KeepAlive } from "react-activation";
 import { useLocation, useNavigate } from "react-router";
 import { array_is_includes } from "hsu-utils";
 import { getAccessToken } from "@/utils/auth";

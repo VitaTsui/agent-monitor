@@ -3,7 +3,7 @@
 #
 # 为什么需要这个脚本：.env.prod 里的 CRYPTO_KEY / RSA_PUB_KEY 必须与线上 hub 的
 # AM_CRYPTO_KEY / RSA 私钥配对，属于「部署方持有的配置」，不进版本库；而
-# config/webpack.config.prod.cjs 又必须读到这个文件才编得出包。于是结构留在
+# vite.config.ts 又必须读到这个文件才编得出包。于是结构留在
 # .env/.env.prod.example（入库），两个配对值由环境变量注入（CI 走仓库变量）。
 #
 # 用法:

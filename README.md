@@ -14,7 +14,7 @@
 │  agent-monitor-web (React, 端口 3003)                                 │
 │  ├── /portal   前台：Claude 式对话界面（左侧会话列表，右侧对话流+控制）      │
 │  └── /admin    后管：用户管理 / 版本管理 / 机器人接入（登录 + 超级管理员）   │
-│                    │  /api → http://localhost:8383（webpack 代理）      │
+│                    │  /api → http://localhost:8383（Vite 代理）        │
 │                    ▼                                                  │
 │  agent-task-monitor (Rust axum, 端口 8383)                            │
 │  ├── hub 模式（默认）：扫描本机 + 聚合多机 + HTTP/WS API + 登录契约        │
