@@ -51,9 +51,36 @@ fn token_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, 
     C.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// 控制面用：换 token、发 OTO 消息这类小 JSON 往返。
+///
+/// 原来是「整体 8s」一刀切。hub 在境外(Vultr)、钉钉在境内，这条链路会**间歇性卡住**，
+/// 8s 的整体预算太紧。改成三档：连不上 8s 就认（对端不可达要快速失败），连上之后
+/// 每次读最多等 15s，整体封顶 30s —— 卡死的连接照样识别得出来，只是不再把「慢一下」
+/// 当成失败。
 fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .read_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// 取文件字节专用。
+///
+/// **绝不能与 `http_client` 共用同一个预算**：那是给几百字节的 JSON 定的，而这里要把一个
+/// 任意大小的文件从钉钉的国内 CDN 拉到境外的 hub 上。线上抓到过（2026-09-09 hub 日志）：
+/// 一份几 KB 的 .md 连着两次卡在 8.0s 整上超时（02:46:37→02:46:49、02:47:08→02:47:19，
+/// 都是 3s 攒批窗口 + 8s 超时），第三次 0.5s 就下完了 —— 失败与文件大小无关，纯粹是这条
+/// 跨境链路会卡。而超时的后果是 `bot::send_input` 提前 return：文件没下发，**任务正文也
+/// 一起没下发**，用户只能把文件和指令整条重发（那次他重发了三遍）。
+///
+/// 整体给到 180s，靠 20s 的**每次读**超时来兜住真卡死的连接 —— 传输在推进就不该被砍断。
+fn download_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .read_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(180))
         .build()
         .map_err(|e| e.to_string())
 }
@@ -121,36 +148,141 @@ async fn oto_send(
     }
 }
 
-/// 下载机器人「收到的」文件内容（downloadCode → downloadUrl → 字节）。
-pub async fn download_bot_file(
+/// 一次下载尝试的失败：能不能靠「换条新连接再来一次」救回来。
+///
+/// 这个区分是整个重试的前提。没有它，重试要么不敢做、要么对着「下载码已过期」空等
+/// 一整轮超时 —— 后者比不重试还糟。
+#[derive(Debug)]
+enum DlFail {
+    /// 链路问题（连不上 / 超时 / 传一半断了 / 对端 5xx）—— 换条连接就换掉了
+    Retryable(String),
+    /// 下载码过期、鉴权不过、响应结构不对 —— 换几条连接都一样，重试只是白等
+    Fatal(String),
+}
+
+/// 网络层错误里哪些值得再来一次。
+///
+/// `is_timeout` / `is_connect` / `is_request` / `is_body` 说的都是「这条连接不行」；
+/// 剩下的（builder 配错、响应不是 JSON）换多少条连接都还是那样。
+fn classify_net(what: &str, e: reqwest::Error) -> DlFail {
+    let msg = format!("{what}: {e}");
+    if e.is_timeout() || e.is_connect() || e.is_request() || e.is_body() {
+        DlFail::Retryable(msg)
+    } else {
+        DlFail::Fatal(msg)
+    }
+}
+
+/// HTTP 状态码定可重试性。
+///
+/// 5xx / 408 / 429 是「对端这会儿不行」，换条连接重来有意义；其余 4xx 是「这个请求本身
+/// 不行」（下载码过期、token 失效、robotCode 对不上），重试只会把失败拖长一倍。
+fn classify_status(what: &str, status: reqwest::StatusCode, body: &str) -> DlFail {
+    // 错误体可能是一整页 CDN 的 XML/HTML，日志里截断就够定位了
+    let body: String = body.chars().take(300).collect();
+    let msg = format!("{what}（HTTP {status}）: {body}");
+    if status.is_server_error()
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        DlFail::Retryable(msg)
+    } else {
+        DlFail::Fatal(msg)
+    }
+}
+
+/// 「可重试就换新连接再来一次」的骨架。
+///
+/// 抽出来是为了能在没有网络的情况下测到重试本身：生产代码走的是同一段循环。
+async fn retry_once<T, F, Fut>(what: &str, mut attempt: F) -> Result<T, String>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = Result<T, DlFail>>,
+{
+    const ATTEMPTS: u32 = 2;
+    let mut last = String::new();
+    for i in 1..=ATTEMPTS {
+        match attempt(i).await {
+            Ok(v) => {
+                if i > 1 {
+                    tracing::info!("{what} 第 {i} 次成功（第 {} 次失败于：{last}）", i - 1);
+                }
+                return Ok(v);
+            }
+            Err(DlFail::Fatal(e)) => {
+                tracing::warn!("{what} 第 {i}/{ATTEMPTS} 次失败，不重试（重试也是白等）：{e}");
+                return Err(e);
+            }
+            Err(DlFail::Retryable(e)) => {
+                tracing::warn!("{what} 第 {i}/{ATTEMPTS} 次失败（可重试）：{e}");
+                last = e;
+            }
+        }
+    }
+    Err(format!("{what} 重试 {ATTEMPTS} 次仍失败：{last}"))
+}
+
+/// 一次完整的取文件尝试：换下载地址 → 拉字节。
+async fn download_bot_file_once(
     app: &crate::registry::DingtalkApp,
     download_code: &str,
-    now_ms: u64,
-) -> Result<Vec<u8>, String> {
+    token: &str,
+) -> Result<Vec<u8>, DlFail> {
     let robot_code = robot_code_of(app);
-    let token = access_token(&app.app_key, &app.app_secret, now_ms).await?;
-    let resp = http_client()?
+    // **每次尝试都新建 client**：reqwest 的连接池挂在 client 上，复用同一个 client 就可能
+    // 复用那条刚刚卡住的连接 —— 而那条连接正是要换掉的东西，不换等于重试了个寂寞。
+    let cli = download_client().map_err(DlFail::Fatal)?;
+    // 换地址与拉字节都走 download_client：这两步都是跨境到钉钉，正是会卡的那两步。
+    let resp = cli
         .post("https://api.dingtalk.com/v1.0/robot/messageFiles/download")
         .header("x-acs-dingtalk-access-token", token)
         .json(&serde_json::json!({ "downloadCode": download_code, "robotCode": robot_code }))
         .send()
         .await
-        .map_err(|e| format!("取下载地址失败: {e}"))?;
-    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        .map_err(|e| classify_net("取下载地址失败", e))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(classify_status("取下载地址被拒", status, &body));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(|e| classify_net("下载地址响应读取失败", e))?;
     let url = v
         .get("downloadUrl")
         .and_then(|u| u.as_str())
-        .ok_or_else(|| format!("无 downloadUrl: {v}"))?;
-    let bytes = http_client()?
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("下载文件失败: {e}"))?
-        .bytes()
-        .await
-        .map_err(|e| e.to_string())?
-        .to_vec();
+        .ok_or_else(|| DlFail::Fatal(format!("无 downloadUrl: {v}")))?;
+    let resp = cli.get(url).send().await.map_err(|e| classify_net("下载文件失败", e))?;
+    let status = resp.status();
+    // 这一步以前**不查状态码**，直接 `.bytes()`：CDN 返回的 403/404 错误页会被原样当成
+    // 文件内容落到用户目录里 —— 文件名没错、大小几百字节、打开是一段 XML。比下载失败更难查。
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(classify_status("下载文件被拒", status, &body));
+    }
+    let bytes = resp.bytes().await.map_err(|e| classify_net("下载文件中断", e))?.to_vec();
     Ok(bytes)
+}
+
+/// 下载机器人「收到的」文件内容（downloadCode → downloadUrl → 字节）。
+///
+/// 失败会**换一条新连接**重试一次。根因见 [`download_client`] 的注释：这条跨境链路是
+/// **连接级**偶发卡死 —— 线上同一份几 KB 的 .md 连撞两次 8s 超时、第三次 0.5s 就下完。
+/// 单纯抬高超时上限只会让失败来得更慢，换连接才是对症的。
+///
+/// 「换下载地址」那一步也一起重试：它同样是发往 api.dingtalk.com 的跨境请求、同样会卡，
+/// 而它是纯读、幂等（拿一个临时 URL），重来没有副作用。所以两步作为一个整体重来，
+/// 而不是只重试拉字节那一半。
+///
+/// token 留在重试之外只取一次：它有缓存、和链路抖动无关；真失效了会是 401，那是 Fatal。
+pub async fn download_bot_file(
+    app: &crate::registry::DingtalkApp,
+    download_code: &str,
+    now_ms: u64,
+) -> Result<Vec<u8>, String> {
+    let token = access_token(&app.app_key, &app.app_secret, now_ms).await?;
+    // 先降成 &str 再进闭包：这样闭包捕获的全是「借自本函数」的引用，产出的 future 不牵扯
+    // 闭包自身的借用，`FnMut(u32) -> Fut` 才推得动。
+    let token: &str = &token;
+    retry_once("钉钉文件下载", move |_| download_bot_file_once(app, download_code, token)).await
 }
 
 /// 上传一段文本为钉钉媒体文件，返回 media_id（用同一 access_token）。
@@ -451,5 +583,73 @@ mod tests {
     fn urlencode_escapes_base64_chars() {
         // base64 里的 + / = 必须转义，否则拼进 URL 会被解析成别的意思
         assert_eq!(urlencode("a+b/c="), "a%2Bb%2Fc%3D");
+    }
+
+    /// 可重试的失败必须真的再来一次。
+    ///
+    /// 这是整个修复的要害：跨境链路是**连接级**偶发卡死（线上同一份 .md 连撞两次 8s
+    /// 超时、第三次 0.5s 就下完），不重试就等于把一次抖动直接判成失败，而失败的代价是
+    /// 连任务正文一起不下发。
+    #[tokio::test]
+    async fn retryable_failure_is_retried_with_new_attempt() {
+        let calls = std::cell::Cell::new(0u32);
+        let got = retry_once("测试", |i| {
+            calls.set(calls.get() + 1);
+            async move {
+                if i == 1 {
+                    Err(DlFail::Retryable("超时".into()))
+                } else {
+                    Ok(vec![1u8, 2, 3])
+                }
+            }
+        })
+        .await;
+        assert_eq!(got, Ok(vec![1, 2, 3]), "第二次成功就该返回成功");
+        assert_eq!(calls.get(), 2, "可重试的失败必须换新连接再来一次");
+    }
+
+    /// 两次都是可重试的失败 → 放弃，但错误信息要带上最后一次的原因（线上就靠它定位）。
+    #[tokio::test]
+    async fn retryable_failure_gives_up_after_two_attempts() {
+        let calls = std::cell::Cell::new(0u32);
+        let got: Result<(), String> = retry_once("测试", |_| {
+            calls.set(calls.get() + 1);
+            async { Err(DlFail::Retryable("连不上".into())) }
+        })
+        .await;
+        assert_eq!(calls.get(), 2, "只重试一次，不能无限重试把人晾在那");
+        assert!(got.unwrap_err().contains("连不上"), "错误里要留下最后一次的原因");
+    }
+
+    /// 4xx 不重试 —— 下载码过期 / 鉴权不过重试多少次都是同一个结果，
+    /// 白等一轮超时反而让用户多等一倍。
+    #[tokio::test]
+    async fn fatal_failure_is_not_retried() {
+        let calls = std::cell::Cell::new(0u32);
+        let got: Result<(), String> = retry_once("测试", |_| {
+            calls.set(calls.get() + 1);
+            async { Err(DlFail::Fatal("下载码已过期".into())) }
+        })
+        .await;
+        assert_eq!(calls.get(), 1, "不可重试的失败必须立刻放弃");
+        assert!(got.unwrap_err().contains("下载码已过期"));
+    }
+
+    /// 状态码分类：生产代码用的就是这个函数，4xx / 5xx 分得清才谈得上「只重试该重试的」。
+    #[test]
+    fn status_decides_retryability() {
+        use reqwest::StatusCode;
+        let retryable = |s| matches!(classify_status("x", s, "body"), DlFail::Retryable(_));
+        // 对端这会儿不行 → 换条连接重来有意义
+        assert!(retryable(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(retryable(StatusCode::BAD_GATEWAY));
+        assert!(retryable(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(retryable(StatusCode::REQUEST_TIMEOUT), "408 就是超时，正是要重试的那种");
+        assert!(retryable(StatusCode::TOO_MANY_REQUESTS), "429 限流，退一步再来");
+        // 请求本身不行 → 重试只是白等
+        assert!(!retryable(StatusCode::UNAUTHORIZED), "401 token 不对，重试没用");
+        assert!(!retryable(StatusCode::FORBIDDEN), "403 下载码过期，重试没用");
+        assert!(!retryable(StatusCode::NOT_FOUND));
+        assert!(!retryable(StatusCode::BAD_REQUEST));
     }
 }

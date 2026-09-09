@@ -1216,21 +1216,10 @@ async fn queue_pending_file(
     taken: &mut Option<Taken>,
 ) -> Result<QueuedFile, String> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
-    // 已经取好内容的直接用（bytes 非空）；钉钉那条才需要现在去下载。
-    let bytes = match &pf.bytes {
-        Some(b) => b.clone(),
-        None => {
-            // 下载要用「收到该文件的那个应用」的凭据（多租户下 app_user 可能 != 归属账号）
-            let app = state
-                .registry
-                .read()
-                .await
-                .dingtalk_app_of(&pf.app_user)
-                .ok_or("未配置钉钉应用")?;
-            let now_ms = crate::state::now_secs() * 1000;
-            crate::dingtalk::download_bot_file(&app, &pf.download_code, now_ms).await?
-        }
-    };
+    // 字节必须已经取好。**这里不再自己下载** —— 下载归 `fetch_attach_bytes` 一家管，
+    // 它才拿得到整批共享的截止时刻；这里再留一条下载路，整批预算就形同虚设，
+    // 而且同一件事有两套判断，下次一定有人只改其中一套。
+    let bytes = pf.bytes.clone().ok_or("文件内容未取到")?;
     let task = state
         .tasks_for(username)
         .await
@@ -1334,13 +1323,96 @@ async fn queue_pending_file(
     })
 }
 
+/// 一批附件「从钉钉取字节」的**整批**总预算。
+///
+/// 为什么必须是整批的：单个文件的预算是 180s（见 `dingtalk::download_client`），串行下来
+/// N 个附件就是 N×180s —— 三个文件能让人对着「已下发…」等九分钟，而钉钉那头根本看不出
+/// 是卡在哪。下面改成并发取，整批耗时 = 最慢的那一个，这个预算才封得住。
+///
+/// 为什么是 90s 而不是 60s：单个文件的**失败**路径是「连不上 8s / 读卡住 20s」再换新连接
+/// 重来一次（见 `dingtalk::download_bot_file`），最坏约 56s 才见分晓。预算若压到 60s，
+/// 第二次尝试常常刚起头就被自己砍掉，重试等于白加。90s = 56s 的失败路径 + 第二次真的
+/// 下起来的余量（线上成功那次只用了 0.5s）。再往上没有意义：人已经干等一分半了。
+const ATTACH_DOWNLOAD_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// 并发把这一批待发文件的字节取回来，**共用一个截止时刻**。
+///
+/// 拆出来是因为「下载」和「入队」的约束正好相反：下载是跨境的、慢的、彼此无关的，
+/// 该并发；入队要严格按顺序（同一批文件靠 `taken` 互相避让落盘名，见 `queue_pending_file`）。
+/// 原来两件事挤在一个串行循环里，于是只能按最慢的那个假设去叠预算。
+///
+/// 并发上限 4：钉钉对 `messageFiles/download` 有 QPS 限制，一口气糊上去十几个请求可能撞
+/// 限流（那会变成 429，反倒更慢）；4 条已经足够把串行的叠加消掉。
+///
+/// 截止时刻整批共享，不是每个文件各给 90s —— 排在后面的文件不会重新开始计时。
+///
+/// 返回 `Err(点名)` = 有文件没取到。
+async fn fetch_attach_bytes(
+    state: &SharedState,
+    files: Vec<crate::state::BotPendingFile>,
+) -> Result<Vec<crate::state::BotPendingFile>, Vec<String>> {
+    use futures_util::StreamExt;
+    let deadline = tokio::time::Instant::now() + ATTACH_DOWNLOAD_BUDGET;
+    let results: Vec<Result<crate::state::BotPendingFile, String>> =
+        futures_util::stream::iter(files.into_iter().map(|mut pf| async move {
+            // 微信那条在收帧时就把字节带来了，只有钉钉是延后下载
+            if pf.bytes.is_some() {
+                return Ok(pf);
+            }
+            // 下载要用「收到该文件的那个应用」的凭据（多租户下 app_user 可能 != 归属账号）
+            let app = match state.registry.read().await.dingtalk_app_of(&pf.app_user) {
+                Some(a) => a,
+                None => return Err(format!("{}：未配置钉钉应用", pf.file_name)),
+            };
+            let now_ms = crate::state::now_secs() * 1000;
+            let dl = crate::dingtalk::download_bot_file(&app, &pf.download_code, now_ms);
+            match tokio::time::timeout_at(deadline, dl).await {
+                Ok(Ok(b)) => {
+                    pf.bytes = Some(b);
+                    Ok(pf)
+                }
+                Ok(Err(e)) => Err(format!("{}：{e}", pf.file_name)),
+                Err(_) => Err(format!(
+                    "{}：整批下载超过 {}s 预算，没等到",
+                    pf.file_name,
+                    ATTACH_DOWNLOAD_BUDGET.as_secs()
+                )),
+            }
+        }))
+        // buffered 保序：入队顺序 = 用户发文件的顺序，拼进任务正文的路径顺序也跟着它
+        .buffered(4)
+        .collect()
+        .await;
+    let mut ok = Vec::new();
+    let mut bad = Vec::new();
+    for r in results {
+        match r {
+            Ok(pf) => ok.push(pf),
+            Err(e) => bad.push(e),
+        }
+    }
+    if bad.is_empty() {
+        Ok(ok)
+    } else {
+        Err(bad)
+    }
+}
+
 /// 认领一个已入队文件的落盘结果，返回拼进任务正文的路径。
 ///
 /// 一批文件依次调用即可：它们是同一轮下发、同一轮回报的，第一个等到之后其余的结果早已
 /// 躺在缓存里，后面几个立即返回 —— 总耗时仍是一次往返。
-async fn resolve_queued(state: &SharedState, q: &QueuedFile) -> Result<String, String> {
+///
+/// 返回的 `bool` = **要了落盘回报却没等到**（不含「这个客户端本来就不回报」那种）。
+/// 它意味着 hub 这边其实不知道文件到底有没有落地 —— `pending_files` 是「响应一发出就从
+/// 队列里没了」的（见 server::report 的 drain），客户端没收到就无从重来。此前这里一律
+/// 返回 Ok，回执照样是「📤 已下发」，人拿着一条指向空气的路径去问 agent 为什么读不到。
+/// 所以要把这份「不确定」原样带回给调用方，由它写进回执。
+async fn resolve_queued(state: &SharedState, q: &QueuedFile) -> Result<(String, bool), String> {
     if q.transfer_id.is_empty() {
-        return Ok(q.to_rel(q.target.clone()));
+        // 这个客户端版本就不回报 —— 是已知的能力缺口，不是这次出了岔子。
+        // 当成异常提示的话，老客户端每发一个文件都要挨一句警告，人很快就学会无视它。
+        return Ok((q.to_rel(q.target.clone()), false));
     }
     // 等客户端回报真实落盘路径。等到 = 路径必定对得上；等不到就退回预判名 —— 那是入队时
     // 算的、已尽力避开撞名的名字，不是原样的「图片.jpg」。
@@ -1349,7 +1421,7 @@ async fn resolve_queued(state: &SharedState, q: &QueuedFile) -> Result<String, S
             if path != q.target {
                 tracing::info!("下发文件落盘改名：预判 {} → 实际 {path}", q.target);
             }
-            Ok(q.to_rel(path))
+            Ok((q.to_rel(path), false))
         }
         Some(Err(e)) => Err(format!("客户端写入失败：{e}")),
         None => {
@@ -1358,7 +1430,7 @@ async fn resolve_queued(state: &SharedState, q: &QueuedFile) -> Result<String, S
                 q.machine_id,
                 q.target
             );
-            Ok(q.to_rel(q.target.clone()))
+            Ok((q.to_rel(q.target.clone()), true))
         }
     }
 }
@@ -1518,19 +1590,54 @@ async fn send_input(
     // 先把整批都塞进下发队列，再统一认领落盘结果 —— 客户端一轮就会全部取走并落盘，
     // 下一轮一起回报。逐个「下发→等回报」则是几次串行往返，附件多时能拖到半分钟。
     let mut queued: Vec<QueuedFile> = Vec::new();
+    // 过期被跳过的文件名。**不能像原来那样直接 continue 了事**：下面会把整个待发列表摘掉，
+    // 于是文件既没跟着任务走、也不在列表里了，而回执还是「📤 已下发到会话 N」——
+    // 人在目录里扑空，从两头都查不出它是什么时候没的。丢可以，但必须说出来。
+    let mut expired: Vec<String> = Vec::new();
+    let mut fresh: Vec<crate::state::BotPendingFile> = Vec::new();
     for pf in &pending {
         if crate::state::now_secs().saturating_sub(pf.at) > 20 * 60 {
+            expired.push(pf.file_name.clone());
             continue;
         }
+        fresh.push(pf.clone());
+    }
+    // 先并发把字节都取回来（整批封顶 90s），再逐个入队。合在一个串行循环里的话，
+    // 超时预算会按附件个数叠加 —— 见 fetch_attach_bytes 的注释。
+    let fresh = match fetch_attach_bytes(state, fresh).await {
+        Ok(v) => v,
+        // 取不到字节 → **整条不发**，待发列表原样留着。
+        //
+        // 这里刻意不走「过期文件那样点名跳过、任务照发」：过期文件是 20 分钟前的旧东西，
+        // 跟眼下这句指令多半无关，丢了就丢了；而这一批正是用户此刻要 agent 看的东西，
+        // 少了它任务就是在错误前提上跑。何况下面 1560 行会把整个待发列表摘掉 —— 跳过
+        // 等于文件**永久没了**，用户得重新上传；中止则只需把指令重发一遍，文件还在。
+        Err(bad) => {
+            return format!(
+                "附带文件下发失败：\n{}\n任务未下发，文件仍挂着，重发一遍这条指令即可再试。",
+                bad.iter().map(|s| format!("· {s}")).collect::<Vec<_>>().join("\n")
+            )
+        }
+    };
+    for pf in &fresh {
         match queue_pending_file(state, username, &task_id, pf, &mut taken).await {
             Ok(q) => queued.push(q),
-            Err(e) => return format!("附带文件下发失败：{e}"),
+            // 文件没成，任务正文也跟着不发了（这个 return 就在正文入队之前）——
+            // 得说清楚，否则用户以为只是「文件没带上、话已经说出去了」。
+            Err(e) => return format!("附带文件下发失败：{e}\n任务未下发，文件仍挂着，重发一遍这条指令即可再试。"),
         }
     }
+    // 要了落盘回报却没等到的文件数 —— hub 并不知道它们到底有没有落地
+    let mut unconfirmed = 0usize;
     for q in &queued {
         match resolve_queued(state, q).await {
-            Ok(rel) => rels.push(rel),
-            Err(e) => return format!("附带文件下发失败：{e}"),
+            Ok((rel, lost_ack)) => {
+                if lost_ack {
+                    unconfirmed += 1;
+                }
+                rels.push(rel);
+            }
+            Err(e) => return format!("附带文件下发失败：{e}\n任务未下发，文件仍挂着，重发一遍这条指令即可再试。"),
         }
     }
     // 全部落定了才摘。中途失败时上面已经 return，待发列表原样留着，重发一遍指令即可再试。
@@ -1539,6 +1646,23 @@ async fn send_input(
     }
     if !rels.is_empty() {
         text = format!("{} {text}", rels.join(" "));
+    }
+    // 回执上要补的话：这两种都是「任务照发了，但文件这边有问题」，不说就等于静默。
+    let mut notes = String::new();
+    if !expired.is_empty() {
+        notes.push_str(&format!(
+            // 回执走的是 msgtype=text（见 dingtalk_text_payload），markdown 不生效 ——
+            // 写 `**没有**` 用户看到的就是两个星号，别用。
+            "\n⚠️ {} 个文件挂了超过 20 分钟已过期，没有附带（{}）。请重新发一遍文件。",
+            expired.len(),
+            expired.join("、")
+        ));
+    }
+    if unconfirmed > 0 {
+        notes.push_str(&format!(
+            "\n⚠️ 有 {unconfirmed} 个文件没等到落盘确认，路径是预判的 —— \
+             若 agent 说找不到文件，请重发一遍。"
+        ));
     }
     if let Err(e) =
         queue_command(state, username, &task_id, ControlAction::Input, Some(text.clone()), "dingtalk").await
@@ -1560,9 +1684,9 @@ async fn send_input(
                 idx.clone(),
             );
             tokio::spawn(async move { confirm_and_watch(st, wh, exp, user, tid, txt, i).await });
-            format!("📤 已下发到会话 {idx}：{text}\n确认排队/执行中，稍后通知…")
+            format!("📤 已下发到会话 {idx}：{text}\n确认排队/执行中，稍后通知…{notes}")
         }
-        _ => format!("已发送到会话 {idx}：{text}"),
+        _ => format!("已发送到会话 {idx}：{text}{notes}"),
     }
 }
 

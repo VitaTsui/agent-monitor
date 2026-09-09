@@ -202,15 +202,17 @@ async fn connect_once(
                 // 必须当场说出来：否则它会被当成一条空文本走完全程，人在目录里扑空还以为是
                 // 落盘出了问题。带上 msgtype 是为了让这一句本身就够定位。
                 //
+                // 判据见 should_warn_unparsed_media：要**真的有非文字元素**却一个下载码都
+                // 没解析出来才报。纯文字的 richText（粘贴带格式文本）不算。
+                //
                 // 在这里就把整句话拼好（而不是把 msgtype 带进下面的 spawn）：msgtype 借自 m，
                 // 跨不过 spawn 的 'static 边界。
-                let unparsed_media_reply = (files.is_empty()
-                    && content.is_empty()
-                    && msgtype != "text")
+                let unparsed_media_warn = should_warn_unparsed_media(&m, msgtype, files.len())
                     .then(|| {
                         format!(
+                            // 回执是 msgtype=text，markdown 不生效，`**…**` 会原样显示成星号
                             "⚠️ 收到一条 {msgtype} 消息，但没能从中取到文件下载码，\
-                             这个文件**没有**被暂存。请把这句话连同文件类型告知维护者。"
+                             这个文件没有被暂存。请把这句话连同文件类型告知维护者。"
                         )
                     });
 
@@ -295,8 +297,6 @@ async fn connect_once(
                             _ if bind_reply.is_some() => bind_reply,
                             // 未绑定：回引导（登录链接 + 绑定码两条路）
                             Err(guide) => Some(guide),
-                            // 富媒体但没捞到下载码：直说，别让它冒充「已收到文件」
-                            Ok(_) if unparsed_media_reply.is_some() => unparsed_media_reply,
                             Ok(acct) => match batch_gen {
                                 // 已入合并窗口：等它到期，由最后一条负责合并下发与回执。
                                 // 纯文件的那条也走这里 —— 窗口到期时若一句话都没攒到，
@@ -310,6 +310,17 @@ async fn connect_once(
                                     crate::bot::dispatch(&st, &acct, &content, Some(&ctx)).await,
                                 ),
                             },
+                        };
+                        // 「没捞到下载码」的告警只**附加**，绝不顶替正常回执。
+                        // 顶替过一次就会出事：带正文的富媒体已经在上面 batch_push 进了合并
+                        // 窗口，若在这里直接返回告警，这条消息的 batch_flush 就永远不会被
+                        // 调用 —— 整批攒着的正文谁也不负责下发，全丢。
+                        // 攒批未到期（reply 为 None）时，告警先单独发一条，正文照旧由最后
+                        // 一条负责。
+                        let reply = match (unparsed_media_warn, reply) {
+                            (Some(w), Some(r)) => Some(format!("{w}\n\n{r}")),
+                            (Some(w), None) => Some(w),
+                            (None, r) => r,
                         };
                         let Some(reply) = reply else {
                             return; // 窗口未到期，由这一批的最后一条负责回执
@@ -420,6 +431,38 @@ fn extract_files(m: &Value, msgtype: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// 该不该就「一个下载码都没捞到」当场告警。
+///
+/// 判据：**这条消息里确实有非文字的东西，却一个下载码都没解析出来**。
+///
+/// 这个判断写错过两次，两次的方向正好相反，所以两边都要钉住：
+///
+/// - 曾经多要求一个「content 为空」。而 richText（图文一起发）恰恰是最常见的形态，
+///   「按这张图改一下」这种消息 content 非空，于是绕开告警、文件静默丢掉，回执还是成功样。
+/// - 后来改成「非 text 且 0 文件」，又矫枉过正：用户从别处**粘一段带格式的纯文本**，
+///   钉钉照样发 richText，数组里全是 `{"text": …}`、本来就一个文件都没有 —— 每条都要
+///   挨一句「文件没被暂存」。告警一多就没人看，真丢文件那次也跟着被无视。
+///
+/// 所以 richText 要再看一眼数组里到底有没有非文字元素：钉钉的 richText 里文字是
+/// `{"text": "…"}`、图片是 `{"downloadCode": "…", "type": "picture"}`，判据就是
+/// **存在不含 `text` 键的元素**。数组本身取不到（结构和预期对不上）也报 —— 那种情况
+/// 根本无从判断里面有没有文件，正是最该让人知道的。
+///
+/// 其余 msgtype（file / picture / 不认识的富媒体）msgtype 本身就宣告了有媒体，照报。
+fn should_warn_unparsed_media(m: &Value, msgtype: &str, file_count: usize) -> bool {
+    // 捞到了就别多嘴；msgtype 为空是坏帧（对每条坏帧刷屏没有意义）
+    if file_count > 0 || msgtype.is_empty() || msgtype == "text" {
+        return false;
+    }
+    if msgtype == "richText" {
+        return match m.pointer("/content/richText").and_then(Value::as_array) {
+            Some(arr) => arr.iter().any(|it| it.get("text").is_none()),
+            None => true,
+        };
+    }
+    true
+}
+
 /// 深捞 JSON 里所有「…downloadCode」字段（按出现顺序，去重）。
 ///
 /// 只认字段名后缀，不认层级 —— 正是因为层级不可靠才要有这一步。
@@ -524,5 +567,50 @@ mod extract_files_tests {
     fn plain_text_yields_nothing() {
         let m = json!({"text": {"content": "@7 跑一下"}});
         assert!(extract_files(&m, "text").is_empty());
+    }
+
+    /// 富媒体没捞到码就必须告警 —— **带不带正文都一样**。
+    ///
+    /// 曾经的判据多要求一个「content 为空」，于是「图片 + 一句话」（richText，最常见的
+    /// 形态）解析失败时不告警，文件静默丢掉、回执还是成功样。
+    #[test]
+    fn warns_on_media_without_code_even_with_text() {
+        use super::should_warn_unparsed_media;
+        // 图 + 一句话：数组里那个图片元素没有 text 键，下载码却没解出来 → 必须告警
+        let with_text = json!({"content": {"richText": [
+            {"text": "按这张图改一下"}, {"type": "picture"}]}});
+        assert!(should_warn_unparsed_media(&with_text, "richText", 0), "图文一起发也要告警");
+        // richText 结构完全对不上预期 —— 里面有没有文件根本无从判断，正是最该报的
+        let broken = json!({"content": {"foo": "bar"}});
+        assert!(should_warn_unparsed_media(&broken, "richText", 0), "结构对不上就该报");
+
+        let file = json!({"content": {"fileName": "a.pdf"}});
+        assert!(should_warn_unparsed_media(&file, "file", 0));
+        assert!(should_warn_unparsed_media(&file, "spaceFile", 0), "不认识的富媒体类型也要告警");
+        // 解析出来了就别多嘴
+        assert!(!should_warn_unparsed_media(&with_text, "richText", 1));
+        assert!(!should_warn_unparsed_media(&file, "file", 2));
+        // 纯文本与解析不出 msgtype 的坏帧不告警（后者会变成对每条坏帧刷屏）
+        assert!(!should_warn_unparsed_media(&json!({}), "text", 0));
+        assert!(!should_warn_unparsed_media(&json!({}), "", 0));
+    }
+
+    /// 纯文字的 richText 不许告警。
+    ///
+    /// 用户从别处粘一段**带格式的纯文本**，钉钉发的就是 richText，数组里全是
+    /// `{"text": …}`、本来就一个文件都没有。按「非 text 且 0 文件」判，这种消息每条都要
+    /// 挨一句「文件没被暂存」—— 告警一多就没人看了，真丢文件那次也跟着被无视。
+    #[test]
+    fn plain_rich_text_does_not_warn() {
+        use super::should_warn_unparsed_media;
+        let pasted = json!({"content": {"richText": [
+            {"text": "第一段", "bold": true}, {"text": "第二段"}]}});
+        assert!(!should_warn_unparsed_media(&pasted, "richText", 0), "粘贴的带格式纯文本不该告警");
+        // 空数组同理：里面什么都没有，没有「丢了文件」这回事
+        let empty = json!({"content": {"richText": []}});
+        assert!(!should_warn_unparsed_media(&empty, "richText", 0));
+        // 而这些确实没有文件，extract_files 也确实捞不到东西 —— 两边判据不能打架
+        assert!(extract_files(&pasted, "richText").is_empty());
+        assert!(extract_files(&empty, "richText").is_empty());
     }
 }
