@@ -8,8 +8,9 @@ tmp
 playwright
 .playwright-mcp
 
-# 运行时生成的密钥，勿入库
-agent-task-monitor/keys/
+# 私钥一律不入库。hub 的 RSA 私钥是运行时读/生成的（AM_RSA_KEY_PATH，
+# 缺省落在数据目录），不再编译期嵌入，仓库里本就不该出现任何 .pem。
+*.pem
 
 # Claude 本地配置（保留项目级 skills）
 **/.claude/*
