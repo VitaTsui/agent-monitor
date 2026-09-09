@@ -8,6 +8,18 @@ import { PortalMessage } from "@/services/apis/portal";
  * 过滤口径必须一致 —— 所以集中在这里，两处共用，别各写各的。
  */
 
+/**
+ * 「当前状态」快照消息的 role。
+ *
+ * 这两条与对话消息**语义相反**：对话是只增不减的事件流，它们是每轮重算的当前状态，
+ * 新的一份就该整个顶掉旧的。混进对话流的累积去重里会被当成重复丢掉 —— 见
+ * PortalStore.fetchMessages 里的说明。
+ */
+export const STATE_ROLES = ["todos", "bgtasks"];
+
+/** 这条消息是状态快照而非对话内容 */
+export const isStateSnapshot = (role: string) => STATE_ROLES.includes(role);
+
 /** 任务清单里的一项（后端 todos 消息的 JSON 结构） */
 export interface TodoItem {
   id: string;

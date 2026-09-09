@@ -17,6 +17,7 @@ import {
 } from "@/services/apis/portal";
 
 import { isSlashCommand } from "./_utils/slashCommand";
+import { isStateSnapshot } from "./_utils/sessionState";
 
 import { makeAutoObservable } from "mobx";
 import { message as antdMessage } from "@hsu-react/ui";
@@ -806,10 +807,30 @@ class PortalStore {
           return;
         }
         if (res.code === 0) {
-          const incoming = res.data?.list ?? [];
+          const list = res.data?.list ?? [];
+          // 「当前状态」快照（todos / bgtasks）**不能走下面那套累积去重**：
+          // 它们是每轮重算的当前状态，新的一份必须整个顶掉旧的。
+          //
+          // 混进去会被静默丢掉：去重键是 `时间戳|role|全文长度|前 60 字`，而快照的时间戳
+          // 取自最后一条对话消息 —— 父会话闲着时它一动不动；`running` 与 `stopped` 又
+          // 恰好都是 7 个字符，全文长度分毫不差；前 60 字则止步于第一条任务的 status 之前
+          // —— `[{"id":"<17 位>","label":"` 固定占 36 字，首条 label 满 12 字时，status 的值
+          // 就落到下标 60 开外切不进来了（实测 11 字还切得到、12 字起切不到；线上那两条
+          // 是 13、14 字）；若翻转的不是首条，那更是与首条 label 长短无关，必撞。三段全撞，
+          // 新旧快照的键完全一样。实测线上会话 7d4a7af0 那份 2371 字节的快照，把两条
+          // running 改成 stopped 之后键逐字节相同 —— 于是「子会话已经不在跑了」这个更新
+          // 永远递不到界面上，胶囊一直挂着。
+          // （`completed` 是 9 个字符、长度会变，所以只有 stopped 这条路被吞，更阴。）
+          const incoming = list.filter((m) => !isStateSnapshot(m.role));
+          const snapshots = list.filter((m) => isStateSnapshot(m.role));
           // 累积合并：拉取是滑动窗口会丢老消息，这里按 key 去重后只增不减，
           // 保证对话流稳定增长、不因窗口滑动丢历史。
-          let prev = this._messagesById[id] ?? [];
+          const prevSnapshots = (this._messagesById[id] ?? []).filter((m) =>
+            isStateSnapshot(m.role),
+          );
+          let prev = (this._messagesById[id] ?? []).filter(
+            (m) => !isStateSnapshot(m.role),
+          );
           // key 带上全文长度，降低同时间戳+同前缀不同消息被误判重复的概率
           const mkey = (m: PortalMessage) =>
             `${m.timestamp}|${m.role}|${m.content.length}|${m.content.slice(0, 60)}`;
@@ -877,16 +898,23 @@ class PortalStore {
           });
           const echoReplaced = withoutEcho.length !== prev.length;
           prev = withoutEcho;
+          // 状态快照按内容比，变了就整份换掉（它是替换语义，不是追加语义）
+          const sameSnapshots =
+            prevSnapshots.length === snapshots.length &&
+            prevSnapshots.every((m, i) => m.content === snapshots[i].content);
           // 无新消息就不换引用：轮询每 2s 一次，无条件替换会让整条对话流
           // 每 2s 白重渲染一遍（长会话下明显掉帧）。
-          if (fresh.length || echoReplaced) {
+          if (fresh.length || echoReplaced || !sameSnapshots) {
             // 单会话上限：只增不减的合并会随长会话无限涨，超出后丢最老的。
             const merged = [...prev, ...fresh];
+            const kept =
+              merged.length > MAX_MESSAGES_PER_TASK
+                ? merged.slice(-MAX_MESSAGES_PER_TASK)
+                : merged;
+            // 快照挂在末尾：parseLast 从后往前找，取到的就是最新这份
             this._messagesById = {
               ...this._messagesById,
-              [id]: merged.length > MAX_MESSAGES_PER_TASK
-                ? merged.slice(-MAX_MESSAGES_PER_TASK)
-                : merged,
+              [id]: [...kept, ...snapshots],
             };
           }
         }
