@@ -319,10 +319,17 @@
   }
 }
 
-  // 交互式选择卡片（AskUserQuestion 同步）：琥珀色调，暗示「等待输入」
+  // 交互式选择卡片（AskUserQuestion 同步）：琥珀色调，暗示「等待输入」。
+  //
+  // 底色**自己画**，用 --term-bg。这张卡从头到脚是终端配色（--term-amber /
+  // --term-fg / --term-text，都是压在深底上的浅色），所以它得自带那块深底。
+  // 原先底色由外层的 ChatPane `.pendingSelect { background: var(--foreground) }`
+  // 顶上 —— 那是拿「正文色」当深底使，只在浅色主题下碰巧成立：暗色下
+  // --foreground 翻成近白，浅色字压近白底，整张卡在暗色模式里几乎看不见。
   .selectCard {
     border: 1px solid color-mix(in srgb, var(--term-amber) 45%, transparent);
     border-radius: var(--radius);
+    background: var(--term-bg);
     margin: 2px 0 6px;
     overflow: hidden;
 

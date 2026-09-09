@@ -440,10 +440,9 @@
     max-height: 46vh;
     overflow-y: auto;
     margin-bottom: 8px;
-    // 卡片本身的配色是按终端深色底设计的（文字/描述都是浅色），
-    // 直接放到这块浅色区就是浅底浅字，得把底色一起带过来。
-    background: var(--foreground);
-    border-radius: var(--radius);
+    // 底色由卡片自己画（见 TerminalFeed 的 .selectCard）。这里原先写的是
+    // `background: var(--foreground)` —— 拿正文色当深底使，只在浅色主题下
+    // 碰巧成立，暗色下 --foreground 翻成近白，整张卡的浅色字就没了。
     padding: 8px;
     // 出现时轻推一下，让人注意到「多了个要办的事」
     animation: pendingIn 0.18s ease-out;
