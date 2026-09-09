@@ -84,7 +84,7 @@ graph TB
 - `crypto.rs` —— 登录口令的 RSA+AES 解密（与前端 `.env` 密钥配对）。
 - `oauth.rs` —— 第三方登录（Apple / 钉钉 等）。
 - `dingtalk.rs` / `dingtalk_stream.rs` —— 钉钉主动推送 + Stream 长连接双向遥控。
-- `bot.rs` —— 渠道无关的机器人指令分发（会话/发/暂停/撤回/监控/@N 速记 …）。
+- `bot.rs` —— 渠道无关的机器人指令分发（会话/发/暂停/撤回/监控/#N 速记 …）。
 - `wecom.rs` —— 企业微信自建应用。
 - `admin.rs` / `commands.rs` —— 后台管理、部署令牌校验。
 
@@ -190,7 +190,7 @@ sequenceDiagram
 **解法**：Stream 模式 —— hub 用 AppKey/AppSecret **主动**向钉钉网关建 WebSocket 长连接收消息（`dingtalk_stream.rs`），完全免公网入站。
 - 收消息 → `bot::dispatch` 渠道无关指令分发 → `sessionWebhook` 回发。
 - 主动推送（任务完成/需选择/会话结束）→ 企业应用 OTO `oToMessages/batchSend` 私聊本人。
-- 指令：`会话`（按设备→终端→项目分组列出）、`发 N`、`暂停/中断/终止/撤回 N`、`监控 N`、`绑定`、`@N 速记`。
+- 指令：`会话`（按设备→终端→项目分组列出）、`发 N`、`暂停/中断/终止/撤回 N`、`监控 N`、`绑定`、`#N 速记`。
 - 推送去抖：`online_since` 沉降期（重连/更新不刷屏「会话开始」）、`FINISH_GRACE`（配对振荡不误推结束）、`last_select_at`（等待选择的会话不误判开始/结束）。
 - 长内容：正文截断预览 + 完整原文作为 `.txt` 文件补发（`upload_media` → `sampleFile`）。
 

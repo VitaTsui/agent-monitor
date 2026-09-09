@@ -39,7 +39,7 @@ pub struct HistoryEntry {
     /// 下发来源：dingtalk / web / mcp；assistant 条为空
     #[serde(default)]
     pub source: String,
-    /// 会话在钉钉里的号位（@N 的 N），让两边编号对得上
+    /// 会话在钉钉里的号位（#N 的 N），让两边编号对得上
     #[serde(default)]
     pub slot: Option<u32>,
     pub hostname: String,

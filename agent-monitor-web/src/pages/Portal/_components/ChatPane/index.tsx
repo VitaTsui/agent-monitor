@@ -362,8 +362,8 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
             {/* 号位：手机上看着这个号去钉钉发「@N …」。移动端头部是唯一能看到它的
                 地方（侧栏是抽屉、看完就收起了），所以这里必须有。 */}
             {task.slot != null && (
-              <Tooltip title={`钉钉里发「@${task.slot} 内容」即下发到这个终端`}>
-                <span className={styles.slotChip}>@{task.slot}</span>
+              <Tooltip title={`钉钉里发「#${task.slot} 内容」即下发到这个终端`}>
+                <span className={styles.slotChip}>#{task.slot}</span>
               </Tooltip>
             )}
             <span className={styles.headTitleText}>

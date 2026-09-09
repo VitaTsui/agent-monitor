@@ -611,7 +611,7 @@ const Portal: React.FC = observer(() => {
                               />
                               {/* 号位：与钉钉「@N」同一个编号，在手机上照着这个号下发 */}
                               {t.slot != null && (
-                                <Tooltip title={`钉钉里发「@${t.slot} 内容」即下发到这个终端`}>
+                                <Tooltip title={`钉钉里发「#${t.slot} 内容」即下发到这个终端`}>
                                   <span className={styles.sessSlot}>{t.slot}</span>
                                 </Tooltip>
                               )}

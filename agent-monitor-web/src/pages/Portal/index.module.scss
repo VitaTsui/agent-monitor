@@ -279,7 +279,7 @@ $active-bg: color-mix(in srgb, var(--foreground) 9%, transparent);
         }
       }
 
-      // 号位徽标：与钉钉「@N」是同一个编号。人在手机上看网页、用钉钉下发，
+      // 号位徽标：与钉钉「#N」是同一个编号。人在手机上看网页、用钉钉下发，
       // 这个号是两端唯一的对照物，所以放在最显眼的行首（状态点之后）。
       .sessSlot {
         flex: none;

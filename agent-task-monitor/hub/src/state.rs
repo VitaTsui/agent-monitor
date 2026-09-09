@@ -338,7 +338,7 @@ pub struct AppState {
     pub history: RwLock<Vec<crate::history::HistoryEntry>>,
     /// 历史有未落盘变更（tick 循环定期 flush 到 history.json）
     pub history_dirty: std::sync::atomic::AtomicBool,
-    /// 机器人会话号位（「@2 / 发 2 / 暂停 2」里的 2）：用户名 → 号位表。
+    /// 机器人会话号位（「#2 / 发 2 / 暂停 2」里的 2）：用户名 → 号位表。
     /// 号绑定终端窗口而非列表位置，跨排序变化与 hub 重启都不变 —— 见 crate::slots。
     pub bot_slots: RwLock<HashMap<String, crate::slots::SlotTable>>,
     /// 号位表有未落盘变更（tick 循环定期 flush 到 bot_slots.json）
@@ -347,7 +347,7 @@ pub struct AppState {
     /// 钉钉「监控」：user → 其监控中的多个会话（每会话一份）。支持同时监控多个、单独停止。
     pub bot_monitors: RwLock<HashMap<String, Vec<BotMonitor>>>,
     /// 连续对话「待确认」的内容：用户名 → (原文, 暂存时刻秒)。
-    /// 锁定的会话冷却后（久未对话），第一条不带 `@` 的消息不直接下发，先回一句确认、把内容
+    /// 锁定的会话冷却后（久未对话），第一条不带 `#` 的消息不直接下发，先回一句确认、把内容
     /// 存在这里；用户回「确认」就发它，省得重打一遍。短期数据，不落盘。
     pub bot_sticky_pending: RwLock<HashMap<String, (String, u64)>>,
     /// 配置同步基线：账号 → 其「配置源」设备的在管配置。见 crate::configsync。
@@ -463,7 +463,7 @@ impl AppState {
         let (tx, _) = broadcast::channel(64);
         // 会话持久化：重启不掉线（网页 / 移动端 / 客户端一体生效）
         let sessions = load_sessions(&config.data_dir);
-        // 号位持久化：hub 重启后「@2」还是同一个终端（重启丢表正是序号错位的成因之一）
+        // 号位持久化：hub 重启后「#2」还是同一个终端（重启丢表正是序号错位的成因之一）
         let slots = crate::slots::load(&config.data_dir);
         // 会话历史持久化：hub 重启后仍能回看之前派出去的活的结果
         let history = crate::history::load(&config.data_dir);

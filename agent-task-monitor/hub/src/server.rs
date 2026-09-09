@@ -733,8 +733,8 @@ async fn list_tasks(
     ok(json!({ "list": with_slots(&state, &user, &filtered).await }))
 }
 
-/// 给会话补上「号位」（钉钉里 `@N` 的 N），让网页/移动端与钉钉看到同一个编号 ——
-/// 否则在网页上看着会话，却不知道该 @ 几号。
+/// 给会话补上「号位」（钉钉里 `#N` 的 N），让网页/移动端与钉钉看到同一个编号 ——
+/// 否则在网页上看着会话，却不知道该 # 几号。
 ///
 /// 号位的分配与去重统一由 `bot::sorted_active_tasks` 负责（那里保证了分配顺序稳定），
 /// 这里**只按终端锚查、不分配**，避免两处各自分配导致编号不一致。
@@ -3638,7 +3638,7 @@ async fn report(
 
     // 会话历史：锁已释放，这里统一落（record 内部去重 + 截断 + 标脏，tick 循环负责写盘）
     for (mut rec, anchor) in pending_history {
-        // 补号位，让历史里的编号与钉钉的「@N」对得上。会话可能已结束、活跃列表里查不到，
+        // 补号位，让历史里的编号与钉钉的「#N」对得上。会话可能已结束、活跃列表里查不到，
         // 所以按终端锚直接查表（锚要过保留期才回收，多数情况仍在）。
         rec.slot = crate::slots::slot_of(&state, &rec.owner, &anchor).await;
         crate::history::append(&state, rec).await;

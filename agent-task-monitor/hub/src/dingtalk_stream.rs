@@ -622,7 +622,7 @@ mod extract_files_tests {
     /// 真的没有文件就别硬造 —— 纯文本消息不该被当成富媒体。
     #[test]
     fn plain_text_yields_nothing() {
-        let m = json!({"text": {"content": "@7 跑一下"}});
+        let m = json!({"text": {"content": "#7 跑一下"}});
         assert!(extract_files(&m, "text").is_empty());
     }
 

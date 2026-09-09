@@ -102,29 +102,44 @@ pub(crate) struct ReplyCtx {
     pub robot_code: String,
 }
 
-/// 会话级指令（吃一个会话号位 N）：`@x` 速记与多目标都只对这些指令 + 「内容(=发)」生效。
+/// 会话级指令（吃一个会话号位 N）：`#x` 速记与多目标都只对这些指令 + 「内容(=发)」生效。
 const SESSION_CMDS: &[&str] = &[
     "暂停", "恢复", "中断", "终止", "停止", "撤回", "监控", "watch", "排队", "队列", "queue",
 ];
 
-/// 解析「@N …」速记为一组 (cmd, arg)。支持多目标：`@1 @2 xxx`、`@1 @2 暂停`、`@x 排队`。
-/// - 非 @ 开头 → None（交常规分发）。
-/// - @ 开头但没解析出有效目标/内容 → Some(空) → 提示用法。
+/// 会话号位的展示与输入前缀：`#N`。推送里的 `{NO}` 占位早就是 `#N`，界面徽标、帮助文案
+/// 也一律用它 —— **别再往任何用户可见的地方写 `@`**。
+const SLOT_PREFIX: char = '#';
+
+/// 老写法 `@N`：换用 `#` 之前的速记前缀。继续认，但不再对外宣传。
+///
+/// 不删是因为它没有歧义成本（两个前缀后面都必须紧跟数字），而删掉的代价是实打实的：
+/// 用户的手指记忆、钉钉里翻得到的历史消息、别处抄来的用法，全部一夜失效。
+/// 顺带一提，`@` 在钉钉输入框里会弹「@某人」选择器，本来就不好打 —— 这也是换成 `#` 的原因。
+const SLOT_PREFIX_LEGACY: char = '@';
+
+/// 剥掉会话号位前缀（新写法 `#` 优先，老写法 `@` 兼容）。
+fn strip_slot_prefix(s: &str) -> Option<&str> {
+    s.strip_prefix(SLOT_PREFIX)
+        .or_else(|| s.strip_prefix(SLOT_PREFIX_LEGACY))
+}
+
+/// 解析「#N …」速记为一组 (cmd, arg)。支持多目标：`#1 #2 xxx`、`#1 #2 暂停`、`#x 排队`。
+/// - 非前缀开头 → None（交常规分发）。
+/// - 前缀开头但没解析出有效目标/内容 → Some(空) → 提示用法。
 /// - rest 首词是会话级指令 → 每个目标一条「指令 N …」；否则整段当内容 → 每个目标一条「发 N …」。
-fn parse_at_commands(text: &str) -> Option<Vec<(String, String)>> {
+fn parse_slot_commands(text: &str) -> Option<Vec<(String, String)>> {
     let mut rest = text.trim();
-    if !rest.starts_with('@') {
-        return None;
-    }
+    strip_slot_prefix(rest)?;
     let mut targets: Vec<String> = Vec::new();
     loop {
         rest = rest.trim_start();
-        let Some(r) = rest.strip_prefix('@') else {
+        let Some(r) = strip_slot_prefix(rest) else {
             break;
         };
         let digits: String = r.chars().take_while(|c| c.is_ascii_digit()).collect();
         if digits.is_empty() {
-            break; // 「@abc」不是会话号
+            break; // 「#abc」不是会话号
         }
         if !targets.contains(&digits) {
             targets.push(digits.clone());
@@ -135,7 +150,7 @@ fn parse_at_commands(text: &str) -> Option<Vec<(String, String)>> {
         return Some(vec![]);
     }
     let rest = rest.trim();
-    // 只发「@9」不带内容 = 把连续对话切到 9 号（之后不带 @ 的文本都投给它）。
+    // 只发「#9」不带内容 = 把连续对话切到 9 号（之后不带前缀的文本都投给它）。
     // 多目标时没有「当前会话」可言，退回用法提示。
     if rest.is_empty() {
         return match targets.as_slice() {
@@ -145,7 +160,7 @@ fn parse_at_commands(text: &str) -> Option<Vec<(String, String)>> {
     }
     let (first, tail) = split_cmd(rest);
     // 首词是会话指令、**且后面没有别的内容**时才当指令。这些指令都不吃额外参数（序号已经由
-    // `@N` 给出），所以「@3 暂停」是暂停会话，而「@3 暂停一下再继续」是发一条任务 ——
+    // `#N` 给出），所以「#3 暂停」是暂停会话，而「#3 暂停一下再继续」是发一条任务 ——
     // 「暂停 / 停止」这类词也是很自然的任务开头，只看首词会把正文整条吞掉。
     // （注：「继续」已不作指令 —— 它是最常见的「让 agent 接着做」输入，一律当内容发。）
     let cmds = if SESSION_CMDS.contains(&first.as_str()) && tail.is_empty() {
@@ -218,18 +233,18 @@ const CONFIRM_WORDS: &[&str] = &["确认", "确定", "是", "y", "Y", "ok", "OK"
 
 /// 这条钉钉消息该立即执行，还是先进合并窗口攒着？
 ///
-/// 判据只有一条：**它是不是指令**。指令的语义依赖「单独成条」——「@2 暂停」跟后面一条内容
-/// 拼在一起，`parse_at_commands` 见 tail 非空就整段当内容，暂停指令当场消失。内容则相反：
+/// 判据只有一条：**它是不是指令**。指令的语义依赖「单独成条」——「#2 暂停」跟后面一条内容
+/// 拼在一起，`parse_slot_commands` 见 tail 非空就整段当内容，暂停指令当场消失。内容则相反：
 /// 逐条转发的那几条本就该拼成一段，agent 才能一次看全（否则第一条就带着它开跑了）。
 pub(crate) fn is_immediate(text: &str) -> bool {
     let t = text.trim();
     if t.is_empty() || CONFIRM_WORDS.contains(&t) {
         return true;
     }
-    // 「@N …」：解析成会话级指令（暂停/撤回/锁定…）才算指令；
-    // 「@N 正文」解析出来的是「发」，那是内容，要参与合并。
-    if let Some(cmds) = parse_at_commands(t) {
-        // 空 = @ 用法错误，立即回提示，别攒
+    // 「#N …」：解析成会话级指令（暂停/撤回/锁定…）才算指令；
+    // 「#N 正文」解析出来的是「发」，那是内容，要参与合并。
+    if let Some(cmds) = parse_slot_commands(t) {
+        // 空 = 前缀用法错误，立即回提示，别攒
         return cmds.is_empty() || cmds.iter().any(|(c, _)| c != "发");
     }
     let (cmd, _) = split_cmd(t);
@@ -254,7 +269,7 @@ pub(crate) fn should_batch(has_files: bool, content: &str) -> bool {
 
 /// 只收到文件、没带正文时的回执。窗口到期仍没等来文字就回它（见 [`batch_flush`]）。
 pub(crate) const FILE_ONLY_REPLY: &str =
-    "📎 已收到文件，随下一条任务一起发出（如「@2 处理这个文件」），\
+    "📎 已收到文件，随下一条任务一起发出（如「#2 处理这个文件」），\
                                           会存到该会话目录的 tmp/ 下并把路径拼到任务开头。";
 
 /// 把一条内容消息投进钉钉合并窗口，返回本次的世代号（交给 [`batch_flush`] 比对）。
@@ -351,11 +366,11 @@ pub(crate) async fn dispatch(
     text: &str,
     reply: Option<&ReplyCtx>,
 ) -> String {
-    // 「@N …」速记（多目标 + 全部会话级指令）：逐条 run_command，回复拼接
-    if let Some(cmds) = parse_at_commands(text) {
+    // 「#N …」速记（多目标 + 全部会话级指令）：逐条 run_command，回复拼接
+    if let Some(cmds) = parse_slot_commands(text) {
         if cmds.is_empty() {
-            return "用法：@号位 接内容或会话指令，可多个。\n\
-                    例：@1 @2 重启服务 / @1 排队 / @2 暂停 / @1 撤回"
+            return "用法：#号位 接内容或会话指令，可多个。\n\
+                    例：#1 #2 重启服务 / #1 排队 / #2 暂停 / #1 撤回"
                 .to_string();
         }
         let mut out = Vec::new();
@@ -371,7 +386,7 @@ pub(crate) async fn dispatch(
     if let Some(out) = run_command(state, username, &cmd, &arg, reply).await {
         return out;
     }
-    // 不是指令 → 连续对话：投给锁定的会话，不用每条都带 @
+    // 不是指令 → 连续对话：投给锁定的会话，不用每条都带 #
     sticky_send(state, username, text, reply).await
 }
 
@@ -386,7 +401,7 @@ async fn sticky_send(
     reply: Option<&ReplyCtx>,
 ) -> String {
     let Some(n) = crate::slots::sticky_of(state, username).await else {
-        return "未知指令。发「帮助」看用法，或用「@号位 内容」下发任务。".to_string();
+        return "未知指令。发「帮助」看用法，或用「#号位 内容」下发任务。".to_string();
     };
     // 冷却后的第一条：确认流程
     if crate::slots::sticky_cooled(state, username).await {
@@ -424,7 +439,7 @@ async fn sticky_send(
             "⏸ 距上次对话已有一段时间，先确认下目标会话：\n\
              当前锁定 {label}\n\
              待发内容：{preview}\n\n\
-             确认无误回「确认」即发出；要换会话发「@号位」；发「会话」看列表。"
+             确认无误回「确认」即发出；要换会话发「#号位」；发「会话」看列表。"
         );
     }
     send_input(state, username, &format!("{n} {text}"), reply).await
@@ -451,7 +466,7 @@ async fn sticky_label(state: &SharedState, username: &str, no: u32) -> String {
         .unwrap_or_else(|| format!("{no} 号"))
 }
 
-/// 单条指令分发（@N 速记逐条走这里，常规消息也走这里）。
+/// 单条指令分发（#N 速记逐条走这里，常规消息也走这里）。
 ///
 /// 返回 `None` = 这个词不是指令 —— 由调用方决定拿它怎么办（连续对话时当内容发给锁定的
 /// 会话，否则回「未知指令」）。**不认识时不产生任何副作用**，所以可以先试着当指令跑。
@@ -848,15 +863,15 @@ fn help_text() -> String {
      • 停止监控 [N] —— 停某个会话；不带号位停全部\n\
      \n\
      【文件】\n\
-     • 直接发文件/图片给我 → 暂存，随下一条任务（如「@2 处理这些文件」）落到会话 tmp/ 并把路径拼到开头\n\
+     • 直接发文件/图片给我 → 暂存，随下一条任务（如「#2 处理这些文件」）落到会话 tmp/ 并把路径拼到开头\n\
      • 删除文件 N —— 删某个；清空文件 —— 全部丢弃\n\
      \n\
      【速记 / 连续对话】\n\
-     • @N 接内容或任意会话指令 —— @2 重启服务 / @2 暂停 / @2 排队\n\
-     • 发过一次 @N 后，直接发内容就一直发给它，不用再带 @\n\
-     • @N（单独发）—— 切换到 N 号继续对话\n\
+     • #N 接内容或任意会话指令 —— #2 重启服务 / #2 暂停 / #2 排队\n\
+     • 发过一次 #N 后，直接发内容就一直发给它，不用再带 #\n\
+     • #N（单独发）—— 切换到 N 号继续对话\n\
      • 查指令（帮助/会话/排队…）不会打断对话，之后继续直接发即可\n\
-     • @1 @2 内容 —— 同一任务发给多个会话\n\
+     • #1 #2 内容 —— 同一任务发给多个会话\n\
      \n\
      • 帮助 —— 显示本说明"
         .to_string()
@@ -982,7 +997,7 @@ fn render_monitor_push(msgs: &[&am_core::model::MessageBrief]) -> String {
     out
 }
 
-/// 会话的号位（「发 N / 暂停 N」里的 N），用于钉钉推送里带上号让人「@N」回应。
+/// 会话的号位（「发 N / 暂停 N」里的 N），用于钉钉推送里带上号让人「#N」回应。
 ///
 /// 按**终端锚**反查而不是 task_id：同一个终端窗口在 /clear、--resume 前后是不同的会话 id，
 /// 却该报出同一个号。锚下的代表会话被去重掉时也照样能拿到号。
@@ -1019,11 +1034,11 @@ fn one_line(s: &str, limit: usize) -> String {
     flat.chars().take(limit).collect()
 }
 
-/// 活跃会话 + 各自号位，按「设备名 → 终端 → 项目 → 号位」排序。「会话」列表、「@N / 发 N /
+/// 活跃会话 + 各自号位，按「设备名 → 终端 → 项目 → 号位」排序。「会话」列表、「#N / 发 N /
 /// 暂停 N」、推送里的 `#N` 全部以它为准。
 ///
 /// 号位来自 [`crate::slots`]：绑定终端窗口（shell pid + start）并落盘，所以它既不随
-/// title/prompt 变化漂移，也不随会话增减、hub 重启重排 —— 位置序号那套正是「@2 打到列表
+/// title/prompt 变化漂移，也不随会话增减、hub 重启重排 —— 位置序号那套正是「#2 打到列表
 /// 第 5 位」错位的根因。排序也直接用号位，于是同组内号是递增的、好扫视。
 ///
 /// 同一终端锚下若有多个活跃会话（罕见：/clear 后旧会话短暂并存），只留最近活动的那条：
@@ -1050,7 +1065,7 @@ pub(crate) async fn sorted_active_tasks(
     });
     let nos = crate::slots::ensure(state, username, &tasks).await;
     // ensure 一定给了号（锚就是从这批会话来的）；真没拿到就宁可不列出，也不显示一个
-    // 解析不到的「0.」让用户去发「@0」。
+    // 解析不到的「0.」让用户去发「#0」。
     let mut out: Vec<(am_core::model::Task, u32)> = tasks
         .into_iter()
         .filter_map(|t| {
@@ -1074,7 +1089,7 @@ async fn list_sessions(state: &SharedState, username: &str) -> String {
     if tasks.is_empty() {
         return "当前没有活跃会话。".to_string();
     }
-    // 当前连续对话锁定的号位：列表里标出来，免得「不带 @ 直接发」时不知道会进哪个终端
+    // 当前连续对话锁定的号位：列表里标出来，免得「不带 # 直接发」时不知道会进哪个终端
     let sticky = crate::slots::sticky_of(state, username).await;
     let mut lines = vec![format!("共 {} 个活跃会话：", tasks.len())];
     let mut cur_dev = String::new();
@@ -1112,9 +1127,9 @@ async fn list_sessions(state: &SharedState, username: &str) -> String {
     lines.push("\n号位跟着终端窗口固定不变，可能不连号。".to_string());
     match sticky {
         Some(n) => lines.push(format!(
-            "当前对话：{n} 号 —— 直接发内容即可，不用带 @；发「@其它号」可切换。"
+            "当前对话：{n} 号 —— 直接发内容即可，不用带 #；发「#其它号」可切换。"
         )),
-        None => lines.push("发「@2 内容」下发任务，之后直接发内容就一直发给 2 号。".to_string()),
+        None => lines.push("发「#2 内容」下发任务，之后直接发内容就一直发给 2 号。".to_string()),
     }
     lines.join("\n")
 }
@@ -1670,8 +1685,8 @@ async fn remove_pending_file(state: &SharedState, username: &str, arg: &str) -> 
 
 /// 「历史 [N]」：回看最近的远程往来，按时间正序排成对话流。
 ///
-/// 参数是**号位**（与 `@N` 同源）时只看那个会话；不带参数看全部。
-/// 「@9 历史」经速记展开成「历史 9」，落到这里也是只看 9 号 —— 与「在某个会话里点历史」
+/// 参数是**号位**（与 `#N` 同源）时只看那个会话；不带参数看全部。
+/// 「#9 历史」经速记展开成「历史 9」，落到这里也是只看 9 号 —— 与「在某个会话里点历史」
 /// 的直觉一致。
 async fn list_history(state: &SharedState, username: &str, arg: &str) -> String {
     let arg = arg.trim();
@@ -1731,7 +1746,7 @@ async fn list_history(state: &SharedState, username: &str, arg: &str) -> String 
     lines.join("\n")
 }
 
-/// 「@N」（不带内容）：把连续对话切到 N 号，之后不带 @ 的文本都投给它。
+/// 「#N」（不带内容）：把连续对话切到 N 号，之后不带 # 的文本都投给它。
 async fn lock_session(state: &SharedState, username: &str, arg: &str) -> String {
     // 先解析一次，确认这个号确实有会话 —— 免得锁到一个空号上，后面每条消息都报错
     let task_id = match resolve_task(state, username, arg).await {
@@ -1739,7 +1754,7 @@ async fn lock_session(state: &SharedState, username: &str, arg: &str) -> String 
         Err(e) => return e,
     };
     let Ok(n) = arg.trim().parse::<u32>() else {
-        return "请给会话号位，如「@2」。发「会话」看号位。".to_string();
+        return "请给会话号位，如「#2」。发「会话」看号位。".to_string();
     };
     crate::slots::set_sticky(state, username, n).await;
     let title = state
@@ -1756,7 +1771,7 @@ async fn lock_session(state: &SharedState, username: &str, arg: &str) -> String 
             format!("（{} · {}）", t.project_name, one_line(&s, 20))
         })
         .unwrap_or_default();
-    format!("✅ 已锁定会话 {n}{title}\n之后直接发内容即可，不用带 @。发「@其它号」可切换。")
+    format!("✅ 已锁定会话 {n}{title}\n之后直接发内容即可，不用带 #。发「#其它号」可切换。")
 }
 
 async fn send_input(
@@ -1773,7 +1788,7 @@ async fn send_input(
         Ok(id) => id,
         Err(e) => return e,
     };
-    // 下发成功即锁定该会话：后续不带 @ 的文本都投给它（连续对话）
+    // 下发成功即锁定该会话：后续不带 # 的文本都投给它（连续对话）
     if let Ok(n) = idx.trim().parse::<u32>() {
         crate::slots::set_sticky(state, username, n).await;
     }
@@ -2259,13 +2274,13 @@ mod tests {
         // 指令不攒：语义依赖单独成条。带着文件发指令也一样立即执行，文件继续挂着
         assert!(!should_batch(false, "暂停"));
         assert!(!should_batch(true, "暂停"));
-        assert!(!should_batch(true, "@2 撤回"));
-        // 「@N 正文」解析出来是「发」，那是内容，要攒
-        assert!(should_batch(true, "@2 处理这个文件"));
+        assert!(!should_batch(true, "#2 撤回"));
+        // 「#N 正文」解析出来是「发」，那是内容，要攒
+        assert!(should_batch(true, "#2 处理这个文件"));
     }
 
     use super::{
-        answering_select, is_immediate, parse_at_commands, split_cmd, split_ext, stamped_name,
+        answering_select, is_immediate, parse_slot_commands, split_cmd, split_ext, stamped_name,
         unique_against,
     };
 
@@ -2295,61 +2310,84 @@ mod tests {
     }
 
     #[test]
-    fn at_commands() {
-        let c = |s: &str| parse_at_commands(s);
-        // @N + 内容 → 发 N 内容
+    fn slot_commands() {
+        let c = |s: &str| parse_slot_commands(s);
+        // #N + 内容 → 发 N 内容
         assert_eq!(
-            c("@2 重启服务"),
+            c("#2 重启服务"),
             Some(vec![("发".into(), "2 重启服务".into())])
         );
         assert_eq!(
-            c("@2重启服务"),
+            c("#2重启服务"),
             Some(vec![("发".into(), "2 重启服务".into())])
         );
-        // @N + 会话级指令（含排队）→ 指令 N
-        assert_eq!(c("@2 暂停"), Some(vec![("暂停".into(), "2".into())]));
-        assert_eq!(c("@2 排队"), Some(vec![("排队".into(), "2".into())]));
-        assert_eq!(c("@2 撤回"), Some(vec![("撤回".into(), "2".into())]));
+        // #N + 会话级指令（含排队）→ 指令 N
+        assert_eq!(c("#2 暂停"), Some(vec![("暂停".into(), "2".into())]));
+        assert_eq!(c("#2 排队"), Some(vec![("排队".into(), "2".into())]));
+        assert_eq!(c("#2 撤回"), Some(vec![("撤回".into(), "2".into())]));
         // 多目标：同一内容/指令下发到多个会话
         assert_eq!(
-            c("@1 @2 重启服务"),
+            c("#1 #2 重启服务"),
             Some(vec![
                 ("发".into(), "1 重启服务".into()),
                 ("发".into(), "2 重启服务".into())
             ])
         );
         assert_eq!(
-            c("@1 @2 暂停"),
+            c("#1 #2 暂停"),
             Some(vec![
                 ("暂停".into(), "1".into()),
                 ("暂停".into(), "2".into())
             ])
         );
-        // 指令词开头、但后面还有正文 → 是任务内容，不是指令（实测踩过：「@3 继续…」
+        // 指令词开头、但后面还有正文 → 是任务内容，不是指令（实测踩过：「#3 继续…」
         // 被当成「恢复 3」，任务整条丢失）
         assert_eq!(
-            c("@3 继续修复登录 bug"),
+            c("#3 继续修复登录 bug"),
             Some(vec![("发".into(), "3 继续修复登录 bug".into())])
         );
         assert_eq!(
-            c("@3 暂停一下再说"),
+            c("#3 暂停一下再说"),
             Some(vec![("发".into(), "3 暂停一下再说".into())])
         );
         assert_eq!(
-            c("@3 停止服务后重启"),
+            c("#3 停止服务后重启"),
             Some(vec![("发".into(), "3 停止服务后重启".into())])
         );
         // 「继续」已彻底不作会话指令：单独发也当内容 —— 它几乎总是「让 claude 接着干活」，
-        // 真要解除暂停有「恢复」。其余指令词单独出现时仍是指令（见上面的 @2 暂停/排队/撤回）。
-        assert_eq!(c("@3 继续"), Some(vec![("发".into(), "3 继续".into())]));
+        // 真要解除暂停有「恢复」。其余指令词单独出现时仍是指令（见上面的 #2 暂停/排队/撤回）。
+        assert_eq!(c("#3 继续"), Some(vec![("发".into(), "3 继续".into())]));
         // 去重目标
-        assert_eq!(c("@1 @1 x"), Some(vec![("发".into(), "1 x".into())]));
-        // 非 @ → None（走常规分发）；无效目标 → Some(空)（提示用法）
+        assert_eq!(c("#1 #1 x"), Some(vec![("发".into(), "1 x".into())]));
+        // 非前缀开头 → None（走常规分发）；无效目标 → Some(空)（提示用法）
         assert_eq!(c("发 2 继续"), None);
-        assert_eq!(c("@abc"), Some(vec![]));
-        // 单发「@N」= 切到 N 号继续对话；多目标时没有「当前会话」可言，退回用法提示
+        assert_eq!(c("#abc"), Some(vec![]));
+        // 单发「#N」= 切到 N 号继续对话；多目标时没有「当前会话」可言，退回用法提示
+        assert_eq!(c("#2"), Some(vec![("锁定".into(), "2".into())]));
+        assert_eq!(c("#1 #2"), Some(vec![]));
+    }
+
+    /// 老写法 `@N` 必须继续认：换前缀那天钉钉里已经发出去的消息、用户的手指记忆都还是 `@`，
+    /// 认不了就等于一次静默的功能下线（发出去没反应，还只回一句「未知指令」）。
+    #[test]
+    fn legacy_at_prefix_still_parses() {
+        let c = |s: &str| parse_slot_commands(s);
+        assert_eq!(
+            c("@2 重启服务"),
+            Some(vec![("发".into(), "2 重启服务".into())])
+        );
+        assert_eq!(c("@2 暂停"), Some(vec![("暂停".into(), "2".into())]));
         assert_eq!(c("@2"), Some(vec![("锁定".into(), "2".into())]));
-        assert_eq!(c("@1 @2"), Some(vec![]));
+        // 新老混写也不该翻车（复制粘贴拼出来的多目标）
+        assert_eq!(
+            c("@1 #2 重启服务"),
+            Some(vec![
+                ("发".into(), "1 重启服务".into()),
+                ("发".into(), "2 重启服务".into()),
+            ])
+        );
+        assert_eq!(c("@abc"), Some(vec![]));
+        assert!(is_immediate("@2 暂停"));
     }
 
     /// 撞名避让必须与客户端 unique_target 用同一套规则：不一致的话，这里算出的名字客户端
@@ -2406,20 +2444,20 @@ mod tests {
         assert!(is_immediate("暂停 3"));
         assert!(is_immediate("发 2 继续执行"));
         assert!(is_immediate("清空文件"));
-        assert!(is_immediate("@2 暂停")); // 会话级指令
-        assert!(is_immediate("@2")); // = 锁定 2 号
-        assert!(is_immediate("@abc")); // @ 用法错误 → 立即回提示
+        assert!(is_immediate("#2 暂停")); // 会话级指令
+        assert!(is_immediate("#2")); // = 锁定 2 号
+        assert!(is_immediate("#abc")); // # 用法错误 → 立即回提示
         assert!(is_immediate("确认")); // sticky 冷却确认，攒了就等不到了
         assert!(is_immediate("OK"));
 
         // —— 进合并窗口：内容 ——
-        assert!(!is_immediate("@2 帮我看这段日志")); // @N + 正文 = 发内容
+        assert!(!is_immediate("#2 帮我看这段日志")); // #N + 正文 = 发内容
         assert!(!is_immediate("重启一下服务"));
         assert!(!is_immediate("[转发] 昨天那个报错又出现了"));
         // 「继续」不是指令（见 at_commands），自然也该参与合并
-        assert!(!is_immediate("@3 继续"));
+        assert!(!is_immediate("#3 继续"));
         // 指令词开头但后面还有正文 → 是内容
-        assert!(!is_immediate("@3 暂停一下再说"));
+        assert!(!is_immediate("#3 暂停一下再说"));
     }
 
     /// `msgtype=text` 的三条出口（同步回复 / 会话 webhook / Stream 异步回执）都过这里，
