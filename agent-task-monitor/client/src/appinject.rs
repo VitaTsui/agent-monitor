@@ -14,10 +14,28 @@
 //! 5.3 秒，会话里元素更多。原生 AX 直接问目标进程，同一棵树 68ms，差 78 倍。
 //! 顺带还避开了把用户正文拼进 AppleScript 字符串的转义雷区。
 //!
-//! # 已知边界（实测，不是猜的）
-//! - **只认屏幕上当前打开的那条会话**。AX 看得到的只有撰写框，看不出它属于哪条会话；
-//!   所以调用方必须先确认该宿主 App 在本机只有一条会话（见 `agent::execute`），
-//!   否则拒绝注入，绝不赌。
+//! # 会话身份：怎么确认屏幕上开着的就是要发的那条
+//! 撰写框本身认不出自己属于哪条会话，但**窗口的 URL 认得出**。实测（macOS 26.0、
+//! Claude.app 2026-09）Claude.app 的 `AXWebArea` 上有 `AXURL`，值就是 claude.ai 的
+//! 当前路由，例如 `https://claude.ai/chat/9b5147d7-…`；本地代理（Cowork）会话的路由是
+//! `/cowork/local_<uuid>`，那个 `local_<uuid>` 正是会话隔离家目录的名字，磁盘上拿得到
+//! （见 `am_core::scanner::claude_local_agent_session_id`）。两边同一个值，比得起来。
+//!
+//! 判据只有一条：**目标会话 id 出现在某个 web 区域 URL 的某一段路径里**就算命中，
+//! 否则拒绝。这也是上游自己的判法（app.asar 里 `getURL().includes(sessionId)`）。
+//! 它不认任何产品文案，也不可能误命中——另一条会话的 URL 里不会出现这条会话的 uuid。
+//!
+//! - **ChatGPT.app 认不出来**。实测它的 `AXWebArea.AXURL` 恒为 `app://-/index.html`、
+//!   `AXTitle` 恒为 `Codex`，整棵树里没有一个带任务 id 的 `AXDOMIdentifier`
+//!   （只有 `radix-_r_2_` 这类自动生成的），唯一能读到的只有标题文字。标题会重名、
+//!   也不是稳定主键，拿它放行等于赌。所以这个宿主上仍旧沿用老规矩：多于一条会话
+//!   就拒绝（见 [`SessionRef::Unidentified`] 与 `agent::execute`）。
+//!
+//! - **只看一个窗口**。`target_window` 取的是宿主的焦点/主窗口，目标会话要是被拖到
+//!   另一个窗口里，这里读到的 URL 就不是它 —— 结果是**拒绝**，不是发错人，方向是安全的。
+//!   本机实测 Claude.app 一直只有一个窗口，所以先不为此改遍历顺序。
+//!
+//! # 其它已知边界（实测，不是猜的）
 //! - **写入前必须先 `AXFocused = true`**。不设焦点时 `AXUIElementSetAttributeValue`
 //!   照样返回 0（成功），值却纹丝不动 —— 静默失败。设焦点不抢系统前台焦点
 //!   （实测写入前后 frontmost 应用不变）。
@@ -52,6 +70,20 @@ pub enum Injected {
     Written { why: &'static str },
 }
 
+/// 要注入的那条会话的身份 —— 注入前拿它跟「窗口里此刻开着的会话」比对。
+///
+/// 这不是给日志看的标签，是一道闸门：认得出身份就比对身份，认不出就退回
+/// 「宿主上只能有一条会话」的老规矩。两条路互斥，不并存。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionRef {
+    /// Claude 桌面版本地代理（Cowork）会话，id 形如 `local_<uuid>`。
+    /// 它会出现在 webview 的 URL 路径里，可以精确比对。
+    ClaudeLocalAgent(String),
+    /// 宿主 App 不暴露当前会话身份（实测 ChatGPT.app 就是这样）。
+    /// 调用方必须先确认该宿主上只有这一条会话才允许走到这里。
+    Unidentified,
+}
+
 /// 注入失败的原因。分类是为了让调用方能区分「该降级」与「该告诉用户别再试」。
 ///
 /// 同 [`Injected`]：非 macOS 上只构造得出 `Other`，其余变体按平台放行。
@@ -64,6 +96,9 @@ pub enum InjectError {
     ComposerNotFound { diag: String },
     /// 撰写框里有未发送的内容。**绝不覆盖**，直接拒绝。
     DraftPresent { preview: String },
+    /// 窗口里开着的不是要发的那条会话。发错会话比发不出去严重得多，所以直接拒绝，
+    /// 并把「屏幕上是哪条」如实告诉用户，让他自己切过去再重发。
+    WrongSession { want: String, on_screen: String },
     /// 写进去了但回读对不上（值不一致）。如实上报，不重试到「看起来成功」为止。
     /// `hint` 是能判定出来的具体成因（判不出来就是空串）。
     VerifyFailed {
@@ -86,6 +121,11 @@ impl std::fmt::Display for InjectError {
             Self::DraftPresent { preview } => {
                 write!(f, "撰写器里有未发送内容（开头「{preview}」），已拒绝注入")
             }
+            Self::WrongSession { want, on_screen } => write!(
+                f,
+                "窗口里开着的不是这条会话（屏幕上是「{on_screen}」，要发给 {want}），\
+                 已拒绝注入；把那条会话切到前台再重发"
+            ),
             Self::VerifyFailed {
                 wrote,
                 read_back,
@@ -175,10 +215,11 @@ mod imp {
         kCFStringEncodingUTF8, CFStringCreateWithBytes, CFStringGetBytes, CFStringGetLength,
         CFStringGetTypeID, CFStringRef,
     };
+    use core_foundation_sys::url::{CFURLGetString, CFURLGetTypeID, CFURLRef};
     use std::ffi::c_void;
     use std::time::Duration;
 
-    type ElemRef = *const c_void;
+    pub(super) type ElemRef = *const c_void;
     type AxError = i32;
 
     const AX_OK: AxError = 0;
@@ -273,7 +314,7 @@ mod imp {
     }
 
     /// 持有所有权的 AXUIElement（Drop 释放）。
-    struct Elem(ElemRef);
+    pub(super) struct Elem(ElemRef);
     impl Elem {
         /// 接管一个**已经 +1 过引用**的指针。
         fn owned(p: ElemRef) -> Self {
@@ -284,7 +325,7 @@ mod imp {
             unsafe { CFRetain(p as CFTypeRef) };
             Self(p)
         }
-        fn get(&self) -> ElemRef {
+        pub(super) fn get(&self) -> ElemRef {
             self.0
         }
     }
@@ -349,6 +390,71 @@ mod imp {
 
     fn attr_string(el: ElemRef, name: &str) -> Option<String> {
         cf_to_string(attr(el, name)?.0 as CFStringRef)
+    }
+
+    /// 读一个值为 `CFURL` 的属性（`AXURL`）。
+    ///
+    /// 不能走 [`attr_string`]：`AXURL` 回来的是 CFURL 不是 CFString，
+    /// `cf_to_string` 的类型闸门会把它判掉，永远返回 None。
+    /// `CFURLGetString` 是 Get 语义（不转移所有权），返回的串归那个 CFURL 所有，
+    /// 在 `CfObj` 还活着的这一行里读完就行，不许 release。
+    fn attr_url(el: ElemRef, name: &str) -> Option<String> {
+        let o = attr(el, name)?;
+        unsafe {
+            if CFGetTypeID(o.0) != CFURLGetTypeID() {
+                return None;
+            }
+            cf_to_string(CFURLGetString(o.0 as CFURLRef))
+        }
+    }
+
+    /// 窗口里全部 web 区域的「URL + 文档标题」。
+    ///
+    /// Claude.app 实测有两个：Electron 外壳自己那张
+    /// `file:///Applications/Claude.app/…/index.html`，和真正装着会话的
+    /// `https://claude.ai/…`。这里不挑、不猜哪张是「主」的，全收回来交给
+    /// [`url_names_session`] 逐个比 —— 挑错了就等于把判据建在猜测上。
+    pub(super) fn web_areas(root: ElemRef) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let mut visited = 0usize;
+        let mut stack: Vec<(Elem, usize)> = vec![(Elem::retained(root), 0)];
+        while let Some((el, depth)) = stack.pop() {
+            visited += 1;
+            if visited > MAX_NODES {
+                break;
+            }
+            if attr_string(el.get(), "AXRole").as_deref() == Some("AXWebArea") {
+                out.push((
+                    attr_url(el.get(), "AXURL").unwrap_or_default(),
+                    attr_string(el.get(), "AXTitle").unwrap_or_default(),
+                ));
+            }
+            if depth < MAX_DEPTH {
+                for c in children(el.get()) {
+                    stack.push((c, depth + 1));
+                }
+            }
+        }
+        out
+    }
+
+    /// 这个 URL 指的是不是 `session_id` 这条会话。
+    ///
+    /// 判据：**把 URL 按 `/` 切开，某一段完全等于会话 id**。会话 id 是
+    /// `local_<uuid>`，全局唯一，所以命中即确定；反过来，别的会话的 URL 里
+    /// 不可能出现这条会话的 uuid，不存在误放行。
+    ///
+    /// 之所以比「路径段」而不是整条路由（`/cowork/<id>`）：路由名是上游的产品结构，
+    /// 改名就会让这里永远拒绝；而会话 id 是数据主键，改不了。同一个取舍上游自己也做过
+    /// —— app.asar 里判「用户是不是正在看这条会话」用的就是 `getURL().includes(id)`。
+    /// 这里比整段而不是子串包含，是为了不让一个 id 意外命中另一个更长的 id。
+    pub(super) fn url_names_session(url: &str, session_id: &str) -> bool {
+        if session_id.is_empty() {
+            return false;
+        }
+        // 查询串/锚点不属于路径，先切掉，免得 `?next=local_x` 这种回跳参数冒充当前会话。
+        let path = url.split(['?', '#']).next().unwrap_or(url);
+        path.split('/').any(|seg| seg == session_id)
     }
 
     fn attr_point(el: ElemRef, name: &str) -> Option<CgPoint> {
@@ -476,18 +582,18 @@ mod imp {
         (found, visited, hit_cap)
     }
 
-    fn app_element(pid: u32) -> Elem {
+    pub(super) fn app_element(pid: u32) -> Elem {
         Elem::owned(unsafe { AXUIElementCreateApplication(pid as i32) })
     }
 
     /// Electron（Claude.app）必须先打开这个开关，否则 window 下只有一串空 AXGroup、
     /// 什么都找不到。Chromium 分支（ChatGPT.app）不支持它，返回 -25205，忽略即可。
-    fn enable_manual_accessibility(app: &Elem) -> AxError {
+    pub(super) fn enable_manual_accessibility(app: &Elem) -> AxError {
         let key = CfStr::new("AXManualAccessibility");
         unsafe { AXUIElementSetAttributeValue(app.get(), key.get(), kCFBooleanTrue) }
     }
 
-    fn target_window(app: &Elem) -> Option<Elem> {
+    pub(super) fn target_window(app: &Elem) -> Option<Elem> {
         for name in ["AXFocusedWindow", "AXMainWindow"] {
             if let Some(o) = attr(app.get(), name) {
                 return Some(Elem::retained(o.0 as ElemRef));
@@ -663,13 +769,14 @@ mod imp {
     /// 只对这一个错误码重试，只重试一次，其余任何失败都原样上报。
     pub fn inject(
         host_pid: u32,
+        target: &SessionRef,
         text: &str,
         submit: bool,
     ) -> Result<(Injected, String), InjectError> {
-        match attempt(host_pid, text, submit) {
+        match attempt(host_pid, target, text, submit) {
             Ok(v) => Ok(v),
             Err((e, false)) => Err(e),
-            Err((_, true)) => attempt(host_pid, text, submit).map_err(|(e, _)| e),
+            Err((_, true)) => attempt(host_pid, target, text, submit).map_err(|(e, _)| e),
         }
     }
 
@@ -685,6 +792,7 @@ mod imp {
     /// 失败时第二个返回值是「句柄失效，重走一遍多半就好了」——只有 [`inject`] 关心它。
     fn attempt(
         host_pid: u32,
+        target: &SessionRef,
         text: &str,
         submit: bool,
     ) -> Result<(Injected, String), (InjectError, bool)> {
@@ -726,6 +834,42 @@ mod imp {
         };
         let cel = composer.el.get();
         let cbox = (composer.x, composer.y, composer.h);
+
+        // 会话身份校验。排在**所有动作最前面**：屏幕上要是别的会话，后面每一步都不该发生
+        // —— 连草稿判定都不该做，那是别人的草稿。
+        //
+        // 读之前先踢醒渲染进程（理由见 `wake`）。这一下在这里比在别处更要紧：后台节流时
+        // 直接读 URL 拿到的是**导航前**的旧值，而旧值恰好错在最危险的方向 —— 用户刚切走，
+        // 我们却还以为停在目标会话上，于是把话发进别人的对话里。
+        if let SessionRef::ClaudeLocalAgent(want) = target {
+            wake(cel);
+            std::thread::sleep(Duration::from_millis(150));
+            let areas = web_areas(win.get());
+            if !areas.iter().any(|(url, _)| url_names_session(url, want)) {
+                // 说清屏幕上是哪条，用户才知道该切到哪去。这里用文档标题只为了让提示
+                // 好读，判据自始至终只有上面那条 URL 比对，跟标题文案无关。
+                let on_screen = areas
+                    .iter()
+                    .find(|(url, _)| url.starts_with("http"))
+                    .map(|(url, title)| {
+                        if title.is_empty() {
+                            url.clone()
+                        } else {
+                            format!("{} / {url}", truncate(title, 40))
+                        }
+                    })
+                    .unwrap_or_else(|| {
+                        format!("认不出来（{} 个 web 区域都没有可读的 URL）", areas.len())
+                    });
+                return Err((
+                    InjectError::WrongSession {
+                        want: want.clone(),
+                        on_screen,
+                    },
+                    false,
+                ));
+            }
+        }
 
         // 草稿保护：只要读到内容就拒绝，绝不覆盖用户没发出去的东西。
         //
@@ -868,21 +1012,36 @@ mod imp {
     }
 }
 
-/// 往桌面客户端**当前打开的那条会话**的撰写框注入一条消息。
+/// 往桌面客户端里 `target` 那条会话的撰写框注入一条消息。
 ///
 /// `host_pid` 是宿主 GUI 应用（Claude.app / ChatGPT.app）的进程 id，
 /// 由 `am_core::process::desktop_host` 顺父链算出来。
 ///
-/// 调用前必须先过 [`enabled`] 这道闸门；调用方还要保证该宿主 App 在本机只有一条会话
-/// （AX 看不出撰写框属于哪条会话，多会话时必须拒绝，不能赌）。
+/// `target` 是要发给哪条会话：
+/// - [`SessionRef::ClaudeLocalAgent`]：这里会先比对窗口 URL，对不上直接拒绝
+///   （[`InjectError::WrongSession`]），宿主上有几条会话都不影响；
+/// - [`SessionRef::Unidentified`]：这里比不了，**调用方必须已经确认该宿主上只有这一条
+///   会话**，否则就是在赌。
+///
+/// 调用前还要先过 [`enabled`] 这道闸门。
 #[cfg(target_os = "macos")]
-pub fn inject(host_pid: u32, text: &str, submit: bool) -> Result<(Injected, String), InjectError> {
-    imp::inject(host_pid, text, submit)
+pub fn inject(
+    host_pid: u32,
+    target: &SessionRef,
+    text: &str,
+    submit: bool,
+) -> Result<(Injected, String), InjectError> {
+    imp::inject(host_pid, target, text, submit)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn inject(host_pid: u32, text: &str, submit: bool) -> Result<(Injected, String), InjectError> {
-    let _ = (host_pid, text, submit);
+pub fn inject(
+    host_pid: u32,
+    target: &SessionRef,
+    text: &str,
+    submit: bool,
+) -> Result<(Injected, String), InjectError> {
+    let _ = (host_pid, target, text, submit);
     Err(InjectError::Other(
         "桌面客户端注入目前只在 macOS 上实现（Windows 需改用 UIAutomation）".into(),
     ))
@@ -950,6 +1109,100 @@ mod tests {
         assert_eq!(verify_hint("abc", "abd"), "");
         // 换行还在，只是内容截断了 → 也不是这个成因，别乱扣帽子
         assert_eq!(verify_hint("a\nb", "a\n"), "");
+    }
+
+    /// 会话身份比对：URL 的某一段等于会话 id 才算「屏幕上就是这条」。
+    /// 这条判据只要松一点，就会把消息发进别人的对话里，所以两个方向都得钉住。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn url_matching_identifies_the_session_on_screen() {
+        use super::imp::url_names_session;
+        let id = "local_18c6b796-a156-4546-a70e-0dd4da930073";
+        // 实测的本地代理路由形态
+        assert!(url_names_session(
+            &format!("https://claude.ai/cowork/{id}"),
+            id
+        ));
+        // 路由名变了也照样认得出——判据是会话 id 那一段，不是产品的路由结构
+        assert!(url_names_session(
+            &format!("https://claude.ai/agent/{id}/files"),
+            id
+        ));
+        // 屏幕上是别的会话 → 必须不匹配
+        assert!(!url_names_session(
+            "https://claude.ai/cowork/local_ea3779b7-7948-47f1-9b0c-6b4e15ff8249",
+            id
+        ));
+        // 屏幕上是普通网页对话（不是本地代理会话）→ 不匹配
+        assert!(!url_names_session(
+            "https://claude.ai/chat/9b5147d7-60cd-4caf-8097-b67892c67267",
+            id
+        ));
+        // Electron 外壳那张空页 → 不匹配
+        assert!(!url_names_session(
+            "file:///Applications/Claude.app/Contents/Resources/app.asar/index.html",
+            id
+        ));
+        // 查询串里的回跳参数不算「当前开着的会话」
+        assert!(!url_names_session(
+            &format!("https://claude.ai/cowork/other?next=/cowork/{id}"),
+            id
+        ));
+        // 只是前缀/子串，不是完整的一段 → 不匹配（否则短 id 会命中长 id）
+        assert!(!url_names_session(
+            &format!("https://claude.ai/cowork/{id}-2"),
+            id
+        ));
+        assert!(!url_names_session(
+            "https://claude.ai/cowork/local_18c6",
+            id
+        ));
+        // 空 id 是「认不出身份」，绝不能变成「什么都匹配」
+        assert!(!url_names_session("https://claude.ai/cowork/x", ""));
+    }
+
+    /// 对着**真实运行中的**宿主 App 读一遍窗口 URL，验证「屏幕上是哪条会话」这条链路
+    /// 从 AX 里真的读得出来。
+    ///
+    /// 只读：只调 `web_areas`（读 `AXURL`/`AXTitle`），不碰撰写框、不写一个字、不按任何键。
+    /// 需要辅助功能授权和一个开着的 App，所以标 `#[ignore]`，CI 不跑；手动跑：
+    /// `AM_INJECT_PROBE_PID=<宿主 pid> cargo test -p am-client -- --ignored --nocapture`
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "需要真实运行中的宿主 App 与辅助功能授权，靠 AM_INJECT_PROBE_PID 指定"]
+    fn reads_on_screen_session_url_from_live_app() {
+        let Ok(pid) = std::env::var("AM_INJECT_PROBE_PID") else {
+            panic!("请用 AM_INJECT_PROBE_PID=<Claude.app 或 ChatGPT.app 的 pid> 指定宿主");
+        };
+        let pid: u32 = pid.trim().parse().expect("AM_INJECT_PROBE_PID 必须是数字");
+        let app = imp::app_element(pid);
+        imp::enable_manual_accessibility(&app);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let win = imp::target_window(&app).expect("宿主没有可见窗口");
+        let areas = imp::web_areas(win.get());
+        assert!(!areas.is_empty(), "整棵树里一个 AXWebArea 都没有");
+        for (url, title) in &areas {
+            println!("web 区域：url={url} title={title}");
+        }
+        // 反向必须成立：一个不在屏幕上的会话 id 绝不能匹配上任何一条 URL。
+        let bogus = "local_00000000-0000-0000-0000-000000000000";
+        assert!(
+            !areas.iter().any(|(u, _)| imp::url_names_session(u, bogus)),
+            "不在屏幕上的会话 id 匹配上了，判据太松"
+        );
+    }
+
+    /// 拒绝的理由要能让用户直接动手：屏幕上是哪条、该发给哪条、下一步做什么。
+    #[test]
+    fn wrong_session_error_says_what_is_on_screen() {
+        let e = InjectError::WrongSession {
+            want: "local_abc".into(),
+            on_screen: "周报 / https://claude.ai/cowork/local_xyz".into(),
+        };
+        let s = e.to_string();
+        assert!(s.contains("local_abc"), "{s}");
+        assert!(s.contains("local_xyz"), "{s}");
+        assert!(s.contains("切到前台"), "{s}");
     }
 
     #[test]

@@ -135,6 +135,10 @@ const CODEX_DESKTOP_ORIGINATOR: &str = "Codex Desktop";
 /// 里面那份 jsonl 就是标准 Claude Code 格式，用同一套解析器。
 /// 两层 id 是上游私有实现、随时可能变，所以这里不写死层数，见 [`claude_desktop_roots`]。
 const CLAUDE_DESKTOP_SESSION_PREFIX: &str = "local_";
+/// 本地代理根目录名。既用来拼绝对路径（见 [`claude_desktop_dir`]），也当作
+/// [`claude_local_agent_session_id`] 的锚点 —— 少了它，任何叫 `local_xxx` 的
+/// 普通目录都会被当成会话 id。
+const CLAUDE_DESKTOP_ROOT_DIR: &str = "local-agent-mode-sessions";
 /// 从本地代理根往下找 `local_*` 的最大深度（实测在第 2 层；留一层余量）。
 const CLAUDE_DESKTOP_MAX_DEPTH: usize = 3;
 
@@ -194,8 +198,33 @@ fn claude_desktop_roots(root: &Path) -> Vec<PathBuf> {
 /// 各平台的取值。取不到家目录就给一个必然不存在的路径，调用方按「目录不存在」处理。
 fn claude_desktop_dir() -> PathBuf {
     dirs::config_dir()
-        .map(|c| c.join("Claude").join("local-agent-mode-sessions"))
+        .map(|c| c.join("Claude").join(CLAUDE_DESKTOP_ROOT_DIR))
         .unwrap_or_else(|| PathBuf::from("/nonexistent"))
+}
+
+/// 从一个路径里取出 Claude 桌面版本地代理的**会话 id**（形如 `local_<uuid>`），
+/// 认不出来就返回 None。
+///
+/// 这个 id 不是我们发明的编号，是上游自己给会话的主键：会话隔离家目录就叫这个名字
+/// （`<根>/<组织>/<用户>/local_<uuid>/…`），桌面客户端内部也用它当路由参数
+/// （app.asar 里 `dispatchNavigate(\`/cowork/${sessionId}\`)`）。正因为两处是同一个值，
+/// 客户端才能拿磁盘上的路径去比对「窗口里此刻开着的是哪条会话」
+/// （见 `client::appinject::SessionRef`）。
+///
+/// 判据是**两段路径都要在**：先出现根目录名 `local-agent-mode-sessions`，其后才认
+/// `local_` 打头的那一段。只认前缀会把任何用户目录里叫 `local_xxx` 的文件夹误当成会话。
+pub fn claude_local_agent_session_id(path: &str) -> Option<String> {
+    let mut seen_root = false;
+    for seg in path.split(['/', '\\']) {
+        if seg == CLAUDE_DESKTOP_ROOT_DIR {
+            seen_root = true;
+            continue;
+        }
+        if seen_root && seg.starts_with(CLAUDE_DESKTOP_SESSION_PREFIX) {
+            return Some(seg.to_string());
+        }
+    }
+    None
 }
 
 impl SessionScanner {
@@ -5140,6 +5169,48 @@ mod desktop_session_tests {
         for d in [&missing, &deep, &renamed] {
             let _ = fs::remove_dir_all(d);
         }
+    }
+
+    /// 从路径里认会话 id：必须**先**看到本地代理根目录名，才认 `local_` 那一段。
+    /// 这个 id 要拿去跟窗口 URL 比对（见 client 的 appinject），认错等于发错会话。
+    #[test]
+    fn reads_local_agent_session_id_from_path() {
+        // 实测取值：进程 cwd 落在会话隔离家目录的 outputs 里
+        let cwd = "/Users/u/Library/Application Support/Claude/local-agent-mode-sessions/\
+                   dc6589d7-9da7-40ac-8c88-213585132c2c/26eaaf4d-6fa9-4370-9096-75398c87927c/\
+                   local_18c6b796-a156-4546-a70e-0dd4da930073/outputs";
+        assert_eq!(
+            claude_local_agent_session_id(cwd).as_deref(),
+            Some("local_18c6b796-a156-4546-a70e-0dd4da930073")
+        );
+        // 会话文件所在目录同样认得出（同一个 local_ 段）
+        let jsonl = "/Users/u/Library/Application Support/Claude/local-agent-mode-sessions/o/u/\
+                     local_abc/.claude/projects/-x/s1.jsonl";
+        assert_eq!(
+            claude_local_agent_session_id(jsonl).as_deref(),
+            Some("local_abc")
+        );
+        // Windows 反斜杠
+        assert_eq!(
+            claude_local_agent_session_id(
+                r"C:\Users\u\AppData\Roaming\Claude\local-agent-mode-sessions\o\u\local_win\outputs"
+            )
+            .as_deref(),
+            Some("local_win")
+        );
+        // 没有根目录名 → 不认。用户自己有个叫 local_xxx 的项目目录不该被当成桌面会话。
+        assert_eq!(
+            claude_local_agent_session_id("/Users/u/code/local_something/src"),
+            None
+        );
+        // 根目录名在 local_ 段**之后**出现也不认（顺序是判据的一部分）
+        assert_eq!(
+            claude_local_agent_session_id("/tmp/local_x/local-agent-mode-sessions"),
+            None
+        );
+        // 终端 CLI 会话的 cwd → 不认，调用方据此退回「宿主上只能有一条会话」
+        assert_eq!(claude_local_agent_session_id("/Users/u/code/proj"), None);
+        assert_eq!(claude_local_agent_session_id(""), None);
     }
 
     /// 桌面版本地代理的 jsonl 走的是**同一套** Claude Code 解析器，只是换个扫描根；

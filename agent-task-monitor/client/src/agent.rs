@@ -256,34 +256,44 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                 .flatten()
             })
             .collect();
-        // 桌面客户端（Claude.app / ChatGPT.app）会话：claude/codex pid → 宿主 GUI 应用
-        // (pid, 应用名)。注入要按宿主 pid 打开可访问性树，不是按代理 pid。
-        // 只在实验开关打开时才算 —— 关着的时候连这一次父链遍历都不做。
-        let desktop_host_of: std::collections::HashMap<u32, (u32, String)> =
+        // 桌面客户端（Claude.app / ChatGPT.app）会话：claude/codex pid → 注入所需的一切
+        // （宿主 GUI 应用 pid、应用名、这条会话的身份）。注入要按宿主 pid 打开可访问性树，
+        // 不是按代理 pid。只在实验开关打开时才算 —— 关着的时候连这一次父链遍历都不做。
+        let desktop_of: std::collections::HashMap<u32, DesktopTarget> =
             if crate::appinject::enabled() {
                 scanned
                     .iter()
                     .filter_map(|t| {
                         let p = t.process.as_ref()?;
-                        (p.ide == am_core::model::IdeKind::Desktop)
-                            .then(|| am_core::process::desktop_host(p.pid).map(|h| (p.pid, h)))
-                            .flatten()
+                        if p.ide != am_core::model::IdeKind::Desktop {
+                            return None;
+                        }
+                        let (host_pid, app_name) = am_core::process::desktop_host(p.pid)?;
+                        Some((
+                            p.pid,
+                            DesktopTarget {
+                                host_pid,
+                                app_name,
+                                session: desktop_session_ref(p),
+                            },
+                        ))
                     })
                     .collect()
             } else {
                 std::collections::HashMap::new()
             };
-        // 同一个宿主 App 上挂着几条会话：AX 只看得到「屏幕上当前那条」的撰写框，
-        // 分不出它属于哪条会话。多于一条就必须拒绝注入（见 execute），不能赌。
+        // 同一个宿主 App 上挂着几条会话。**只有认不出会话身份的宿主**（实测 ChatGPT.app）
+        // 才靠这个数兜底：那种宿主上多于一条会话就必须拒绝注入（见 execute），不能赌。
+        // Claude.app 那边改成比对窗口 URL，几条会话都不影响。
         //
-        // 必须按**会话**数，不能按 desktop_host_of 的条目数：ChatGPT 桌面版只有一个
+        // 必须按**会话**数，不能按 desktop_of 的条目数：ChatGPT 桌面版只有一个
         // `codex … app-server` 进程同时托着界面上的每一条对话（见 scanner 里
         // shared_host 的配对），多条会话共用同一个 pid —— 按 pid 去重就永远只数出 1 条，
         // 这道闸门等于没有。
         let sessions_per_host: std::collections::HashMap<u32, usize> = scanned
             .iter()
             .filter_map(|t| t.process.as_ref())
-            .filter_map(|p| desktop_host_of.get(&p.pid).map(|(hp, _)| *hp))
+            .filter_map(|p| desktop_of.get(&p.pid).map(|d| d.host_pid))
             .fold(std::collections::HashMap::new(), |mut m, hp| {
                 *m.entry(hp).or_insert(0) += 1;
                 m
@@ -471,7 +481,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                             cmd,
                             &known_pids,
                             &ide_shell_of,
-                            &desktop_host_of,
+                            &desktop_of,
                             &sessions_per_host,
                         )
                         .await;
@@ -979,6 +989,32 @@ fn unique_target(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     target
 }
 
+/// 一条桌面客户端会话注入所需的全部信息。
+struct DesktopTarget {
+    /// 宿主 GUI 应用（Claude.app / ChatGPT.app）的进程 id：可访问性树按它打开。
+    host_pid: u32,
+    /// 宿主应用名，只用于日志与给用户看的提示。
+    app_name: String,
+    /// 这条会话的身份。注入前拿它比对「窗口里此刻开着的是哪条」。
+    session: crate::appinject::SessionRef,
+}
+
+/// 认出这条桌面会话的身份。
+///
+/// 目前只有 Claude 桌面版的本地代理（Cowork）会话认得出来：它的进程工作目录就在
+/// 会话隔离家目录 `…/local-agent-mode-sessions/<组织>/<用户>/local_<uuid>/…` 里，
+/// 那个 `local_<uuid>` 正是桌面客户端自己的会话主键，也会出现在窗口 URL 里。
+///
+/// ChatGPT 桌面版认不出来（实测它整棵可访问性树里没有任何任务 id，
+/// 见 `appinject` 的模块说明），如实返回 [`SessionRef::Unidentified`]，
+/// 由调用方退回「宿主上只能有一条会话」的老规矩 —— 不拿标题文案硬凑一个身份。
+fn desktop_session_ref(p: &am_core::model::ProcessInfo) -> crate::appinject::SessionRef {
+    match am_core::scanner::claude_local_agent_session_id(&p.cwd) {
+        Some(id) => crate::appinject::SessionRef::ClaudeLocalAgent(id),
+        None => crate::appinject::SessionRef::Unidentified,
+    }
+}
+
 /// 执行 hub 下发的控制命令。
 /// `known_pids` 是本轮本机扫描出的会话 pid 集合——只对这些 pid 动手，
 /// 不无条件信任 hub 响应（响应链路若被中间人篡改，否则可对任意进程发信号）。
@@ -988,7 +1024,7 @@ async fn execute(
     cmd: ControlCmd,
     known_pids: &std::collections::HashSet<u32>,
     ide_shell_of: &std::collections::HashMap<u32, u32>,
-    desktop_host_of: &std::collections::HashMap<u32, (u32, String)>,
+    desktop_of: &std::collections::HashMap<u32, DesktopTarget>,
     sessions_per_host: &std::collections::HashMap<u32, usize>,
 ) {
     let Some(pid) = cmd.pid else {
@@ -1028,27 +1064,33 @@ async fn execute(
         // 这是与「扩展桥接」「终端注入」并列的第三种送达目标，不是叠在它们之上的补丁：
         // 会话宿主是什么类型，就走哪一条，走完即返回。
         //
-        // desktop_host_of 只在实验开关开着时才非空，所以开关关闭时这一整段等价于不存在。
-        if let Some((host_pid, app_name)) = desktop_host_of.get(&pid) {
-            let n = sessions_per_host.get(host_pid).copied().unwrap_or(1);
-            if n > 1 {
-                // AX 只看得到「屏幕上当前打开的那条会话」的撰写框，认不出它是哪条。
-                // 宿主上不止一条会话时注入就是在赌 —— 宁可不发，也不能发错会话。
-                let msg = format!(
-                    "拒绝注入桌面会话：{app_name} 上有 {n} 条会话，无法确认屏幕上是哪一条（任务 {}）",
-                    cmd.task_id
-                );
-                crate::state::client_log(&msg);
-                crate::appinject::notify(&format!(
-                    "{app_name} 上有 {n} 条会话，无法确认当前打开的是哪一条，已拒绝注入"
-                ));
-                return;
+        // desktop_of 只在实验开关开着时才非空，所以开关关闭时这一整段等价于不存在。
+        if let Some(target) = desktop_of.get(&pid) {
+            let (host_pid, app_name) = (target.host_pid, &target.app_name);
+            // 认不出会话身份的宿主（实测 ChatGPT.app）才需要这道数量闸门：屏幕上开着哪条
+            // 会话我们既读不出、也比不了，多于一条就是在赌 —— 宁可不发，也不能发错会话。
+            // Claude.app 那边身份认得出来，交给 appinject 逐条比对 URL，不受条数限制。
+            if target.session == crate::appinject::SessionRef::Unidentified {
+                let n = sessions_per_host.get(&host_pid).copied().unwrap_or(1);
+                if n > 1 {
+                    let msg = format!(
+                        "拒绝注入桌面会话：{app_name} 上有 {n} 条会话且认不出屏幕上是哪一条（任务 {}）",
+                        cmd.task_id
+                    );
+                    crate::state::client_log(&msg);
+                    crate::appinject::notify(&format!(
+                        "{app_name} 上有 {n} 条会话，无法确认当前打开的是哪一条，已拒绝注入"
+                    ));
+                    return;
+                }
             }
-            let (hp, an, txt) = (*host_pid, app_name.clone(), text.clone());
+            let (hp, an, txt) = (host_pid, app_name.clone(), text.clone());
+            let sess = target.session.clone();
             // AX 调用要跨进程等对方响应，App 卡住时会一直挂着，绝不能占住 async worker。
-            let res =
-                tokio::task::spawn_blocking(move || crate::appinject::inject(hp, &txt, submit))
-                    .await;
+            let res = tokio::task::spawn_blocking(move || {
+                crate::appinject::inject(hp, &sess, &txt, submit)
+            })
+            .await;
             match res {
                 Ok(Ok((done, detail))) => {
                     crate::state::client_log(&format!(
@@ -1059,6 +1101,17 @@ async fn execute(
                             "{an}：内容已写入撰写框但未发送（{why}）"
                         ));
                     }
+                    return;
+                }
+                // 「屏幕上不是这条会话」是一次**明确的拒绝**，不是一次没成功的尝试：
+                // 已经确定这条命令不该送到这里，再往下降级去试终端注入没有任何意义
+                // （桌面会话没有 tty，那条路只会再失败一次，把日志和通知各刷一遍）。
+                Ok(Err(e @ crate::appinject::InjectError::WrongSession { .. })) => {
+                    crate::state::client_log(&format!(
+                        "拒绝注入桌面会话：{an}(pid={host_pid}) {e}（任务 {}）",
+                        cmd.task_id
+                    ));
+                    crate::appinject::notify(&format!("{an}：{e}"));
                     return;
                 }
                 Ok(Err(e)) => {
