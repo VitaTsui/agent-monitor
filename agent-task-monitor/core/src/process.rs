@@ -788,6 +788,27 @@ fn tiocsti_send_key(tty: &str, key: &str, count: usize) -> Result<&'static str> 
     Ok("已注入按键")
 }
 
+/// 落盘一段临时 PowerShell 脚本 —— **必须带 UTF-8 BOM**。
+///
+/// `powershell.exe`（Windows PowerShell 5.1，本仓库调用的就是它）对**没有 BOM** 的 .ps1
+/// 一律按系统 ANSI 代码页解码。中文 Windows 上那是 GBK：脚本里的中文注释按 UTF-8 写下去、
+/// 按 GBK 读回来，三字节汉字的尾字节落在 GBK 前导字节区间（0x81-0xFE），会把紧随其后的
+/// CRLF 当成自己的后继字节吃掉 —— 下一行源码于是被并进上一行注释里，整行代码消失。
+///
+/// 实测后果：`windows_send_input` 内嵌的 C# 里 `MkCtrlU()` 与 `WriteAll()` 两个方法声明被
+/// 注释吞掉，`Add-Type` 编译失败（"c:\…\xxx.0.cs(15) : 类、结构或接口成员声明中的标记
+/// "while" 无效"），于是独立 PowerShell 窗口里的会话永远注入不进去。
+///
+/// 加 BOM 后 PowerShell 按 UTF-8 解码，问题从源头消失；所有生成脚本都走这里，
+/// 不留第二条写法。
+#[cfg(windows)]
+fn write_ps1(path: &std::path::Path, script: &str) -> Result<()> {
+    let mut bytes = Vec::with_capacity(script.len() + 3);
+    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    bytes.extend_from_slice(script.as_bytes());
+    std::fs::write(path, bytes).map_err(|e| anyhow!("写入临时脚本失败: {e}"))
+}
+
 /// Windows：挂起 / 恢复整个进程，充当 Unix 那边 SIGSTOP / SIGCONT 的对应物。
 ///
 /// Windows 没有信号，此前这两个动作直接返回「暂不支持」—— 网页上按钮点了就是没反应。
@@ -824,7 +845,7 @@ public class AmSusp {
 Add-Type -TypeDefinition $code -Language CSharp
 if([AmSusp]::Run([uint32]$TargetPid,[bool]$Suspend)){ exit 0 } else { exit 2 }
 "#;
-    std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
+    write_ps1(&ps_path, &script)?;
     let out = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
@@ -912,7 +933,7 @@ Add-Type -TypeDefinition $code -Language CSharp
 if([AmKey]::Send([uint32]$TargetPid,[uint16]$Vk,[char]$Uch,$Count)){{ exit 0 }} else {{ exit 2 }}
 "#
     );
-    std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
+    write_ps1(&ps_path, &script)?;
     let out = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
@@ -1043,7 +1064,7 @@ Add-Type -TypeDefinition $code -Language CSharp
 $t=[System.IO.File]::ReadAllText($TextFile,[System.Text.Encoding]::UTF8)
 if([AmConIn]::Send([uint32]$TargetPid,$t,($Submit -ne 0))){ exit 0 } else { exit 2 }
 "#;
-    std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
+    write_ps1(&ps_path, &script)?;
 
     let out = std::process::Command::new("powershell")
         .args([
@@ -1212,7 +1233,7 @@ public class AmFKey {
 Add-Type -TypeDefinition $code -Language CSharp
 if([AmFKey]::Run([uint32]$WtPid,[byte]$Vk,$Count)){ exit 0 } else { exit 4 }
 "#;
-    std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
+    write_ps1(&ps_path, &script)?;
 
     let out = std::process::Command::new("powershell")
         .args([
@@ -1308,7 +1329,7 @@ Start-Sleep -Milliseconds 250
 try { if($old -ne $null){ Set-Clipboard -Value $old } } catch {}
 if($ok){ exit 0 } else { exit 4 }
 "#;
-    std::fs::write(&ps_path, script).map_err(|e| anyhow!("写入临时脚本失败: {e}"))?;
+    write_ps1(&ps_path, &script)?;
 
     let out = std::process::Command::new("powershell")
         .args([
@@ -1877,5 +1898,48 @@ mod bridge_key_tests {
         assert!(key_spec_to_chars("f5").is_none());
         assert!(key_spec_to_chars("tab:2,f5").is_none());
         assert!(key_spec_to_chars("").is_none());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod ps1_encoding_tests {
+    use super::write_ps1;
+
+    /// 临时 .ps1 必须带 UTF-8 BOM。
+    ///
+    /// 没有 BOM 时 `powershell.exe`（5.1）按系统 ANSI 解码：中文 Windows 上是 GBK，
+    /// 汉字的 UTF-8 尾字节会吃掉行尾 CRLF，把下一行源码并进注释——`windows_send_input`
+    /// 内嵌的 C# 因此少了两个方法声明、`Add-Type` 编译失败，独立 PowerShell 窗口里的
+    /// 会话就永远注入不进去。这条断言把「必须带 BOM」钉死。
+    #[test]
+    fn ps1_written_with_utf8_bom() {
+        let dir = std::env::temp_dir().join(format!("am-ps1-bom-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.ps1");
+        let script = "# 中文注释 —— 长\r\nWrite-Output 'ok'\r\n";
+        write_ps1(&path, script).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            &bytes[..3],
+            &[0xEF, 0xBB, 0xBF],
+            "缺 BOM，PowerShell 5.1 会按 GBK 读"
+        );
+        assert_eq!(&bytes[3..], script.as_bytes());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 真机回归：把 `windows_send_input` 那段脚本落盘后交给 powershell 跑一遍，
+    /// 编译失败会在 stderr 里出现 `Add-Type`。目标 pid 用 0（AttachConsole 必失败），
+    /// 所以只验「C# 编译得过」，不会真的往谁的终端里注入东西。
+    #[test]
+    fn embedded_csharp_compiles_under_powershell() {
+        let err = match super::windows_send_input(0, "x", false) {
+            Ok(_) => String::new(),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            !err.contains("Add-Type"),
+            "内嵌 C# 没编译过（多半又是脚本编码问题）：{err}"
+        );
     }
 }
