@@ -216,7 +216,7 @@ pub async fn auth_user(state: &SharedState, headers: &axum::http::HeaderMap) -> 
     }
 }
 
-/// 后管门卫：登录 + 超级管理员 + 部署令牌（X-Admin-Token）三重校验。
+/// 后管门卫：登录 + 超级管理员两重校验（部署令牌 X-Admin-Token 已废弃）。
 /// 通过返回用户名；失败返回统一错误响应。
 pub async fn admin_gate(
     state: &SharedState,

@@ -224,7 +224,8 @@ graph LR
 **发布流程（发版陷阱汇总）**
 
 1. **交叉编译**：`cargo zigbuild -p am-hub --release --target x86_64-unknown-linux-musl`（hub）；`cargo xwin`/打包脚本产 mac zip + Windows 安装包。
-2. **前端**（若改了）：用**生产密钥**的 `.env.prod` 跑 `yarn build`，产物覆盖 `web/`（属主 `agentmon`）。
+2. **前端**（若改了）：`.env.prod` 不入库，先 `CRYPTO_KEY=… RSA_PUB_KEY=… bash scripts/write-env-prod.sh`
+   生成它（CI 走仓库变量 `WEB_CRYPTO_KEY` / `WEB_RSA_PUB_KEY`），再跑 `yarn build`，产物覆盖 `web/`（属主 `agentmon`）。
 3. **hub**：`scp` 覆盖 `/opt/agent-monitor/agent-task-monitor` → 重启 `agent-monitor.service`。
 4. **安装包**：mac zip + **固定名 `agent-monitor-setup.exe`** + 版本化 `AgentMonitor-X.Y.Z-setup.exe` 三份都传到 downloads；固定名 `cmp` 校验与版本化一致（客户端自更新拿固定名，漏同步会更新打转）。
 5. **版本对齐**：`/monitor/version` 的 `desktop` 由 `ready_desktop_version`（downloads 里最高的 `AgentMonitor-*-setup.exe`）决定；hub-only 改动不 bump 安装包时，advertised 保持上一版、客户端不被打扰。

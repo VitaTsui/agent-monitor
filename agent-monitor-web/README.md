@@ -67,7 +67,8 @@ yarn start
 ```
 
 默认监听 **3003** 端口（被占用时由 portfinder 自动顺延，终端会打印实际地址）。
-启动前请在 `.env/.env.dev` 中把 `API_PROXY` 指向你的后端，并填好登录加密密钥。
+启动前先 `cp .env/.env.dev.example .env/.env.dev`，把 `API_PROXY` 指向你的后端，
+并填好登录加密密钥（`.env.dev` / `.env.prod` 带具体部署值，不入库）。
 
 ## 常用脚本
 
@@ -91,9 +92,20 @@ yarn start
 
 | 文件 | 用途 |
 | --- | --- |
-| `.env.common` | 公共配置（如 CSS Modules 类名放行白名单 `PASS_CLS`） |
-| `.env.dev` | 开发环境：端口、`/api` 代理目标、登录加密密钥 |
-| `.env.prod` | 生产环境 |
+| `.env.common` | 公共配置（如 CSS Modules 类名放行白名单 `PASS_CLS`）。**入库** |
+| `.env.dev.example` / `.env.prod.example` | 模板，只有结构与占位符。**入库** |
+| `.env.dev` | 开发环境：端口、`/api` 代理目标、登录加密密钥。**不入库**，`cp` 模板后自己填 |
+| `.env.prod` | 生产环境。**不入库**，由 `bash scripts/write-env-prod.sh` 从模板生成 |
+
+`.env.dev` / `.env.prod` 里的 `CRYPTO_KEY`、`RSA_PUB_KEY` 必须与对应 hub 的
+`AM_CRYPTO_KEY` / RSA 私钥配对，是「部署方持有的配置」，所以这两个文件不进版本库。
+生产构建：
+
+```bash
+CRYPTO_KEY=… RSA_PUB_KEY=… bash scripts/write-env-prod.sh && yarn build
+```
+
+CI 里这两个值取自仓库变量 `WEB_CRYPTO_KEY` / `WEB_RSA_PUB_KEY`。
 
 `.env.dev` 关键项：
 

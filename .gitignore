@@ -12,6 +12,11 @@ playwright
 # 缺省落在数据目录），不再编译期嵌入，仓库里本就不该出现任何 .pem。
 *.pem
 
+# 前端环境文件：带具体部署值的那两个不入库，只留 .example 模板与公共的 .env.common。
+# 真实 .env.prod 由 agent-monitor-web/scripts/write-env-prod.sh 生成（CI 也走它）。
+agent-monitor-web/.env/.env.dev
+agent-monitor-web/.env/.env.prod
+
 # Claude 本地配置（保留项目级 skills）
 **/.claude/*
 !**/.claude/skills/

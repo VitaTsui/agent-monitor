@@ -12,6 +12,8 @@ hub 的 RSA 私钥是**运行时**读文件的（`hub/src/main.rs` 的 `load_or_
 hub 会现生成一对 2048 位密钥落盘（0600），并在日志里打印配对公钥的 base64；
 AES 密钥同理，`AM_CRYPTO_KEY` 不设就生成到 `<AM_DATA_DIR>/crypto-key` 并打印。
 
+`.env.dev` 不入库，先 `cp agent-monitor-web/.env/.env.dev.example agent-monitor-web/.env/.env.dev`。
+
 **本地要走真口令登录**，就把这两个打印值填进 `agent-monitor-web/.env/.env.dev` 的
 `RSA_PUB_KEY` / `CRYPTO_KEY` 再重启前端 —— 两边不配对时登录会「无请求即失败」
 （浏览器里加密就崩了，网络面板一条请求都没有）。反过来也行：先有 `.env.dev` 的值，
