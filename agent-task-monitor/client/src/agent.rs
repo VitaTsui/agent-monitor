@@ -520,7 +520,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                 // 实际后果：换服务器后客户端拿着作废的设备令牌空转，日志里干干净净，
                 // 用户只看到网页上什么都没有，无从查起（这个 bug 就是这么被发现的）。
                 // 首次失败必打，之后每 ~60s 一条，既不刷屏也不至于全无痕迹。
-                if hub_ok || net_fail_streak == 0 || net_fail_streak % 40 == 0 {
+                if hub_ok || net_fail_streak == 0 || net_fail_streak.is_multiple_of(40) {
                     tracing::warn!("上报 hub 失败（第 {} 次）: {e}", net_fail_streak + 1);
                 }
                 net_fail_streak = net_fail_streak.saturating_add(1);

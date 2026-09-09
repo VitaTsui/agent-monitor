@@ -181,7 +181,7 @@ impl SessionScanner {
         }
         // Codex CLI 会话（~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl）
         self.scan_codex_into(&mut out, now_ms);
-        out.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+        out.sort_by_key(|b| std::cmp::Reverse(b.mtime_ms));
         out
     }
 
@@ -286,7 +286,7 @@ impl SessionScanner {
         let session_id = session_id.or_else(|| {
             path.file_stem()?
                 .to_str()?
-                .rsplitn(6, '-')
+                .rsplit('-')
                 .next()
                 .map(String::from)
         })?;
@@ -675,7 +675,7 @@ pub fn build_tasks(
     // 活着的长会话会被死会话挤掉：配不到进程 → 判为 Finished → 从列表里消失，
     // 而那个死会话反倒顶着 pid 一直显示「等待输入」，内容永远不更新。
     for list in sess_by_key.values_mut() {
-        list.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+        list.sort_by_key(|b| std::cmp::Reverse(b.mtime_ms));
     }
 
     let mut pid_of_session: HashMap<&str, &ProcessInfo> = HashMap::new();
@@ -774,7 +774,7 @@ pub fn build_tasks(
                 .iter()
                 .rev()
                 .filter(|p| !paired_pids.contains(&p.pid))
-                .map(|p| *p)
+                .copied()
                 .collect();
             let mut free_sess: Vec<&SessionSummary> = sess
                 .iter()
@@ -782,7 +782,7 @@ pub fn build_tasks(
                     !pid_of_session.contains_key(s.session_id.as_str())
                         && !released.contains(s.session_id.as_str())
                 })
-                .map(|s| *s)
+                .copied()
                 .collect();
 
             // ① 命令行 --resume <id>：恢复指定会话（创建于很久前，靠命令行认出）。
@@ -826,8 +826,7 @@ pub fn build_tasks(
                         continue;
                     }
                     let diff = s.created_ms as i64 - p_ms;
-                    if diff >= -CREATE_BACK_MS
-                        && diff <= CREATE_FWD_MS
+                    if (-CREATE_BACK_MS..=CREATE_FWD_MS).contains(&diff)
                         && (s.created_ms as i64) < best_created
                     {
                         best_created = s.created_ms as i64;
@@ -884,9 +883,9 @@ pub fn build_tasks(
             // 安全性完全由上面的 mtime>=启动 约束保证，与活跃间隔无关；会话集合本身已卡 7 天窗口。
             let mut free_sess: Vec<&SessionSummary> = free_sess.into_iter().collect();
             // 新进程优先认领新会话：按启动时间降序，避免老进程抢走更晚的会话文件
-            free_procs.sort_by(|a, b| b.start_time.cmp(&a.start_time));
+            free_procs.sort_by_key(|b| std::cmp::Reverse(b.start_time));
             for p in free_procs {
-                let p_start_ms = (p.start_time as u64).saturating_mul(1000);
+                let p_start_ms = p.start_time.saturating_mul(1000);
                 // free_sess 已按 mtime 降序：第一条满足「mtime≥启动」的即该进程可认领的最新会话
                 if let Some(pos) = free_sess.iter().position(|s| s.mtime_ms >= p_start_ms) {
                     let s = free_sess.remove(pos);

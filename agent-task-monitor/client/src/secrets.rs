@@ -2,6 +2,7 @@
 //! - macOS：钥匙串（security CLI，随用户登录解锁）
 //! - Windows：DPAPI 按用户加密后落文件（其他用户/拷走文件都解不开）
 //! - 其它/失败回退：明文文件 + unix 0600
+//!
 //! 迁移：旧版明文 device-token 首次读取时自动导入安全存储并删除。
 
 #[cfg(target_os = "macos")]

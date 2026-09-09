@@ -7,6 +7,12 @@ pub struct ProcessScanner {
     sys: System,
 }
 
+impl Default for ProcessScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProcessScanner {
     pub fn new() -> Self {
         Self {

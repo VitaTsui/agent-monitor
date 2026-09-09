@@ -389,7 +389,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             // agent 模式启动即后台，初始就用 Accessory —— 若先 Regular 再切，
             // set_activation_policy 走事件循环代理，Dock 图标会闪现一下才消失。
             #[cfg(target_os = "macos")]
-            let _ = app.set_activation_policy(if background_launch && !need_onboard {
+            app.set_activation_policy(if background_launch && !need_onboard {
                 tauri::ActivationPolicy::Accessory
             } else {
                 tauri::ActivationPolicy::Regular
