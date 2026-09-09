@@ -427,8 +427,6 @@ pub async fn resolve_scan_user(
     Ok((user_id.to_string(), nick))
 }
 
-/// 通过企业应用机器人 OTO 接口，主动把一条文本发给某个用户（staffId）。
-/// full 非空且比正文长时，额外把完整内容作为 .txt 文件发在下面（正文被截断的兜底）。
 /// 出网前脱敏：把正文和「完整内容.txt」附件一起过一遍 crate::redact。
 ///
 /// **判据不在这儿**——一个字节的判断都没有，全部委托给 `redact_secrets`，
@@ -442,6 +440,8 @@ fn redact_outbound(text: &str, full: Option<&str>) -> (String, Option<String>) {
     )
 }
 
+/// 通过企业应用机器人 OTO 接口，主动把一条文本发给某个用户（staffId）。
+/// full 非空且比正文长时，额外把完整内容作为 .txt 文件发在下面（正文被截断的兜底）。
 pub async fn push_oto(
     app: &crate::registry::DingtalkApp,
     staff_id: &str,
