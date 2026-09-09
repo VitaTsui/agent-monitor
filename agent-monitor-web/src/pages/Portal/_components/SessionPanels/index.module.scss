@@ -128,6 +128,24 @@
   font-variant-numeric: tabular-nums;
 }
 
+// 失败原因：上游那句英文原文，挂在名字下面单独一行。
+//
+// 缩进对齐名字（状态点 7 + gap 8 = 15），不跟着图标列走 —— 它说的是这一条任务的事，
+// 不是又一条任务。最多两行，再长就截断（整句挂在 title 上）：一句 300 字符的
+// 报错能把整张卡撑成一屏，而人要的只是开头那半句「为什么」。
+.itemReason {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  margin: 3px 0 0 15px;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  // 英文原文里常有很长的 URL / request id，不断行会把卡片顶宽
+  overflow-wrap: anywhere;
+}
+
 // 状态点：执行中主色 + 脉冲，等待中中性
 .dot {
   flex: none;

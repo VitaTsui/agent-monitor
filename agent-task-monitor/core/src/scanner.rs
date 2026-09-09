@@ -620,6 +620,7 @@ impl SessionScanner {
                 role: "todos".into(),
                 content: m,
                 timestamp: ts.clone(),
+                is_error: false,
             });
         }
         if let Some(m) = bgtasks {
@@ -627,6 +628,7 @@ impl SessionScanner {
                 role: "bgtasks".into(),
                 content: m,
                 timestamp: ts,
+                is_error: false,
             });
         }
         Ok(out)
@@ -1670,6 +1672,7 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 role: "user".into(),
                 content: t,
                 timestamp: ts,
+                is_error: false,
             }),
             "assistant" => {
                 let mut buf = String::new();
@@ -1685,6 +1688,7 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     role: "assistant".into(),
                     content: truncate(t, FLOW_TEXT_MAX),
                     timestamp: ts,
+                    is_error: false,
                 })
             }
             _ => None, // developer 等注入角色不进对话流
@@ -1706,6 +1710,7 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 role: "tool".into(),
                 content,
                 timestamp: ts,
+                is_error: false,
             })
         }
         "function_call_output" | "custom_tool_call_output" => {
@@ -1714,6 +1719,7 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 role: "tool_result".into(),
                 content: truncate(out.trim(), 400),
                 timestamp: ts,
+                is_error: false,
             })
         }
         _ => None,
@@ -1750,6 +1756,7 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     role: "user".into(),
                     content: text,
                     timestamp: ts,
+                    is_error: false,
                 });
             }
             // tool_result：展示简要执行结果
@@ -1761,6 +1768,12 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                             role: "tool_result".into(),
                             content: truncate(&text, 400),
                             timestamp: ts,
+                            // 这一步是不是跑砸了 —— 记录里本来就有，别再丢一次。
+                            // 缺这个键（老记录 / 别的形态）按「没出错」算，与改前一致。
+                            is_error: item
+                                .get("is_error")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
                         });
                     }
                 }
@@ -1818,6 +1831,7 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     role: "plan".into(),
                     content: truncate(p.trim(), FLOW_TEXT_MAX),
                     timestamp: ts,
+                    is_error: false,
                 });
             }
             // 交互式选择卡片：整份 input（questions/options）序列化给前端
@@ -1826,6 +1840,7 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     role: "select".into(),
                     content: truncate(&inp.to_string(), 4000),
                     timestamp: ts,
+                    is_error: false,
                 });
             }
             if !text_buf.trim().is_empty() {
@@ -1833,12 +1848,14 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     role: "assistant".into(),
                     content: truncate(text_buf.trim(), FLOW_TEXT_MAX),
                     timestamp: ts,
+                    is_error: false,
                 })
             } else if !tools.is_empty() {
                 Some(MessageBrief {
                     role: "tool".into(),
                     content: truncate(&tools.join(" | "), 400),
                     timestamp: ts,
+                    is_error: false,
                 })
             } else {
                 None
@@ -2515,6 +2532,7 @@ impl TodoTracker {
             role: "todos".into(),
             content: serde_json::to_string(&self.items).ok()?,
             timestamp: ts.to_string(),
+            is_error: false,
         })
     }
 }
@@ -4432,6 +4450,83 @@ mod user_text_tests {
             entry_to_brief(&user_entry("把服务启动，然后打开前台")).expect("真实用户消息必须保留");
         assert_eq!(m.role, "user");
         assert_eq!(m.content, "把服务启动，然后打开前台");
+    }
+}
+
+/// `tool_result` 的成败标记（`is_error`）能不能原样带到前端。
+///
+/// 这几条盯的是**下发形态**而不只是字段值：为真时键要在、为假与缺失时
+/// 整个键都不出现（见 `MessageBrief::is_error` 的说明）。只断言字段值的话，
+/// 哪天 `skip_serializing_if` 被摘掉，两万多条 `isError: false` 会悄悄
+/// 涌进每次轮询，测试却照样绿。
+#[cfg(test)]
+mod tool_result_error_tests {
+    use super::*;
+
+    /// 真实形态：`type=user` 的记录里挂一个 `tool_result` 块
+    fn result_entry(err: Option<bool>) -> Value {
+        let mut item = serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": "toolu_01",
+            "content": "npm ERR! code ELIFECYCLE"
+        });
+        if let Some(e) = err {
+            item["is_error"] = Value::Bool(e);
+        }
+        serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-09-09T10:00:00Z",
+            "message": { "content": [item] }
+        })
+    }
+
+    fn wire(v: &Value) -> Value {
+        serde_json::to_value(entry_to_brief(v).expect("这条应当进对话流")).unwrap()
+    }
+
+    #[test]
+    fn failed_step_carries_is_error() {
+        let m = entry_to_brief(&result_entry(Some(true))).expect("tool_result 应当进对话流");
+        assert_eq!(m.role, "tool_result");
+        assert!(m.is_error, "记录里写着 is_error=true，这一步就是跑砸的");
+        assert_eq!(
+            wire(&result_entry(Some(true)))["isError"],
+            Value::Bool(true),
+            "为真时必须下发 isError，否则前端标不出失败的那一步"
+        );
+    }
+
+    /// 为假：字段值是 false，且**键整个不出现** —— 少数派才占带宽
+    #[test]
+    fn successful_step_omits_the_key() {
+        let m = entry_to_brief(&result_entry(Some(false))).expect("tool_result 应当进对话流");
+        assert!(!m.is_error);
+        assert!(
+            wire(&result_entry(Some(false))).get("isError").is_none(),
+            "为假时不该下发这个键"
+        );
+    }
+
+    /// 缺字段（老记录 / 别的形态）：行为与改前一致 —— 不出错、不出键
+    #[test]
+    fn missing_field_behaves_as_before() {
+        let m = entry_to_brief(&result_entry(None)).expect("tool_result 应当进对话流");
+        assert!(!m.is_error);
+        assert_eq!(m.content, "npm ERR! code ELIFECYCLE");
+        assert!(wire(&result_entry(None)).get("isError").is_none());
+    }
+
+    /// 别的 role 一律不带这个键：它只描述「一次工具调用的收场」
+    #[test]
+    fn other_roles_never_carry_it() {
+        let v = serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-09-09T10:00:00Z",
+            "message": { "content": "把服务启动" }
+        });
+        let w = wire(&v);
+        assert_eq!(w["role"], "user");
+        assert!(w.get("isError").is_none());
     }
 }
 

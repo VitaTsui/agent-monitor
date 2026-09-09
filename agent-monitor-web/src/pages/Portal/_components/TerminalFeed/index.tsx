@@ -413,7 +413,7 @@ interface ChainCall {
   /** 入参提示（命令 / 路径 / 描述），后端 `tool_input_hint` 挑出来的那一个 */
   hint: string;
   /** 这次调用的输出。一条调用可能跟着多条输出记录 */
-  results: { key: string; text: string }[];
+  results: { key: string; text: string; bad?: boolean }[];
 }
 interface ChainNote {
   kind: "note";
@@ -421,6 +421,17 @@ interface ChainNote {
   msg: PortalMessage;
 }
 type ChainItem = ChainCall | ChainNote;
+
+/**
+ * 这一步跑砸了没有。
+ *
+ * 判据只认后端下发的 `isError`（`tool_result` 块上的 `is_error` 原样带出来），
+ * 不去输出文本里找 `error` / `失败` 之类的字眼 —— 那是拿字面量当接口用，
+ * 一条打印了 "0 errors" 的成功输出就会被判成失败。
+ *
+ * 一次调用可能跟着多条输出记录，**有一条报错就算这步跑砸了**。
+ */
+const stepFailed = (c: ChainCall) => c.results.some((r) => r.bad);
 
 /**
  * 一串链项概括成一句话：`跑了 6 条命令，查了 3 次资料`。
@@ -450,7 +461,13 @@ const summarizeChain = (items: ChainItem[]): string => {
   if (looked.length) clauses.push(`查了 ${looked.length} 次资料`);
   if (wrote.length) clauses.push(`改了 ${wrote.length} 个文件`);
   if (others.length) clauses.push(`调用了 ${others.length} 次工具`);
-  return clauses.join("，");
+  /* 失败要在**收起状态**下就说得出来：跑完的那一轮整条链默认是折起来的
+     （`shown` 在非 live 且未展开时是空数组），只在步骤行上标红等于把它藏在
+     一次点击后面 —— 而「哪一轮出过错」恰恰是回看时最先想知道的事。 */
+  const bad = calls.filter(stepFailed).length;
+  const head = clauses.join("，");
+  if (!bad) return head;
+  return head ? `${head}，其中 ${bad} 步没跑成` : `${bad} 步没跑成`;
 };
 
 /**
@@ -570,9 +587,13 @@ const StepRow: React.FC<{
   toggleExpand: (key: string) => void;
 }> = ({ step, running, open, onToggle, expanded, toggleExpand }) => {
   const human = step.name ? humanTool(step.name) : "命令输出";
+  /* 跑砸的那一步整行走 destructive（与 SessionPanels 的失败行同一套色）：
+     一列灰扑扑的步骤里，只有它是「这里出过事」—— 图标、名字、状态一起变色，
+     扫一眼就能定位到出错的位置，不用逐条展开找。 */
+  const bad = stepFailed(step);
 
   return (
-    <div className={styles.step}>
+    <div className={`${styles.step} ${bad ? styles.stepBad : ""}`}>
       <button
         type="button"
         className={styles.stepHead}
@@ -580,7 +601,13 @@ const StepRow: React.FC<{
         onClick={onToggle}
       >
         <Icon
-          icon={running ? "LoadingOutlined" : "ToolOutlined"}
+          icon={
+            running
+              ? "LoadingOutlined"
+              : bad
+                ? "CloseCircleFilled"
+                : "ToolOutlined"
+          }
           className={`${styles.stepIcon} ${running ? styles.stepIconLive : ""}`}
         />
         {/* 工具名挂成一枚淡底小标：一列 `Browser click` / `Bash` 里，
@@ -591,6 +618,7 @@ const StepRow: React.FC<{
         ) : null}
         <span className={styles.stepName}>{step.hint || human}</span>
         {running ? <span className={styles.stepStatus}>执行中…</span> : null}
+        {bad ? <span className={styles.stepStatus}>失败</span> : null}
         <Icon
           icon={open ? "UpOutlined" : "DownOutlined"}
           className={styles.stepCaret}
@@ -874,15 +902,16 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                            找不到上一步（历史裁剪把调用那条丢了）就自成一步，
                            内容一条都不丢。 */
                         const last = chain[chain.length - 1];
+                        const out = { key: k, text: m.content, bad: m.isError };
                         if (last && last.kind === "call") {
-                          last.results.push({ key: k, text: m.content });
+                          last.results.push(out);
                         } else {
                           chain.push({
                             kind: "call",
                             key: k,
                             name: "",
                             hint: "",
-                            results: [{ key: k, text: m.content }],
+                            results: [out],
                           });
                         }
                         return;
@@ -953,9 +982,10 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
 };
 
 /*
- * TODO(am-core): 执行链缺三样后端此刻不下发的东西，都要改 `MessageBrief`
+ * TODO(am-core): 执行链还缺两样后端此刻不下发的东西，都要改 `MessageBrief`
  * （`agent-task-monitor/core/src/model.rs:77`）＋ `entry_to_brief`
- * （`core/src/scanner.rs:1727` 起）才能补上：
+ * （`core/src/scanner.rs:1727` 起）才能补上（「每步成败」已经接通，
+ * 走 `MessageBrief::is_error` → `PortalMessage.isError` → `.stepBad`）：
  *
  *   1. **每步耗时**。原始 jsonl 里根本没有：`durationMs` 只挂在
  *      `type=system, subtype=turn_duration` 上（**整轮**的耗时），
@@ -964,11 +994,7 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
  *      `Agent` 全部落在 0.02–0.1s（子代理实际跑几分钟），`Bash` 中位数 0.08s
  *      而最小 0.01s（一个 shell 都起不来）。它量的是记录落盘的间隔，不是执行时间。
  *      要真耗时得后端在调用与结果配对时自己计时并下发 `durationMs`。
- *   2. **每步成败**。这个原始数据里**有**：`tool_result` 块上带 `is_error`
- *      （实测 27 条 true / 1152 条 false），但 `entry_to_brief` 只取了文本、
- *      把它丢了（`scanner.rs:1758-1766`）。加一个 `isError?: bool` 即可，
- *      前端这边 `.stepBad` 的样式已经备好了。
- *   3. **多次调用的拆分**。同一条 assistant 记录里的多次 tool_use 被
+ *   2. **多次调用的拆分**。同一条 assistant 记录里的多次 tool_use 被
  *      `tools.join(" | ")` 拼成一条（`scanner.rs:1841`），前端没法安全拆开
  *      （命令自己就可能带管道）。该出成结构化数组而不是拼字符串。
  *

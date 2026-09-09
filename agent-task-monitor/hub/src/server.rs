@@ -4083,6 +4083,7 @@ mod selecting_tests {
             role: role.into(),
             content: String::new(),
             timestamp: String::new(),
+            is_error: false,
         }
     }
     fn msgs(roles: &[&str]) -> Vec<MessageBrief> {

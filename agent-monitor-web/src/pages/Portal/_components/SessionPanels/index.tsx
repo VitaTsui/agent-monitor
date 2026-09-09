@@ -63,10 +63,19 @@ const StateCard: React.FC<CardProps> = ({ icon, title, meta, children }) => (
  * 三种收场分色（与 VitaAgent 一致，见 `TaskCard/index.module.scss:94-104`）：
  * 执行中走主色（墨黑）+ 脉冲，异常收场走 destructive，其余中性。
  * 右侧那枚小胶囊写耗时 —— 「还在跑」与「卡死了」的唯一区别就是它。
+ *
+ * 收场不对的还多一行原因（`task.summary`，见 `BgTask.summary`）：光有「失败」
+ * 两个字回答不了「所以我该怎么办」——退出码、限流、卡死超时是三件完全不同的事。
+ * 这一行只在**真有原因可说**时才出现，没有就退回原先的一行。
+ *
+ * 跑完的那些不在这里：清单本身就把 `completed` 滤掉了（见 `BG_DONE` /
+ * `aliveBgTasks`），所以不必再判一次状态 —— 后端给完成条目也带 `summary`
+ * （`Agent "X" finished`），那句话和上面的名字是重复的，正好一条都进不来。
  */
 const TaskRow: React.FC<{ task: BgTask; now: number }> = ({ task, now }) => {
   const failed = isBgFailed(task.status);
   const elapsed = fmtElapsed(task.startedAt, now);
+  const reason = task.summary?.trim();
   return (
     <li className={`${styles.item} ${failed ? styles.failed : ""}`}>
       <span className={styles.itemHead}>
@@ -85,6 +94,13 @@ const TaskRow: React.FC<{ task: BgTask; now: number }> = ({ task, now }) => {
             （VitaAgent `TaskCard/index.module.scss:376-388` 的 `.cellMeta`） */}
         {elapsed ? <span className={styles.itemMeta}>{elapsed}</span> : null}
       </span>
+      {/* 原文照登：这句话是上游写的英文，翻译或改写都会把退出码、request id
+          这类真正有用的东西弄丢。整句放不下时用 title 兜住，鼠标停一下看全 */}
+      {reason ? (
+        <span className={styles.itemReason} title={reason}>
+          {reason}
+        </span>
+      ) : null}
     </li>
   );
 };

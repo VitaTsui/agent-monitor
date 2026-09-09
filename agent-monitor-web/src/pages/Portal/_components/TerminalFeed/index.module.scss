@@ -361,6 +361,25 @@
     }
   }
 
+  // 跑砸的那一步：整行走 destructive，与 SessionPanels 里失败的后台任务同一套色。
+  // 悬停提亮那条规则（`.stepHead:hover` 把三个子元素刷成 --foreground）写在
+  // `.stepHead` 内层、特指度更高，所以这里要跟上一条同样口径的 hover，
+  // 否则鼠标一划过失败行就变回普通灰，「这里出过事」当场消失。
+  .stepBad {
+    .stepIcon,
+    .stepName,
+    .stepStatus {
+      color: var(--destructive);
+    }
+
+    .stepHead:hover {
+      .stepName,
+      .stepStatus {
+        color: var(--destructive);
+      }
+    }
+  }
+
   // 箭头紧跟内容，不顶到行尾
   .stepCaret {
     flex: none;

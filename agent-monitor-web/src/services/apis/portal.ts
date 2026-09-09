@@ -37,6 +37,14 @@ export interface PortalMessage {
    * 单看内容说明不了什么（孤零零一个「1」），问题本身又不在流里 —— 不进对话流。
    */
   fromSelect?: boolean;
+  /**
+   * **这一步跑砸了**（只出现在 `role === "tool_result"` 上）。
+   *
+   * 后端只在为真时下发这个键（`am-core` `model.rs` 的 `MessageBrief::is_error`），
+   * 所以「缺失」就是「没出错」，不必和 `false` 区分。老版客户端上报的数据里没有
+   * 这个键，执行链退回改前的样子（每一步都不标失败），不会报错。
+   */
+  isError?: boolean;
 }
 
 /** AskUserQuestion 的一道题 */

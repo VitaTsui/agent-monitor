@@ -79,6 +79,17 @@ pub struct MessageBrief {
     /// user 提示词 / assistant 文本 / 工具名
     pub content: String,
     pub timestamp: String,
+    /// **这一步跑砸了**：`tool_result` 块上的 `is_error`。
+    ///
+    /// 原始记录里一直带着（实测本机 `~/.claude/projects` 25222 个块里 997 个为真），
+    /// 此前 `entry_to_brief` 只取了文本、把它丢掉 —— 于是前端执行链上每一步长得
+    /// 一模一样，跑成的和跑砸的没有任何区别，一轮里到底哪一步出的错看不出来。
+    ///
+    /// **只在为真时下发**（与 [`Task::live_cwd`] 同一套口径：没什么可说就不出这个键）。
+    /// 失败是少数派，把两万多条 `isError: false` 塞进每次轮询纯粹是搬运。
+    /// 前端按「有这个键且为真 = 失败」判，缺失即不失败，老客户端上报的数据不受影响。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_error: bool,
 }
 
 /// 聚合后的「任务」：一个代理会话 + 可能匹配到的进程

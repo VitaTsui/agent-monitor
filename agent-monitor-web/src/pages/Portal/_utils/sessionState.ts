@@ -36,6 +36,17 @@ export interface BgTask {
   kind?: string;
   /** 起跑时刻（ISO8601）。老客户端上报的数据里可能没有，此时不显示耗时 */
   startedAt?: string;
+  /**
+   * **为什么是这个收场**：完成通知里 `<summary>` 的英文原文，≤300 字符、单行。
+   *
+   * 退出码、限流原因、卡死时长都嵌在这一句话里（`Agent "X" failed: Agent stalled:
+   * no progress for 600s`）。**原样显示，不解析**：那是上游随时会改的英文文案，
+   * 去里面抠 `exit code (\d+)` 就是拿字面量当接口用，上游改一版就整条哑掉。
+   *
+   * 只有收到完成通知才有值；后端为空时该键整个不出现（不是空串），
+   * 老客户端上报的数据里没有它，退回改前的样子（只说「哪一条、什么收场」）。
+   */
+  summary?: string;
 }
 
 /**
@@ -52,8 +63,8 @@ export const BG_DONE = ["completed"];
  * **异常收场**的后台任务：跑砸了、被杀了、被停了。
  *
  * 与 `BG_DONE` 分开的原因见上：这几种不能滤掉，要留在清单里并标成失败态。
- * 会话记录里没有失败原因字段（scanner 的 `<task-notification>` 只解析 `<status>`），
- * 所以能说的只有「哪一条、什么收场」——比原先什么都不说强得多。
+ * 失败原因走 [`BgTask.summary`]（后端从完成通知的 `<summary>` 里带出来），
+ * 所以这几条现在说得出「为什么」，不只是「什么收场」。
  */
 export const BG_FAILED = ["failed", "killed", "stopped"];
 
