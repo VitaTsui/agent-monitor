@@ -2,9 +2,11 @@
 // 颜色一律走 styles/tokens.scss 的令牌，明暗两套自动跟随。
 
 .SearchPalette {
-  // 内容区的内边距与圆角由内联 styles.container 给（见 index.tsx 注释），
-  // 这里只管圆角这一档 —— 组件库没写死它，不会打架
-  :global(.ant-modal-content) {
+  /* 圆角这一档。**类名是 `.ant-modal-container` 不是 `.ant-modal-content`** ——
+     antd v6 把这个槽改名了，照 v5 写的选择器一个都命不中（本文件原来就写错，
+     圆角一直是 antd 的默认值在顶着）。内边距仍走内联 styles.container，
+     见 index.tsx 里的说明。 */
+  :global(.ant-modal-container) {
     border-radius: 12px;
   }
 

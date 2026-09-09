@@ -174,12 +174,15 @@ const Portal: React.FC = observer(() => {
    *
    * 带修饰键，所以在输入框（对话框、备注、搜索行）里聚焦时也不会被当成正常输入误触发；
    * `preventDefault` 挡掉浏览器自己的 ⌘K（Chrome 聚焦地址栏搜索）。
-   * 挂 window 上是因为入口有两个：这个键，和侧栏头部那颗按钮。 */
+   * 挂 window 上是因为入口有三个：这个键、侧栏头部那颗按钮、移动端顶栏那颗。 */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        setSearchOpen(true);
+        // **开关**，不是只管开：同一个键既然能唤起它，就得能收回去。只管开的话，
+        // 一旦焦点不在弹窗里（Esc 走的是弹窗自己的按键通道），这个遮罩就没有
+        // 键盘出路了 —— 页面点不动、Esc 又不响应，只能刷新。
+        setSearchOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", onKey);
