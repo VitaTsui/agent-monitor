@@ -56,8 +56,8 @@ pub struct HistoryEntry {
     /// 这个终端的所有历史记录跟着一起变。会话 id 做不到这件事 —— `/clear`、`--resume`
     /// 各换一次新 id，而备注挂在终端窗口上（见 crate::notes）。
     ///
-    /// 0.11.55 之前写入的存量记录没有这个字段，为空串，永远匹配不到备注（备注表的键都带
-    /// `machine|` 前缀），于是回落到 `title` —— 与改动前的表现完全一致。
+    /// 本次改动之前写入的存量记录没有这个字段，反序列化得空串，永远匹配不到备注（备注表的
+    /// 键都带 `machine|` 前缀），于是回落到 `title` —— 与改动前的表现完全一致。
     #[serde(default)]
     pub anchor: String,
     /// 用户给这个终端起的名字，**读取时现填**。
@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(got.note, None);
     }
 
-    /// 存量记录（0.11.55 之前写入，没有 anchor 字段）：读回来 anchor 为空、
+    /// 存量记录（本次改动之前写入，没有 anchor 字段）：读回来 anchor 为空、
     /// 即便用户已经起了名字也匹配不到，表现与改动前一致 —— 显示自动标题。
     #[test]
     fn legacy_entry_without_anchor_falls_back_to_title() {
