@@ -111,6 +111,13 @@ interface IPortalTaskData {
    * 人早在终端上选完了，那份只能当记录看。）用户选完即由后续 hook 清除。
    */
   pendingSelect?: SelectPayload;
+  /**
+   * 用户给这个会话起的名字。有它就盖过自动标题（见 _utils/sessionNote 的 sessionTitle）。
+   *
+   * 挂在**终端窗口**上而不是会话 id 上，`/clear`、`--resume`、hub 重启都不丢；
+   * 没起过名字时后端下发 null。
+   */
+  note?: string | null;
 }
 export type PortalTaskData = Partial<IPortalTaskData>;
 
@@ -173,6 +180,15 @@ export const getPortalTaskMessages = async (id: string, limit?: number) => {
   return await get<ListRes<PortalMessage>>(`/monitor/tasks/${id}/messages`, {
     params: { limit },
   });
+};
+
+/**
+ * 设置或清除会话备注。传空串 = 清除，恢复自动标题。
+ *
+ * 超长（>100 字）后端报 400 而不是静默截断，msg 里带实际字数，直接展示即可。
+ */
+export const setPortalTaskNote = async (id: string, note: string) => {
+  return await post<{ note: string | null }>(`/monitor/tasks/${id}/note`, { note });
 };
 
 export interface SlashCommand {

@@ -285,7 +285,7 @@ axios.interceptors.response.use(
   (err) => {
     if (!err?.response) return Promise.reject(err);
 
-    const { status, config, statusText } = err.response;
+    const { status, config, statusText, data } = err.response;
 
     if (status === 401) {
       // 标记为静默的请求（如登录页探测钉钉开关）401 时不跳登录，仅向上抛错
@@ -294,7 +294,13 @@ axios.interceptors.response.use(
       }
       return Promise.reject(err);
     } else {
-      const errorText = codeMessage[status] || statusText;
+      // 服务端自己说了原因就照原话展示。按状态码查表得到的是「发出的请求有错误」
+      // 这类放之四海皆准的废话，而后端在业务信封里给的往往是「备注最长 100 个字，
+      // 当前 104 个」—— 后者才是用户照着能改对的那句。
+      const errorText =
+        (typeof data?.msg === "string" && data.msg.trim()) ||
+        codeMessage[status] ||
+        statusText;
 
       errMsg(status, config.url, errorText);
 

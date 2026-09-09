@@ -1,0 +1,68 @@
+// 标题本体保持原样式（字号/粗细由宿主决定），这里只负责「可点」这层壳：
+// 宽度不撑开、不换行，铅笔跟在名字后面。
+.renameTrigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+
+  &:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+
+  // 铅笔平时压得很淡：标题是主角，改名是顺手的事，不该抢视线；
+  // 但不能藏起来只在 hover 出现 —— 触屏没有 hover，那等于没有入口。
+  .renameIcon {
+    flex: none;
+    font-size: 12px;
+    color: var(--muted-foreground);
+    opacity: 0.55;
+  }
+
+  &:hover .renameIcon,
+  &:focus-visible .renameIcon {
+    color: var(--primary);
+    opacity: 1;
+  }
+}
+
+.renamePop {
+  :global(.ant-popover-inner-content) {
+    padding: 4px 2px;
+  }
+}
+
+.renameForm {
+  width: 268px;
+  max-width: 76vw;
+}
+
+.renameTitle {
+  margin-bottom: 8px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.renameHint {
+  margin-top: 6px;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--muted-foreground);
+
+  // 超长：本地就把话说清楚，不用等后端 400
+  &.over {
+    color: var(--destructive);
+  }
+}
+
+.renameActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}

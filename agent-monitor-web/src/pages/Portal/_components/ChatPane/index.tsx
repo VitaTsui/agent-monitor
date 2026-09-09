@@ -20,7 +20,9 @@ import PortalStore from "../../PortalStore";
 import Composer from "../Composer";
 import TerminalFeed, { SelectCard } from "../TerminalFeed";
 import SessionPanels from "../SessionPanels";
+import SessionRename from "../SessionRename";
 import SubAgentChip from "../SubAgentChip";
+import { sessionTitle } from "../../_utils/sessionNote";
 import styles from "./index.module.scss";
 
 interface ChatPaneProps {
@@ -366,9 +368,18 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 <span className={styles.slotChip}>#{task.slot}</span>
               </Tooltip>
             )}
-            <span className={styles.headTitleText}>
-              {task.title || task.prompt || task.projectName || "会话"}
-            </span>
+            {/* 点标题即改名。紧凑卡片除外 —— 那张卡整块都是「换到主区」的点击区，
+                标题再抢一次点击，右侧那列就没法用了。 */}
+            <SessionRename
+              taskId={id}
+              note={task.note}
+              disabled={compact || !id}
+              className={styles.headTitleEdit}
+            >
+              <span className={styles.headTitleText}>
+                {sessionTitle(task, "会话")}
+              </span>
+            </SessionRename>
           </div>
           <div className={styles.headMeta}>
             {/* 拆分可同时看多设备的会话：标题下标明本会话所属设备 */}

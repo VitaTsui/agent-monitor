@@ -115,6 +115,18 @@
       text-overflow: ellipsis;
       white-space: nowrap;
 
+      // 标题现在是个可点的改名入口：整块仍不许换行，省略号落到文字本体上
+      .mobileTitleEdit {
+        max-width: 100%;
+        vertical-align: middle;
+      }
+
+      .mobileTitleText {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       .mobileStatusDot {
         display: inline-block;
         width: 8px;

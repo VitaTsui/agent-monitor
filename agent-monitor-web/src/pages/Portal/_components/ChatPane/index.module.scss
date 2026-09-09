@@ -114,6 +114,11 @@
         font-weight: 600;
         color: var(--foreground);
 
+        // 改名触发器：不撑宽度，标题该省略号还是省略号
+        .headTitleEdit {
+          min-width: 0;
+        }
+
         .headTitleText {
           overflow: hidden;
           text-overflow: ellipsis;

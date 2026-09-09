@@ -12,10 +12,12 @@ import {
   getPortalTaskList,
   getPortalTaskMessages,
   sendPortalInput,
+  setPortalTaskNote,
   trustPortalDevice,
   untrustPortalDevice,
 } from "@/services/apis/portal";
 
+import { sessionTitle } from "./_utils/sessionNote";
 import { isSlashCommand } from "./_utils/slashCommand";
 import { isStateSnapshot } from "./_utils/sessionState";
 
@@ -134,6 +136,8 @@ class PortalStore {
 
     return this._tasks.filter(
       (t) =>
+        // 备注也参与匹配：用户起完名字后，第一反应就是按那个名字搜
+        (t.note ?? "").toLowerCase().includes(k) ||
         (t.projectName ?? "").toLowerCase().includes(k) ||
         (t.prompt ?? "").toLowerCase().includes(k) ||
         (t.hostname ?? "").toLowerCase().includes(k)
@@ -241,10 +245,11 @@ class PortalStore {
     // 固定字母序：分组按标题、组内会话按标题(再退 id)稳定排序 —— 之前顺序跟随
     // filtered 的活跃度，活跃会话一变就整列上下跳；改成字母序后位置钉死不乱跳。
     const groups = [...byProject.values()];
-    const taskKey = (t: PortalTaskData) =>
-      t.title || t.prompt || t.projectName || t.id || "";
-    // 有真实内容（标题/提示词）= 真正在用的会话，排在「刚开还没输入的空占位」前
-    const hasContent = (t: PortalTaskData) => !!(t.title || t.prompt);
+    // 排序按**显示出来的那个名字**：起了备注就按备注排，否则列表里看着是 A 在 B 前，
+    // 排序却还照着被盖掉的旧标题走
+    const taskKey = (t: PortalTaskData) => sessionTitle(t, t.id ?? "");
+    // 有真实内容（备注/标题/提示词）= 真正在用的会话，排在「刚开还没输入的空占位」前
+    const hasContent = (t: PortalTaskData) => !!(t.note || t.title || t.prompt);
     groups.sort((a, b) => a.title.localeCompare(b.title, "zh"));
     for (const g of groups) {
       g.tasks.sort((a, b) => {
@@ -582,6 +587,37 @@ class PortalStore {
         antdMessage.error(res.msg ?? "操作失败");
       }
     }).catch(() => antdMessage.error("删除设备失败，请检查网络"));
+  };
+
+  /**
+   * 给会话起名 / 改名；`note` 传空串 = 清除，标题退回自动推断的那个。
+   *
+   * 成功后**当场把本地这条改掉**，不等下一次推送：WS 推的是整份会话列表，
+   * 名字改完却要隔一拍才变，用起来像没保存上。推送随后会带着同样的 note 回来，
+   * 覆盖上去是同一个值，不会打架。
+   *
+   * @returns 是否保存成功（调用方据此决定收起编辑框还是留着让用户改）
+   */
+  public setNote = async (id: string, note: string): Promise<boolean> => {
+    try {
+      const res = await setPortalTaskNote(id, note);
+      if (res.code !== 0) {
+        // 超长等业务错误：后端 msg 说得比任何本地兜底文案都准（带实际字数）
+        antdMessage.error(res.msg ?? "保存失败");
+        return false;
+      }
+      const saved = res.data?.note ?? null;
+      this._tasks = this._tasks.map((t) => (t.id === id ? { ...t, note: saved } : t));
+      antdMessage.success(saved ? "已重命名" : "已清除备注，标题恢复自动生成");
+      return true;
+    } catch (e) {
+      // 带响应的失败（400/404 等）由响应拦截器把服务端原话弹出来了（见 Axios.ts），
+      // 这里再补一条只会盖住它；真正没人吭声的只有「请求根本没发出去」。
+      if (!(e && typeof e === "object" && "response" in e)) {
+        antdMessage.error("保存失败，请检查网络");
+      }
+      return false;
+    }
   };
 
   /** 单击会话：替换为单格视图 */

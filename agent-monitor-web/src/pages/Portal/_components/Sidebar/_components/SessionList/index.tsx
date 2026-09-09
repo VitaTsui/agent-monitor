@@ -5,6 +5,7 @@ import { SplitCellsOutlined } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
 import PortalStore from "../../../../PortalStore";
+import { sessionTitle } from "../../../../_utils/sessionNote";
 import ScrollText from "../../../ScrollText";
 import styles from "./index.module.scss";
 
@@ -73,8 +74,8 @@ const SessionList: React.FC<SessionListProps> = observer((props) => {
                   <ScrollText
                     className={styles.sessName}
                     active={openIds.includes(t.id ?? "")}
-                    plain={t.title || t.prompt || t.projectName || "新会话"}
-                    text={t.title || t.prompt || t.projectName || "新会话"}
+                    plain={sessionTitle(t, "新会话")}
+                    text={sessionTitle(t, "新会话")}
                   />
                   <span
                     className={`${styles.sessStatus} ${styles[t.status ?? ""] ?? ""}`}

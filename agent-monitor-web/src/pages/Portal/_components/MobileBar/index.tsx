@@ -12,7 +12,9 @@ import {
 import { observer } from "mobx-react-lite";
 
 import PortalStore from "../../PortalStore";
+import { sessionTitle } from "../../_utils/sessionNote";
 import { SidebarIcon } from "../Sidebar";
+import SessionRename from "../SessionRename";
 import styles from "./index.module.scss";
 
 interface MobileBarProps {
@@ -55,7 +57,22 @@ const MobileBar: React.FC<MobileBarProps> = observer((props) => {
             className={`${styles.mobileStatusDot} ${styles[t0.status ?? ""] ?? ""}`}
           />
         ) : null}
-        {t0?.title || t0?.prompt || t0?.projectName || "终端任务监控"}
+        {/* 移动端会话头部整个被样式隐藏，这里是标题唯一露面的地方 ——
+            改名入口也只能在这儿：点标题即改。 */}
+        {t0 ? (
+          <SessionRename
+            taskId={t0.id ?? ""}
+            note={t0.note}
+            disabled={!t0.id}
+            className={styles.mobileTitleEdit}
+          >
+            <span className={styles.mobileTitleText}>
+              {sessionTitle(t0, "终端任务监控")}
+            </span>
+          </SessionRename>
+        ) : (
+          "终端任务监控"
+        )}
       </span>
       {/* 正在跑的时候「中断」提到一级：手机上想停一下是最急的操作，
           埋在 ⋯ 里要点两次、还要在小菜单里瞄准。不跑时不占位。 */}

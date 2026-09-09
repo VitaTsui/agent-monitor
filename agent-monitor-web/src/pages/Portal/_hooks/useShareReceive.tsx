@@ -140,8 +140,11 @@ export const ShareReceiveModal: React.FC = observer(() => {
           value={taskId || undefined}
           onChange={(v) => setTaskId(String(v ?? ""))}
           options={tasks.map((t) => ({
+            // 备注排最前，与列表/头部一致：用户在这儿也是照着自己起的名字找会话。
+            // 后面接的是 providerDsr 而不是 sessionTitle 那条链 —— 这个下拉挑的是
+            // 「传到哪台设备」，认不出名字时看「Claude / Codex」比看项目名更管用。
             label: `${t.hostname ?? t.machineId} · ${
-              t.title || t.providerDsr || "会话"
+              t.note || t.title || t.providerDsr || "会话"
             }`,
             value: t.id ?? "",
           }))}
