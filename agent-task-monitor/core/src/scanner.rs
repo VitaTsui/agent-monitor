@@ -2878,7 +2878,10 @@ mod bg_tests {
         t.observe(&stop_result("u2", "b1", "local_bash"));
         assert_eq!(t.items.len(), 1, "停止结果不该新建条目");
         assert_eq!(t.items[0].status, "stopped");
-        assert!(t.items[0].ended_ms > 0, "收尾时刻要落下来，否则复活判定会误翻");
+        assert!(
+            t.items[0].ended_ms > 0,
+            "收尾时刻要落下来，否则复活判定会误翻"
+        );
     }
 
     /// 子代理同样可以被主动停掉（实测 20 条停止结果里 5 条是 `local_agent`）
@@ -4466,4 +4469,3 @@ mod short_name_tests {
         assert_eq!(short_name(r"D:\cursor\"), "cursor");
     }
 }
-
