@@ -336,9 +336,19 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
         };
 
         let mut req = client.post(format!("{hub}/monitor/report"));
+        // 手里有哪张凭证就都递上去，由 hub 挑一张认（它本就写成「设备令牌或全局令牌，
+        // 任一成立即放行」）。原先是 `else if`：只要本机存过设备令牌，显式配置的
+        // AM_AGENT_TOKEN 就永远发不出去。
+        //
+        // 这在 mac 上是必然踩的：设备令牌存在钥匙串里，键名固定为
+        // AgentMonitor/device-token（见 secrets.rs），**不按 machine_id 也不按数据目录区分**。
+        // 于是本机再起第二个实例（联调/换 AM_MACHINE_ID）时，它会捞到已安装客户端的
+        // 那张令牌，拿着别人的身份去认自己的 machine_id —— hub 那边 verify 必然不过，
+        // 而唯一能救场的全局令牌又被这个 else 挡住了，结果就是「怎么配都登记不上」。
         if let Some(t) = state.device_token.read().await.as_deref() {
             req = req.header("x-device-token", t);
-        } else if let Some(t) = &legacy_token {
+        }
+        if let Some(t) = &legacy_token {
             req = req.header("x-agent-token", t);
         }
         match req.json(&payload).send().await {
@@ -363,19 +373,43 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                 }
             }
             Ok(resp) => {
-                if !hub_ok {
-                    tracing::info!("已连上 hub: {hub}");
-                    hub_ok = true;
-                }
-                net_fail_streak = 0;
-                state
-                    .hub_connected
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                // 上报成功即清掉旧的拒绝原因（例如用户刚把令牌改对了）
-                if state.hub_error.read().await.is_some() {
-                    *state.hub_error.write().await = None;
-                }
-                if let Ok(body) = resp.json::<Value>().await {
+                // 这个 hub 的业务错误码放在**响应体**里，HTTP 状态一律 200
+                // （`err(401, …)` 返回的是 `Json({"code":401,…})`）。所以上面那个
+                // `!resp.status().is_success()` 分支实际上只兜得住极少数传输层错误，
+                // 401「设备未绑定」、400「AM_USER 账号不存在」全都从这里进来 ——
+                // 而这里过去无脑当成功：打一句「已连上 hub」、托盘标「已连接」，
+                // 然后设备根本没在 hub 上登记，网页设备列表永远空着。
+                // 实测就是这个组合把人坑住的：日志说连上了、手工 curl 同样参数却能登记成功。
+                let body = resp.json::<Value>().await.unwrap_or(Value::Null);
+                let biz = body.get("code").and_then(Value::as_i64).unwrap_or(0);
+                if biz != 0 {
+                    let msg = body.get("msg").and_then(Value::as_str).unwrap_or_default();
+                    tracing::warn!("上报被 hub 拒绝: code={biz} {msg}");
+                    hub_ok = false;
+                    state
+                        .hub_connected
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    // 托盘要显示人话原因：这类失败是配置错了，重试一万次也不会好
+                    *state.hub_error.write().await = Some(describe_reject(biz as u16, msg));
+                    // 设备令牌失效（设备被删/换绑）：清掉本地令牌，回到配对流程重新绑定。
+                    // 判据与上面 HTTP 分支保持一致，别在两处各写一套。
+                    if biz == 401 && legacy_token.is_none() {
+                        *state.device_token.write().await = None;
+                        crate::secrets::clear(&state.config.data_dir);
+                    }
+                } else {
+                    if !hub_ok {
+                        tracing::info!("已连上 hub: {hub}");
+                        hub_ok = true;
+                    }
+                    net_fail_streak = 0;
+                    state
+                        .hub_connected
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    // 上报成功即清掉旧的拒绝原因（例如用户刚把令牌改对了）
+                    if state.hub_error.read().await.is_some() {
+                        *state.hub_error.write().await = None;
+                    }
                     // 更新推送：hub 版本比本机新 → 记录，托盘显示「新版本可用」
                     if let Some(hv) = body.pointer("/data/hubVersion").and_then(Value::as_str) {
                         let newer = version_newer(hv, env!("CARGO_PKG_VERSION"));
