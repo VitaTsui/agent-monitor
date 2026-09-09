@@ -130,7 +130,9 @@ const Portal: React.FC = observer(() => {
     // 刷新当前用户信息（含实时 isSuper）：改了权限无需重新登录，下次加载即生效
     getMe()
       .then((res) => {
-        if (res.code === 0 && res.data) {
+        // 拦截器已保证是业务信封；这里只确认 data 确实是一条用户记录，
+        // 不让形状不对的 payload 覆盖掉本地已有的登录用户信息。
+        if (res.code === 0 && res.data?.username) {
           setUserInfo(res.data);
           setUser(res.data);
         }
