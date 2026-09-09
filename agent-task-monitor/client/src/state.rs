@@ -138,8 +138,8 @@ pub struct AppState {
     pub hub_latest_version: RwLock<Option<String>>,
     /// hub 下发的强制更新下限：本机低于它必须更新才能继续使用
     pub hub_min_version: RwLock<Option<String>>,
-    /// 每设备上报令牌（配对后持久化于 data_dir/device-token）
-    pub device_token: RwLock<Option<String>>,
+    /// 每设备上报令牌（配对后持久化到系统安全存储，见 secrets）
+    pub device_token: RwLock<Option<DeviceToken>>,
     /// 进行中的配对 (code, pair_token)
     pub pair_info: RwLock<Option<(String, String)>>,
     /// 最近一次上报被拒原因（托盘显示，与断网区分）
@@ -147,6 +147,37 @@ pub struct AppState {
 }
 
 pub type SharedState = Arc<AppState>;
+
+/// 每设备上报令牌 + 它的归属是否已确认。
+///
+/// `provisional` 为真：这张令牌来自 macOS 钥匙串里**旧版不区分机器**的那条条目
+/// （`AgentMonitor/device-token`），本地无从判断它属于哪台机器 —— 可能是本机升级前
+/// 自己写的，也可能是同一台 Mac 上另一个实例的。所以先拿来试，由 hub 裁决：
+/// - 上报成功 = hub 确认这张令牌绑的就是本机 machine_id → `adopt_device_token`
+///   写进本机专属键、删掉旧条目；
+/// - 被判 401 = 不是本机的（或已失效）→ 只从内存丢弃，**绝不删钥匙串里那条**，
+///   否则会把已安装客户端的令牌一起抹掉，害人家重新配对。
+pub struct DeviceToken {
+    pub value: String,
+    pub provisional: bool,
+}
+
+impl DeviceToken {
+    /// 归属已确认（本机专属键读出的 / 自家数据目录里的 / 刚配对签发的）
+    pub fn confirmed(value: String) -> Self {
+        Self {
+            value,
+            provisional: false,
+        }
+    }
+    /// 归属待确认（旧版共用条目读出的）
+    pub fn provisional(value: String) -> Self {
+        Self {
+            value,
+            provisional: true,
+        }
+    }
+}
 
 impl AppState {
     pub fn new(config: Config) -> SharedState {
@@ -172,6 +203,43 @@ impl AppState {
             pair_info: RwLock::new(None),
             hub_error: RwLock::new(None),
         })
+    }
+
+    /// 保存设备令牌（配对签发/换绑）：内存 + 系统安全存储的本机专属键。
+    pub async fn set_device_token(&self, token: &str) {
+        *self.device_token.write().await = Some(DeviceToken::confirmed(token.to_string()));
+        crate::secrets::save(&self.config.data_dir, &self.config.machine_id, token);
+    }
+
+    /// hub 认了这张暂用令牌：迁进本机专属键并删掉旧版共用条目。非暂用时是空操作。
+    pub async fn adopt_device_token(&self) {
+        if !matches!(self.device_token.read().await.as_ref(), Some(d) if d.provisional) {
+            return;
+        }
+        let mut guard = self.device_token.write().await;
+        if let Some(d) = guard.as_mut() {
+            if d.provisional {
+                crate::secrets::adopt_shared_legacy(
+                    &self.config.data_dir,
+                    &self.config.machine_id,
+                    &d.value,
+                );
+                d.provisional = false;
+                tracing::info!("设备令牌归属已确认，迁入本机专属键");
+            }
+        }
+    }
+
+    /// 令牌被 hub 判为无效：从内存丢弃；只有归属已确认的才连带清除本地存储
+    /// （暂用令牌可能是别的实例的，清了会害人家掉线）。
+    pub async fn invalidate_device_token(&self) {
+        let dropped = self.device_token.write().await.take();
+        match dropped {
+            Some(d) if d.provisional => {
+                tracing::info!("暂用设备令牌不属于本机，已丢弃（保留钥匙串旧条目不动）");
+            }
+            _ => crate::secrets::clear(&self.config.data_dir, &self.config.machine_id),
+        }
     }
 }
 

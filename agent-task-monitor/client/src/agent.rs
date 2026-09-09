@@ -350,12 +350,15 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
         // 任一成立即放行」）。原先是 `else if`：只要本机存过设备令牌，显式配置的
         // AM_AGENT_TOKEN 就永远发不出去。
         //
-        // 这在 mac 上是必然踩的：设备令牌存在钥匙串里，键名固定为
-        // AgentMonitor/device-token（见 secrets.rs），**不按 machine_id 也不按数据目录区分**。
-        // 于是本机再起第二个实例（联调/换 AM_MACHINE_ID）时，它会捞到已安装客户端的
-        // 那张令牌，拿着别人的身份去认自己的 machine_id —— hub 那边 verify 必然不过，
-        // 而唯一能救场的全局令牌又被这个 else 挡住了，结果就是「怎么配都登记不上」。
-        if let Some(t) = state.device_token.read().await.as_deref() {
+        // （历史坑：钥匙串键名曾固定为 AgentMonitor/device-token，同一台 Mac 上的第二个
+        // 实例会捞到已安装客户端的令牌 —— 现在键按 machine_id 分开，见 secrets.rs。）
+        let device_token = state
+            .device_token
+            .read()
+            .await
+            .as_ref()
+            .map(|d| d.value.clone());
+        if let Some(t) = &device_token {
             req = req.header("x-device-token", t);
         }
         if let Some(t) = &legacy_token {
@@ -378,8 +381,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                 *state.hub_error.write().await = Some(describe_reject(code.as_u16(), &body));
                 // 设备令牌失效（设备被删除/换绑）：清掉本地令牌，回到配对流程重新绑定
                 if code.as_u16() == 401 && legacy_token.is_none() {
-                    *state.device_token.write().await = None;
-                    crate::secrets::clear(&state.config.data_dir);
+                    state.invalidate_device_token().await;
                 }
             }
             Ok(resp) => {
@@ -404,10 +406,17 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                     // 设备令牌失效（设备被删/换绑）：清掉本地令牌，回到配对流程重新绑定。
                     // 判据与上面 HTTP 分支保持一致，别在两处各写一套。
                     if biz == 401 && legacy_token.is_none() {
-                        *state.device_token.write().await = None;
-                        crate::secrets::clear(&state.config.data_dir);
+                        state.invalidate_device_token().await;
                     }
                 } else {
+                    // 上报被接受 = hub 确认这张设备令牌绑的就是本机 machine_id，
+                    // 于是「暂用」的旧版共用令牌（钥匙串里不区分机器的那条）归属落实：
+                    // 迁进本机专属键并删掉旧条目。**这是本地唯一能判定归属的依据** ——
+                    // 令牌是 hub 侧的随机串，本地看不出属于谁。
+                    // 配了全局令牌时跳过：那种情况下放行的可能是全局令牌，证明不了什么。
+                    if legacy_token.is_none() && device_token.is_some() {
+                        state.adopt_device_token().await;
+                    }
                     if !hub_ok {
                         tracing::info!("已连上 hub: {hub}");
                         hub_ok = true;
@@ -655,9 +664,8 @@ async fn start_pairing(state: &SharedState, client: &reqwest::Client, hub: &str)
 
 /// 持久化设备令牌（拿到后写盘，下次启动直接上报无需重新配对）
 async fn persist_device_token(state: &SharedState, token: &str) {
-    *state.device_token.write().await = Some(token.to_string());
-    // 系统安全存储（mac 钥匙串 / Windows DPAPI），失败回退受限权限文件
-    crate::secrets::save(&state.config.data_dir, token);
+    // 系统安全存储（mac 钥匙串按 machine_id 分键 / Windows DPAPI），失败回退受限权限文件
+    state.set_device_token(token).await;
 }
 
 /// a 是否比 b 更新（按点分数字逐段比较；解析不了的段按 0）。

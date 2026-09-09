@@ -98,7 +98,8 @@ fn main() -> Result<()> {
 
     // 已配对过的设备：从系统安全存储加载每设备上报令牌
     // （mac 钥匙串 / Windows DPAPI；旧版明文文件自动迁移进安全存储）
-    if let Some(t) = secrets::load(&state.config.data_dir) {
+    // 键按 machine_id 分开；读到旧版共用条目时先当「暂用」，由 hub 裁决归属
+    if let Some(t) = secrets::load(&state.config.data_dir, &state.config.machine_id) {
         *state.device_token.blocking_write() = Some(t);
     }
 
