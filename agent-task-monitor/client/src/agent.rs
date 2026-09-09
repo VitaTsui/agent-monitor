@@ -4,10 +4,20 @@ use crate::state::SharedState;
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// 活跃任务才携带消息缓存，且仅在会话文件变化时重读
+/// 活跃任务才携带消息缓存，且仅在「与结果相关的文件」变化时重读。
+///
+/// 缓存键必须同时带上**子会话记录目录**的最新写入时刻：消息末尾那条 `bgtasks` 快照里
+/// 「子会话还在不在跑」是由 `<会话>/subagents/*.jsonl` 决定的，父会话 jsonl 不动、
+/// 子会话跑完，答案照样变了。只按父会话 mtime 缓存的话，父会话闲着的那段时间里，
+/// 跑完的子会话胶囊会一直挂着，非得等用户下次敲字才清掉。
+///
+/// 还得给缓存**压一个最长寿命**：快照里「子会话跑完没」有两道判定是随墙钟翻的
+/// （静置够久 → 收尾、停在半路太久 → 放弃），翻的那一刻没有任何文件在变，纯按 mtime
+/// 做键的话它们永远轮不到执行。取 `SUBAGENT_SETTLE_MS`（= 那两道判定的时间分辨率），
+/// 代价是活跃会话每 5 分钟多重算一次消息。
 struct MsgCache {
-    /// session_id → (mtime_ms, messages)
-    inner: HashMap<String, (u64, Vec<am_core::model::MessageBrief>)>,
+    /// session_id → (父会话 mtime_ms, 子会话记录最新写入 ms, 算出来的时刻, messages)
+    inner: HashMap<String, (u64, u64, std::time::Instant, Vec<am_core::model::MessageBrief>)>,
 }
 
 /// 下发后「待确认是否真的提交」的记录。Cursor 内嵌终端粘贴态会吞掉提交回车，表现为
@@ -640,15 +650,21 @@ async fn attach_messages(state: &SharedState, tasks: &mut [Task], cache: &mut Ms
         if !active || t.id.contains("pid-") {
             continue;
         }
-        // 文件没变化就复用缓存，避免每轮重读大文件
-        if let Some((mtime, msgs)) = cache.inner.get(&t.id) {
-            if *mtime == t.mtime_ms {
+        // 父会话与子会话记录都没变化、且没过最长寿命，才复用缓存
+        let sub_ms = scanner.subagents_mtime(&t.id);
+        let max_age =
+            std::time::Duration::from_millis(am_core::scanner::SUBAGENT_SETTLE_MS);
+        if let Some((mtime, subs, at, msgs)) = cache.inner.get(&t.id) {
+            if *mtime == t.mtime_ms && *subs == sub_ms && at.elapsed() < max_age {
                 t.recent_messages = msgs.clone();
                 continue;
             }
         }
         if let Ok(msgs) = scanner.messages(&t.id, 80) {
-            cache.inner.insert(t.id.clone(), (t.mtime_ms, msgs.clone()));
+            cache.inner.insert(
+                t.id.clone(),
+                (t.mtime_ms, sub_ms, std::time::Instant::now(), msgs.clone()),
+            );
             t.recent_messages = msgs;
         }
     }
