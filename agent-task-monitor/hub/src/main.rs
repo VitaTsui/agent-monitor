@@ -13,6 +13,7 @@ mod history;
 mod mcp;
 mod mdfmt;
 mod oauth;
+mod redact;
 mod registry;
 mod server;
 mod slots;

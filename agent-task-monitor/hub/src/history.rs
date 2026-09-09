@@ -74,9 +74,21 @@ pub async fn save(state: &SharedState) {
     let _ = std::fs::rename(&tmp, &path);
 }
 
+/// 入库前对正文做的两件事：**先脱敏，再截断**。
+///
+/// 顺序不能反：先截断的话，一块贴在报告末尾的私钥会被从主体中间切开 ——
+/// 尾部的 `-----END …-----` 没了，脱敏就认不出这块结构，半截私钥照样落盘。
+/// 先脱敏则整块换成一个短占位符，既不漏，也把省下来的额度让给真正的正文。
+fn prepare_content(content: &str) -> String {
+    crate::redact::redact_secrets(content)
+        .chars()
+        .take(CONTENT_LIMIT)
+        .collect()
+}
+
 /// 追加一条交互记录（正序存放，最新在末尾 —— 与聊天记录的读法一致）。
 pub async fn append(state: &SharedState, mut e: HistoryEntry) {
-    e.content = e.content.chars().take(CONTENT_LIMIT).collect();
+    e.content = prepare_content(&e.content);
     e.title = e.title.chars().take(200).collect();
     if e.content.trim().is_empty() {
         return; // 空内容不入流，免得聊天记录里出现空气泡
@@ -170,5 +182,31 @@ mod tests {
         let mut e = entry("x", "assistant", 1);
         e.content = "   \n  ".into();
         assert!(e.content.trim().is_empty());
+    }
+
+    /// 贴在长报告**末尾**的私钥：必须先脱敏再截断。
+    /// 反过来先截断的话，这块会被拦腰切断、认不出结构，半截私钥就落盘了。
+    #[test]
+    fn redacts_before_truncating() {
+        let filler = "正".repeat(CONTENT_LIMIT - 100);
+        let key_body = (0..4)
+            .map(|i| format!("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC{i:015}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let raw =
+            format!("{filler}\n-----BEGIN PRIVATE KEY-----\n{key_body}\n-----END PRIVATE KEY-----");
+        assert!(raw.chars().count() > CONTENT_LIMIT, "构造的用例应超过上限");
+
+        let got = prepare_content(&raw);
+        assert!(got.contains("[REDACTED:private-key]"), "私钥没被脱敏");
+        assert!(!got.contains("MIIEvQIBAD"), "主体残留在库里");
+        assert!(got.chars().count() <= CONTENT_LIMIT, "截断上限失效");
+    }
+
+    /// 正常正文一个字都不能被改动（含「谈论密钥」的那句真实用例）
+    #[test]
+    fn keeps_ordinary_content_intact() {
+        let text = "核验：`BEGIN PRIVATE KEY` 0 命中";
+        assert_eq!(prepare_content(text), text);
     }
 }
