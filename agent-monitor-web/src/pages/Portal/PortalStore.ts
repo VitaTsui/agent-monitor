@@ -16,6 +16,8 @@ import {
   untrustPortalDevice,
 } from "@/services/apis/portal";
 
+import { isSlashCommand } from "./_utils/slashCommand";
+
 import { makeAutoObservable } from "mobx";
 import { message as antdMessage } from "@hsu-react/ui";
 import { getAccessToken } from "@/utils/auth";
@@ -749,8 +751,14 @@ class PortalStore {
     antdMessage.success("已撤回排队任务");
   };
 
-  /** 撤回还在排队的输入（已被终端接收则提示失败并去掉排队标记） */
-  public recallInput = (id: string, cmdId: string) => {
+  /**
+   * 撤回还在排队的输入（已被终端接收则提示失败并去掉排队标记）。
+   *
+   * `fallbackText` = 排队条那一行显示的原文。原文优先取本地回显，但**不是每条排队
+   * 都有回显**：斜杠命令一开始就不建回显（见 sendInput），别的端发来的任务在本端
+   * 也只有 hub 队列这一份。缺了它，撤回就只是撤回，对话框空着，想改完再发得重打。
+   */
+  public recallInput = (id: string, cmdId: string, fallbackText?: string) => {
     recallPortalInput(id, cmdId)
       .then((res) => {
         const cur = this._messagesById[id] ?? [];
@@ -762,10 +770,11 @@ class PortalStore {
             ...this._messagesById,
             [id]: cur.filter((m) => !(m.local && m.cmdId === cmdId)),
           };
-          if (recalled?.content) {
+          const refill = recalled?.content || fallbackText;
+          if (refill) {
             this.composerRefill = {
               taskId: id,
-              text: recalled.content,
+              text: refill,
               nonce: ++this._refillNonce,
             };
           }
@@ -925,19 +934,28 @@ class PortalStore {
         antdMessage.success(res.data?.result ?? "已发送");
         // 乐观回显：发出的内容立即上屏为 user 气泡，
         // 不等终端收到再同步回来（那要好几秒，体感像没发出去）。
-        const echo = {
-          role: "user",
-          content,
-          timestamp: new Date().toISOString(),
-          local: true,
-          cmdId: res.data?.cmdId,
-          queued: !!res.data?.cmdId,
-          fromSelect: opts?.fromSelect,
-        };
-        this._messagesById = {
-          ...this._messagesById,
-          [id]: [...(this._messagesById[id] ?? []), echo],
-        };
+        //
+        // 斜杠命令除外，**一条回显都不建**：CLI 自己把它吃掉，既不写 jsonl 的 user
+        // 记录、也不进 queued_inputs，于是回显唯一的退场路径（被同步回来的真实消息
+        // 接管）永远不会发生 —— 留下的就是撤不掉的孤儿气泡（`/clear` 之后新会话里
+        // 那条孤零零的「/clear」）。判据见 _utils/slashCommand。
+        // 反馈不靠回显：上面的 toast 已经确认发出，若排上了 hub 队列，下一轮
+        // getQueuedInputs 就把它铺进底部排队条（带 cmdId，撤回照常可用）。
+        if (!isSlashCommand(content)) {
+          const echo = {
+            role: "user",
+            content,
+            timestamp: new Date().toISOString(),
+            local: true,
+            cmdId: res.data?.cmdId,
+            queued: !!res.data?.cmdId,
+            fromSelect: opts?.fromSelect,
+          };
+          this._messagesById = {
+            ...this._messagesById,
+            [id]: [...(this._messagesById[id] ?? []), echo],
+          };
+        }
         setTimeout(() => this.fetchMessages(id, false), 1200);
         return true;
       }

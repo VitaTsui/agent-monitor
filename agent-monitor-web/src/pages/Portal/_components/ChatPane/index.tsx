@@ -54,6 +54,12 @@ const fmtTokens = (n: number) => {
  */
 const FLAT_MIN_W = { multi: 400, single: 320 };
 
+/**
+ * 「刚送达终端」的宽限期：这几秒里终端还没来得及把队列上报回来，先按「在排队」算，
+ * 免得刚发出的内容在对话流里闪一下又跳回排队条。
+ */
+const DELIVER_GRACE_MS = 6000;
+
 const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   const { task, closable, compact, onActivate } = props;
   const {
@@ -88,6 +94,14 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   // 判据以终端上报的 queuedInputs 为准 —— 它随任务被会话接受而出列，是唯一
   // 知道「跑了没有」的一方。本地回显的 delivered 只说明「送出去了」。
   const normText = (s: string) => s.replace(/\s+/g, " ").trim();
+  // 宽限期的「现在」。**必须是 state，不能在判定里直接读 Date.now()**：
+  // 判定挂在 useMemo 上，只在依赖变化时重算。会话一安静下来就没有任何依赖会变
+  // ——`/clear` 开出来的新会话正是这样：一条消息都不会再有，queuedInputs 为空时
+  // 后端根本不下发这个字段（core/model.rs 的 skip_serializing_if），依赖恒为
+  // undefined。于是「还在宽限期内」这个结论被永久冻结：那条 `/clear` 一直挂在
+  // 「终端排队中 · 1」不消失，也进不了对话流，界面显示「暂无可展示的对话内容」。
+  // 宽限期是有时限的状态，就得有自己的时钟来推着它走。
+  const [graceNow, setGraceNow] = useState(() => Date.now());
   const stillQueued = React.useMemo(() => {
     const set = new Set((task.queuedInputs ?? []).map(normText));
     return (m: PortalMessage) => {
@@ -100,11 +114,28 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
       // 已送达终端：在队列里就是还没轮到。刚送达的几秒终端还没来得及上报，
       // 先按「在队列」处理，免得它在对话流里闪一下又跳回排队条。
       return (
-        Date.now() - new Date(m.timestamp).getTime() < 6000 ||
+        graceNow - new Date(m.timestamp).getTime() < DELIVER_GRACE_MS ||
         set.has(normText(m.content))
       );
     };
-  }, [task.queuedInputs]);
+  }, [task.queuedInputs, graceNow]);
+
+  // 宽限期的时钟：只在真有回显处在宽限期内时上表，到点走一次即停。
+  // 不是每秒空转 —— 没有待出窗的回显就压根不建定时器。
+  useEffect(() => {
+    const deadlines = messages
+      .filter((m) => m.local && !m.queued)
+      .map((m) => new Date(m.timestamp).getTime() + DELIVER_GRACE_MS)
+      .filter((t) => Number.isFinite(t) && t > graceNow);
+    if (!deadlines.length) {
+      return;
+    }
+    const timer = window.setTimeout(
+      () => setGraceNow(Date.now()),
+      Math.max(50, Math.min(...deadlines) - Date.now()),
+    );
+    return () => window.clearTimeout(timer);
+  }, [messages, graceNow]);
 
   // 会话上下文：内容里的本地图片路径以会话 cwd 为根解析（见 utils/sessionImages）。
   // 没有 cwd（历史会话、进程已退出）就不给 —— 那时路径无从解析，保持破图但不误导。
@@ -617,11 +648,11 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                       className={styles.queuedItemRecall}
                       role="button"
                       tabIndex={0}
-                      onClick={() => recallInput(id, q.cmdId as string)}
+                      onClick={() => recallInput(id, q.cmdId as string, q.text)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
-                          recallInput(id, q.cmdId as string);
+                          recallInput(id, q.cmdId as string, q.text);
                         }
                       }}
                     >
