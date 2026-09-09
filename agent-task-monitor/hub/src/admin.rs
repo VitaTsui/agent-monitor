@@ -258,7 +258,7 @@ pub async fn verify_admin_token(
     ok(json!(true))
 }
 
-/// GET /sys/menu/getMenuATopATopMenu —— 后管仅保留「用户管理」
+/// GET /sys/menu/getMenuATopATopMenu —— 后管只有「用户管理」「版本管理」两页
 pub async fn menus(
     State(state): State<SharedState>,
     headers: axum::http::HeaderMap,
@@ -276,11 +276,6 @@ pub async fn menus(
             "id": "2", "nm": "版本管理", "pid": null, "seq": 2, "level": 1, "children": null,
             "path": "sysmgmt/version", "url": "sysmgmt/Version/index", "perm": "sysmgmt:version:list",
             "icon": "carbon:upgrade", "status": null
-        },
-        {
-            "id": "3", "nm": "机器人接入", "pid": null, "seq": 3, "level": 1, "children": null,
-            "path": "sysmgmt/dingtalk", "url": "sysmgmt/Dingtalk/index", "perm": "sysmgmt:dingtalk:list",
-            "icon": "carbon:bot", "status": null
         }
     ]);
     ok(json!({ "topMenuList": [], "menuList": menu_list, "topId": null, "topList": null }))
@@ -302,9 +297,7 @@ pub async fn permissions(
             "permit:user:resetPwd",
             "permit:user:del",
             "sysmgmt:version:list",
-            "sysmgmt:version:upd",
-            "sysmgmt:dingtalk:list",
-            "sysmgmt:dingtalk:upd"
+            "sysmgmt:version:upd"
         ]
     }))
 }
