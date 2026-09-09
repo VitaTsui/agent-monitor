@@ -63,10 +63,18 @@ pub fn send_via_extension(data_dir: &Path, shell_pid: u32, text: &str, submit: b
         return false;
     }
     let ts = now_ms();
-    let file = dir.join(format!("{ts}-{shell_pid}.json"));
+    // 毫秒不足以区分背靠背的两次投递：选择卡作答是「序号 → Tab → 回车」连着写的，
+    // 全落在同一毫秒里，只用「毫秒-pid」做文件名后一条会**同名覆盖**前一条，
+    // 单选「2」于是退化成一个裸回车、被选择卡当成选中默认高亮项。
+    // 补一个进程内自增序号，两个字段都定宽，字典序 = 投递顺序（扩展就是 sort 后顺序处理的）。
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file = dir.join(format!("{ts:013}-{seq:09}-{shell_pid}.json"));
     let body = serde_json::json!({ "pid": shell_pid, "text": text, "ts": ts, "submit": submit });
     std::fs::write(&file, body.to_string()).is_ok()
 }
+
+/// 同一毫秒内的投递序号，只保证本进程内单调递增；跨进程由前面的毫秒时间戳兜住。
+static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -119,10 +127,17 @@ mod tests {
             .map(|n| {
                 let txt = std::fs::read_to_string(out.join(n)).unwrap();
                 let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
-                v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string()
+                v.get("text")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string()
             })
             .collect();
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(texts, vec!["a", "b", "c", "d", "e"], "字典序没能还原投递顺序");
+        assert_eq!(
+            texts,
+            vec!["a", "b", "c", "d", "e"],
+            "字典序没能还原投递顺序"
+        );
     }
 }
