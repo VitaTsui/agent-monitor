@@ -221,7 +221,7 @@ fn hostname() -> String {
                 return n;
             }
         }
-        return "unknown".into();
+        "unknown".into()
     }
     #[cfg(not(windows))]
     {

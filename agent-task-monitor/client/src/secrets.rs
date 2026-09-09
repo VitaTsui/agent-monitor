@@ -126,7 +126,7 @@ fn load_secure(data_dir: &std::path::Path) -> Option<String> {
     if enc.is_empty() {
         return None;
     }
-    let mut input = CRYPT_INTEGER_BLOB {
+    let input = CRYPT_INTEGER_BLOB {
         cbData: enc.len() as u32,
         pbData: enc.as_ptr() as *mut u8,
     };
@@ -136,7 +136,7 @@ fn load_secure(data_dir: &std::path::Path) -> Option<String> {
     };
     let ok = unsafe {
         CryptUnprotectData(
-            &mut input,
+            &input,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
@@ -159,7 +159,7 @@ fn load_secure(data_dir: &std::path::Path) -> Option<String> {
 fn save_secure(data_dir: &std::path::Path, token: &str) -> bool {
     use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
     let data = token.as_bytes();
-    let mut input = CRYPT_INTEGER_BLOB {
+    let input = CRYPT_INTEGER_BLOB {
         cbData: data.len() as u32,
         pbData: data.as_ptr() as *mut u8,
     };
@@ -169,7 +169,7 @@ fn save_secure(data_dir: &std::path::Path, token: &str) -> bool {
     };
     let ok = unsafe {
         CryptProtectData(
-            &mut input,
+            &input,
             std::ptr::null(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
