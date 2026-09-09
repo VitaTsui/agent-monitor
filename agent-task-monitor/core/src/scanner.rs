@@ -1901,6 +1901,25 @@ struct BgTask {
     /// 起跑时刻（会话记录里的 ISO8601 时间戳），前端据此算耗时；拿不到就空串
     #[serde(rename = "startedAt")]
     started_at: String,
+    /// 完成通知里的 `<summary>` 原文 —— 这是**唯一**说得出「为什么是这个收场」的字段。
+    ///
+    /// 实测本机 466 份会话记录、1431 条去重后的 `<task-notification>`：
+    /// `<summary>` 出现 1412 次，非 completed 的 141 条里 138 条有它，缺的 3 条
+    /// 全是 `__orphan_summary__` 那种合成通知（本就没有单条任务的收尾信息）。
+    /// 形态固定为一行，长度中位数 75、p90 243、最长 926 字符，例如：
+    /// - `Background command "…" failed with exit code 137`
+    /// - `Agent "…" failed: Agent stalled: no progress for 600s (stream watchdog did not recover)`
+    /// - `Agent "…" failed: Agent terminated early due to an API error: …（error type rate_limit, HTTP 429, request id …）`
+    /// - `Agent "…" was stopped by Claude` / `Background command "…" was stopped`
+    ///
+    /// **原样下发，不做任何解析**：退出码、限流原因、卡死时长都嵌在这句话里，
+    /// 而这句话是上游随时会改的英文文案。去里面抠 `exit code (\d+)` 就是拿字面量
+    /// 当接口用，上游改一版就整条哑掉；下发原文则最多是措辞变了，信息不会丢。
+    ///
+    /// 只有通知带过来才有值；[`Self::reconciled`] 靠磁盘改判状态时会清掉它 ——
+    /// 那时这句话描述的已经不是当前状态了。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
     /// 最近一条完成通知的时刻（epoch 毫秒，0 = 还没收到）。只用于与磁盘对齐时
     /// 判「这条通知是不是已经过期」（子会话被唤醒续跑了），不外发。
     #[serde(skip)]
@@ -1932,8 +1951,16 @@ struct BgTracker {
     /// 通知在 :5414、起跑记录在 :5573，两者时间戳还差 4.5 分钟），通知先到时
     /// [`Self::on_notification`] 找不到条目就把它丢了，条目随后建出来永远停在「执行中」。
     /// 故先按 `<tool-use-id>` 存着，等配对的 `tool_result` 到达时补上。
-    early: HashMap<String, (String, String, u64)>,
+    early: HashMap<String, EarlyDone>,
     items: Vec<BgTask>,
+}
+
+/// 早到的完成通知：等配对的 `tool_result` 到达时回填给条目。
+struct EarlyDone {
+    task_id: String,
+    status: String,
+    summary: Option<String>,
+    ended_ms: u64,
 }
 
 impl BgTracker {
@@ -1999,6 +2026,10 @@ impl BgTracker {
         if let Some(id) = stopped_task_id(meta) {
             if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
                 t.status = "stopped".into();
+                // TaskStop 的结果里只有 "Successfully stopped task: <id> (<命令>)"，
+                // 复述了 id 与命令、说不出别的（实测 20 条形态一致），当不了原因；
+                // 上一轮跑的那句更是过期了，一并清掉。
+                t.summary = None;
                 t.ended_ms = iso_to_ms(ts).unwrap_or(0);
             }
             return;
@@ -2015,8 +2046,8 @@ impl BgTracker {
         let done = self
             .early
             .remove(use_id)
-            .filter(|(task_id, _, _)| *task_id == id)
-            .map(|(_, status, ended_ms)| (status, ended_ms));
+            .filter(|d| d.task_id == id)
+            .map(|d| (d.status, d.summary, d.ended_ms));
         let (label, started_at) = match started {
             Some((l, t)) => (l, t),
             // tool_use 落在重放窗口之外（极少见）：退回结果里的说明，时间用当前这条
@@ -2028,11 +2059,12 @@ impl BgTracker {
                 ts.to_string(),
             ),
         };
-        let (status, ended_ms) = done.unwrap_or_else(|| ("running".to_string(), 0));
+        let (status, summary, ended_ms) = done.unwrap_or_else(|| ("running".to_string(), None, 0));
         // 同一个子代理被唤醒续跑时会再来一条结果：原地复活，别堆重复条目
         if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
             t.label = label;
             t.status = status;
+            t.summary = summary;
             t.started_at = started_at;
             t.ended_ms = ended_ms;
             return;
@@ -2043,6 +2075,7 @@ impl BgTracker {
             status,
             kind: kind.to_string(),
             started_at,
+            summary,
             ended_ms,
         });
     }
@@ -2067,22 +2100,49 @@ impl BgTracker {
         // 实测：c7d3a592-…jsonl:88 的通知只报了 af93b9ce77aec80b3，正文里引用到本段
         // 源码，结果把并行跑着的 a33f6420ca1247a8d 一并抹成 completed。
         let ended_ms = iso_to_ms(ts).unwrap_or(0);
+        // 孤儿汇总要先认出来：它那句 `<summary>` 讲的是「上一轮整批没留下收尾记录」，
+        // 对同一条通知里点名的任务也一样不成立，所以得在分派原因之前就判掉。
+        let mut is_orphan_summary = false;
+        {
+            let mut scan = text;
+            while let Some(id) = tag_value(scan, "task-id") {
+                if id.starts_with("__orphan_summary__") {
+                    is_orphan_summary = true;
+                    break;
+                }
+                let Some(pos) = scan.find("</task-id>") else {
+                    break;
+                };
+                scan = &scan[pos + "</task-id>".len()..];
+            }
+        }
+        // 收尾原因。上界取 300：实测非 completed 的 138 条 summary，p90 = 243、
+        // 最长 926（限流那句会带上 request id 与模型名），300 能把 p90 完整收下，
+        // 又不至于让一条卡片的文案顶到千字。
+        let summary = (!is_orphan_summary)
+            .then(|| tag_value(text, "summary").map(|s| truncate(&s, 300)))
+            .flatten();
         // 通知里的 `<tool-use-id>` 就是起跑那次调用的 tool_use_id —— 起跑记录还没轮到时
         // 靠它把终态存下来（见 [`Self::early`]）。孤儿汇总没有这个标签，也不需要。
         let use_id = tag_value(text, "tool-use-id");
-        let mut is_orphan_summary = false;
         let mut rest = text;
         while let Some(id) = tag_value(rest, "task-id") {
             // "__orphan_summary__:*" 是内部扫描标记，不是真任务
-            if id.starts_with("__orphan_summary__") {
-                is_orphan_summary = true;
-            } else if !id.starts_with("__") {
+            if !id.starts_with("__") {
                 if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
                     t.status = status.clone();
+                    t.summary = summary.clone();
                     t.ended_ms = ended_ms;
                 } else if let Some(u) = &use_id {
-                    self.early
-                        .insert(u.clone(), (id.clone(), status.clone(), ended_ms));
+                    self.early.insert(
+                        u.clone(),
+                        EarlyDone {
+                            task_id: id.clone(),
+                            status: status.clone(),
+                            summary: summary.clone(),
+                            ended_ms,
+                        },
+                    );
                 }
             }
             let Some(pos) = rest.find("</task-id>") else {
@@ -2094,6 +2154,7 @@ impl BgTracker {
             for t in self.items.iter_mut() {
                 if t.status == "running" {
                     t.status = status.clone();
+                    t.summary = None;
                     t.ended_ms = ended_ms;
                 }
             }
@@ -2147,14 +2208,19 @@ impl BgTracker {
             match tail_of(&t.id) {
                 // 结果已经交回去了，静置够久就是真跑完了 —— 父记录漏了那条通知而已
                 Some(SubAgentTail::Finished) if idle_ms > SUBAGENT_SETTLE_MS => {
-                    t.status = "completed".into()
+                    t.status = "completed".into();
+                    t.summary = None;
                 }
                 // 停在半路：正常是在等一个慢工具，久到不像话就是被 kill 在半路了
                 Some(SubAgentTail::Midflight) if idle_ms > SUBAGENT_ABANDON_MS => {
-                    t.status = "stopped".into()
+                    t.status = "stopped".into();
+                    t.summary = None;
                 }
                 // 还在写：在跑（对续跑的条目就是从终态翻回来）
-                Some(_) => t.status = "running".into(),
+                Some(_) => {
+                    t.status = "running".into();
+                    t.summary = None;
+                }
                 None => {}
             }
         }
@@ -3097,6 +3163,104 @@ mod bg_tests {
         assert_eq!(t.items[0].status, "running", "任务号对不上就别套");
     }
 
+    /// 失败原因就是通知里的 `<summary>` 原文 —— 界面能说出「为什么」全靠它。
+    /// 样本取自本机真实记录：后台命令带退出码、子代理带限流/卡死的原话。
+    #[test]
+    fn failure_summary_is_carried_verbatim() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "Start web dev server"));
+        t.observe(&bg_result("u1", "byk6o6vis"));
+        t.observe(&notification(
+            "<task-notification>\n<task-id>byk6o6vis</task-id>\n<status>failed</status>\n<summary>Background command \"Start web dev server\" failed with exit code 137</summary>\n</task-notification>",
+        ));
+        assert_eq!(t.items[0].status, "failed");
+        assert_eq!(
+            t.items[0].summary.as_deref(),
+            Some("Background command \"Start web dev server\" failed with exit code 137"),
+            "退出码嵌在这句话里，原样带出去，不去抠数字"
+        );
+
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u2", "Agent", "Deploy third release"));
+        t.observe(&agent_result("u2", "a1111111111111111"));
+        t.observe(&notification(
+            "<task-notification>\n<task-id>a1111111111111111</task-id>\n<status>failed</status>\n<summary>Agent \"Deploy third release\" failed: Agent stalled: no progress for 600s (stream watchdog did not recover)</summary>\n</task-notification>",
+        ));
+        assert_eq!(
+            t.items[0].summary.as_deref(),
+            Some(
+                "Agent \"Deploy third release\" failed: Agent stalled: no progress for 600s (stream watchdog did not recover)"
+            )
+        );
+    }
+
+    /// 通知不带 `<summary>` 时行为与改前一致：状态照落，原因留空（不编一个出来）
+    #[test]
+    fn notification_without_summary_leaves_reason_empty() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "起 dev server"));
+        t.observe(&bg_result("u1", "b1"));
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b1</task-id>\n<status>failed</status>\n</task-notification>",
+        ));
+        assert_eq!(t.items[0].status, "failed");
+        assert_eq!(t.items[0].summary, None);
+        // 没有原因时该字段整个不下发，前端拿到的就是 undefined
+        let json = serde_json::to_string(&t.items[0]).unwrap();
+        assert!(!json.contains("summary"), "为空时不该出现在报文里：{json}");
+    }
+
+    /// 早到的通知（起跑记录还没轮到）也要把原因存住，等条目成形时一并补上
+    #[test]
+    fn early_notification_carries_its_summary() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "Poll windows build again"));
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b6a9qfb2x</task-id>\n<tool-use-id>u1</tool-use-id>\n<status>failed</status>\n<summary>Background command \"Poll windows build again\" failed with exit code 1</summary>\n</task-notification>",
+        ));
+        t.observe(&bg_result("u1", "b6a9qfb2x"));
+        assert_eq!(t.items[0].status, "failed");
+        assert_eq!(
+            t.items[0].summary.as_deref(),
+            Some("Background command \"Poll windows build again\" failed with exit code 1")
+        );
+    }
+
+    /// 孤儿汇总那句 summary 讲的是「上一轮整批没留下收尾记录」，不对应任何一条任务，
+    /// 挂上去就成了一句人人都有、谁也不对应的假原因。
+    #[test]
+    fn orphan_summary_does_not_become_a_per_task_reason() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "甲"));
+        t.observe(&bg_result("u1", "b5eauqs4i"));
+        t.observe(&bg_use("u2", "Bash", "漏网的 dev server"));
+        t.observe(&bg_result("u2", "bvvgsfndf"));
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b5eauqs4i</task-id>\n<task-id>__orphan_summary__:shell</task-id>\n<status>stopped</status>\n<summary>No completion record was found for this background shell command from the previous session.</summary>\n</task-notification>",
+        ));
+        assert!(t.items.iter().all(|i| i.status == "stopped"));
+        assert!(
+            t.items.iter().all(|i| i.summary.is_none()),
+            "整批的说明不该冒充单条任务的原因"
+        );
+    }
+
+    /// 主动停掉（TaskStop）没有原因可说 —— 它的 message 只复述 id 与命令；
+    /// 上一轮跑留下的那句更是过期的，必须清掉。
+    #[test]
+    fn task_stop_clears_stale_reason() {
+        let mut t = BgTracker::default();
+        t.observe(&bg_use("u1", "Bash", "起 dev server"));
+        t.observe(&bg_result("u1", "b1"));
+        t.observe(&notification(
+            "<task-notification>\n<task-id>b1</task-id>\n<status>failed</status>\n<summary>Background command \"起 dev server\" failed with exit code 1</summary>\n</task-notification>",
+        ));
+        assert!(t.items[0].summary.is_some());
+        t.observe(&stop_result("u9", "b1", "shell"));
+        assert_eq!(t.items[0].status, "stopped");
+        assert_eq!(t.items[0].summary, None, "状态改了，旧原因就过期了");
+    }
+
     /// 通知没带 tool-use-id（孤儿汇总、MCP 任务）时维持原样：只作用于已成形的条目
     #[test]
     fn notification_without_tool_use_id_is_not_buffered() {
@@ -3162,6 +3326,7 @@ mod subagent_tests {
             status: status.into(),
             kind: "agent".into(),
             started_at: "2026-09-08T02:55:52.284Z".into(),
+            summary: Some("Agent \"子会话\" failed: Agent stalled".into()),
             ended_ms,
         }
     }
@@ -3186,6 +3351,32 @@ mod subagent_tests {
             t.items[0].status, "running",
             "判定不写回状态，续跑时才翻得回来"
         );
+    }
+
+    /// 靠磁盘改判状态时，通知里那句原因就过期了 —— 它说的是「failed」，
+    /// 而这里判出来的是「completed」，留着就成了自相矛盾的一张卡。
+    #[test]
+    fn reconcile_clears_the_stale_reason_when_it_overrides_status() {
+        let mut t = BgTracker::default();
+        // agent() 造出来就带一句 failed 的原因
+        t.items.push(agent("a1", "failed", 0));
+        let now = 12 * HOUR;
+        // 通知之后很久还在写 → 是被唤醒续跑了，终态与原因都作废
+        let out = t.reconciled(&writes("a1", now - 60_000), now, &|_| {
+            Some(SubAgentTail::Midflight)
+        });
+        assert_eq!(out[0].status, "running");
+        assert_eq!(out[0].summary, None, "翻回执行中就不该再挂着失败原因");
+
+        // 父记录漏了通知、子会话自己早已交回结果 → 判 completed，旧原因同样作废
+        let mut t = BgTracker::default();
+        t.items.push(agent("a2", "running", 0));
+        t.items[0].summary = Some("Agent \"x\" failed: 过期的原因".into());
+        let out = t.reconciled(&writes("a2", now - 8 * HOUR), now, &|_| {
+            Some(SubAgentTail::Finished)
+        });
+        assert_eq!(out[0].status, "completed");
+        assert_eq!(out[0].summary, None);
     }
 
     /// 流式写入途中，最后一条常常正好是 thinking / text（assistant 按内容块拆条落盘），
