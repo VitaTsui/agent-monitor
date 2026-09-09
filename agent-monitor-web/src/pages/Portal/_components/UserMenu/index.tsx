@@ -25,8 +25,8 @@ interface UserMenuProps {
 /**
  * 侧栏底部账户菜单的内容（对齐 claude.ai 侧栏底部的账户菜单）。
  *
- * 「设置 / 设备管理 / 安全防护」在档 B 之后都是**真实地址**，点它们走 navigate，
- * 而不再是打开一个弹窗 —— 所以本组件只发出「去哪一页」，跳转由壳负责。
+ * 「设置 / 设备管理 / 安全防护」都是同一个设置弹窗的不同分栏 —— 本组件只发出
+ * 「开到哪个分栏」，开合与分栏状态由壳（Portal/index.tsx）持有。
  */
 const UserMenu: React.FC<UserMenuProps> = (props) => {
   const { user, pendingCount, onOpenSettings, onLogout, onClose } = props;

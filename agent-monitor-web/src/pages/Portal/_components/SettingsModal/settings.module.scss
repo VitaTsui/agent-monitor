@@ -1,15 +1,21 @@
 @use "@hsu-react/ui/es/styles/responsive" as r;
 
 /**
- * 七个设置分栏共用的排版件（卡片行、说明条、分节标题、按钮胶囊）。
+ * 七个设置分栏共用的排版件（分栏标题、说明条、分节标题、一行一件事、按钮胶囊）。
  *
- * 这些原来全挤在 `SettingsModal/index.module.scss`（889 行）里，和弹窗骨架、
- * 移动端两级导航混在一处。骨架已经跟着设置壳走（index.module.scss），
- * 这里只留「一个分栏里长什么样」。
+ * 弹窗骨架（左栏 / 内容列 / 移动端两级）在 index.module.scss，这里只管
+ * 「一个分栏里长什么样」。数值对齐参照站的设置弹窗：分栏标题 15、行标题 14、
+ * 说明 12、行内边距 12/0、行与行之间只画一条分隔线。
  */
 
-// 分栏标题。移动端由设置壳的固定头部显示，这里的头整块隐藏，避免两个标题
-.paneHead {
+// 分栏标题。移动端由弹窗的固定头部显示，这里整块隐藏，避免两个标题
+.paneTitle {
+  margin-bottom: 12px;
+  color: var(--foreground);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 20px;
+
   @include r.down(md) {
     display: none;
   }
@@ -82,42 +88,51 @@
   }
 }
 
-// 通用「一行一件事」的卡片行：左侧标题 + 说明，右侧控件
-.device {
+/**
+ * 通用「一行一件事」：左侧标题 ＋ 说明，右侧控件。
+ *
+ * 原来每行是一张 `radius: 12` 的描边卡片 —— 一屏十几张小卡，边框把内容切得
+ * 到处是框。改成参照站那种：行**不画框**，只在相邻两行之间画一条淡分隔线。
+ */
+.row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--overlay-2);
-  border-radius: var(--radius-lg);
-  margin-bottom: 8px;
+  gap: 16px;
+  padding: 12px 0;
 
-  .devInfo {
+  & + .row {
+    border-top: 1px solid var(--overlay-2);
+  }
+
+  .rowInfo {
+    flex: 1;
     min-width: 0;
 
-    .devName {
+    .rowTitle {
       display: flex;
       align-items: center;
       gap: 6px;
-      font-size: var(--text-base);
-      font-weight: 600;
+      font-size: var(--text-md);
       color: var(--foreground);
+      line-height: 1.5;
       flex-wrap: wrap;
     }
 
-    .devMeta {
-      margin-top: 4px;
-      font-size: var(--text-xs);
+    .rowDesc {
+      margin-top: 2px;
+      font-size: var(--text-sm);
       color: var(--muted-foreground);
+      line-height: 1.5;
     }
   }
 
-  .devActions {
+  .rowActions {
     display: flex;
     gap: 6px;
     white-space: nowrap;
     align-items: center;
+    flex-shrink: 0;
 
     // 统一按钮：小胶囊，默认描边低调，各自 hover 表意
     .actBtn,
@@ -176,7 +191,7 @@
     flex-direction: column;
     align-items: stretch;
 
-    .devActions {
+    .rowActions {
       flex-wrap: wrap;
       justify-content: flex-end;
       gap: 6px;

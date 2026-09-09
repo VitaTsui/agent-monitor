@@ -69,9 +69,8 @@ export function installSheetSwipe() {
       // 点 antd 自带的关闭钮触发 onCancel。
       //
       // 这里原先还有一条 `[data-sheet-close]` 兜底，给 `closable={false}` 的弹窗用 ——
-      // 全项目只有前台的设置弹窗是那种，而设置在档 B 之后成了路由页（/portal/settings/*），
-      // 不再是弹窗。兜底随之没有任何生产者，留着就是一条永远走不到的分支。
-      // 将来若真出现 `closable={false}` 的 sheet，正路是让它照常渲染关闭钮。
+      // 全项目没有那种弹窗（设置弹窗照常渲染关闭钮，只是移动端 display:none），
+      // 兜底没有任何生产者，留着就是一条永远走不到的分支。
       const modal = content.closest(".ant-modal");
       const close = modal?.querySelector(".ant-modal-close") as HTMLElement | null;
       window.setTimeout(() => {

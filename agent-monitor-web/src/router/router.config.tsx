@@ -3,7 +3,6 @@ import App from "@/App";
 import Home from "@/pages/Home";
 import Login from "@/pages/Login";
 import Portal from "@/pages/Portal";
-import PortalSettingsIndex from "./_components/PortalSettingsIndex";
 import PortalSuspense from "./_components/PortalSuspense";
 import { ReactNode, lazy } from "react";
 import { Navigate, RouteObject } from "react-router-dom";
@@ -14,33 +13,13 @@ import { Navigate, RouteObject } from "react-router-dom";
 /**
  * 前台 `/portal` 出口下的视图。
  *
- * 早先是 Portal 这个壳内部用 `useState` 在「会话网格 / 设置弹窗（7 个分栏）/
- * 历史弹窗」之间 if/else 切，代价是刷新丢失当前页、浏览器前进后退失效、
- * 页面发不出去（地址永远停在 `/portal`）。现在每个视图都有真实地址。
+ * 只有两个：会话网格与远程往来。**设置不在这里** —— 它是弹窗，由壳持有
+ * `settingsOpen / settingsTab` 两份 state 驱动（见 pages/Portal/index.tsx）。
  *
- * 一律懒加载：设置的七个分栏里有配置同步、机器人接入这类首屏用不到的重块，
- * 静态引进来会跟着会话页一起进首屏。
+ * 懒加载：远程往来只有点进去才看得到，静态引进来会跟着会话页一起进首屏。
  */
 const PanesView = lazy(() => import("@/pages/Portal/_views/PanesView"));
 const HistoryView = lazy(() => import("@/pages/Portal/_views/HistoryView"));
-const SettingsView = lazy(() => import("@/pages/Portal/_views/SettingsView"));
-const AccountView = lazy(
-  () => import("@/pages/Portal/_views/SettingsView/AccountView"),
-);
-const AppearanceView = lazy(
-  () => import("@/pages/Portal/_views/SettingsView/AppearanceView"),
-);
-const DevicesView = lazy(
-  () => import("@/pages/Portal/_views/SettingsView/DevicesView"),
-);
-const ConfigsView = lazy(
-  () => import("@/pages/Portal/_views/SettingsView/ConfigsView"),
-);
-const BotsView = lazy(() => import("@/pages/Portal/_views/SettingsView/BotsView"));
-const SecurityView = lazy(
-  () => import("@/pages/Portal/_views/SettingsView/SecurityView"),
-);
-const AboutView = lazy(() => import("@/pages/Portal/_views/SettingsView/AboutView"));
 
 /**
  * MetaType 路由元信息
@@ -161,90 +140,6 @@ const Router: RouteType[] = [
           </PortalSuspense>
         ),
         meta: { title: "远程往来", noAuth: true, noTabsView: true },
-      },
-      {
-        // 设置壳：左侧分类导航 ＋ 二级出口。七个分栏各一条子路由
-        path: "settings",
-        element: (
-          <PortalSuspense>
-            <SettingsView />
-          </PortalSuspense>
-        ),
-        meta: { title: "设置", noAuth: true, noTabsView: true },
-        children: [
-          {
-            /* 桌面进 `/portal/settings` 落到「账户」；移动端是 iOS 设置式两级，
-               这一层只显示菜单列表，所以**不能**在这里无条件重定向 ——
-               那样一进设置就直接冲进二级页，一级菜单永远看不到。
-               条件由 SettingsIndex 这个薄壳按视口判断（见 _components）。 */
-            index: true,
-            element: <PortalSettingsIndex />,
-            meta: { noAuth: true, noTabsView: true },
-          },
-          {
-            path: "account",
-            element: (
-              <PortalSuspense>
-                <AccountView />
-              </PortalSuspense>
-            ),
-            meta: { title: "账户", noAuth: true, noTabsView: true },
-          },
-          {
-            path: "appearance",
-            element: (
-              <PortalSuspense>
-                <AppearanceView />
-              </PortalSuspense>
-            ),
-            meta: { title: "外观", noAuth: true, noTabsView: true },
-          },
-          {
-            path: "devices",
-            element: (
-              <PortalSuspense>
-                <DevicesView />
-              </PortalSuspense>
-            ),
-            meta: { title: "设备管理", noAuth: true, noTabsView: true },
-          },
-          {
-            path: "configs",
-            element: (
-              <PortalSuspense>
-                <ConfigsView />
-              </PortalSuspense>
-            ),
-            meta: { title: "配置同步", noAuth: true, noTabsView: true },
-          },
-          {
-            path: "bots",
-            element: (
-              <PortalSuspense>
-                <BotsView />
-              </PortalSuspense>
-            ),
-            meta: { title: "机器人管理", noAuth: true, noTabsView: true },
-          },
-          {
-            path: "security",
-            element: (
-              <PortalSuspense>
-                <SecurityView />
-              </PortalSuspense>
-            ),
-            meta: { title: "安全防护", noAuth: true, noTabsView: true },
-          },
-          {
-            path: "about",
-            element: (
-              <PortalSuspense>
-                <AboutView />
-              </PortalSuspense>
-            ),
-            meta: { title: "关于", noAuth: true, noTabsView: true },
-          },
-        ],
       },
     ],
   },

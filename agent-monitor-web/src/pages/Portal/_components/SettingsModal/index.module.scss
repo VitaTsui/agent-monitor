@@ -1,0 +1,364 @@
+@use "@hsu-react/ui/es/styles/responsive" as r;
+
+/**
+ * 设置弹窗的骨架。
+ *
+ * 桌面：960 宽的居中弹窗，左栏 190 常驻 ＋ 右侧内容列（内容列自己滚）。
+ * 移动端：弹窗被 styles/antd-overload.scss 统一改成底部 sheet，这里再按
+ * iOS 设置式分两级 —— 一级是菜单列表，二级是分栏内容，由 `.atMenu` 决定露哪一半。
+ */
+.SettingsModal {
+  :global(.ant-modal-body) {
+    padding: 0;
+  }
+
+  // 没有标题栏（见 index.tsx 的 title={null}），关闭钮要浮在内容右上角 ——
+  // 否则 antd 会按「无 header」把它排进文档流里，把内容顶下去一截
+  :global(.ant-modal-close) {
+    top: 10px;
+    inset-inline-end: 12px;
+    z-index: 2;
+  }
+}
+
+/* 固定高度而不是随内容伸缩：七个分栏内容长短差得远，跟着变高会让弹窗在
+   切分栏时上下跳。730 在矮屏上会顶出视口，所以与视口高取小。 */
+.body {
+  display: flex;
+  height: min(730px, calc(100vh - 120px));
+
+  // 移动端二级头部：桌面隐藏
+  .mobileHead {
+    display: none;
+  }
+
+  .navChevron {
+    display: none;
+  }
+
+  // 身份 pill：仅移动端用（桌面隐藏）
+  .identityPill {
+    display: none;
+  }
+}
+
+/* 左侧分类导航（对齐 claude.ai 设置页）。
+   选中态是一层低调的填充，不是浮起来的白色卡片。 */
+.nav {
+  flex: none;
+  width: 190px;
+  padding: 18px 8px;
+  border-right: 1px solid var(--overlay-2);
+  overflow-y: auto;
+}
+
+.navTitle {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--foreground);
+  padding: 4px 10px 14px;
+}
+
+.navItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: var(--text-md);
+  color: var(--foreground);
+  margin-bottom: 2px;
+
+  :global(.anticon) {
+    font-size: var(--text-lg);
+    color: var(--muted-foreground);
+  }
+
+  &:hover {
+    background: var(--overlay-1);
+  }
+
+  &.active {
+    background: var(--overlay-2);
+    font-weight: 500;
+
+    :global(.anticon) {
+      color: var(--foreground);
+    }
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: -2px;
+  }
+
+  // 只让标题占满剩余空间；图标与角标各自保持原宽
+  .navLabel {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+/* 内容列。左右各 24 —— 960 减去左栏 190 与那条 1px 线，正好剩 720 的阅读列。
+   顶部 28 是给右上角关闭钮让位。 */
+.panel {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 28px 24px 24px;
+}
+
+// 分栏首次加载（懒加载切块落地）时的占位，避免内容列瞬间塌成 0 高
+.panelLoading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 120px;
+}
+
+// ============================================================
+// 移动端：底部 sheet ＋ iOS 设置式两级
+// ============================================================
+@include r.down(md) {
+  .SettingsModal {
+    // sheet 自带顶部抓手条与安全区内边距（antd-overload），这里只负责两级切换
+    :global(.ant-modal-body) {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+  }
+
+  .body {
+    flex: 1;
+    min-height: 0;
+    height: auto;
+    flex-direction: column;
+    overflow: hidden;
+
+    // 固定头部（不随内容滚动）：左侧返回 / 居中标题 / 右侧关闭
+    .mobileHead {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      flex: none;
+      height: 44px;
+      margin-bottom: 4px;
+
+      .mobileHeadTitle {
+        font-size: 18px;
+        font-weight: 650;
+        color: var(--foreground);
+      }
+
+      .mobileBack {
+        position: absolute;
+        left: 0;
+        top: 0;
+        height: 44px;
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        padding: 0 8px;
+        font-size: 16.5px;
+        color: var(--primary);
+        cursor: pointer;
+
+        // iOS 返回箭头：加大加粗的 chevron
+        .mobileBackIcon {
+          font-size: 20px;
+
+          svg {
+            stroke: currentColor;
+            stroke-width: 40; // 视觉加粗（antd 图标默认偏细）
+          }
+        }
+      }
+
+      // 关闭：右上角。移动端 antd 自带的关闭钮是 display:none（见
+      // styles/antd-overload.scss），sheet 的关闭靠下滑手势与这一枚
+      .mobileClose {
+        position: absolute;
+        right: 0;
+        top: 0;
+        width: 44px;
+        height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--muted-foreground);
+        font-size: var(--text-lg);
+        cursor: pointer;
+
+        &:active {
+          color: var(--foreground);
+        }
+      }
+    }
+  }
+
+  /* 一级：iOS 设置式分组列表（整组一张圆角卡 ＋ 项间分隔线）。
+     卡片底走 --overlay-1（前景色的 6% 叠加）而不是 --card —— sheet 本身
+     已经是 --card 了，再铺一层同色就看不出分组。 */
+  .nav {
+    flex: 1;
+    width: 100%;
+    min-width: 0;
+    border-right: none;
+    padding: 0 0 8px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .navTitle {
+    display: none;
+  }
+
+  // Claude sheet 顶部身份 pill：圆角行，头像 + 名字 + chevron。
+  // 必须落在 `.nav` 里面 —— 桌面那条 `.body .identityPill { display: none }`
+  // 是两级选择器，顶层单类压不过它
+  .nav .identityPill {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    margin-bottom: 18px;
+    background: var(--overlay-1);
+    border-radius: var(--radius-lg);
+    cursor: pointer;
+
+    .identityAvatar {
+      flex: none;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      background: var(--primary);
+      color: var(--primary-foreground);
+      font-size: var(--text-md);
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .identityName {
+      flex: 1;
+      min-width: 0;
+      font-size: var(--text-lg);
+      font-weight: 600;
+      color: var(--foreground);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .identityArrow {
+      flex: none;
+      color: var(--border);
+      font-size: var(--text-md);
+    }
+
+    &:active {
+      background: var(--overlay-2);
+    }
+  }
+
+  // 整组做成一张圆角卡
+  .navList {
+    background: var(--overlay-1);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+
+  .navItem {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    font-size: 16.5px;
+    border-radius: 0;
+    margin: 0;
+
+    // 分隔线：从图标右侧起（iOS 惯例，内缩到文字对齐），最后一项无线
+    position: relative;
+
+    &:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      left: 52px;
+      right: 0;
+      bottom: 0;
+      height: 0.5px;
+      background: color-mix(in srgb, var(--foreground) 12%, transparent);
+    }
+
+    // Claude 风格：单色细线图标（不是 iOS 的彩色圆角块）
+    .navIcon {
+      flex: none;
+      width: 26px;
+      height: 26px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      color: var(--muted-foreground);
+
+      :global(.anticon) {
+        font-size: 21px;
+        color: var(--muted-foreground);
+      }
+    }
+
+    .navLabel {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .navChevron {
+      display: inline-flex;
+      flex: none;
+      margin-left: auto;
+      color: var(--border);
+      font-size: var(--text-lg);
+    }
+
+    // 一级列表无持久选中态：进二级返回后不该有项还高亮
+    &.active {
+      background: transparent;
+      font-weight: 400;
+
+      .navChevron {
+        color: var(--border);
+      }
+
+      .navIcon :global(.anticon) {
+        color: var(--muted-foreground);
+      }
+    }
+
+    &:hover {
+      background: transparent;
+    }
+
+    &:active {
+      background: var(--overlay-1);
+    }
+  }
+
+  .panel {
+    padding: 0;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  // 视图切换：一级只露菜单，二级只露内容
+  .atMenu .panel {
+    display: none;
+  }
+
+  .body:not(.atMenu) .nav {
+    display: none;
+  }
+}

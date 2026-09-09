@@ -1,11 +1,16 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { Suspense, lazy, useEffect, useMemo, useState } from "react";
 
 import { message as antdMessage } from "@hsu-react/ui";
 import { observer } from "mobx-react-lite";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { claimPairDevice, getMe } from "@/services/apis/portal";
-import { getAccessToken, getUserInfo, removeToken, setUserInfo } from "@/utils/auth";
+import {
+  getAccessToken,
+  getUserInfo,
+  removeToken,
+  setUserInfo,
+} from "@/utils/auth";
 import {
   clientSilentLogin,
   inDesktopClient,
@@ -20,24 +25,24 @@ import { ShareReceiveModal } from "./_hooks/useShareReceive";
 import MobileBar from "./_components/MobileBar";
 import Sidebar from "./_components/Sidebar";
 import { PortalUserContext, PortalUserInfo } from "./_context/portalUser";
-import {
-  PORTAL_BASE,
-  SettingsTab,
-  portalBackTarget,
-  settingsPath,
-} from "./_utils/portalNav";
+import { PORTAL_BASE, SettingsTab, portalBackTarget } from "./_utils/portalNav";
 import styles from "./index.module.scss";
+
+// 设置弹窗整块懒加载：里面的配置同步 / 机器人接入 / 设备管理都是首屏用不到的重块
+const SettingsModal = lazy(() => import("./_components/SettingsModal"));
 
 /**
  * 前台的**壳**：移动端顶栏 ＋ 侧栏 ＋ 一个高度有界的内容区 ＋ `<Outlet />`。
  *
- * 档 B 之前这里是 786 行：侧栏、顶栏、会话网格、放大布局、用户菜单、设置弹窗
- * 全挤在一个组件里，右边显示什么由 `paneCount` 和 `settingsOpen` 这些 state 决定。
- * 代价是刷新丢失当前页、浏览器前进后退失效、「设备管理」这类界面发不出链接。
+ * 这里曾经是 786 行：侧栏、顶栏、会话网格、放大布局、用户菜单、设置弹窗全挤在
+ * 一个组件里。现在侧栏 / 顶栏 / 会话网格 / 用户菜单 / 设置各自成组件或视图。
  *
- * 现在右边显示什么**由地址决定**（见 router.config.tsx 的 `/portal` 子路由），
+ * 现在会话网格与远程往来**由地址决定**（见 router.config.tsx 的 `/portal` 子路由），
  * 本组件只保留「所有子页面都需要的东西」：登录态自检、轮询生命周期、设备配对认领、
- * 更新提醒、抽屉开合、Android 返回键。
+ * 更新提醒、抽屉开合、设置弹窗开合、Android 返回键。
+ *
+ * 设置是**弹窗**不是地址：它是一次性动作（改完就走），不需要发链接、也不需要
+ * 前进后退。代价是刷新会丢当前分栏、浏览器后退关不掉它 —— 这是明确取舍。
  */
 const Portal: React.FC = observer(() => {
   const navigate = useNavigate();
@@ -51,6 +56,13 @@ const Portal: React.FC = observer(() => {
   // 移动端：侧栏抽屉开合
   const [mobileNav, setMobileNav] = useState(false);
   const [isMobile, setIsMobile] = useState(isMobileViewport);
+  // 设置弹窗：开合与当前分栏。分栏放在壳里而不是弹窗内部 —— 返回键要靠它
+  // 判断「退到一级菜单」还是「关掉弹窗」，两处各存一份就会不同步。
+  // `null` = 移动端停在一级菜单（桌面无此态，弹窗按「账户」渲染）。
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
+  // 首次打开后就不再卸载：卸载会掐掉 antd 的关闭动画（移动端是底部 sheet，更明显）
+  const [settingsMounted, setSettingsMounted] = useState(false);
   // 用 state 承载用户信息：每次加载调 /monitor/me 刷新（含实时 isSuper），
   // 这样管理员改了别人的权限，对方不必重新登录、下次加载即生效。
   const [user, setUser] = useState<PortalUserInfo>(
@@ -186,7 +198,9 @@ const Portal: React.FC = observer(() => {
           refresh();
           loadDevices();
         } else {
-          antdMessage.warning(res.msg || "配对码无效或已过期，请重启客户端重试");
+          antdMessage.warning(
+            res.msg || "配对码无效或已过期，请重启客户端重试",
+          );
         }
       })
       .catch(() => antdMessage.error("绑定失败，请检查网络后重启客户端重试"))
@@ -194,12 +208,12 @@ const Portal: React.FC = observer(() => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 原生壳（Android）的返回键：先关浮层，再退一层路由，都没有才交还系统语义。
+  // 原生壳（Android）的返回键：从内到外一层层退 —— 抽屉 → 用户菜单 →
+  // 设置（移动端先退到一级菜单，再关弹窗）→ 退一层路由，都没有才交还系统语义。
   //
-  // 「退一层」不能写成 `history.back()`：从推送/深链直接进 /portal/settings/devices 时
+  // 「退一层路由」不能写成 `history.back()`：从推送/深链直接进 /portal/history/xxx 时
   // 历史里没有上一条，`canGoBack` 为 false，系统语义会直接退出整个 App。
-  // 按地址算目标（portalBackTarget）才是确定的一层，且与页面里的返回按钮、
-  // 浏览器后退落到同一个地方。浏览器里此钩子空转。
+  // 按地址算目标（portalBackTarget）才是确定的一层。浏览器里此钩子空转。
   useNativeBack(() => {
     if (mobileNav) {
       setMobileNav(false);
@@ -209,7 +223,16 @@ const Portal: React.FC = observer(() => {
       setUserMenuOpen(false);
       return true;
     }
-    const target = portalBackTarget(pathname, isMobile);
+    if (settingsOpen) {
+      // 移动端是 iOS 式两级：二级分栏先退回一级菜单，一级菜单才关弹窗
+      if (isMobile && settingsTab) {
+        setSettingsTab(null);
+      } else {
+        setSettingsOpen(false);
+      }
+      return true;
+    }
+    const target = portalBackTarget(pathname);
     if (target) {
       navigate(target);
       return true;
@@ -229,7 +252,9 @@ const Portal: React.FC = observer(() => {
   const openSettings = (tab: SettingsTab) => {
     setUserMenuOpen(false);
     setMobileNav(false);
-    navigate(settingsPath(tab));
+    setSettingsMounted(true);
+    setSettingsTab(tab);
+    setSettingsOpen(true);
   };
 
   const onLogout = () => {
@@ -249,12 +274,18 @@ const Portal: React.FC = observer(() => {
     <PortalUserContext.Provider value={userValue}>
       <div className={styles.Portal}>
         {atSessions && (
-          <MobileBar navOpen={mobileNav} onToggleNav={() => setMobileNav((v) => !v)} />
+          <MobileBar
+            navOpen={mobileNav}
+            onToggleNav={() => setMobileNav((v) => !v)}
+          />
         )}
 
         {/* 移动端抽屉遮罩 */}
         {mobileNav && (
-          <div className={styles.mobileBackdrop} onClick={() => setMobileNav(false)} />
+          <div
+            className={styles.mobileBackdrop}
+            onClick={() => setMobileNav(false)}
+          />
         )}
 
         <Sidebar
@@ -270,9 +301,23 @@ const Portal: React.FC = observer(() => {
           onLogout={onLogout}
         />
 
-        <main className={`${styles.main} ${mobileNav ? styles.mainPushed : ""}`}>
+        <main
+          className={`${styles.main} ${mobileNav ? styles.mainPushed : ""}`}
+        >
           <Outlet />
         </main>
+
+        {settingsMounted && (
+          <Suspense fallback={null}>
+            <SettingsModal
+              open={settingsOpen}
+              tab={settingsTab}
+              isMobile={isMobile}
+              onTabChange={setSettingsTab}
+              onClose={() => setSettingsOpen(false)}
+            />
+          </Suspense>
+        )}
 
         <ShareReceiveModal />
       </div>

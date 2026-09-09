@@ -1,7 +1,14 @@
 import React, { useEffect, useState } from "react";
 
 import { Button, Input, Modal, Switch, message } from "@hsu-react/ui";
-import { Badge, Empty, Modal as AntModal, Popconfirm, Progress, Tag } from "antd";
+import {
+  Badge,
+  Empty,
+  Modal as AntModal,
+  Popconfirm,
+  Progress,
+  Tag,
+} from "antd";
 import { LinkOutlined, RightOutlined } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
@@ -11,10 +18,9 @@ import {
   disconnectShare,
 } from "@/services/apis/portal";
 import { localMachineId } from "@/utils/clientAuth";
-import PortalStore from "../../../PortalStore";
-import ShareModal from "../../../_components/ShareModal";
-import views from "../../views.module.scss";
-import st from "../settings.module.scss";
+import PortalStore from "../../../../PortalStore";
+import ShareModal from "../../../ShareModal";
+import st from "../../settings.module.scss";
 import styles from "./index.module.scss";
 
 const PLATFORM_COLOR: Record<string, string> = {
@@ -30,12 +36,12 @@ interface UpdateProgress {
 }
 
 /**
- * 设备管理（`/portal/settings/devices`）。
+ * 设备管理分栏。
  *
  * 三块内容：本机客户端（开机自启 / 客户端与插件版本 / 监控范围，仅客户端窗口内）、
  * 设备列表（信任 / 撤销 / 删除 / 协助共享）、接入他人电脑。
  */
-const DevicesView: React.FC = observer(() => {
+const DevicesPane: React.FC = observer(() => {
   const { devices, loadDevices, trustDevice, untrustDevice, deleteDevice } =
     PortalStore;
 
@@ -44,7 +50,10 @@ const DevicesView: React.FC = observer(() => {
     window as unknown as {
       __TAURI__?: {
         core?: {
-          invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+          invoke?: (
+            cmd: string,
+            args?: Record<string, unknown>,
+          ) => Promise<unknown>;
         };
       };
     }
@@ -100,7 +109,9 @@ const DevicesView: React.FC = observer(() => {
 
   const loadPluginVersion = () => {
     tauriInvoke?.("plugin_status")
-      .then((v) => setPluginVer(v as { installed: string | null; latest: string }))
+      .then((v) =>
+        setPluginVer(v as { installed: string | null; latest: string }),
+      )
       .catch(() => setPluginVer(null));
   };
 
@@ -160,7 +171,9 @@ const DevicesView: React.FC = observer(() => {
             okText: "立即更新",
             cancelText: "稍后",
             onOk: () => {
-              tauriInvoke?.("update_start").catch(() => message.error("启动更新失败"));
+              tauriInvoke?.("update_start").catch(() =>
+                message.error("启动更新失败"),
+              );
             },
           });
         } else {
@@ -234,9 +247,9 @@ const DevicesView: React.FC = observer(() => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 停留在本页时轮询版本/进度（更新中每 1.5s 刷新进度条）。
-  // 从前挂在弹窗的 open 上，现在挂在「本页是否挂载」上 —— 离开路由即卸载，
-  // 定时器自然停掉，语义比 open 更准。
+  // 停留在本分栏时轮询版本/进度（更新中每 1.5s 刷新进度条）。
+  // 挂在「本分栏是否挂载」上而不是弹窗的 open 上：切走分栏即卸载，
+  // 定时器自然停掉，不会在别的分栏里空转。
   useEffect(() => {
     if (!tauriInvoke) {
       return;
@@ -247,12 +260,14 @@ const DevicesView: React.FC = observer(() => {
   }, []);
 
   const renderDevice = (d: PortalDevice) => (
-    <div key={d.id} className={st.device}>
-      <div className={st.devInfo}>
-        <div className={st.devName}>
+    <div key={d.id} className={st.row}>
+      <div className={st.rowInfo}>
+        <div className={st.rowTitle}>
           <Badge status={d.online ? "success" : "default"} />
           <span>{d.hostname}</span>
-          <Tag color={PLATFORM_COLOR[d.platform ?? ""] || "default"}>{d.platformDsr}</Tag>
+          <Tag color={PLATFORM_COLOR[d.platform ?? ""] || "default"}>
+            {d.platformDsr}
+          </Tag>
           {d.id === localId ? <Tag color="purple">本机</Tag> : null}
           {d.shared ? (
             <Tag color="cyan">协助接入{d.owner ? ` · ${d.owner}` : ""}</Tag>
@@ -262,11 +277,11 @@ const DevicesView: React.FC = observer(() => {
             <Tag color="warning">已断开</Tag>
           )}
         </div>
-        <div className={st.devMeta}>
+        <div className={st.rowDesc}>
           {d.online ? "在线" : "离线"} · {d.sessionCount} 个会话 · v{d.version}
         </div>
       </div>
-      <div className={st.devActions}>
+      <div className={st.rowActions}>
         {d.shared ? (
           <Button
             size="small"
@@ -335,207 +350,213 @@ const DevicesView: React.FC = observer(() => {
   const trusted = devices.filter((d) => d.trusted);
 
   return (
-    <div className={views.pageFixed}>
-      <div>
-        <div className={`${views.fixedHead} ${st.paneHead}`}>
-          <div className={views.headRow}>
-            <span className={views.headTitle}>设备管理</span>
-          </div>
-        </div>
-        <div className={views.fixedBody}>
-          <div className={st.hint}>
-            新设备接入<strong>默认信任</strong>：在其它电脑安装客户端并登录你的账号，
-            它会自动出现在这里并开始同步。信任开关就是同步链接的开关——
-            撤销信任即断开该设备的同步（不会被自动恢复），随时可手动重新信任。
-            需要协助别人时，在自己设备上点「协助共享」生成连接码给对方。
-          </div>
+    <>
+      <div className={st.paneTitle}>设备管理</div>
+      <div className={st.hint}>
+        新设备接入<strong>默认信任</strong>
+        ：在其它电脑安装客户端并登录你的账号，
+        它会自动出现在这里并开始同步。信任开关就是同步链接的开关——
+        撤销信任即断开该设备的同步（不会被自动恢复），随时可手动重新信任。
+        需要协助别人时，在自己设备上点「协助共享」生成连接码给对方。
+      </div>
 
-          {autostart !== null && (
-            <div className={st.section}>
-              <div className={st.sectionTitle}>本机客户端</div>
-              <div className={st.device}>
-                <div className={st.devInfo}>
-                  <div className={st.devName}>开机自启</div>
-                  <div className={st.devMeta}>随系统启动，在后台持续同步本机终端会话</div>
-                </div>
-                <Switch checked={autostart} onChange={toggleAutostart} />
+      {autostart !== null && (
+        <div className={st.section}>
+          <div className={st.sectionTitle}>本机客户端</div>
+          <div className={st.row}>
+            <div className={st.rowInfo}>
+              <div className={st.rowTitle}>开机自启</div>
+              <div className={st.rowDesc}>
+                随系统启动，在后台持续同步本机终端会话
               </div>
-              <div className={st.device}>
-                <div className={st.devInfo}>
-                  <div className={st.devName}>
-                    客户端版本
-                    {/* 版本标签固定显示当前版本，更新中也不切成「正在下载/安装」——
+            </div>
+            <Switch checked={autostart} onChange={toggleAutostart} />
+          </div>
+          <div className={st.row}>
+            <div className={st.rowInfo}>
+              <div className={st.rowTitle}>
+                客户端版本
+                {/* 版本标签固定显示当前版本，更新中也不切成「正在下载/安装」——
                         更新进度由下方的进度条单独呈现，标签只作版本标识 */}
-                    {clientVer ? (
-                      <Tag color={clientVer.latest ? "warning" : "green"}>
-                        v{clientVer.current}
-                      </Tag>
-                    ) : null}
-                  </div>
-                  {updating && clientVer?.progress ? (
-                    <div className={styles.updateProgress}>
-                      {clientVer.progress.phase === "downloading" &&
-                      clientVer.progress.total > 0 ? (
-                        <>
-                          <Progress
-                            percent={Math.min(
+                {clientVer ? (
+                  <Tag color={clientVer.latest ? "warning" : "green"}>
+                    v{clientVer.current}
+                  </Tag>
+                ) : null}
+              </div>
+              {updating && clientVer?.progress ? (
+                <div className={styles.updateProgress}>
+                  {clientVer.progress.phase === "downloading" &&
+                  clientVer.progress.total > 0 ? (
+                    <>
+                      <Progress
+                        percent={Math.min(
+                          100,
+                          Math.round(
+                            (clientVer.progress.received /
+                              clientVer.progress.total) *
                               100,
-                              Math.round(
-                                (clientVer.progress.received / clientVer.progress.total) *
-                                  100,
-                              ),
-                            )}
-                            size="small"
-                            strokeColor="var(--primary)"
-                          />
-                          <span className={styles.updateProgressText}>
-                            {(clientVer.progress.received / 1024 / 1024).toFixed(1)} /{" "}
-                            {(clientVer.progress.total / 1024 / 1024).toFixed(1)} MB
-                          </span>
-                        </>
-                      ) : (
-                        <span className={styles.updateProgressText}>
-                          完成后客户端将自动重启，请稍候
-                        </span>
-                      )}
-                    </div>
-                  ) : (
-                    <div className={st.devMeta}>更新会自动下载安装并重启客户端</div>
-                  )}
-                </div>
-                {clientVer?.latest && !updating ? (
-                  // 有新版本且尚未在更新：给「更新到 vX」按钮。更新中则落到下面显示
-                  // 「更新中」+进度（updating 已排除了「已是最新却有遗留进度」的误判）。
-                  <Button
-                    size="small"
-                    className={styles.updateNowBtn}
-                    onClick={() =>
-                      tauriInvoke
-                        ?.("update_start")
-                        .catch(() => message.error("启动更新失败"))
-                    }
-                  >
-                    更新到 v{clientVer.latest}
-                  </Button>
-                ) : (
-                  <Button
-                    size="small"
-                    className={styles.checkUpdateBtn}
-                    loading={checkingUpdate || updating}
-                    disabled={updating}
-                    onClick={checkUpdate}
-                  >
-                    {updating ? "更新中" : "检查更新"}
-                  </Button>
-                )}
-              </div>
-              {/* 插件版本（Cursor/VSCode 桥接扩展）：旧客户端无 plugin_status IPC → pluginVer 为 null，整行不渲染 */}
-              {pluginVer ? (
-                <div className={st.device}>
-                  <div className={st.devInfo}>
-                    <div className={st.devName}>
-                      插件版本
-                      <Tag
-                        color={
-                          pluginVer.installed === pluginVer.latest
-                            ? "green"
-                            : pluginVer.installed
-                              ? "warning"
-                              : "default"
-                        }
-                      >
-                        {pluginVer.installed ? `v${pluginVer.installed}` : "未安装"}
-                      </Tag>
-                    </div>
-                    <div className={st.devMeta}>
-                      Cursor/VSCode 桥接扩展，内嵌终端下发靠它
-                    </div>
-                  </div>
-                  {pluginVer.installed !== pluginVer.latest ? (
-                    <Button
-                      size="small"
-                      className={styles.updateNowBtn}
-                      loading={checkingPlugin}
-                      onClick={updatePlugin}
-                    >
-                      {pluginVer.installed ? `更新到 v${pluginVer.latest}` : "安装插件"}
-                    </Button>
-                  ) : (
-                    <Button
-                      size="small"
-                      className={styles.checkUpdateBtn}
-                      loading={checkingPlugin}
-                      onClick={checkPluginUpdate}
-                    >
-                      检查更新
-                    </Button>
-                  )}
-                </div>
-              ) : null}
-              <div className={styles.termScope}>
-                <div className={st.sectionTitle}>监控范围</div>
-                {terminals.length === 0 ? (
-                  <div className={styles.termScopeEmpty}>暂未检测到本机终端会话</div>
-                ) : (
-                  terminals.map((tm) => (
-                    <div key={tm.key} className={styles.termScopeRow}>
-                      <span className={styles.termScopeName} title={tm.key}>
-                        {tm.name}
-                      </span>
-                      <Switch
-                        checked={!tm.excluded}
-                        onChange={(on) => toggleTerminal(tm.key, !on)}
+                          ),
+                        )}
+                        size="small"
+                        strokeColor="var(--primary)"
                       />
-                    </div>
-                  ))
-                )}
-                <div className={styles.termScopeHint}>
-                  关闭开关 = 不监控该终端（对应会话不再上报）
+                      <span className={styles.updateProgressText}>
+                        {(clientVer.progress.received / 1024 / 1024).toFixed(1)}{" "}
+                        / {(clientVer.progress.total / 1024 / 1024).toFixed(1)}{" "}
+                        MB
+                      </span>
+                    </>
+                  ) : (
+                    <span className={styles.updateProgressText}>
+                      完成后客户端将自动重启，请稍候
+                    </span>
+                  )}
                 </div>
-              </div>
+              ) : (
+                <div className={st.rowDesc}>更新会自动下载安装并重启客户端</div>
+              )}
             </div>
-          )}
-
-          {pending.length > 0 && (
-            <div className={st.section}>
-              <div className={st.sectionTitle}>未信任 · 已断开（{pending.length}）</div>
-              {pending.map(renderDevice)}
-            </div>
-          )}
-          <div className={st.section}>
-            <div className={st.sectionTitle}>已信任（{trusted.length}）</div>
-            {trusted.length ? (
-              trusted.map(renderDevice)
+            {clientVer?.latest && !updating ? (
+              // 有新版本且尚未在更新：给「更新到 vX」按钮。更新中则落到下面显示
+              // 「更新中」+进度（updating 已排除了「已是最新却有遗留进度」的误判）。
+              <Button
+                size="small"
+                className={styles.updateNowBtn}
+                onClick={() =>
+                  tauriInvoke?.("update_start").catch(() =>
+                    message.error("启动更新失败"),
+                  )
+                }
+              >
+                更新到 v{clientVer.latest}
+              </Button>
             ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无已信任设备" />
+              <Button
+                size="small"
+                className={styles.checkUpdateBtn}
+                loading={checkingUpdate || updating}
+                disabled={updating}
+                onClick={checkUpdate}
+              >
+                {updating ? "更新中" : "检查更新"}
+              </Button>
             )}
           </div>
-
-          {/* 接入他人电脑：独立入口（输入对方协助码），与「管理自己的设备」区分开 */}
-          <div
-            className={styles.connectEntry}
-            role="button"
-            tabIndex={0}
-            onClick={() => setConnectOpen(true)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                setConnectOpen(true);
-              }
-            }}
-          >
-            <span className={styles.connectEntryIcon}>
-              <LinkOutlined />
-            </span>
-            <div className={styles.connectEntryText}>
-              <div className={styles.connectEntryTitle}>接入他人电脑</div>
-              <div className={styles.connectEntryDesc}>
-                输入对方的协助码，远程查看、控制其终端会话
+          {/* 插件版本（Cursor/VSCode 桥接扩展）：旧客户端无 plugin_status IPC → pluginVer 为 null，整行不渲染 */}
+          {pluginVer ? (
+            <div className={st.row}>
+              <div className={st.rowInfo}>
+                <div className={st.rowTitle}>
+                  插件版本
+                  <Tag
+                    color={
+                      pluginVer.installed === pluginVer.latest
+                        ? "green"
+                        : pluginVer.installed
+                          ? "warning"
+                          : "default"
+                    }
+                  >
+                    {pluginVer.installed ? `v${pluginVer.installed}` : "未安装"}
+                  </Tag>
+                </div>
+                <div className={st.rowDesc}>
+                  Cursor/VSCode 桥接扩展，内嵌终端下发靠它
+                </div>
               </div>
+              {pluginVer.installed !== pluginVer.latest ? (
+                <Button
+                  size="small"
+                  className={styles.updateNowBtn}
+                  loading={checkingPlugin}
+                  onClick={updatePlugin}
+                >
+                  {pluginVer.installed
+                    ? `更新到 v${pluginVer.latest}`
+                    : "安装插件"}
+                </Button>
+              ) : (
+                <Button
+                  size="small"
+                  className={styles.checkUpdateBtn}
+                  loading={checkingPlugin}
+                  onClick={checkPluginUpdate}
+                >
+                  检查更新
+                </Button>
+              )}
             </div>
-            <RightOutlined className={styles.connectEntryArrow} />
+          ) : null}
+          <div className={styles.termScope}>
+            <div className={st.sectionTitle}>监控范围</div>
+            {terminals.length === 0 ? (
+              <div className={styles.termScopeEmpty}>
+                暂未检测到本机终端会话
+              </div>
+            ) : (
+              terminals.map((tm) => (
+                <div key={tm.key} className={styles.termScopeRow}>
+                  <span className={styles.termScopeName} title={tm.key}>
+                    {tm.name}
+                  </span>
+                  <Switch
+                    checked={!tm.excluded}
+                    onChange={(on) => toggleTerminal(tm.key, !on)}
+                  />
+                </div>
+              ))
+            )}
+            <div className={styles.termScopeHint}>
+              关闭开关 = 不监控该终端（对应会话不再上报）
+            </div>
           </div>
         </div>
+      )}
+
+      {pending.length > 0 && (
+        <div className={st.section}>
+          <div className={st.sectionTitle}>
+            未信任 · 已断开（{pending.length}）
+          </div>
+          {pending.map(renderDevice)}
+        </div>
+      )}
+      <div className={st.section}>
+        <div className={st.sectionTitle}>已信任（{trusted.length}）</div>
+        {trusted.length ? (
+          trusted.map(renderDevice)
+        ) : (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description="暂无已信任设备"
+          />
+        )}
+      </div>
+
+      {/* 接入他人电脑：独立入口（输入对方协助码），与「管理自己的设备」区分开 */}
+      <div
+        className={styles.connectEntry}
+        role="button"
+        tabIndex={0}
+        onClick={() => setConnectOpen(true)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setConnectOpen(true);
+          }
+        }}
+      >
+        <span className={styles.connectEntryIcon}>
+          <LinkOutlined />
+        </span>
+        <div className={styles.connectEntryText}>
+          <div className={styles.connectEntryTitle}>接入他人电脑</div>
+          <div className={styles.connectEntryDesc}>
+            输入对方的协助码，远程查看、控制其终端会话
+          </div>
+        </div>
+        <RightOutlined className={styles.connectEntryArrow} />
       </div>
 
       <ShareModal device={shareDevice} onClose={() => setShareDevice(null)} />
@@ -560,10 +581,14 @@ const DevicesView: React.FC = observer(() => {
           onChange={(v) => setConnCode(v)}
           className={styles.connectInput}
         />
-        <Input placeholder="密码" value={connPwd} onChange={(v) => setConnPwd(v)} />
+        <Input
+          placeholder="密码"
+          value={connPwd}
+          onChange={(v) => setConnPwd(v)}
+        />
       </Modal>
-    </div>
+    </>
   );
 });
 
-export default DevicesView;
+export default DevicesPane;
