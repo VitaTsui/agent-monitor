@@ -86,10 +86,13 @@
   --input: var(--vita-border);
   --ring: var(--vita-primary);
 
-  // ---- 圆角：deepseek-harness 的档位（6 / 8 / 12，胶囊 999）----
-  --radius-sm: 6px;
-  --radius: 8px;
-  --radius-lg: 12px;
+  // ---- 圆角 ----
+  // 值不再另抄一份：组件库的 --vita-radius-* 就是 6 / 8 / 12 这三档，
+  // 抄一遍就意味着改圆角要改两处、还会悄悄跑偏。
+  // --radius-full 是本项目独有的一档（胶囊），组件库没有对应物。
+  --radius-sm: var(--vita-radius-sm);
+  --radius: var(--vita-radius);
+  --radius-lg: var(--vita-radius-lg);
   --radius-full: 999px;
 
   // ---- 字号：以 12 / 13 / 14 为主，比 antd 默认更紧 ----
@@ -111,13 +114,6 @@
   --term-amber: #f0c674; // 警告、待输入
   --term-green: #67a579; // 成功、已完成
 
-  // ---- 间距：4px 网格 ----
-  --space-1: 4px;
-  --space-2: 6px;
-  --space-3: 8px;
-  --space-4: 12px;
-  --space-5: 16px;
-  --space-6: 24px;
 }
 
 // 暗色只覆盖会变的那些。--card / --popover 在 shadcn 暗色下比 background 亮一档，
