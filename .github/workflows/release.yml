@@ -1,16 +1,38 @@
+# 发版：先把三端安装包构建出来，最后一步才创建 Release 并把包一起挂上去。
+#
+# 顺序是这个工作流的全部要点。以前是「推 main → 立刻 gh release create → 安装包
+# 事后由人手动 gh release upload」，于是每次发版都先冒出一个没有任何资产、却被
+# 标成 Latest 的空 Release；忘了传（常事）它就一直空着。
+#
+# 也没有拆成两个工作流用 `release: published` 串起来：GITHUB_TOKEN 创建的 Release
+# 不会再触发别的工作流（GitHub 的防递归），那条链在本仓根本不会被点着。
+#
+# 现在的失败语义：任何一端构建挂了，release 这一步就不会跑 —— 结果是「没有
+# Release、工作流标红」，而不是「空 Release 被标成 Latest」。
 name: release
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 只构建安装包、不创建 Release（用来验证构建链）
+        type: boolean
+        default: true
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  version:
+    name: 版本号
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
+      skip: ${{ steps.ver.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,27 +57,137 @@ jobs:
             exit 1
           fi
 
-          TAG="v$VERSION"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
-          # 版本号没动就重复推 main 是常事，重复建 Release 不是——静默跳过。
-          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+          # 版本号没动就重复推 main 是常事，重复发版不是——连构建一起静默跳过。
+          if git rev-parse "refs/tags/v$VERSION" >/dev/null 2>&1; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "tag $TAG 已存在，跳过发布"
+            echo "tag v$VERSION 已存在，跳过发布"
           else
-            echo "将发布 $TAG"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "将发布 v$VERSION"
           fi
 
-      - name: 打 tag 并生成 Release
-        if: steps.ver.outputs.skip != 'true'
+  web:
+    name: Web 产物
+    needs: version
+    if: needs.version.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-monitor-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # pnpm 版本由 package.json 的 packageManager 固定，不在这里另写一遍。
+      - name: 启用 Corepack
+        run: corepack enable
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+      - name: 构建
+        run: pnpm build
+      # dist 不入库，但客户端 tauri::generate_context! 在**编译期**就要读它
+      # （tauri.conf.json 的 frontendDist），所以在这里产出、下面两端各自取回。
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: agent-monitor-web/dist
+          retention-days: 1
+
+  package:
+    name: 安装包 (${{ matrix.target }})
+    needs: [version, web]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      # 一端挂了不该埋掉另一端的日志；但 release 作业要求 needs 全绿，
+      # 所以缺包时不会有 Release 出去。
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: macos-arm64
+          - os: windows-latest
+            target: windows-x64
+    defaults:
+      run:
+        shell: bash
+        working-directory: agent-task-monitor
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: agent-monitor-web/dist
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent-task-monitor
+
+      # Windows runner 自带 NSIS，但不一定在 PATH 上；缺了就装。
+      - name: 准备 NSIS
+        if: startsWith(matrix.os, 'windows')
         run: |
-          gh release create "${{ steps.ver.outputs.tag }}" \
-            --generate-notes \
-            --target "${{ github.ref_name }}" \
-            --latest
+          echo "C:\Program Files (x86)\NSIS" >> "$GITHUB_PATH"
+          if ! command -v makensis >/dev/null && [ ! -x "/c/Program Files (x86)/NSIS/makensis.exe" ]; then
+            choco install nsis -y --no-progress
+          fi
+
+      - name: 打包 macOS
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          bash scripts/package-macos.sh
+          mkdir -p out
+          # 这个 zip 里就是完整的 .app（ditto 打的，签名/资源叉都在），
+          # 既是应用内自更新用的包，也是能直接下载解压就用的那一个。
+          cp target/dist/agent-monitor-mac.zip \
+            "out/AgentMonitor-${{ needs.version.outputs.version }}-mac.zip"
+
+      - name: 打包 Windows
+        if: startsWith(matrix.os, 'windows')
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          bash scripts/package-windows.sh
+          mkdir -p out
+          cp "target/dist/AgentMonitor-${{ needs.version.outputs.version }}-setup.exe" out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.target }}
+          path: agent-task-monitor/out/*
+          if-no-files-found: error
+
+  release:
+    name: 打 tag 并发布
+    needs: [version, package]
+    if: needs.version.outputs.skip != 'true' && inputs.dry_run != true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: assets
+
+      - name: 创建 Release 并挂上安装包
         env:
           GH_TOKEN: ${{ github.token }}
-
-      # 安装包不在这里构建：Windows 包要 cargo-xwin + makensis，macOS 包要真机签名，
-      # 都由本地 scripts/package-*.sh 产出后用 `gh release upload` 挂到上面这个 Release。
-      # 客户端自更新走自建服务器，Releases 上的包只作备份下载。
+        run: |
+          ls -la assets
+          # tag 在这一刻才打：前面任一端没构建出包，这一步压根不会执行，
+          # 于是不会留下一个空的 Latest。
+          gh release create "${{ needs.version.outputs.tag }}" \
+            --generate-notes \
+            --target "${{ github.sha }}" \
+            --latest \
+            assets/*
