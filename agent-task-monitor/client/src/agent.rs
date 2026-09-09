@@ -256,6 +256,38 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                 .flatten()
             })
             .collect();
+        // 桌面客户端（Claude.app / ChatGPT.app）会话：claude/codex pid → 宿主 GUI 应用
+        // (pid, 应用名)。注入要按宿主 pid 打开可访问性树，不是按代理 pid。
+        // 只在实验开关打开时才算 —— 关着的时候连这一次父链遍历都不做。
+        let desktop_host_of: std::collections::HashMap<u32, (u32, String)> =
+            if crate::appinject::enabled() {
+                scanned
+                    .iter()
+                    .filter_map(|t| {
+                        let p = t.process.as_ref()?;
+                        (p.ide == am_core::model::IdeKind::Desktop)
+                            .then(|| am_core::process::desktop_host(p.pid).map(|h| (p.pid, h)))
+                            .flatten()
+                    })
+                    .collect()
+            } else {
+                std::collections::HashMap::new()
+            };
+        // 同一个宿主 App 上挂着几条会话：AX 只看得到「屏幕上当前那条」的撰写框，
+        // 分不出它属于哪条会话。多于一条就必须拒绝注入（见 execute），不能赌。
+        //
+        // 必须按**会话**数，不能按 desktop_host_of 的条目数：ChatGPT 桌面版只有一个
+        // `codex … app-server` 进程同时托着界面上的每一条对话（见 scanner 里
+        // shared_host 的配对），多条会话共用同一个 pid —— 按 pid 去重就永远只数出 1 条，
+        // 这道闸门等于没有。
+        let sessions_per_host: std::collections::HashMap<u32, usize> = scanned
+            .iter()
+            .filter_map(|t| t.process.as_ref())
+            .filter_map(|p| desktop_host_of.get(&p.pid).map(|(hp, _)| *hp))
+            .fold(std::collections::HashMap::new(), |mut m, hp| {
+                *m.entry(hp).or_insert(0) += 1;
+                m
+            });
         // 活跃会话的项目目录：文件上传允许写进这些目录（项目常不在家目录下，
         // 见 safe_upload_dir_within）
         let session_dirs: Vec<std::path::PathBuf> = scanned
@@ -400,7 +432,15 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         _ => Vec::new(),
                     };
                     for cmd in commands {
-                        execute(&state, cmd, &known_pids, &ide_shell_of).await;
+                        execute(
+                            &state,
+                            cmd,
+                            &known_pids,
+                            &ide_shell_of,
+                            &desktop_host_of,
+                            &sessions_per_host,
+                        )
+                        .await;
                     }
                     // 待写入文件（hub 下发的文件传输）。同样不能静默吞——文件丢了，
                     // 回填进任务的路径却还在，agent 只会报「文件不存在」。
@@ -908,11 +948,14 @@ fn unique_target(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
 /// 执行 hub 下发的控制命令。
 /// `known_pids` 是本轮本机扫描出的会话 pid 集合——只对这些 pid 动手，
 /// 不无条件信任 hub 响应（响应链路若被中间人篡改，否则可对任意进程发信号）。
+#[allow(clippy::too_many_arguments)]
 async fn execute(
     state: &SharedState,
     cmd: ControlCmd,
     known_pids: &std::collections::HashSet<u32>,
     ide_shell_of: &std::collections::HashMap<u32, u32>,
+    desktop_host_of: &std::collections::HashMap<u32, (u32, String)>,
+    sessions_per_host: &std::collections::HashMap<u32, usize>,
 ) {
     let Some(pid) = cmd.pid else {
         // 会话没配对到进程（前端显示为「Claude Code / 等待输入」这类占位标题）时 pid 为空，
@@ -946,6 +989,61 @@ async fn execute(
         // 只认纯数字：选择卡的「自行输入」发的是文本，那条路仍要回车才提交得了。
         // from_select 已经限定了这是在回答选择卡，此时纯数字不会是别的东西。
         let submit = !(from_select && !text.is_empty() && text.chars().all(|c| c.is_ascii_digit()));
+        // 目标是桌面客户端（Claude.app / ChatGPT.app）拉起的会话：它没有 tty、也没有
+        // 内嵌终端，下面两条路都送不到 —— 改走宿主 App 的辅助功能接口，直接写进撰写框。
+        // 这是与「扩展桥接」「终端注入」并列的第三种送达目标，不是叠在它们之上的补丁：
+        // 会话宿主是什么类型，就走哪一条，走完即返回。
+        //
+        // desktop_host_of 只在实验开关开着时才非空，所以开关关闭时这一整段等价于不存在。
+        if let Some((host_pid, app_name)) = desktop_host_of.get(&pid) {
+            let n = sessions_per_host.get(host_pid).copied().unwrap_or(1);
+            if n > 1 {
+                // AX 只看得到「屏幕上当前打开的那条会话」的撰写框，认不出它是哪条。
+                // 宿主上不止一条会话时注入就是在赌 —— 宁可不发，也不能发错会话。
+                let msg = format!(
+                    "拒绝注入桌面会话：{app_name} 上有 {n} 条会话，无法确认屏幕上是哪一条（任务 {}）",
+                    cmd.task_id
+                );
+                crate::state::client_log(&msg);
+                crate::appinject::notify(&format!(
+                    "{app_name} 上有 {n} 条会话，无法确认当前打开的是哪一条，已拒绝注入"
+                ));
+                return;
+            }
+            let (hp, an, txt) = (*host_pid, app_name.clone(), text.clone());
+            // AX 调用要跨进程等对方响应，App 卡住时会一直挂着，绝不能占住 async worker。
+            let res =
+                tokio::task::spawn_blocking(move || crate::appinject::inject(hp, &txt, submit))
+                    .await;
+            match res {
+                Ok(Ok((done, detail))) => {
+                    crate::state::client_log(&format!(
+                        "注入桌面会话：{an}(pid={host_pid}) {done:?} —— {detail}（{preview}…）"
+                    ));
+                    if let crate::appinject::Injected::Written { why } = done {
+                        crate::appinject::notify(&format!(
+                            "{an}：内容已写入撰写框但未发送（{why}）"
+                        ));
+                    }
+                    return;
+                }
+                Ok(Err(e)) => {
+                    // 不静默失败、也不假装成功：日志 + 系统通知都说清楚，
+                    // 然后落到下面的终端注入路径去（桌面会话通常没有 tty，
+                    // 那条路会再报一次它自己的错，两条都在 client.log 里可查）。
+                    crate::state::client_log(&format!(
+                        "桌面会话注入失败，降级走终端注入：{an}(pid={host_pid}) {e}（任务 {}）",
+                        cmd.task_id
+                    ));
+                    crate::appinject::notify(&format!("{an} 注入失败：{e}"));
+                }
+                Err(e) => {
+                    crate::state::client_log(&format!(
+                        "桌面会话注入阻塞任务异常：{an}(pid={host_pid}) {e}"
+                    ));
+                }
+            }
+        }
         // 目标是 Cursor/VSCode 内嵌终端（ConPTY/编辑器内置，注入不进去）、且有活着的桥接
         // 扩展在管这个终端，就把任务写进文件桥交给扩展 terminal.sendText 送达（全平台）。
         // 终端 shell pid 用扫描时已算好的终端锚（与配对同锚）；本轮没扫到（罕见）再退回

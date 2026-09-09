@@ -3,6 +3,8 @@
 #![cfg_attr(all(windows, feature = "desktop"), windows_subsystem = "windows")]
 
 mod agent;
+/// 桌面客户端（Claude.app / ChatGPT.app）撰写框注入——默认关闭的实验特性
+mod appinject;
 /// Cursor/VSCode 扩展桥接（文件 IPC）——全平台内嵌终端都靠它下发
 mod bridge;
 /// Claude Code / Codex 配置的跨设备同步（白名单扫描 + 备份原子写）

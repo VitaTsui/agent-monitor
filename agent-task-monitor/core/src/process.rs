@@ -468,6 +468,51 @@ fn app_bundle_name(exe: &str) -> Option<&str> {
         .filter(|n| !n.is_empty())
 }
 
+/// 顺父链找出**托着这个代理进程的 macOS GUI 应用**：`(宿主进程 pid, 应用名)`。
+///
+/// 判据与 [`classify_chain`] 的桌面客户端分支逐条对齐（跳过链首、遇 shell 即停、
+/// 取最外层 `.app`），共用同一个 [`app_bundle_name`] —— 两处判据必须永远一致，
+/// 否则会出现「扫描认成桌面会话、注入却找不到宿主」这种自相矛盾。
+/// 区别只在这里额外把**宿主的 pid** 带出来：AX 注入要按 pid 打开应用元素。
+///
+/// 只在 macOS 成立（判据是 `.app` 包结构），其它平台恒返回 None。
+pub fn desktop_host(agent_pid: u32) -> Option<(u32, String)> {
+    let mut cur = agent_pid;
+    // 跳过链首（进程自己）：代理二进制本身也可能装在 .app 里，拿它当宿主就成了自己托自己。
+    for _ in 0..16 {
+        cur = ppid_via_ps(cur)?;
+        if cur <= 1 {
+            return None;
+        }
+        let exe = exe_via_ps(cur)?;
+        // 遇到 shell 就停：终端里跑的代理父链一定是 代理 → shell → 终端应用，
+        // 而终端应用同样是个 .app，再往上找就会把终端会话认成桌面会话。
+        if is_shell_name(&base(&exe).to_lowercase()) {
+            return None;
+        }
+        if let Some(app) = app_bundle_name(&exe) {
+            return Some((cur, app.to_string()));
+        }
+    }
+    None
+}
+
+/// 进程的可执行文件路径（macOS 的 `ps -o comm=` 给的就是完整路径）
+#[cfg(unix)]
+fn exe_via_ps(pid: u32) -> Option<String> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+#[cfg(not(unix))]
+fn exe_via_ps(_pid: u32) -> Option<String> {
+    None
+}
+
 /// 路径的基名（同时认 / 与 \，兼顾 Windows）
 fn base(s: &str) -> &str {
     s.rsplit(['/', '\\']).next().unwrap_or(s)
