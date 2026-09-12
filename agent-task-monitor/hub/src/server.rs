@@ -767,7 +767,9 @@ struct SessionHistoryQuery {
 /// 不能复用，故取 `/monitor/sessions/history`。
 ///
 /// 数据来自各机器每轮上报的快照，扫描窗口见 am-core 的 `AM_HISTORY_DAYS`（默认 30 天）。
-/// hub 不落盘：客户端每轮都会重报，hub 重启后几秒内自愈。
+/// hub 不落盘：历史列表由客户端每 30 秒随上报刷新一份全的。hub 重启后这份是空的，
+/// 但会在下发响应里带 `wantHistory` 主动索要，约一个上报周期（1.5~3 秒）即恢复 ——
+/// 不这么做就得干等客户端那 30 秒定时器，期间历史会话按 id 取数全是 404。
 async fn list_session_history(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -3431,6 +3433,7 @@ async fn report(
                 pending_fsop: VecDeque::new(),
                 pending_file_fetch: VecDeque::new(),
                 history_tasks: Vec::new(),
+                history_reported: false,
                 pending_session_fetch: VecDeque::new(),
                 session_fetch_results: HashMap::new(),
                 file_fetch_results: HashMap::new(),
@@ -3891,10 +3894,11 @@ async fn report(
         .new_session_pending
         .retain(|_, (since, _)| since.elapsed().as_secs() < 10 * 60);
     entry.tasks = tasks;
-    // 历史会话列表：只有本轮带了才刷新（每 30 秒一次）。None = 没带，沿用上一份 ——
+    // 历史会话列表：只有本轮带了才刷新（客户端 30 秒一次）。None = 没带，沿用上一份 ——
     // 当成空表会让历史列表每 30 秒闪空一次。
     if let Some(h) = payload.history_tasks.clone() {
         entry.history_tasks = h;
+        entry.history_reported = true;
     }
     // 会话历史（需要 &state，故在释放 machines 锁之后写 —— 见函数末尾）
     let pending_history = history_records;
@@ -3985,7 +3989,11 @@ async fn report(
     let dir_queries: Vec<am_core::model::DirQuery> = entry.pending_dir.drain(..).collect();
     let fs_ops: Vec<am_core::model::FsOp> = entry.pending_fsop.drain(..).collect();
     let file_fetches: Vec<am_core::model::FileFetch> = entry.pending_file_fetch.drain(..).collect();
-    let session_fetches: Vec<am_core::model::SessionFetch> = entry.pending_session_fetch.drain(..).collect();
+    let session_fetches: Vec<am_core::model::SessionFetch> =
+        entry.pending_session_fetch.drain(..).collect();
+    // 还没收到过这台机器的历史列表（hub 刚重启 / 这台机器刚上线）→ 让它下一轮就补发，
+    // 别干等客户端那 30 秒的定时器。见 MachineEntry::history_reported。
+    let want_history = !entry.history_reported;
     drop(machines);
 
     // 配置同步：锁已释放再算 —— 里面要拿 registry 与 configs 两把锁，
@@ -4031,6 +4039,7 @@ async fn report(
         "fsOps": fs_ops,
         "fileFetches": file_fetches,
         "sessionFetches": session_fetches,
+        "wantHistory": want_history,
         // 配置同步：向源机索要的路径 / 向镜像机下发的内容（两者互斥，见 sync_configs）
         "configPulls": config_pulls,
         "configPushes": config_pushes,

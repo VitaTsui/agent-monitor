@@ -62,6 +62,9 @@ const MSG_FETCH_MAX: usize = 500;
 /// 却是上报体积的大头：实测 30 天窗口一轮 94 条、92 KB，其中 86 条属于这一批。
 /// 按 1.5s 一轮算是每天 5 GB 上行 —— 全为了重发一堆不会变的东西。
 /// 30 秒一次足够（历史列表本就不要求秒级新鲜），与配置清单同一个节奏。
+///
+/// hub 重启后不靠这个定时器补 —— 它会在下发响应里带 `wantHistory` 主动索要，
+/// 收到就把计时清零、下一轮立刻补发。
 const HISTORY_REPORT_INTERVAL_SECS: u64 = 30;
 
 const RESUBMIT_WAIT_MS: u64 = 2000;
@@ -651,6 +654,17 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                             }
                             pending_session_fetches.push(out);
                         }
+                    }
+                    // hub 说它手里没有本机的历史会话列表（它刚重启 / 本机刚上线）：
+                    // 下一轮立刻补发，不要干等本地那 30 秒定时器。只有 hub 知道自己的
+                    // 快照空了，客户端无从察觉 —— 干等的后果是最长半分钟内所有历史会话
+                    // 按 id 取数全是 404（/messages、/subtasks、/subagents/…）。
+                    if body
+                        .pointer("/data/wantHistory")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        last_history_report = None;
                     }
                     // 配置同步：hub 点名索要的文件内容（下一轮随上报回传）
                     let cfg_pulls: Vec<String> = body

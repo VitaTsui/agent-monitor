@@ -34,12 +34,21 @@ pub struct MachineEntry {
     /// 热列表：近期有活动的会话，每轮上报全量刷新。**所有既有逻辑只看它**
     /// （号位、钉钉推送、会话开始/结束判定、`/monitor/tasks`），语义与改动前一致。
     pub tasks: Vec<Task>,
-    /// 历史会话：比热列表更老、仍在回溯窗口内的已结束会话。每 30 秒随上报刷新一次，
-    /// 只服务 `/monitor/sessions/history` 与「按 id 找这条会话在哪台机器」。
+    /// 历史会话：比热列表更老、仍在回溯窗口内的已结束会话。客户端每 30 秒随上报刷新
+    /// 一次，服务 `/monitor/sessions/history` 与「按 id 找这条会话在哪台机器」——
+    /// `/messages`、`/subtasks`、`/subagents/:id/messages` 解析 `:id` 都要用到它。
     ///
-    /// 不落盘：客户端每 30 秒就重报一份全的，hub 重启后半分钟内自愈 ——
-    /// 为一份随时能重建的快照上数据库不值得。
+    /// 不落盘：客户端随时能重报一份全的。但**不能干等它那 30 秒的定时器**：hub 一重启
+    /// 这里就空了，而客户端并不知道，于是最长半分钟内所有历史会话按 id 取数全是 404
+    /// （实测重启后 13 秒：历史列表只剩 8 条热会话，`/subtasks` 报「任务不存在」）。
+    /// 所以由 hub 主动索要，见 [`Self::history_reported`]。
     pub history_tasks: Vec<Task>,
+    /// **本 hub 生命周期内收到过这台机器的历史列表没有**。
+    ///
+    /// 为假时每轮上报的响应里带 `wantHistory: true`，让客户端下一轮立刻补发，不必等它
+    /// 自己那 30 秒的定时器 —— 只有 hub 知道自己的快照是空的，客户端无从察觉。
+    /// 收到一次（哪怕是空表，那说明这台机器确实没有历史会话）就置真，不再反复索要。
+    pub history_reported: bool,
     pub last_report: Instant,
     /// 待下发给该 agent 的控制命令
     pub pending: VecDeque<ControlCmd>,
