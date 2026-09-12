@@ -8,13 +8,25 @@
  * 说明 12、行内边距 12/0、行与行之间只画一条分隔线。
  */
 
-// 分栏标题。移动端由弹窗的固定头部显示，这里整块隐藏，避免两个标题
-.paneTitle {
-  margin-bottom: 12px;
+/* 区块标题。**15 / 580 / 20**，参照实测的唯一一档面板内标题。
+ *
+ * 分栏标题（`.paneTitle`，每个分栏最上面那行）与分组标题（`.sectionTitle`）
+ * 共用同一份规格 —— 参照里本来就只有一级：左栏选中项已经说了「你在哪一页」，
+ * 面板里再摆一个更大的 H1 是同一句话说两遍。
+ * 两者唯一的差别是移动端：`.paneTitle` 与弹窗固定头部重复，所以隐藏。
+ */
+.paneTitle,
+.sectionTitle {
+  margin-bottom: 4px;
   color: var(--foreground);
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 580;
   line-height: 20px;
+}
+
+.paneTitle {
+  // 后面通常紧跟 .hint 或第一条 .row，4px 太贴
+  margin-bottom: 12px;
 
   @include r.down(md) {
     display: none;
@@ -77,15 +89,13 @@
   }
 }
 
-.section {
-  margin-bottom: 18px;
-
-  .sectionTitle {
-    font-size: var(--text-base);
-    font-weight: 600;
-    color: color-mix(in srgb, var(--foreground) 60%, transparent);
-    margin-bottom: 8px;
-  }
+/* 分组之间留 32（参照实测）。原来写的是每块 `margin-bottom: 18`，
+   最后一块下面也会多出 18px 的空 —— 用相邻选择器只在分组之间生效。
+   `.row + .section` 是同一回事：安全防护那页第一条开关没有分组标题、
+   直接跟着分组走，只靠 row 自己的 12px 内边距会比分组之间挤掉 20px。 */
+.section + .section,
+.row + .section {
+  margin-top: 32px;
 }
 
 /**
@@ -101,8 +111,11 @@
   gap: 16px;
   padding: 12px 0;
 
+  /* 分隔线画在**除第一行外**每一行的上边（与参照的 divide-y 同一种做法）。
+     颜色用 --border-weak 而不是 --overlay-2（9% 墨）：它只是分隔，
+     不该像个框 —— 一屏十几行时 9% 会把内容切得到处是线 */
   & + .row {
-    border-top: 1px solid var(--overlay-2);
+    border-top: 1px solid var(--border-weak);
   }
 
   .rowInfo {

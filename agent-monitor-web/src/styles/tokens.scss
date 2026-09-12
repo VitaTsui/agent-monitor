@@ -52,8 +52,12 @@
   --accent: var(--vita-hover);
   --accent-foreground: var(--vita-foreground);
 
-  // ---- 语义色（取 shadcn 的 destructive，其余对齐 tailwind 同级）----
-  --destructive: #ef4444;
+  // ---- 语义色 ----
+  // 三支全部指向组件库令牌：error/success/warning 在 --vita-* 里已经是
+  // #dc2626 / #16a34a / #f59e0b（暗色 #f87171 / #22c55e / #fbbf24）。
+  // 这里原先把 destructive 单独写成 #ef4444（red-500），比组件库按钮、
+  // 表单报错用的 red-600 浅一档 —— 同一个「危险」在页面里出现两种红。
+  --destructive: var(--vita-error);
   --destructive-foreground: #fafafa;
   --destructive-subtle: #fef2f2;
   --success: var(--vita-success);
@@ -90,17 +94,30 @@
   // 值不再另抄一份：组件库的 --vita-radius-* 就是 6 / 8 / 12 这三档，
   // 抄一遍就意味着改圆角要改两处、还会悄悄跑偏。
   // --radius-full 是本项目独有的一档（胶囊），组件库没有对应物。
+  --radius-xs: var(--vita-radius-xs);
   --radius-sm: var(--vita-radius-sm);
   --radius: var(--vita-radius);
   --radius-lg: var(--vita-radius-lg);
   --radius-full: 999px;
 
-  // ---- 字号：以 12 / 13 / 14 为主，比 antd 默认更紧 ----
-  --text-xs: 11px; // 元信息、角标
-  --text-sm: 12px; // 次级说明、表格密集态
-  --text-base: 13px; // 正文默认
-  --text-md: 14px; // 强调正文、表单控件
-  --text-lg: 16px; // 小标题
+  // ---- 字号：12 / 14 / 16 三档，与组件库令牌同源 ----
+  // 正文基准原来是 13px，而 `body` 与所有 antd 控件走的是组件库的
+  // `--vita-font-size: 14px`（见 index.scss 的 body 规则）。于是同一段文字
+  // 写没写 `--text-base` 会差一号，「手写 div 比旁边的输入框小一档」到处都是。
+  // 基准回到 14，并且不再另抄字面值，直接指组件库令牌 —— 一处改两边同步。
+  --text-xs: 11px; // 元信息、角标（组件库没有这一档，本项目独有）
+  --text-sm: var(--vita-font-size-sm); // 12px 次级说明、表格密集态
+  --text-base: var(--vita-font-size); // 14px 正文默认
+  --text-md: var(--text-base); // 兼容位：与基准同值，新代码直接用 --text-base
+  --text-lg: var(--vita-font-size-lg); // 16px 小标题
+
+  // ---- 展示层衬线 ----
+  // 组件库只有 --vita-font-family（无衬线），没有衬线这一档，项目侧补一条。
+  // **西文走衬线、中文交给系统黑体**，顺序不能反：中文衬线（宋体）在界面里
+  // 读作公文；claude.ai 的 anthropic-serif 回退链同样是 Georgia → PingFang SC。
+  // 只用于展示层（问候语、页面大标题、侧栏字标），操作层一律无衬线。
+  --vita-font-serif: Georgia, "Times New Roman", "PingFang SC",
+    "Microsoft YaHei", "Noto Sans CJK SC", serif;
 
   // ---- 终端面板 ----
   // 单开一组，**不跟随主题**：它模拟的是终端，浅色模式下也该是深底，
@@ -129,7 +146,7 @@ html[data-prefers-color-scheme="dark"] {
   --primary-subtle: #27272a; // zinc-800
   --primary-subtle-foreground: #fafafa;
 
-  --destructive: #f87171;
+  // --destructive 跟着 --vita-error 走（暗色已是 #f87171），这里只翻前景
   --destructive-foreground: #18181b;
   --destructive-subtle: rgba(248, 113, 113, 0.16);
   --success-subtle: rgba(34, 197, 94, 0.16);
