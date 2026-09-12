@@ -165,6 +165,17 @@ interface IPortalTaskData {
   autoPaused: boolean;
   provider: string;
   providerDsr: string;
+  /**
+   * 这条会话属于**终端 CLI（`false`）还是桌面客户端（`true`）** ——
+   * 与 {@link DeviceProvider.desktop}、{@link HistorySession.desktop} 是同一个键。
+   *
+   * 侧栏分组直接用 `(provider, desktop)` 这一对判，**不要**再去「拿历史快照反查」或
+   * 「按该设备该 provider 只有唯一一项」推断：同机同时跑 Codex CLI 与 ChatGPT 桌面版、
+   * 且这条会话还没进历史列表时，反查会把它落到隔壁组。
+   *
+   * 进程占位任务（会话记录还没生成）没有会话文件可判，一律按 CLI 算（`false`）。
+   */
+  desktop: boolean;
   /** 项目根（归一化，不随会话内 cd 漂移）——分组、标题用 */
   project: string;
   projectName: string;

@@ -5756,6 +5756,9 @@ mod desktop_session_tests {
         assert_eq!(tasks[0].pid, Some(700));
         assert_eq!(tasks[0].status, TaskStatus::Idle);
         assert_eq!(tasks[0].provider_dsr, "Claude 桌面版");
+        // 「哪个客户端」是结构化事实，热路径的 Task 上必须带着它 —— 前端按
+        // (provider, desktop) 分组，只给展示名的话它就得去抠中文串
+        assert!(tasks[0].desktop, "桌面客户端会话的 desktop 必须为真");
         assert_eq!(tasks[0].ide_dsr, "Claude");
     }
 
@@ -5776,6 +5779,7 @@ mod desktop_session_tests {
             assert_eq!(t.pid, Some(900), "{} 该配到桌面宿主", t.id);
             assert_eq!(t.status, TaskStatus::Idle);
             assert_eq!(t.provider_dsr, "ChatGPT 桌面版");
+            assert!(t.desktop, "ChatGPT 桌面版的会话 desktop 必须为真");
         }
     }
 
@@ -5807,6 +5811,7 @@ mod desktop_session_tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].pid, None, "CLI 会话不能被桌面宿主认领");
         assert_eq!(tasks[0].provider_dsr, "Codex");
+        assert!(!tasks[0].desktop, "终端 CLI 的 desktop 必须为假 —— 同机两个客户端靠它分开");
     }
 
     /// 桌面宿主只认自己那个 provider 的桌面会话。
