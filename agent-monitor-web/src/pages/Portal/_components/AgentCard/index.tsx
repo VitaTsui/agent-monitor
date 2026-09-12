@@ -199,11 +199,19 @@ const AgentCard: React.FC<AgentCardProps> = ({
                     </span>
                     <span className={styles.cellNm}>{a.label}</span>
                   </span>
-                  {/* 第二行是这一个的「量」：状态 ＋ 耗时。
-                      「还在跑」与「卡死了」的唯一区别就是耗时在不在走字 */}
+                  {/* 第二行是这一个的「量」：状态 ＋ 耗时（＋ 被派过几次）。
+                      「还在跑」与「卡死了」的唯一区别就是耗时在不在走字。
+
+                      **被重新派过活就要说出来**：同一个子代理可以被再派一次
+                      （`SubTask.runs`），那时它的收场从「已完成」翻回「执行中」是
+                      **对的**。但界面上要是不写这一句，用户看到的就是一个跑完的
+                      子代理忽然又动起来，没有任何解释 —— 跟这一版一直在修的
+                      「界面别骗人」是同一件事。
+                      `runs` 缺失或等于 1 时什么都不写：「第 1 次派活」是噪音。 */}
                   <span className={styles.cellMeta}>
                     {SUB_OUTCOME_LABEL[a.outcome] ?? a.status}
                     {` · ${fmtSubTaskElapsed(a, now) || "—"}`}
+                    {a.runs && a.runs > 1 ? ` · 第 ${a.runs} 次派活` : ""}
                   </span>
                 </button>
               );
