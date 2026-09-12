@@ -482,6 +482,22 @@ export const getHistorySessionList = async (params?: {
 
 // ---------- 设备管理（信任设备）----------
 
+/** 一台设备上「有哪一类终端、各有多少条会话」——侧栏按「设备 × 终端类型」分组用 */
+export interface DeviceProvider {
+  /** `claude` / `codex`，与 {@link HistorySession.provider} 同一套取值 */
+  provider: string;
+  /**
+   * 展示名。**取该 provider 下最近一条会话上报的值** —— 同一个 `codex` 既可能是
+   * 「Codex」也可能是「ChatGPT 桌面版」，取最近的才跟得上客户端现在的说法。
+   */
+  providerDsr: string;
+  /**
+   * 该设备该 provider 下的会话总数，**含已结束**。
+   * 与 `getHistorySessionList({ machineId, provider })` 返回的 `total` 同口径。
+   */
+  sessionCount: number;
+}
+
 export interface PortalDevice {
   id: string;
   hostname: string;
@@ -496,6 +512,17 @@ export interface PortalDevice {
   trusted: boolean;
   /** 是否是「他人协助码共享给我」的设备 */
   shared: boolean;
+  /**
+   * 这台设备上有哪几类终端、各有多少条会话。按会话数降序（同数按 provider 名），
+   * 顺序稳定，可直接照序渲染分组。
+   *
+   * 别再用 `getHistorySessionList({ limit: 200 })` 数最近 200 条倒推 —— 那是将就：
+   * 某个终端最近一条会话一旦排到 200 条之外，对应分组就会凭空消失。
+   *
+   * **没有会话时是空数组**（不是缺字段）。设备离线仍返回上次已知的那份 ——
+   * 否则笔记本一合盖，侧栏分组就全没了；本 hub 生命周期内从未上报过的设备才是空数组。
+   */
+  providers: DeviceProvider[];
 }
 
 export const getPortalDevices = async () => {

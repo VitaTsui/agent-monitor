@@ -486,6 +486,51 @@ pub struct BotMonitor {
     pub last_ts: String,
 }
 
+/// 一台设备上「有哪一类终端、各有多少条会话」。
+///
+/// 口径必须与 `/monitor/sessions/history?machineId=&provider=` 的 `total` 一致，
+/// 所以：① 热列表与历史列表都要数（会话总数含已结束，不是只数活跃的）；
+/// ② 排除进程占位任务（会话记录还没生成，它不是一条会话）——判据复用
+/// [`crate::server::is_proc_placeholder`]，不在这里另写一份「id 里有没有 pid-」。
+///
+/// `provider_dsr` 取该 provider 下**最近一条**会话上报的值：同一个 `codex` 既可能是
+/// 「Codex」也可能是「ChatGPT 桌面版」，取最近的才跟得上客户端现在的说法。
+///
+/// 排序：会话数多的在前，同数按 provider 名 —— 侧栏的顺序得是确定的，不能每轮抖。
+fn providers_of<'a>(tasks: impl Iterator<Item = &'a Task>) -> Vec<am_core::model::ProviderStat> {
+    // provider -> (条数, 最近一条的 mtime, 那条的展示名)
+    let mut agg: HashMap<&str, (usize, u64, &str)> = HashMap::new();
+    for t in tasks {
+        if crate::server::is_proc_placeholder(t) {
+            continue;
+        }
+        let e = agg.entry(t.provider.as_str()).or_insert((0, 0, ""));
+        e.0 += 1;
+        if t.mtime_ms >= e.1 {
+            e.1 = t.mtime_ms;
+            e.2 = t.provider_dsr.as_str();
+        }
+    }
+    let mut out: Vec<am_core::model::ProviderStat> = agg
+        .into_iter()
+        .map(|(provider, (n, _, dsr))| am_core::model::ProviderStat {
+            provider: provider.to_string(),
+            provider_dsr: if dsr.is_empty() {
+                am_core::model::provider_dsr(provider)
+            } else {
+                dsr.to_string()
+            },
+            session_count: n,
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.session_count
+            .cmp(&a.session_count)
+            .then(a.provider.cmp(&b.provider))
+    });
+    out
+}
+
 pub type SharedState = Arc<AppState>;
 
 impl AppState {
@@ -635,6 +680,7 @@ impl AppState {
                     owner: meta.owner,
                     trusted: meta.trusted,
                     shared: false,
+                    providers: providers_of(e.tasks.iter().chain(e.history_tasks.iter())),
                 }
             })
             .collect();
@@ -671,6 +717,9 @@ impl AppState {
                 owner: meta.owner.clone(),
                 trusted: meta.trusted,
                 shared: false,
+                // 本 hub 生命周期内它一次都没上报过（关机 / 客户端没开），
+                // 手里没有任何会话可数 —— 空数组，不是「没有会话」而是「还不知道」。
+                providers: Vec::new(),
                 id,
             });
         }
@@ -715,6 +764,10 @@ impl AppState {
                 owner: meta.owner.clone(),
                 trusted: true,
                 shared: true,
+                // 协助码共享给我的设备：它没上报到我这边时同样只能给空数组
+                providers: live
+                    .map(|e| providers_of(e.tasks.iter().chain(e.history_tasks.iter())))
+                    .unwrap_or_default(),
                 id,
             });
         }

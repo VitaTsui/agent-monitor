@@ -59,7 +59,7 @@ fn worth_finish_notice(mtime_ms: u64, now_secs: u64) -> bool {
 ///
 /// 光靠文本口径挡不住它：占位任务的标题恒为终端名「Claude Code」、提示词恒为
 ///「（会话尚未产生记录）」，两者都非空。只能认 id。
-fn is_proc_placeholder(t: &am_core::model::Task) -> bool {
+pub(crate) fn is_proc_placeholder(t: &am_core::model::Task) -> bool {
     is_proc_placeholder_id(&t.id, &t.machine_id)
 }
 
@@ -789,8 +789,10 @@ async fn list_session_history(
         .await
         .into_iter()
         .filter(|t| {
-            // 占位任务（进程有了但会话记录还没生成）不是历史，没有正文可看
-            if t.id.contains("pid-") {
+            // 占位任务（进程有了但会话记录还没生成）不是历史，没有正文可看。
+            // 判据走统一那份，别在这里另认一遍「id 里有没有 pid-」——
+            // 设备 providers 的计数要与这里的 total 严丝合缝地对上。
+            if is_proc_placeholder(t) {
                 return false;
             }
             if let Some(m) = &q.machine_id {

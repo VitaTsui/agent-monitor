@@ -363,6 +363,26 @@ pub struct ControlReq {
     pub pid: Option<u32>,
 }
 
+/// 一台设备上「有哪一类终端、各有多少条会话」。
+///
+/// 侧栏要按「设备 × 终端类型」分组，而在此之前没有任何接口能直接回答这个问题 ——
+/// 前端只能拉 `/monitor/sessions/history?limit=200`（接口上限）去数最近 200 条倒推。
+/// 那是个将就：某个终端最近一条会话一旦排在 200 条之外，这一轮就数不出来，
+/// 对应的分组会凭空消失。所以由服务端直接给。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderStat {
+    /// claude / codex …（与会话上的 `Task::provider` 同一个取值）
+    pub provider: String,
+    /// 展示名。**取该 provider 下最近一条会话上报的那个** —— 同一个 `codex` 既可能是
+    /// 「Codex」也可能是「ChatGPT 桌面版」（实测本机 33 条 codex 里 32 条前者、1 条后者），
+    /// 取最近的才跟得上客户端现在的说法。
+    pub provider_dsr: String,
+    /// 该设备该 provider 下的会话总数，**含已结束**。
+    /// 与 `/monitor/sessions/history?machineId=&provider=` 的 `total` 同口径。
+    pub session_count: usize,
+}
+
 /// 一台被监控的电脑
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -388,6 +408,12 @@ pub struct MachineInfo {
     /// 本设备是否是「他人通过协助码共享给我」的（非本人设备）
     #[serde(default)]
     pub shared: bool,
+    /// 这台设备上有哪几类终端、各有多少条会话（见 [`ProviderStat`]）。
+    ///
+    /// 没有任何会话时是**空数组而不是省略字段** —— 前端要区分「这台机器确实没会话」
+    /// 和「老版本 hub 不给这个字段」。
+    #[serde(default)]
+    pub providers: Vec<ProviderStat>,
 }
 
 /// agent → hub 的快照上报
