@@ -77,8 +77,10 @@
 - 识别的宿主：**Cursor / VSCode 内嵌终端**（父进程链优先判 IDE，Windows 下不会被
   powershell/cmd 误判），以及**独立终端**——mac 的 Terminal/iTerm/Warp/kitty 等、
   Windows 的 Windows Terminal / PowerShell / CMD、tmux。
-- 前台左侧：按**设备 × 终端类型**分组（机器 + provider，Claude / Codex 各一组），
-  分组直接吃 `/monitor/devices` 的 `providers` 字段，组内按最近活动分桶
+- 前台左侧：按**设备 × 客户端**分组，分组键是 `(provider, desktop)` 这一对而不是
+  `provider` 一个值 —— 同一台机器上 Codex CLI 与 ChatGPT 桌面版都是 `provider="codex"`，
+  却是两个不同的客户端，各占一组。分组直接吃 `/monitor/devices` 的 `providers` 字段，
+  组内按最近活动分桶
   （今天 / 昨天 / 过去 7 天 / 过去 30 天 / 更早）。列的是回溯窗口内的**全部会话**，
   已结束的也在，走 `/monitor/sessions/history` 的时间游标翻页、滚动加载；侧栏筛选框
   筛的就是这同一份全量（关键字一并传给历史接口）。
@@ -87,9 +89,11 @@
   一张**智能体卡**（目标 · 状态 · 个数 · 耗时），点卡里的子代理小卡，**那个子代理自己
   走过的执行链就作为兄弟节点原地接在卡片下面继续排**，不跳转、不弹层。子链默认铺 40 步，
   其余收进「展开全部」。卡片跑中默认展开、跑完默认收起，展开态不持久化。
-- 跑中的子代理**自动跟着长**：仅当 `outcome === "running"` 且子链正展开时每 5 秒拉一次；
-  跑完先停定时器再补拉一次拿最终内容，收起 / 关格子 / 切走都随之停掉。终态子代理永不
-  轮询，拿到过就缓存。
+- 跑中的子代理**自动跟着长**，两条节律各管一件事：**子代理正文**仅当
+  `outcome === "running"` 且子链正展开时每 5 秒拉一次（跑完先停定时器再补拉一次拿最终
+  内容，收起 / 关格子 / 切走都随之停掉，终态永不轮询、拿到过就缓存）；**子任务清单**
+  （`/subtasks`）在该会话还有 `running` 子代理时每 10 秒重拉一次，没有就一个请求都不发
+  ——它是现读磁盘的，慢一档，代价是卡片最多晚 10 秒翻成终态。
 - 前台右侧支持**拆分视图**：像 IDE 终端拆分一样并排显示最多 4 个任务，各自独立控制；
   每格底部是 hsu-ui `Chat.Input` 对话框，可**直接发布任务/终端命令**（按 provider 提供
   `/clear`、`/compact`、`/model` 等快捷键）。
@@ -194,11 +198,11 @@ $env:AM_HUB_URL="http://<hub-ip>:8383"; .\agent-monitor.exe
 | GET | `/monitor/tasks?status=&keyword=` | 任务列表（前台，平铺参数） |
 | GET | `/monitor/tasks/page?query=` | 任务分页（后管，vita-admin Query 格式） |
 | GET | `/monitor/tasks/detail/:id` | 任务详情 |
-| GET | `/monitor/sessions/history` | 历史会话列表（**不过滤已结束**）。`keyword`（项目/标题/提示词/主机名）、`machineId`、`provider`、`before`（时间游标）、`limit`（1–200，默认 50）；返回 `{list, total, nextCursor}` |
+| GET | `/monitor/sessions/history` | 历史会话列表（**不过滤已结束**）。`keyword`（项目/标题/提示词/主机名）、`machineId`、`provider`、`desktop`（不传 = CLI 与桌面版都要）、`before`（时间游标）、`limit`（1–200，默认 50）；返回 `{list, total, nextCursor}`，每行带 `desktop` |
 | GET | `/monitor/tasks/:id/messages?limit=` | 会话对话流。活跃会话读上报缓存，历史会话按需现读磁盘；返回 `{list, pending}` |
 | GET | `/monitor/tasks/:id/subtasks` | 该会话**全部**子任务（现读磁盘、不套保留窗口，是快照里 `subTasks` 的超集）；返回 `{list, pending}` |
 | GET | `/monitor/tasks/:id/subagents/:agentId/messages?limit=` | 单个子代理正文（`limit` 默认 200、上限 500）。`agentId` 取自 `subTasks[]` 里 `kind=agent` 且 `hasBody` 为真的条目 |
-| GET | `/monitor/devices` | 设备列表。`machines[].providers: {provider, providerDsr, sessionCount}[]` 供侧栏建「设备 × 终端类型」分组 |
+| GET | `/monitor/devices` | 设备列表。`machines[].providers: {provider, desktop, providerDsr, sessionCount}[]` 供侧栏建「设备 × 客户端」分组 |
 | POST | `/monitor/tasks/:id/control` | `{action: pause/resume/interrupt/stop/kill, pid?}` |
 | POST | `/monitor/tasks/:id/input` | `{text, pid?}` —— 向会话发布一行输入（TTY 注入） |
 | GET | `/monitor/machines` | 机器列表（在线状态 / 系统 / 会话数） |
@@ -217,13 +221,23 @@ $env:AM_HUB_URL="http://<hub-ip>:8383"; .\agent-monitor.exe
 > `code=404 任务不存在` 的形式出现。所以判离线**不能只看 code**，要配合 `/monitor/devices`
 > 的 `online` 字段现场核对，否则会把一条好好躺在关机电脑上的会话说成「已被删除」。
 >
-> `/monitor/devices` 的 `providers`：`provider` 是 `claude` / `codex`；`providerDsr` 是展示名，
-> 取该 provider **最近一条**会话上报的值（同一个 codex 可能报「Codex」也可能报
-> 「ChatGPT 桌面版」）；`sessionCount` 是**回溯窗口内**（`AM_HISTORY_DAYS`，默认 30 天）
-> 的会话数（含已结束、排除进程占位任务），**不是有史以来的总数**，口径与
-> `/monitor/sessions/history` 的 `total` 一致。排序由后端定好（会话数降序、同数按 provider 名），
-> 前端不再排一遍。字段恒存在，`[]` = 确实没会话。设备离线时照常返回上次已知的那份 ——
+> `/monitor/devices` 的 `providers`：一项 = 一个客户端，键是 `(provider, desktop)`，
+> 所以**同一个 `provider` 可能出现两项**（`codex/false` = Codex CLI、`codex/true` =
+> ChatGPT 桌面版）。`providerDsr` 是这对组合算出的**规范名**（`provider_dsr()` /
+> `provider_dsr_desktop()` 两个固定枚举），不是客户端自由上报的字符串，也不取任何一条
+> 会话的值 —— 取了的话 1 条桌面版会话就能把 32 条 CLI 会话的组改名。`sessionCount` 是
+> **回溯窗口内**（`AM_HISTORY_DAYS`，默认 30 天）的会话数（含已结束、排除进程占位任务），
+> **不是有史以来的总数**，口径与 `/monitor/sessions/history?machineId=&provider=&desktop=`
+> 的 `total` 一致。排序由后端定好（会话数降序 → provider 名 → CLI 在桌面版前），前端不再
+> 排一遍。字段恒存在，`[]` = 确实没会话。设备离线时照常返回上次已知的那份 ——
 > 否则笔记本一合盖，侧栏分组会全部消失。
+>
+> 要取某一个客户端的会话，必须 `machineId + provider + desktop` 三件套一起传；只传
+> `provider` 会把 CLI 与桌面版混在一起给你。热路径的 `desktop` 也都带：`/monitor/tasks`、
+> `/monitor/tasks/detail/:id`、`/monitor/tasks/page`、WS 首帧 `{type:"tasks"}` 四处都有，
+> 进程占位任务（id 含 `-pid-`，会话文件还没生成、判不出来源）恒为 `false`。
+> **旧客户端上报的 `Task` 没有这个字段，按 `false` 取**，于是它的桌面版会话会并进 CLI 组
+> ——这不是 bug，升级客户端即恢复正确分组。
 
 ## 扩展新代理（如 Codex）
 
