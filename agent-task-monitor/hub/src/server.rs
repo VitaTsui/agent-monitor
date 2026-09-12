@@ -750,6 +750,12 @@ struct SessionHistoryQuery {
     machine_id: Option<String>,
     /// 只看某个 provider（claude / codex …）
     provider: Option<String>,
+    /// 只看终端 CLI（`false`）或只看桌面客户端（`true`）；不传 = 两者都要。
+    ///
+    /// 与 `provider` 配合就是 `/monitor/devices` 里 `providers[]` 的那个分组键：
+    /// 同一个 `codex` 下 Codex CLI 与 ChatGPT 桌面版是两个客户端，光靠 `provider`
+    /// 分不开。**不用展示名当筛选参数** —— 那是给人看的中文串，不是接口契约。
+    desktop: Option<bool>,
     /// 游标：上一页最后一条的 `mtimeMs`，要更旧的就把它带回来。
     /// 用时间游标而不是 offset —— 这份列表的底料是每轮上报刷新的内存快照，
     /// 翻页期间新会话插进头部，offset 会让某条被跳过或看两遍。
@@ -765,6 +771,9 @@ struct SessionHistoryQuery {
 /// 钉钉推送）默认的前提；往里塞历史会话会让每个消费方都得再加一层过滤。
 /// 而 `/monitor/history` 这个名字已经被**远程交互记录**占了（见 `list_history`），
 /// 不能复用，故取 `/monitor/sessions/history`。
+///
+/// 筛选键与 `/monitor/devices` 的 `providers[]` 对齐：`machineId` + `provider` + `desktop`
+/// 三个一起，才唯一确定「哪台机器上的哪个客户端」。
 ///
 /// 数据来自各机器每轮上报的快照，扫描窗口见 am-core 的 `AM_HISTORY_DAYS`（默认 30 天）。
 /// hub 不落盘：历史列表由客户端每 30 秒随上报刷新一份全的。hub 重启后这份是空的，
@@ -805,6 +814,11 @@ async fn list_session_history(
                     return false;
                 }
             }
+            if let Some(d) = q.desktop {
+                if t.desktop != d {
+                    return false;
+                }
+            }
             if let Some(k) = &keyword {
                 if !t.project.to_lowercase().contains(k)
                     && !t.title.to_lowercase().contains(k)
@@ -838,6 +852,9 @@ async fn list_session_history(
                 "statusDsr": t.status_dsr,
                 "provider": t.provider,
                 "providerDsr": t.provider_dsr,
+                // 这条会话属于哪个客户端（终端 CLI / 桌面版）——与 devices 的
+                // providers[].desktop 同一个键，前端据此把会话归回对应分组
+                "desktop": t.desktop,
                 "project": t.project,
                 "projectName": t.project_name,
                 "machineId": t.machine_id,

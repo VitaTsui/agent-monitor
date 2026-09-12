@@ -486,40 +486,43 @@ pub struct BotMonitor {
     pub last_ts: String,
 }
 
-/// 一台设备上「有哪一类终端、各有多少条会话」。
+/// 一台设备上「有哪几个客户端、各有多少条会话」。
 ///
-/// 口径必须与 `/monitor/sessions/history?machineId=&provider=` 的 `total` 一致，
-/// 所以：① 热列表与历史列表都要数（会话总数含已结束，不是只数活跃的）；
+/// **分组键是 `(provider, desktop)` 这一对，不是 `provider` 一个值**：同一台机器上
+/// `provider == "codex"` 既可能是 Codex CLI，也可能是 ChatGPT 桌面版 —— 它们是两个
+/// 不同的客户端，只是会话文件格式一样。只按 provider 聚合会把两者糊成一组，而组名
+/// 若再取「最近一条会话的展示名」，1 条桌面版会话就能把 32 条 CLI 会话的组改名成
+/// 「ChatGPT 桌面版」（实测本机就是这个比例）。用户要的是「单独显示每个客户端的会话」。
+///
+/// 展示名取 `(provider, desktop)` 算出的**规范名**（[`am_core::model::provider_dsr`] /
+/// [`am_core::model::provider_dsr_desktop`]，两个固定枚举），不取某一条会话上的值 ——
+/// 组名不该随最近那条漂。
+///
+/// 计数口径必须与 `/monitor/sessions/history?machineId=&provider=&desktop=` 的 `total`
+/// 一致，所以：① 热列表与历史列表都要数（会话总数含已结束，不是只数活跃的）；
 /// ② 排除进程占位任务（会话记录还没生成，它不是一条会话）——判据复用
-/// [`crate::server::is_proc_placeholder`]，不在这里另写一份「id 里有没有 pid-」。
+/// [`crate::server::is_proc_placeholder`]，不在这里另写一份。
 ///
-/// `provider_dsr` 取该 provider 下**最近一条**会话上报的值：同一个 `codex` 既可能是
-/// 「Codex」也可能是「ChatGPT 桌面版」，取最近的才跟得上客户端现在的说法。
-///
-/// 排序：会话数多的在前，同数按 provider 名 —— 侧栏的顺序得是确定的，不能每轮抖。
+/// 排序：会话数多的在前，同数按 provider 名、CLI 在桌面版之前 —— 侧栏的顺序得是
+/// 确定的，不能每轮抖。
 fn providers_of<'a>(tasks: impl Iterator<Item = &'a Task>) -> Vec<am_core::model::ProviderStat> {
-    // provider -> (条数, 最近一条的 mtime, 那条的展示名)
-    let mut agg: HashMap<&str, (usize, u64, &str)> = HashMap::new();
+    let mut agg: HashMap<(&str, bool), usize> = HashMap::new();
     for t in tasks {
         if crate::server::is_proc_placeholder(t) {
             continue;
         }
-        let e = agg.entry(t.provider.as_str()).or_insert((0, 0, ""));
-        e.0 += 1;
-        if t.mtime_ms >= e.1 {
-            e.1 = t.mtime_ms;
-            e.2 = t.provider_dsr.as_str();
-        }
+        *agg.entry((t.provider.as_str(), t.desktop)).or_insert(0) += 1;
     }
     let mut out: Vec<am_core::model::ProviderStat> = agg
         .into_iter()
-        .map(|(provider, (n, _, dsr))| am_core::model::ProviderStat {
-            provider: provider.to_string(),
-            provider_dsr: if dsr.is_empty() {
-                am_core::model::provider_dsr(provider)
+        .map(|((provider, desktop), n)| am_core::model::ProviderStat {
+            provider_dsr: if desktop {
+                am_core::model::provider_dsr_desktop(provider)
             } else {
-                dsr.to_string()
+                am_core::model::provider_dsr(provider)
             },
+            provider: provider.to_string(),
+            desktop,
             session_count: n,
         })
         .collect();
@@ -527,6 +530,7 @@ fn providers_of<'a>(tasks: impl Iterator<Item = &'a Task>) -> Vec<am_core::model
         b.session_count
             .cmp(&a.session_count)
             .then(a.provider.cmp(&b.provider))
+            .then(a.desktop.cmp(&b.desktop))
     });
     out
 }

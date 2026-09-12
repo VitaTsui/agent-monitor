@@ -1301,6 +1301,8 @@ pub fn build_tasks(
             } else {
                 crate::model::provider_dsr(&s.provider)
             },
+            // 「哪个客户端」在这一层是个布尔量，带上去 —— 上层才不必去抠展示字符串
+            desktop: s.desktop,
             title: if s.title.is_empty() {
                 s.prompt.clone()
             } else {
@@ -1374,6 +1376,8 @@ pub fn build_tasks(
             platform_dsr: String::new(),
             provider: p.agent.clone(),
             provider_dsr: crate::model::provider_dsr(&p.agent),
+            // 进程占位任务只从进程表来，没有会话文件可判来源，一律按终端 CLI 算
+            desktop: false,
             title,
             used_tokens_5h: 0,
             token_limit: 0,

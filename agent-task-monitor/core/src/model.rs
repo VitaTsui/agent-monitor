@@ -269,8 +269,21 @@ pub struct Task {
     pub status: TaskStatus,
     /// 状态中文描述（前端表格直接展示）
     pub status_dsr: String,
-    /// 代理中文/展示名
+    /// 代理中文/展示名。由 `(provider, desktop)` 这一对经 [`provider_dsr`] /
+    /// [`provider_dsr_desktop`] 算出来，**不是客户端自由上报的字符串**。
     pub provider_dsr: String,
+    /// **这条会话来自桌面客户端而不是终端 CLI**（Claude 桌面版的本地代理、
+    /// ChatGPT 桌面版的 Codex）。
+    ///
+    /// 同一台机器上，`provider == "codex"` 既可能是 Codex CLI，也可能是
+    /// ChatGPT 桌面版 —— 它们是**两个不同的客户端**，只是会话文件格式一样。
+    /// 此前这个事实只体现在 `provider_dsr` 那个展示字符串上（scanner 里按它选展示名，
+    /// 见 `build_tasks`），Task 本身不带 —— 于是上层要区分「哪个客户端」时手里只有
+    /// 一个中文串可抓，按 provider 聚合就会把两个客户端糊成一组（实测本机 33 条 codex
+    /// 里 32 条是 CLI、1 条是桌面版，糊在一起后 32 条 CLI 会话被挂在「ChatGPT 桌面版」
+    /// 这个组名下）。判据本来就在扫描那一层是个布尔量，带上来即可，不必去猜字符串。
+    #[serde(default)]
+    pub desktop: bool,
     /// 宿主 IDE 展示名（无进程为 "—"）
     pub ide_dsr: String,
     /// 进程 pid（无进程为 null）
@@ -374,12 +387,18 @@ pub struct ControlReq {
 pub struct ProviderStat {
     /// claude / codex …（与会话上的 `Task::provider` 同一个取值）
     pub provider: String,
-    /// 展示名。**取该 provider 下最近一条会话上报的那个** —— 同一个 `codex` 既可能是
-    /// 「Codex」也可能是「ChatGPT 桌面版」（实测本机 33 条 codex 里 32 条前者、1 条后者），
-    /// 取最近的才跟得上客户端现在的说法。
+    /// 终端 CLI 还是桌面客户端，见 [`Task::desktop`]。
+    ///
+    /// **同一个 `provider` 会出现两项**（如 `codex/false` 与 `codex/true`）——
+    /// 它们是同一台机器上两个不同的客户端，用户要的是「单独显示每个客户端的会话」，
+    /// 糊成一项就不满足。分组键是 `(provider, desktop)` 这一对。
+    pub desktop: bool,
+    /// 展示名：由 `(provider, desktop)` 算出的**规范名**，不是某一条会话上的值。
+    /// 取某条会话的值会让组名随最近那条漂（1 条桌面版会话能把 32 条 CLI 会话的组
+    /// 改名成「ChatGPT 桌面版」）。
     pub provider_dsr: String,
-    /// 该设备该 provider 下的会话总数，**含已结束**。
-    /// 与 `/monitor/sessions/history?machineId=&provider=` 的 `total` 同口径。
+    /// 该设备该 `(provider, desktop)` 下的会话总数，**含已结束**。
+    /// 与 `/monitor/sessions/history?machineId=&provider=&desktop=` 的 `total` 同口径。
     pub session_count: usize,
 }
 

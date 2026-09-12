@@ -430,6 +430,8 @@ interface IHistorySession {
   statusDsr: string;
   provider: string;
   providerDsr: string;
+  /** 这条会话属于终端 CLI 还是桌面客户端 —— 与 {@link DeviceProvider.desktop} 同一个键 */
+  desktop: boolean;
   /** 项目根（归一化，不随会话内 cd 漂移） */
   project: string;
   projectName: string;
@@ -472,6 +474,13 @@ export const getHistorySessionList = async (params?: {
   machineId?: string;
   /** 只看某个 provider（claude / codex …） */
   provider?: string;
+  /**
+   * 只看终端 CLI（`false`）或只看桌面客户端（`true`）；不传 = 两者都要。
+   *
+   * 点开某个侧栏分组拉它的历史时，**必须把 {@link DeviceProvider.desktop} 一起传**：
+   * 光传 `provider` 会把 Codex CLI 与 ChatGPT 桌面版的会话混在一起拉回来。
+   */
+  desktop?: boolean;
   /** 上一页返回的 nextCursor */
   before?: number;
   /** 每页条数，1~200，默认 50 */
@@ -482,18 +491,26 @@ export const getHistorySessionList = async (params?: {
 
 // ---------- 设备管理（信任设备）----------
 
-/** 一台设备上「有哪一类终端、各有多少条会话」——侧栏按「设备 × 终端类型」分组用 */
+/** 一台设备上「有哪几个客户端、各有多少条会话」——侧栏按「设备 × 客户端」分组用 */
 export interface DeviceProvider {
   /** `claude` / `codex`，与 {@link HistorySession.provider} 同一套取值 */
   provider: string;
   /**
-   * 展示名。**取该 provider 下最近一条会话上报的值** —— 同一个 `codex` 既可能是
-   * 「Codex」也可能是「ChatGPT 桌面版」，取最近的才跟得上客户端现在的说法。
+   * 终端 CLI（`false`）还是桌面客户端（`true`）。
+   *
+   * **同一个 `provider` 会出现两项**（如 `codex/false` = Codex CLI、
+   * `codex/true` = ChatGPT 桌面版）：它们是同一台机器上两个不同的客户端，
+   * 只是会话文件格式一样。分组键是 `(provider, desktop)` 这一对，别只按 provider 分。
+   */
+  desktop: boolean;
+  /**
+   * 组名：由 `(provider, desktop)` 算出的**规范名**（服务端两个固定枚举），
+   * 不是某一条会话上的值 —— 组名不会随最近那条会话漂。直接当分组标题用。
    */
   providerDsr: string;
   /**
-   * 该设备该 provider 下的会话总数，**含已结束**。
-   * 与 `getHistorySessionList({ machineId, provider })` 返回的 `total` 同口径。
+   * 该设备该 `(provider, desktop)` 下的会话总数，**含已结束**。
+   * 与 `getHistorySessionList({ machineId, provider, desktop })` 的 `total` 同口径。
    */
   sessionCount: number;
 }
@@ -513,7 +530,8 @@ export interface PortalDevice {
   /** 是否是「他人协助码共享给我」的设备 */
   shared: boolean;
   /**
-   * 这台设备上有哪几类终端、各有多少条会话。按会话数降序（同数按 provider 名），
+   * 这台设备上有哪几个客户端、各有多少条会话。按会话数降序（同数按 provider 名、
+   * CLI 在桌面版之前），
    * 顺序稳定，可直接照序渲染分组。
    *
    * 别再用 `getHistorySessionList({ limit: 200 })` 数最近 200 条倒推 —— 那是将就：
