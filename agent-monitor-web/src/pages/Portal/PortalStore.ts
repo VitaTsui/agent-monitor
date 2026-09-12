@@ -83,20 +83,6 @@ export interface ClientKey {
   provider: string;
 }
 
-/**
- * 一个客户端在索引里的身份。
- *
- * 展示名（`providerDsr`）取**最近一条会话**上报的那个：同一个 `provider` 的展示名
- * 会随客户端版本变（实测本机 33 条 codex 里 32 条报 `Codex`、1 条报 `ChatGPT 桌面版`），
- * 以最近的为准才跟得上客户端现在的说法。
- */
-interface ClientIndexEntry extends ClientKey {
-  key: string;
-  hostname: string;
-  providerDsr: string;
-  platformDsr: string;
-}
-
 /** 侧栏里一个客户端分组下的一个时间桶 */
 export interface SessionBucket {
   label: string;
@@ -137,16 +123,6 @@ interface ClientHistoryState {
 
 /** 每页历史条数。50 是后端默认值，够铺满一屏又不至于一次拉太多 */
 const HISTORY_PAGE = 50;
-
-/**
- * 「客户端索引」一次取多少条。200 是 `/monitor/sessions/history` 的上限。
- *
- * 这一条查询**不带任何过滤**，唯一的用途是数出「这个账号下到底存在哪些
- * 设备 × 终端」——详见 `loadClientIndex`。
- */
-const CLIENT_INDEX_LIMIT = 200;
-/** 客户端索引的刷新间隔。新开一种终端（第一次跑 Codex）最迟这么久之后出现在侧栏 */
-const CLIENT_INDEX_MS = 60000;
 
 /**
  * 正文「读取中」的重试节奏。
@@ -289,10 +265,6 @@ class PortalStore {
   /** 子任务清单没取到的原因（会话 id → 原因）。取到了就清掉 */
   private _subTasksFailById: Record<string, FetchFailKind> = {};
   /**
-   * **客户端全集**：这个账号下存在过的每一个「设备 × 终端」。见 `loadClientIndex`。
-   */
-  private _clientIndex: ClientIndexEntry[] = [];
-  /**
    * 历史会话：按客户端（`machineId|provider`）各存一份分页状态。
    *
    * 不做成一张大列表再前端分组 —— 翻页游标是**按查询**的，每个客户端各翻各的页，
@@ -358,7 +330,6 @@ class PortalStore {
       | "_wsRetryTimer"
       | "_pollTimer"
       | "_deviceTimer"
-      | "_clientIndexTimer"
       | "_wsClosing"
       | "_wsGen"
     >(this, {
@@ -367,7 +338,6 @@ class PortalStore {
       _wsRetryTimer: false,
       _pollTimer: false,
       _deviceTimer: false,
-      _clientIndexTimer: false,
       _wsClosing: false,
       _wsGen: false,
     });
@@ -452,15 +422,23 @@ class PortalStore {
    * 同一条会话两边都有时**以活跃那份为准**：反过来的话，一条正在跑的会话会因为
    * 历史快照里写着 `finished` 而显示成已结束。
    *
-   * **组从哪来**：`_clientIndex`（一次不带任何过滤的历史查询数出来的设备 × 终端全集，
-   * 见 `loadClientIndex`）。从前是「客户端集合取自 `_tasks`」—— `_tasks` 只含
-   * **此刻有活进程**的会话，于是「这台机器上有哪些终端」被偷换成了「这台机器上
-   * 此刻有哪些终端在跑」：本机 33 条 Codex 历史会话因为没有一条活着，Codex 组
-   * 压根建不出来，那一组的历史请求也就永远不会发出（历史那一侧只能往**已存在**的
-   * 组里填，建不出新组）。那套判据整条撤销，不留旧入口。
+   * **组从哪来**：`/monitor/devices` 每台设备下发的 `providers`（这台机器上有哪几类
+   * 终端）。从前是「客户端集合取自 `_tasks`」—— `_tasks` 只含**此刻有活进程**的会话，
+   * 于是「这台机器上有哪些终端」被偷换成了「此刻有哪些终端在跑」：本机 33 条 Codex
+   * 历史会话因为没有一条活着，Codex 组压根建不出来，那一组的历史请求也就永远不会
+   * 发出（历史那一侧只能往**已存在**的组里填，建不出新组）。中间过渡过一版「数最近
+   * 200 条历史倒推」，也一并删掉了 —— 某个终端最近一条会话排到 200 条之外就会凭空
+   * 消失，那是将就不是答案。两套来源不并存。
    *
-   * `_tasks` 仍然参与，但只负责**补**：一种终端第一次跑起来时，它的会话会先出现在
-   * 热路径上，不必等索引下一轮刷新（最长 60 秒）才在侧栏冒出来。
+   * **组的顺序就是这里的建组顺序**（Map 保序），末尾不再排一次：
+   *   设备（本机优先、其次主机名）× 该设备的 `providers`（后端已按会话数降序给好）。
+   * 前端再排一遍就是两套排序并存，每轮还可能抖。
+   *
+   * `_tasks` 与历史仍然参与，但只负责**补**：一种终端第一次跑起来时它的会话会先出现在
+   * 热路径上，不必等设备列表下一轮（5 秒）才在侧栏冒出来。
+   *
+   * 设备离线时后端照常返回上次已知的那份 `providers`，所以离线设备的分组继续显示 ——
+   * 笔记本一合盖侧栏就空掉是更糟的那一种；组内点开会走已有的「设备离线」提示。
    */
   get clientSections(): ClientSection[] {
     const kw = this._keyword.trim().toLowerCase();
@@ -469,18 +447,20 @@ class PortalStore {
 
     const byClient = new Map<string, ClientSection>();
     const rowsByClient = new Map<string, Map<string, PortalTaskData>>();
-    const ensure = (t: PortalTaskData | HistorySession): string => {
-      const machineId = t.machineId || t.hostname || "unknown";
-      const provider = t.provider || "unknown";
+    const ensure = (
+      machineId: string,
+      provider: string,
+      meta: { hostname?: string; providerDsr?: string; platformDsr?: string },
+    ): string => {
       const key = `${machineId}|${provider}`;
       if (!byClient.has(key)) {
         byClient.set(key, {
           key,
           machineId,
           provider,
-          hostname: t.hostname || machineId,
-          providerDsr: t.providerDsr || provider,
-          platformDsr: t.platformDsr || "",
+          hostname: meta.hostname || machineId,
+          providerDsr: meta.providerDsr || provider,
+          platformDsr: meta.platformDsr || "",
           running: 0,
           total: 0,
           buckets: [],
@@ -492,15 +472,35 @@ class PortalStore {
       }
       return key;
     };
+    /** 会话（活跃的 / 历史的）那一侧的入口：字段名一样，缺省口径也一样 */
+    const ensureOf = (t: PortalTaskData | HistorySession): string =>
+      ensure(t.machineId || t.hostname || "unknown", t.provider || "unknown", t);
 
-    // 先把全集建出来：**有没有会话可铺是另一回事**，组本身必须先在
-    for (const c of this._clientIndex) {
-      ensure(c);
+    /* 先按设备把全集建出来：**有没有会话可铺是另一回事**，组本身必须先在。
+       设备顺序在这儿定死（本机优先、其次主机名），组内顺序照后端给的 `providers`
+       原样来 —— 末尾因此不需要再 sort 一次。 */
+    const devices = [...this._devices].sort((a, b) => {
+      const local =
+        Number(b.id === this._localMachineId) -
+        Number(a.id === this._localMachineId);
+      if (local !== 0) {
+        return local;
+      }
+      return (a.hostname || a.id).localeCompare(b.hostname || b.id, "zh");
+    });
+    for (const d of devices) {
+      for (const p of d.providers) {
+        ensure(d.id, p.provider, {
+          hostname: d.hostname,
+          providerDsr: p.providerDsr,
+          platformDsr: d.platformDsr,
+        });
+      }
     }
 
     // 再铺活跃会话：它们优先级最高，后面历史里的同 id 不覆盖它
     for (const t of this._tasks) {
-      const key = ensure(t);
+      const key = ensureOf(t);
       if (t.status === "running") {
         byClient.get(key)!.running += 1;
       }
@@ -514,7 +514,7 @@ class PortalStore {
     // 两处各筛一遍就会出现「服务端说 30 条、列表只显示 12 条」。
     for (const state of Object.values(this._historyByClient)) {
       for (const h of state.list) {
-        const key = ensure(h);
+        const key = ensureOf(h);
         const sec = byClient.get(key)!;
         sec.total = Math.max(sec.total, state.total);
         sec.loading = state.loading;
@@ -556,15 +556,9 @@ class PortalStore {
         items: buckets.get(label)!,
       }));
     }
-    // 本机优先，其次主机名、再其次终端名 —— 位置钉死，别跟着活跃度上下跳
-    sections.sort((a, b) => {
-      const local =
-        Number(b.machineId === this._localMachineId) -
-        Number(a.machineId === this._localMachineId);
-      if (local !== 0) return local;
-      const h = a.hostname.localeCompare(b.hostname, "zh");
-      return h !== 0 ? h : a.providerDsr.localeCompare(b.providerDsr, "zh");
-    });
+    /* **这里不再排序**：顺序就是上面的建组顺序（Map 保序）——
+       设备（本机优先、其次主机名）× 后端给好的 `providers`（会话数降序）。
+       再排一遍就是两套排序并存，后端调了口径这边不跟，每轮还可能抖。 */
     return sections;
   }
 
@@ -782,15 +776,37 @@ class PortalStore {
   // ---------- 子任务（子会话树）----------
 
   /**
-   * 一条会话的子任务清单。
+   * 一条会话的子任务清单：**两份合并，不是二选一**。
    *
-   * 优先用按需拉回来的**全量**那份（`getPortalSubTasks`），没有才退回上报捎带的
-   * `Task.subTasks`（只有活跃会话有，且只覆盖近 24 小时 / 50 条）。
+   *   - 按需拉回来的那份（`getPortalSubTasks`）**全**，但它是一次读盘的快照，
+   *     拿到之后就不会再变；
+   *   - 上报捎带的 `Task.subTasks`（只有活跃会话有，只覆盖近 24 小时 / 50 条）**新**，
+   *     WS 每轮推送，子代理跑完的那一刻它先知道。
+   *
+   * 原来是「有全量就只用全量」。ChatPane 改成一打开会话就拉全量之后，那份快照会把
+   * WS 推来的新状态**整个盖掉** —— 表现是一个已经跑完的子代理在链上永远显示「执行中」，
+   * 卡片也永远不收起。所以按 id 合并：以全量为底，活跃那份逐条覆盖同 id 的，
+   * 活跃里多出来的（近 24 小时新起的）追加在后面。
    */
-  public subTasksOf = (id: string): SubTask[] =>
-    this._subTasksById[id] ??
-    this._tasks.find((t) => t.id === id)?.subTasks ??
-    EMPTY_SUB_TASKS;
+  public subTasksOf = (id: string): SubTask[] => {
+    const full = this._subTasksById[id];
+    const live = this._tasks.find((t) => t.id === id)?.subTasks;
+    if (!full) {
+      return live ?? EMPTY_SUB_TASKS;
+    }
+    if (!live?.length) {
+      return full;
+    }
+    const byId = new Map(live.map((t) => [t.id, t]));
+    const merged = full.map((t) => byId.get(t.id) ?? t);
+    const seen = new Set(full.map((t) => t.id));
+    live.forEach((t) => {
+      if (!seen.has(t.id)) {
+        merged.push(t);
+      }
+    });
+    return merged;
+  };
 
   public isSubTasksLoading = (id: string): boolean =>
     this._subTasksLoading.includes(id);
@@ -894,62 +910,6 @@ class PortalStore {
   };
 
   /**
-   * 拉**客户端全集**：这个账号下存在过哪些「设备 × 终端」。
-   *
-   * 为什么单独一条查询：侧栏的分组单位是「设备 × 终端」，而每一组的会话是按
-   * `machineId` ＋ `provider` 分别翻页拉的 —— 所以**得先知道有哪些组**，才谈得上
-   * 去拉它的会话。这件事在改之前是靠 `_tasks`（只含活跃会话）顺带完成的，于是
-   * 「这台机器上有哪些终端」被偷换成了「此刻有哪些终端在跑」（见 `clientSections`）。
-   *
-   * 数据来源用的是现成接口 `/monitor/sessions/history`，**不带 machineId /
-   * provider / keyword 任何过滤**：它的底料是 hub 的 `all_tasks_for(user)`
-   * （含已结束的全部会话，回溯窗口由客户端的 `AM_HISTORY_DAYS` 决定，默认 30 天），
-   * 是目前唯一说得出「存在过哪些终端」的权威来源。
-   *
-   * **已知边界**：这一条只取最近 {@link CLIENT_INDEX_LIMIT} 条（接口上限）。若某个
-   * 终端最近的一条会话排在这 200 条之外，它这一轮就数不出来。本机实测全量 100 条，
-   * 够用；真正的解法是后端直接给出全集，见文件末尾的 TODO(am-hub)。
-   */
-  public loadClientIndex = () => {
-    getHistorySessionList({ limit: CLIENT_INDEX_LIMIT })
-      .then((res) => {
-        if (res.code !== 0) {
-          return;
-        }
-        const list = res.data?.list ?? [];
-        // 列表是 mtime 倒序：先见到的就是最近的那一条，展示名以它为准
-        const map = new Map<string, ClientIndexEntry>();
-        for (const h of list) {
-          const machineId = h.machineId || h.hostname || "";
-          const provider = h.provider || "";
-          if (!machineId || !provider) {
-            continue;
-          }
-          const key = `${machineId}|${provider}`;
-          if (map.has(key)) {
-            continue;
-          }
-          map.set(key, {
-            key,
-            machineId,
-            provider,
-            hostname: h.hostname || machineId,
-            providerDsr: h.providerDsr || provider,
-            platformDsr: h.platformDsr || "",
-          });
-        }
-        const next = [...map.values()];
-        // 内容没变就不换引用，免得每分钟把整条侧栏白重算一遍
-        if (JSON.stringify(next) !== JSON.stringify(this._clientIndex)) {
-          this._clientIndex = next;
-        }
-      })
-      .catch(() => {
-        // 拉不到就维持上一份：清空等于让整条侧栏在一次网络抖动里消失
-      });
-  };
-
-  /**
    * 拉某个客户端的历史会话。
    *
    * @param key `machineId|provider`
@@ -1034,13 +994,10 @@ class PortalStore {
   public init = () => {
     this.refresh();
     this.loadDevices();
-    this.loadClientIndex();
     this.stopPolling();
     this.connectWs();
     // 设备列表不走 WS（推送只含会话），单独低频轮询
     this._deviceTimer = setInterval(this.loadDevices, 5000);
-    // 客户端全集变得很慢（多一种终端才变），更低频地刷
-    this._clientIndexTimer = setInterval(this.loadClientIndex, CLIENT_INDEX_MS);
   };
 
   // ---------- 实时推送 ----------
@@ -1051,8 +1008,6 @@ class PortalStore {
   /** WS 不可用时的兜底轮询 */
   private _pollTimer: ReturnType<typeof setInterval> | null = null;
   private _deviceTimer: ReturnType<typeof setInterval> | null = null;
-  /** 客户端全集的低频刷新（见 loadClientIndex） */
-  private _clientIndexTimer: ReturnType<typeof setInterval> | null = null;
   /** 主动关闭时置位，避免 onclose 触发重连 */
   private _wsClosing = false;
   /**
@@ -1173,10 +1128,6 @@ class PortalStore {
     if (this._deviceTimer) {
       clearInterval(this._deviceTimer);
       this._deviceTimer = null;
-    }
-    if (this._clientIndexTimer) {
-      clearInterval(this._clientIndexTimer);
-      this._clientIndexTimer = null;
     }
   };
 
@@ -1663,14 +1614,19 @@ class PortalStore {
     if (this._subMsgsLoading.includes(key)) {
       return;
     }
-    // 拿到过就不再问：读盘代价高，而子代理跑完之后这份内容不会再变。
-    // 还在跑的那些由用户点「重试」刷新（force），不做轮询。
+    /* 拿到过就不再问：读盘代价高，而**跑完之后这份内容不会再变**。
+       还在跑的那些不走这条路 —— 它们由展开着的那条子链每 5 秒带 `force` 刷一次
+       （见 TerminalFeed 的 SubAgentChain）：这是个监控工具，点开一个正在跑的
+       子代理却只看到一张静止快照，等于把「执行中看不到正在执行的内容」又演一遍。 */
     if (!force && tries === 0 && this._subMsgsById[key]) {
       return;
     }
     this._subMsgsLoading = [...this._subMsgsLoading, key];
-    if (force) {
-      this.setSubMsgsFail(key, undefined);
+    /* 重试计数归零，但**不提前清失败原因**：跑着的子代理每 5 秒自动刷一次
+       （见 TerminalFeed 的 SubAgentChain），清了又置回去会让「设备离线」那一行
+       一闪一闪。成功路径本来就会清，失败也不会被后台刷新静默吞掉。
+       `tries > 0` 是 pending 重试链自己在往下走，别把它的计数踩回 0。 */
+    if (force && tries === 0) {
       this._subMsgsTries = { ...this._subMsgsTries, [key]: 0 };
     }
     getPortalSubAgentMessages(parentId, agentId, 200)
@@ -1953,12 +1909,3 @@ class PortalStore {
 }
 
 export default new PortalStore();
-
-/*
- * TODO(am-hub): 「这个账号下有哪些设备 × 终端」目前没有直给的接口，只能靠
- * `loadClientIndex` 数最近 200 条历史会话倒推 —— 某个终端最近一条会话排在 200 条
- * 之外时，它这一轮数不出来。该补的是 `/monitor/devices`（hub `server.rs` 的
- * `list_devices` → `machines()`）：那份响应里每台设备加一个 `providers:
- * { provider, providerDsr, sessionCount }[]`，数据现成（`state.all_tasks_for(user)`
- * 按 machine_id ＋ provider 聚合一次即可），前端换成读它，索引查询整条删掉。
- */

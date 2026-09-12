@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import dayjs from "dayjs";
 import { Icon } from "@hsu-react/ui";
@@ -833,6 +833,18 @@ const RECENT_STEPS = 3;
  */
 const SUB_STEP_CAP = 40;
 
+/**
+ * 跑着的子代理，展开的那条子链多久自动刷一次。
+ *
+ * 这是个**监控工具**，用户这一轮最主要的抱怨就是「执行中看不到正在执行的内容」——
+ * 点开一个正在跑的子代理却只看到一张静止快照，等于把那个问题又演一遍。
+ *
+ * 但也只刷这一种：正文是**现去那台机器读磁盘**取回来的，跑完的那些内容不会再变，
+ * 跟着刷等于让客户端反复从头读 jsonl。所以三个条件缺一不可 ——
+ * 子代理 `outcome === "running"`、它的子链**正展开着**、5 秒一次。
+ */
+const SUB_REFRESH_MS = 5000;
+
 /** 子代理正文没取到的原因 → 那一行怎么说。与 ChatPane 的空态同一套措辞 */
 const SUB_FAIL_TEXT: Record<string, string> = {
   offline: "设备离线，读不到这个子代理的内容",
@@ -892,6 +904,9 @@ const ChainNodes: React.FC<{
               <SubAgentChain
                 parentId={taskId}
                 agentId={on}
+                live={
+                  it.agents.find((a) => a.id === on)?.outcome === "running"
+                }
                 expanded={expanded}
                 toggleExpand={toggleExpand}
                 renderNote={renderNote}
@@ -927,10 +942,12 @@ const ChainNodes: React.FC<{
 const SubAgentChain: React.FC<{
   parentId: string;
   agentId: string;
+  /** 这个子代理**还在跑**。只有它为真时才自动刷新（见 SUB_REFRESH_MS） */
+  live: boolean;
   expanded: Record<string, boolean>;
   toggleExpand: (key: string) => void;
   renderNote: (m: PortalMessage, key: string) => React.ReactNode;
-}> = observer(({ parentId, agentId, expanded, toggleExpand, renderNote }) => {
+}> = observer(({ parentId, agentId, live, expanded, toggleExpand, renderNote }) => {
   const {
     subAgentMessagesOf,
     isSubAgentLoading,
@@ -944,6 +961,29 @@ const SubAgentChain: React.FC<{
   useEffect(() => {
     loadSubAgentMessages(parentId, agentId);
   }, [parentId, agentId, loadSubAgentMessages]);
+
+  /* 跑着的时候自动刷新。
+     **定时器只挂在这个组件上**：子链一收起（`picked` 清空）这个组件就卸载，
+     cleanup 把定时器清掉；换会话、关格子同理。一个展开的子链一个定时器，
+     不会留在后台空转。
+     `live` 翻成 false（子代理收尾了）时 cleanup 先清定时器，然后**再拉最后一次**
+     —— 最后几步与它交回的结论就是在那一刻落盘的，不补这一次会永远停在倒数第二步。 */
+  const wasLive = useRef(false);
+  useEffect(() => {
+    if (!live) {
+      if (wasLive.current) {
+        wasLive.current = false;
+        loadSubAgentMessages(parentId, agentId, true);
+      }
+      return;
+    }
+    wasLive.current = true;
+    const timer = window.setInterval(
+      () => loadSubAgentMessages(parentId, agentId, true),
+      SUB_REFRESH_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [live, parentId, agentId, loadSubAgentMessages]);
 
   const msgs = subAgentMessagesOf(parentId, agentId);
   const loading = isSubAgentLoading(parentId, agentId);
@@ -1169,16 +1209,16 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
 
   /* 「哪次工具调用派出了哪个子代理」的索引。**只认 `toolUseId`**：
      拿不到的（老记录、或起跑记录落在重放窗口之外）就配不上，那一步照普通
-     工具调用画 —— 不退回按 label / 中文文案凑，两边截断长度不同必然错配。 */
-  const subByToolUse = React.useMemo(() => {
-    const map = new Map<string, SubTask>();
-    (subTasks ?? []).forEach((t) => {
-      if (t.kind === "agent" && t.toolUseId) {
-        map.set(t.toolUseId, t);
-      }
-    });
-    return map;
-  }, [subTasks]);
+     工具调用画 —— 不退回按 label / 中文文案凑，两边截断长度不同必然错配。
+
+     **不套 useMemo**：`subTasksOf` 现在是两份合并出来的新数组（见 PortalStore），
+     引用每次都变，memo 只会每帧重算一遍再多存一份；清单最多一两百条，直接建。 */
+  const subByToolUse = new Map<string, SubTask>();
+  (subTasks ?? []).forEach((t) => {
+    if (t.kind === "agent" && t.toolUseId) {
+      subByToolUse.set(t.toolUseId, t);
+    }
+  });
 
   const toggleExpand = (key: string) => {
     setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
