@@ -487,40 +487,16 @@ class PortalStore {
       }
       return key;
     };
-    /**
-     * 活跃会话是 CLI 还是桌面版。
-     *
-     * **热路径 `/monitor/tasks` 不下发 `desktop`**（只有 `/monitor/sessions/history`
-     * 与 `/monitor/devices` 的 `providers` 有），所以这里只能反查，两步都走权威数据：
-     *   1. 同一条会话的历史快照（同一套后端算出来的，最准）；
-     *   2. 退而求其次：这台设备名下只有一项该 `provider` 时，答案唯一。
-     * 两条都答不上（设备同时跑着 Codex CLI 与桌面版、且这条会话还没进历史列表）就按
-     * CLI 算 —— 那一格会短暂落到隔壁组，下一轮历史回来就归位。
-     *
-     * TODO(am-hub): `/monitor/tasks` 的每条会话补上 `desktop`（`HistorySession` 已经有了，
-     * 同一个字段同一套算法），这段反查整个删掉。
-     */
-    const desktopOfTask = (t: PortalTaskData): boolean => {
-      const hist = this._histById[t.id ?? ""];
-      if (typeof hist?.desktop === "boolean") {
-        return hist.desktop;
-      }
-      const hits = (
-        this._devices.find((d) => d.id === t.machineId)?.providers ?? []
-      ).filter((p) => p.provider === t.provider);
-      return hits.length === 1 ? hits[0].desktop : false;
-    };
-
     /** 会话（活跃的 / 历史的）那一侧的入口：字段名一样，缺省口径也一样 */
-    const ensureOf = (t: PortalTaskData | HistorySession): string => {
-      const own = (t as HistorySession).desktop;
-      return ensure(
+    const ensureOf = (t: PortalTaskData | HistorySession): string =>
+      ensure(
         t.machineId || t.hostname || "unknown",
         t.provider || "unknown",
-        typeof own === "boolean" ? own : desktopOfTask(t as PortalTaskData),
+        // `desktop` 是契约的一部分，热路径与历史两边都下发。**不给兜底** ——
+        // 缺了就是后端的 bug，该暴露出来，不该在这儿遮成「按 CLI 算」
+        !!t.desktop,
         t,
       );
-    };
 
     /* 先按设备把全集建出来：**有没有会话可铺是另一回事**，组本身必须先在。
        设备顺序在这儿定死（本机优先、其次主机名），组内顺序照后端给的 `providers`
