@@ -2194,6 +2194,7 @@ fn new_sub_task(
         summary,
         has_body: false,
         tool_use_id,
+        runs: 1,
     }
 }
 
@@ -2224,6 +2225,39 @@ struct BgTracker {
     /// 故先按 `<tool-use-id>` 存着，等配对的 `tool_result` 到达时补上。
     early: HashMap<String, EarlyDone>,
     items: Vec<SubTask>,
+    /// **磁盘已经判定过的终态**：子会话号 → (终态, 收尾时刻)。
+    ///
+    /// 父记录没写下收尾通知时，终态只能由 [`Self::reconciled`] 从磁盘推断
+    /// （尾形态已收尾 + 静置够久）。此前这个推断**每轮现算、绝不记住**，而判据里
+    /// 有个 `now_ms - 文件最后写入`——于是子会话文件只要再被写一下，静置时间就归零，
+    /// 同一条记录当场从 `completed` 翻回 `running`，`ended_ms` 也跟着换一个新值。
+    /// 确定性复现：静置 10 分钟 → completed(endedMs=T1)；touch 一下 → running(endedMs=0)；
+    /// 再静置 10 分钟 → completed(endedMs=T2)。全程 `tool_use_id` 没变，也就是说
+    /// **根本没有新的一次派活**——状态在骗人。
+    ///
+    /// 所以推断一旦落定就记在这里，**终态是吸收态**。要重新打开它只有一条路：
+    /// 父记录里出现新的一次派活（新的 `tool_use_id`，见 [`Self::on_tool_result`]），
+    /// 或父记录自己发话（收尾通知，见 [`Self::on_notification`]）——那两处都会把这里清掉。
+    /// 「文件又被写了一下」不是证据。
+    settled: HashMap<String, SettledEnd>,
+    /// 已经数过的收尾通知：(子会话号, 通知正文的指纹)。
+    ///
+    /// **同一条收尾通知会落两次盘**：一条 `queue-operation`（通知挂在顶层 content 上）、
+    /// 一条 `user`（挂在 message.content 上），正文逐字节相同，时间戳只差 10~19 毫秒
+    /// （实测 a7f78026084ce8753 的 4 次运行全是这个形态：行 369/377、458/460、
+    /// 548/550、567/569）。两条都要解析（只认其一会漏收尾，见 [`Self::observe`]），
+    /// 但 [`SubTask::runs`] 只能数一次 —— 按时间戳去重会因为那十几毫秒失效，
+    /// 所以按**正文指纹**去重：同一份正文就是同一条通知。
+    ///
+    /// 极端情况下两轮运行的通知正文可能逐字节相同（那样会少数一轮）；正文里嵌着这一轮
+    /// 的完整报告（实测 2172~6545 字节），撞上的概率远低于「每轮都数成两次」的代价。
+    seen_notif: HashSet<(String, u64)>,
+}
+
+/// 磁盘推断出来、已经落定的终态。
+struct SettledEnd {
+    status: String,
+    ended_ms: u64,
 }
 
 /// 早到的完成通知：等配对的 `tool_result` 到达时回填给条目。
@@ -2295,6 +2329,8 @@ impl BgTracker {
         let started = self.pending.remove(use_id);
         // 主动停止（TaskStop）不发完成通知，收尾信号只有这条结果本身
         if let Some(id) = stopped_task_id(meta) {
+            // 父记录亲口说的，盖过磁盘推断
+            self.settled.remove(&id);
             if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
                 t.status = "stopped".into();
                 // TaskStop 的结果里只有 "Successfully stopped task: <id> (<命令>)"，
@@ -2333,6 +2369,11 @@ impl BgTracker {
         let (status, summary, ended_ms) = done.unwrap_or_else(|| ("running".to_string(), None, 0));
         // 同一个子代理被唤醒续跑时会再来一条结果：原地复活，别堆重复条目
         if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
+            // **这是新的一次派活**：同一个子代理被重新叫起来干活（实测本机
+            // a7f78026084ce8753 在父记录里有 8 条时刻各不相同的收尾通知）。
+            // 本条记录只描述最近一次运行，所以 status/ended_ms/tool_use_id 全换 ——
+            // 但 runs 要累加，前端才分得清「它又跑起来了」和「刚才那次判错了」。
+            t.runs = t.runs.saturating_add(1);
             t.label = label;
             t.status = status;
             t.summary = summary;
@@ -2341,8 +2382,11 @@ impl BgTracker {
             // 续跑是新的一次调用，配对键跟着换 —— 留着上一轮的 id 会让执行链把卡片
             // 挂回上一次那一步
             t.tool_use_id = use_id.to_string();
+            // 唯一能把磁盘定案的终态重新打开的事实：真的又派了一次活
+            self.settled.remove(&id);
             return;
         }
+        self.settled.remove(&id);
         self.items.push(new_sub_task(
             id,
             kind,
@@ -2405,10 +2449,27 @@ impl BgTracker {
         while let Some(id) = tag_value(rest, "task-id") {
             // "__orphan_summary__:*" 是内部扫描标记，不是真任务
             if !id.starts_with("__") {
-                if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
+                // 同一条通知落两次盘，按正文指纹去重，别把一轮数成两轮
+                let fresh = self.seen_notif.insert((id.clone(), text_fingerprint(text)));
+                if let Some(t) = self.items.iter_mut().find(|t| t.id == id).filter(|_| fresh) {
+                    // 同一条通知的第二次落盘直接跳过（上面 `fresh` 判的）：内容逐字节相同，
+                    // 应用一遍只会把 ended_ms 挪十几毫秒 —— 白白让下游看到一次值变化。
+                    //
+                    // **同一个子代理被反复叫起来干活**：每跑完一次就来一条收尾通知。
+                    // 实测本机 aad0fb121cab8a31d 有 8 个时刻各不相同的通知 = 跑了 8 次
+                    // （a3ac5a59… 3 次、a7f78026… 4 次）。而**重新派活不写新的
+                    // tool_result**（实测该 agentId 的 toolUseResult 记录全文只有 1 条），
+                    // 所以「第几次运行」只能在这里数：又收到一条更晚的收尾通知，
+                    // 就说明刚才那是新的一轮。同一时刻的重复通知（queue-operation 与
+                    // user 各落一条）时间戳相同，不会重复计数。
+                    if t.status != "running" && ended_ms > t.ended_ms && t.ended_ms > 0 {
+                        t.runs = t.runs.saturating_add(1);
+                    }
                     t.status = status.clone();
                     t.summary = summary.clone();
                     t.ended_ms = ended_ms;
+                    // 父记录亲口说的是最权威的，盖过磁盘那份推断
+                    self.settled.remove(&id);
                 } else if let Some(u) = &use_id {
                     self.early.insert(
                         u.clone(),
@@ -2466,27 +2527,40 @@ impl BgTracker {
     /// （`aa8f4211d424433a4` / `a08b04e8a92c83c7c`，父记录给了确切原因）会被这道兜底
     /// 抹成 `stopped`，连 summary 里的原因一起丢掉。
     ///
-    /// 「很久」不能取小：实测本机 340 个子会话，「最后一条通知 → 记录最后写入」的间隔
-    /// p99 = 0.1 秒（被 kill 的那几个也只差 0.0~0.1 秒，纯写入竞争），唯一的例外
-    /// `a7bca81f9e85bfd33` 是 +1042 秒 —— 正是一个被唤醒续跑的。取
-    /// [`SUBAGENT_SETTLE_MS`]（5 分钟）作界，比那个写入竞争大三个数量级。
-    /// 第一版按「晚于通知即算复活」判，把 30 小时前 failed 的 `aa8f4211d424433a4`
-    /// 重新点亮成执行中，就是栽在这 0.1 秒上 —— 所以「翻回执行中」只给
-    /// 真·续跑（`resumed`）与本就在跑的条目。
+    /// # 终态是吸收态（`outcome 来回抖` 那个 bug 的根）
+    ///
+    /// 上面那条「静置够久 ⇒ 跑完了」的推断里有个 `now_ms - 文件最后写入`。此前推断
+    /// **每轮现算、绝不记住**（原注释写着「误判可自愈…状态自己翻回 running，
+    /// 误判最多让胶囊闪一下」）—— 于是子会话文件只要再被写一下，静置时间就归零，
+    /// 同一条记录当场从 `completed` 翻回 `running`，`ended_ms` 还换一个新值。
+    /// 确定性复现：静置 10 分钟 → `completed(endedMs=T1)`；touch 一下 →
+    /// `running(endedMs=0)`；再静置 10 分钟 → `completed(endedMs=T2)`，
+    /// 全程 `tool_use_id` 没变 = **根本没有新的一次派活**。那不是「自愈」，是状态在骗人。
+    ///
+    /// 所以推断一旦落定就记进 [`Self::settled`]，此后只认两种翻案事实，都在父记录里：
+    /// 真的又派了一次活（[`Self::on_tool_result`]，`runs` 跟着 +1），
+    /// 或父记录自己发话（[`Self::on_notification`] / `TaskStop`）。
+    /// 「文件又被写了一下」不算证据 —— 它既可能是续跑，也可能只是上一次的收尾还在刷盘，
+    /// 二者无从区分，而把两种都当成「又跑起来了」就是现在这个抖动。
+    ///
+    /// 这**不是**退回旧的 early-continue（`status != "running"` 就不读磁盘）：
+    /// 落定之前每一轮照样读磁盘、照样能把父记录说错的 `killed` 纠成 `completed`。
+    /// 区别只在于「纠完之后记不记得住」。
     ///
     /// 对齐只针对子代理（`kind == "agent"`），后台命令没有这份记录 —— 也不需要：
     /// 它的两条收尾信号（完成通知、`TaskStop` 结果）都在父记录里。
     ///
-    /// 不改 `self.items`：对齐结果每轮现算，父记录后来补上真状态时以父记录为准。
     /// `tail_of` 只在真需要时才调用（它要读文件尾）。
     fn reconciled(
-        &self,
+        &mut self,
         last_write: &HashMap<String, u64>,
         now_ms: u64,
         tail_of: &dyn Fn(&str) -> Option<SubAgentTail>,
         opts: ReconcileOpts,
     ) -> Vec<SubTask> {
         let mut items = self.items.clone();
+        // 本轮新落定的磁盘终态（循环里不能同时改 self.settled，攒着出来再写）
+        let mut newly_settled: Vec<(String, SettledEnd)> = Vec::new();
         // 父记录漏掉的子会话（阻塞式派活不写 agentId，见 BgTracker 的说明）：
         // 只有全量视角才补进来，热路径那份维持原样、一个字节不多传。
         for extra in opts.extra {
@@ -2496,11 +2570,26 @@ impl BgTracker {
         }
         for t in items.iter_mut().filter(|t| t.kind == "agent") {
             t.has_body = last_write.contains_key(&t.id);
+            // 磁盘早就判过它收尾了 → 认定案，不再看文件此刻写没写。
+            // 能把它重新打开的只有父记录里的新一次派活 / 新通知，那两处会清掉这份定案。
+            if let Some(done) = self.settled.get(&t.id) {
+                t.status = done.status.clone();
+                t.summary = None;
+                t.ended_ms = done.ended_ms;
+                continue;
+            }
             let Some(&wrote_ms) = last_write.get(&t.id) else {
                 continue;
             };
             let terminal = t.status != "running";
-            // 终态之后子会话还在写 ⇒ 它被唤醒续跑了，那条通知过期了
+            // **通知之后很久还在写 ⇒ 它被重新派活了，正在跑新的一轮。**
+            //
+            // 这是唯一能观测到「新一轮开始」的信号：重新派活不写新的 tool_result
+            // （实测 aad0fb121cab8a31d 的 toolUseResult 全文只有 1 条，收尾通知却有 8 条）。
+            // 只对**父记录给出的**终态成立 —— 那种 `ended_ms` 是通知里的真实时刻，
+            // 「比它晚 5 分钟还在写」确实只能是新一轮。
+            // 磁盘自己推断出来的终态没有这种可信时刻（见 `settled`，上面已 continue），
+            // 对它来说「文件又被写了一下」跟「刚才那一猜太早了」根本分不开。
             let resumed = terminal && wrote_ms > t.ended_ms.saturating_add(SUBAGENT_SETTLE_MS);
             let idle_ms = now_ms.saturating_sub(wrote_ms);
             match tail_of(&t.id) {
@@ -2513,6 +2602,13 @@ impl BgTracker {
                     if t.ended_ms == 0 {
                         t.ended_ms = wrote_ms;
                     }
+                    newly_settled.push((
+                        t.id.clone(),
+                        SettledEnd {
+                            status: t.status.clone(),
+                            ended_ms: t.ended_ms,
+                        },
+                    ));
                 }
                 // 停在半路太久：被 kill 在半路了。只兜底父记录还说在跑的条目，
                 // 已有确切死因的终态条目不碰（见上面的方向说明）。
@@ -2520,9 +2616,20 @@ impl BgTracker {
                     t.status = "stopped".into();
                     t.summary = None;
                     t.ended_ms = wrote_ms;
+                    newly_settled.push((
+                        t.id.clone(),
+                        SettledEnd {
+                            status: t.status.clone(),
+                            ended_ms: t.ended_ms,
+                        },
+                    ));
                 }
-                // 还在写：在跑。终态条目只有真·续跑才翻回来（否则就是那 0.1 秒写入竞争）
+                // 还在写 → 在跑。终态条目只有「通知之后很久还在写」才翻回来（= 新的一轮），
+                // 此时 runs 先记上这一轮：它的收尾通知还没到，on_notification 还没数过它。
                 Some(_) if !terminal || resumed => {
+                    if resumed {
+                        t.runs = t.runs.saturating_add(1);
+                    }
                     t.status = "running".into();
                     t.summary = None;
                     t.ended_ms = 0;
@@ -2530,6 +2637,7 @@ impl BgTracker {
                 _ => {}
             }
         }
+        self.settled.extend(newly_settled);
         // 后台命令没有独立记录可纠，收尾信号全在父记录里 —— 父记录要是没写下来
         // （父进程被打断/退出、机器重启），这条就永远停在「执行中」。
         // 但有一个**硬事实**能给它收尾：父会话都结束了，它派生的后台命令不可能还在跑。
@@ -2659,6 +2767,15 @@ fn retain_recent(items: Vec<SubTask>, now_ms: u64) -> Vec<SubTask> {
             .collect();
     }
     kept
+}
+
+/// 通知正文的指纹，用于「同一条通知落了两次盘」的去重（见 [`BgTracker::seen_notif`]）。
+/// 只求区分同一个子会话名下的不同通知，不求抗碰撞，标准库的 hasher 足够。
+fn text_fingerprint(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
 }
 
 /// 取出 <tag>值</tag> 里的值
@@ -3838,7 +3955,12 @@ mod subagent_tests {
         // agent() 造出来就带一句 failed 的原因
         t.items.push(agent("a1", "failed", 0));
         let now = 12 * HOUR;
-        // 通知之后很久还在写 → 是被唤醒续跑了，终态与原因都作废
+        // 重新派了一次活 → 上一轮的终态与原因都作废
+        t.on_tool_result(
+            &serde_json::json!({"type":"tool_result","tool_use_id":"toolu_RUN2","content":"ok"}),
+            Some(&serde_json::json!({"agentId":"a1"})),
+            "2026-09-13T00:00:00.000Z",
+        );
         let out = t.reconciled(&writes("a1", now - 60_000), now, &|_| {
             Some(SubAgentTail::Midflight)
         }, ReconcileOpts::default());
@@ -4122,23 +4244,120 @@ mod subagent_tests {
         assert_eq!(out[BG_MAX_ITEMS - 1].id, format!("a{}", BG_MAX_ITEMS + 9));
     }
 
-    /// 子会话可以在「完成通知」之后被唤醒续跑（通知正文自己写着可能通知多次）。
-    /// 实测本机 `a7bca81f9e85bfd33` 就是这样：通知之后记录又长了 1042 秒。
-    /// 不认这一条的话，正干着活的子会话在清单里是 completed，头部一个胶囊都不显示。
+    /// **父记录给出的终态**之后很久还在写 ⇒ 它被重新派活了，正在跑新的一轮。
+    ///
+    /// 这是唯一能观测到「新一轮开始」的信号：重新派活**不写**新的 tool_result
+    /// （实测 aad0fb121cab8a31d 的 toolUseResult 记录全文只有 1 条，收尾通知却有 8 条）。
+    /// 那种 ended_ms 是通知里的真实时刻，「比它晚 5 分钟还在写」只能是新一轮。
+    /// 同时 runs 要 +1，前端才分得清「它又跑起来了」和「刚才那次判错了」。
     #[test]
-    fn resumed_after_notification_comes_back_to_running() {
+    fn notified_terminal_reopens_as_a_new_run() {
         let mut t = BgTracker::default();
         let now = 12 * HOUR;
         t.items.push(agent("a1", "completed", now - HOUR));
-        let out = t.reconciled(&writes("a1", now - 5_000), now, &|_| {
-            Some(SubAgentTail::Midflight)
-        }, ReconcileOpts::default());
+        let out = t.reconciled(
+            &writes("a1", now - 5_000),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "running");
+        assert_eq!(out[0].runs, 2, "这是第二轮");
     }
 
-    /// 续跑之后又跑完了：还是按记录判，落回终态
+    /// 同一个子代理跑完多次：每来一条**更晚**的收尾通知就是又跑完了一轮。
+    /// 同一时刻的重复通知（queue-operation 与 user 各落一条）不重复计数。
     #[test]
-    fn resumed_then_finished_settles_back() {
+    fn each_later_notification_counts_as_another_run() {
+        let mut t = BgTracker::default();
+        t.items.push(agent("a1", "running", 0));
+        let notif = |body: &str| {
+            format!(
+                "<task-notification><task-id>a1</task-id><status>completed</status>\
+                 <summary>{body}</summary></task-notification>"
+            )
+        };
+        t.on_notification(&notif("第一轮的报告"), "2026-09-12T17:45:02.754Z");
+        assert_eq!(t.items[0].runs, 1, "第一条通知只是第一轮跑完");
+        // **同一条通知落两次盘**：queue-operation 与 user 各一条，正文逐字节相同、
+        // 时间戳差十几毫秒（实测 a7f78026084ce8753 就是这形态）。按时间戳去重会失效。
+        let ended_after_first = t.items[0].ended_ms;
+        t.on_notification(&notif("第一轮的报告"), "2026-09-12T17:45:02.764Z");
+        assert_eq!(t.items[0].runs, 1, "同一条通知的第二次落盘不算新一轮");
+        assert_eq!(
+            t.items[0].ended_ms, ended_after_first,
+            "重复落盘的同一条通知不该把收尾时刻挪十几毫秒 —— 下游会看到一次无谓的值变化"
+        );
+        t.on_notification(&notif("第二轮的报告"), "2026-09-12T17:59:02.100Z");
+        t.on_notification(&notif("第二轮的报告"), "2026-09-12T17:59:02.119Z");
+        assert_eq!(t.items[0].runs, 2);
+        t.on_notification(&notif("第三轮的报告"), "2026-09-12T18:24:10.000Z");
+        assert_eq!(t.items[0].runs, 3);
+    }
+
+    /// **磁盘推断出来的终态同样是吸收态** —— 这条是 `outcome 来回抖` 的正主。
+    ///
+    /// 父记录没写下收尾通知时，终态只能靠「尾形态已收尾 + 静置够久」推断，而判据里有个
+    /// `now - 文件最后写入`。旧实现每轮现算、不记住：文件被再写一下，静置归零，当场从
+    /// completed 翻回 running，`ended_ms` 还换一个新值 —— 全程没有任何新派活。
+    #[test]
+    fn disk_inferred_terminal_survives_a_later_write() {
+        let mut t = BgTracker::default();
+        let now = 12 * HOUR;
+        t.items.push(agent("a1", "running", 0));
+        // 第一轮：静置够久 + 已交回结果 → 推断 completed
+        let first = t.reconciled(
+            &writes("a1", now - 8 * HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
+        assert_eq!(first[0].status, "completed");
+        let ended = first[0].ended_ms;
+        assert!(ended > 0);
+        // 第二轮：文件刚被写过（静置归零）——旧实现在这里翻回 running
+        let second = t.reconciled(
+            &writes("a1", now - 1_000),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
+        assert_eq!(second[0].status, "completed", "定案之后不因一次写入翻案");
+        assert_eq!(second[0].ended_ms, ended, "收尾时刻必须稳定，不能每轮换一个");
+        assert_eq!(second[0].runs, 1, "没有新派活，runs 不该动");
+    }
+
+    /// 父记录亲口发话盖过磁盘那份推断：定案之后收到通知，以通知为准。
+    #[test]
+    fn notification_overrides_a_settled_guess() {
+        let mut t = BgTracker::default();
+        let now = 12 * HOUR;
+        t.items.push(agent("a1", "running", 0));
+        t.reconciled(
+            &writes("a1", now - 8 * HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
+        // 通知晚到，说它其实是 failed
+        t.on_notification(
+            "<task-notification><task-id>a1</task-id><status>failed</status>\
+             <summary>Agent \"x\" failed: 卡死了</summary></task-notification>",
+            "2026-09-13T00:00:00.000Z",
+        );
+        let out = t.reconciled(
+            &writes("a1", now - 8 * HOUR),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
+        assert_eq!(out[0].status, "failed", "父记录说的盖过磁盘推断");
+        assert!(out[0].summary.is_some(), "死因要留着");
+    }
+
+    /// 已经是终态、磁盘也说收尾了 → 保持终态（两边一致的平凡情形，别被改坏）
+    #[test]
+    fn terminal_and_finished_tail_stays_terminal() {
         let mut t = BgTracker::default();
         let now = 12 * HOUR;
         t.items.push(agent("a1", "completed", now - 2 * HOUR));
@@ -4173,40 +4392,26 @@ mod subagent_tests {
         );
     }
 
-    /// 续跑判定同样是严格大于：只比通知晚 SETTLE 那一刻不算续跑
+    /// 终态被换成**另一个**终态：跑砸过的条目被重新派活、这回跑完了 → completed
+    /// （光测 completed→completed 覆盖不到这条路）
     #[test]
-    fn resume_threshold_is_exclusive_at_the_boundary() {
-        let now = 12 * HOUR;
-        let ended = now - HOUR;
-        let run = |wrote: u64| {
-            let mut t = BgTracker::default();
-            t.items.push(agent("a1", "failed", ended));
-            t.reconciled(&writes("a1", wrote), now, &|_| {
-                Some(SubAgentTail::Midflight)
-            }, ReconcileOpts::default())[0]
-                .status
-                .clone()
-        };
-        assert_eq!(
-            run(ended + SUBAGENT_SETTLE_MS),
-            "failed",
-            "边界上还不算续跑"
-        );
-        assert_eq!(run(ended + SUBAGENT_SETTLE_MS + 1), "running");
-    }
-
-    /// 终态覆盖：failed 的条目被唤醒续跑、这回跑完了 → 改写成 completed
-    /// （光测 completed→completed 覆盖不到「终态被换成另一个终态」这条路）
-    #[test]
-    fn resumed_failed_item_settles_to_completed() {
+    fn redispatched_failed_item_settles_to_completed() {
         let mut t = BgTracker::default();
         let now = 12 * HOUR;
         t.items.push(agent("a1", "failed", now - 3 * HOUR));
-        // 通知之后又写了两小时，且已静置够久
+        // 重新派一次活（新的 tool_use_id），这才是翻案的硬证据
+        t.on_tool_result(
+            &serde_json::json!({"type":"tool_result","tool_use_id":"toolu_RUN2","content":"ok"}),
+            Some(&serde_json::json!({"agentId":"a1"})),
+            "2026-09-13T00:00:00.000Z",
+        );
+        // 这一轮已交回结果且静置够久
         let out = t.reconciled(&writes("a1", now - HOUR), now, &|_| {
             Some(SubAgentTail::Finished)
         }, ReconcileOpts::default());
-        assert_eq!(out[0].status, "completed", "续跑跑完了就不该还挂着 failed");
+        assert_eq!(out[0].status, "completed", "重新派活跑完了就不该还挂着 failed");
+        assert_eq!(out[0].runs, 2);
+        assert_eq!(out[0].tool_use_id, "toolu_RUN2");
     }
 
     /// 后台命令（kind=bg）没有子会话记录，不参与对齐

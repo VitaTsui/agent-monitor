@@ -155,6 +155,17 @@ export interface SubTask {
    * {@link getPortalSubTasks} 都带这个字段。
    */
   toolUseId?: string;
+  /**
+   * **这是第几次派活**（1 起）。同一个子代理可以被反复叫起来干活 ——
+   * 实测本机 `a7f78026084ce8753` 在父会话记录里有 8 条时刻各不相同的收尾通知。
+   *
+   * 本条记录描述的永远是**最近一次**运行（`status`/`outcome`/`endedMs`/`toolUseId`
+   * 都跟着换），所以光看 `outcome` 从终态翻回 `running` 分不清两种情况。判据是这个字段：
+   * - `runs` 变了 → **它又跑起来了**，卡片该翻回「执行中」、该重新起轮询；
+   * - `runs` 没变却翻回 `running` → 那是后端 bug，不是真相。现在不该再出现
+   *   （磁盘推断出来的终态是吸收态，只有新的一次派活才能重新打开它）。
+   */
+  runs?: number;
 }
 
 interface IPortalTaskData {
