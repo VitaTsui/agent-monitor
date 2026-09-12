@@ -76,6 +76,24 @@ const RIGHT_PANE_MIN_W = 640;
  */
 const DELIVER_GRACE_MS = 6000;
 
+/**
+ * 子任务清单的重拉节律，**只在这条会话名下还有子代理在跑的时候才走**。
+ *
+ * 为什么非有这条不可：子代理的收场（`outcome`）只有 `/subtasks` 说得出来。会话还在
+ * `_tasks` 里时 WS 每轮捎带一份，可一旦不在（历史会话、进程退了没配上），那一路就
+ * **压根不存在** —— 清单于是冻结在打开那一刻：子代理早跑完了，卡片还写着
+ * 「执行中 · 13分42秒」，链上那条 5 秒的正文轮询也因为停止条件（`outcome` 翻终态）
+ * 永远不成立而一直转下去。实测确认过。
+ *
+ * 为什么是 10 秒而不是跟着正文那条 5 秒：`/subtasks` 是**现读磁盘**的，一条 149 条
+ * 子任务的会话要 0.8~2 秒，塞进 5 秒轮询等于让客户端不停地重开 jsonl。正文那条
+ * 管「它做到哪一步了」，要跟得紧；这条只管「它收没收场」，慢一档看不出差别 ——
+ * 代价是卡片最多晚 10 秒翻成终态。
+ *
+ * 没有子代理在跑就一个请求都不发，最后一个跑完的那一轮定时器当场停。
+ */
+const SUBTASKS_REFRESH_MS = 10000;
+
 const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   const { task, closable, compact, onActivate } = props;
   const {
@@ -94,6 +112,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     isRightPaneOpen,
     toggleRightPane,
     subTasksOf,
+    hasRunningSubAgent,
     loadSubTasks,
   } = PortalStore;
   // 状态卡去哪儿：宽屏进右栏，窄屏留在对话流末尾（那儿摆不下第三栏）
@@ -205,6 +224,22 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
       loadSubTasks(id);
     }
   }, [id, loadSubTasks]);
+
+  /* 还有子代理在跑的时候，把清单**定时重拉**（理由与节律见 SUBTASKS_REFRESH_MS）。
+     开关就是清单自己算出来的 `hasRunningSubAgent`：最后一个子代理翻成终态的那一轮
+     它跟着翻假，这个副作用重跑、cleanup 把定时器清掉 —— 不靠超时上限那类补丁。
+     换会话、关格子随卸载一起清，不留后台空转。 */
+  const hasRunningSub = hasRunningSubAgent(id);
+  useEffect(() => {
+    if (!id || !hasRunningSub) {
+      return;
+    }
+    const timer = window.setInterval(
+      () => loadSubTasks(id, true),
+      SUBTASKS_REFRESH_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [id, hasRunningSub, loadSubTasks]);
 
   // 宽限期的时钟：只在真有回显处在宽限期内时上表，到点走一次即停。
   // 不是每秒空转 —— 没有待出窗的回显就压根不建定时器。

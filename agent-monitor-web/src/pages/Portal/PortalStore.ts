@@ -77,10 +77,18 @@ const WS_RETRY_MS = [1000, 2000, 5000, 10000];
  */
 const POLL_MS = 2000;
 
-/** 一个「客户端」= 一台机器上的一种终端（Claude / Codex 各算一个） */
+/**
+ * 一个「客户端」= 一台机器上的一个终端程序。
+ *
+ * **`provider` 一个字段不够**：Codex CLI 与 ChatGPT 桌面版同属 `provider === "codex"`，
+ * 但它们是两个各跑各的客户端，会话也分别存在两处。只按 provider 分的话两边的会话
+ * 糊成一组，组名还只能二选一。所以键是 `(machineId, provider, desktop)` 这一组。
+ */
 export interface ClientKey {
   machineId: string;
   provider: string;
+  /** 终端 CLI（false）还是桌面客户端（true） */
+  desktop: boolean;
 }
 
 /** 侧栏里一个客户端分组下的一个时间桶 */
@@ -91,7 +99,12 @@ export interface SessionBucket {
 
 /** 侧栏里的一个客户端分组（可折叠，内含该客户端的全部会话） */
 export interface ClientSection extends ClientKey {
-  /** `machineId|provider`，折叠态与历史分页都按它记 */
+  /**
+   * `machineId|provider|desktop`，折叠态与历史分页都按它记。
+   *
+   * **第三段是 `desktop` 这个布尔量，不是展示名**：展示名是中文串，既不能当契约级的键，
+   * 也不能当筛选参数回传给 `/monitor/sessions/history`。
+   */
   key: string;
   hostname: string;
   providerDsr: string;
@@ -450,14 +463,16 @@ class PortalStore {
     const ensure = (
       machineId: string,
       provider: string,
+      desktop: boolean,
       meta: { hostname?: string; providerDsr?: string; platformDsr?: string },
     ): string => {
-      const key = `${machineId}|${provider}`;
+      const key = `${machineId}|${provider}|${desktop}`;
       if (!byClient.has(key)) {
         byClient.set(key, {
           key,
           machineId,
           provider,
+          desktop,
           hostname: meta.hostname || machineId,
           providerDsr: meta.providerDsr || provider,
           platformDsr: meta.platformDsr || "",
@@ -472,9 +487,40 @@ class PortalStore {
       }
       return key;
     };
+    /**
+     * 活跃会话是 CLI 还是桌面版。
+     *
+     * **热路径 `/monitor/tasks` 不下发 `desktop`**（只有 `/monitor/sessions/history`
+     * 与 `/monitor/devices` 的 `providers` 有），所以这里只能反查，两步都走权威数据：
+     *   1. 同一条会话的历史快照（同一套后端算出来的，最准）；
+     *   2. 退而求其次：这台设备名下只有一项该 `provider` 时，答案唯一。
+     * 两条都答不上（设备同时跑着 Codex CLI 与桌面版、且这条会话还没进历史列表）就按
+     * CLI 算 —— 那一格会短暂落到隔壁组，下一轮历史回来就归位。
+     *
+     * TODO(am-hub): `/monitor/tasks` 的每条会话补上 `desktop`（`HistorySession` 已经有了，
+     * 同一个字段同一套算法），这段反查整个删掉。
+     */
+    const desktopOfTask = (t: PortalTaskData): boolean => {
+      const hist = this._histById[t.id ?? ""];
+      if (typeof hist?.desktop === "boolean") {
+        return hist.desktop;
+      }
+      const hits = (
+        this._devices.find((d) => d.id === t.machineId)?.providers ?? []
+      ).filter((p) => p.provider === t.provider);
+      return hits.length === 1 ? hits[0].desktop : false;
+    };
+
     /** 会话（活跃的 / 历史的）那一侧的入口：字段名一样，缺省口径也一样 */
-    const ensureOf = (t: PortalTaskData | HistorySession): string =>
-      ensure(t.machineId || t.hostname || "unknown", t.provider || "unknown", t);
+    const ensureOf = (t: PortalTaskData | HistorySession): string => {
+      const own = (t as HistorySession).desktop;
+      return ensure(
+        t.machineId || t.hostname || "unknown",
+        t.provider || "unknown",
+        typeof own === "boolean" ? own : desktopOfTask(t as PortalTaskData),
+        t,
+      );
+    };
 
     /* 先按设备把全集建出来：**有没有会话可铺是另一回事**，组本身必须先在。
        设备顺序在这儿定死（本机优先、其次主机名），组内顺序照后端给的 `providers`
@@ -490,7 +536,7 @@ class PortalStore {
     });
     for (const d of devices) {
       for (const p of d.providers) {
-        ensure(d.id, p.provider, {
+        ensure(d.id, p.provider, p.desktop, {
           hostname: d.hostname,
           providerDsr: p.providerDsr,
           platformDsr: d.platformDsr,
@@ -776,17 +822,21 @@ class PortalStore {
   // ---------- 子任务（子会话树）----------
 
   /**
-   * 一条会话的子任务清单：**两份合并，不是二选一**。
+   * 一条会话的子任务清单：全量快照为底，**同 id 以更新的那份为准**。
    *
-   *   - 按需拉回来的那份（`getPortalSubTasks`）**全**，但它是一次读盘的快照，
-   *     拿到之后就不会再变；
-   *   - 上报捎带的 `Task.subTasks`（只有活跃会话有，只覆盖近 24 小时 / 50 条）**新**，
-   *     WS 每轮推送，子代理跑完的那一刻它先知道。
+   *   - 按需拉回来的那份（`getPortalSubTasks`）**全**，但它是一次读盘的快照；
+   *   - 上报捎带的 `Task.subTasks`（只有会话还在 `_tasks` 里时才有，且只覆盖近 24 小时
+   *     / 50 条）**新**，WS 每轮推送。
    *
-   * 原来是「有全量就只用全量」。ChatPane 改成一打开会话就拉全量之后，那份快照会把
-   * WS 推来的新状态**整个盖掉** —— 表现是一个已经跑完的子代理在链上永远显示「执行中」，
-   * 卡片也永远不收起。所以按 id 合并：以全量为底，活跃那份逐条覆盖同 id 的，
-   * 活跃里多出来的（近 24 小时新起的）追加在后面。
+   * **快照的活性由 `hasRunningSubAgent` ＋ ChatPane 的定时重拉负责**，不是靠 WS 兜底。
+   * 曾经是靠 WS 兜的，那是个错的假设：会话一旦不在 `_tasks` 里（历史会话、进程已退出
+   * 没配上），WS 那一路压根不存在，`outcome` 就永远冻结在打开那一刻 —— 子代理明明
+   * 跑完了，卡片还写着「执行中 · 13分42秒」，链上那条 5 秒轮询的停止条件也因此
+   * 永远不成立。那个假设整条推翻，见 `loadSubTasks` 与 `hasRunningSubAgent`。
+   *
+   * WS 那一份**仍然保留**：会话还活着时它是秒级的，比定时重拉快一个量级，白拿的新鲜度
+   * 没有理由丢掉。两者不是两套刷新 —— 刷新只有一处（定时重拉），这里只是「同一条子任务
+   * 谁的版本更新就用谁的」这一条读取规则。
    */
   public subTasksOf = (id: string): SubTask[] => {
     const full = this._subTasksById[id];
@@ -808,6 +858,16 @@ class PortalStore {
     return merged;
   };
 
+  /**
+   * 这条会话名下**还有子代理在跑**吗 —— 定时重拉子任务清单的唯一开关。
+   *
+   * 「还在跑」这件事只有清单自己说得出来，所以它既是刷新的条件、也是刷新的结果：
+   * 最后一个子代理翻成终态的那一轮，这里跟着翻假，定时器当场停 —— 不靠超时上限、
+   * 不靠次数封顶那类「让它自己累死」的补丁。
+   */
+  public hasRunningSubAgent = (id: string): boolean =>
+    this.subTasksOf(id).some((t) => t.kind === "agent" && t.outcome === "running");
+
   public isSubTasksLoading = (id: string): boolean =>
     this._subTasksLoading.includes(id);
 
@@ -826,7 +886,10 @@ class PortalStore {
    *
    * **一条会话只拉一次**（除非 `force`）。这个接口是现读磁盘的，实测一条 149 条子任务的
    * 会话要 0.8~2 秒 —— 收起再展开重拉一遍，每次都要再等两秒，而清单本身几乎不动。
-   * 更不能放进轮询：那等于让客户端每秒重开一遍 jsonl。
+   *
+   * 所以它**不进那条 5 秒轮询**：跟着正文一起刷等于让客户端每 5 秒重开一遍 jsonl。
+   * 要活性的只有一种情形 —— 这条会话名下还有子代理在跑（`hasRunningSubAgent`），
+   * 那时由 ChatPane 以明显更慢的节律带 `force` 重拉，跑完即停。
    *
    * `pending` 同样要重试：这份也是现读磁盘的。404（会话不存在 / 机器离线）就落一份
    * 空清单，不再重试 —— 那条会话确实没有子会话可展，重试也只是白问。
@@ -918,7 +981,11 @@ class PortalStore {
    *   用 offset 会让某条被跳过或看两遍。
    */
   public loadClientHistory = (key: string, more = false) => {
-    const [machineId, provider] = key.split("|");
+    /* key 是 `machineId|provider|desktop`，**三件套一起传**。
+       只传 provider 的话，Codex CLI 与 ChatGPT 桌面版会拉到同一份混着的列表，
+       那就等于分组白拆了（接口注释里写明了这一条）。 */
+    const [machineId, provider, desktopFlag] = key.split("|");
+    const desktop = desktopFlag === "true";
     if (!machineId) {
       return;
     }
@@ -948,6 +1015,7 @@ class PortalStore {
     getHistorySessionList({
       machineId,
       provider: provider || undefined,
+      desktop,
       keyword: this._keyword.trim() || undefined,
       before,
       limit: HISTORY_PAGE,
