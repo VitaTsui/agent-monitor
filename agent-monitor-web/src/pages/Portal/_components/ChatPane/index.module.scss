@@ -260,10 +260,20 @@
     justify-content: center;
     color: color-mix(in srgb, var(--foreground) 35%, transparent);
     gap: 6px;
+    // 失败文案会长到一整句，不限宽的话会横着铺满整格
+    max-width: 420px;
+    margin: 0 auto;
+    text-align: center;
+    line-height: 1.7;
     font-size: var(--text-sm);
 
     .big {
       font-size: 30px;
+    }
+
+    // 「重试」与上面那句话隔开一档：它是一个动作，不是文案的一部分
+    :global(.ant-btn) {
+      margin-top: 6px;
     }
   }
 

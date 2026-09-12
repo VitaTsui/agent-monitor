@@ -146,6 +146,23 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
      一次往返两轮上报。这**不是空会话** —— 说成「暂无可展示的对话内容」会让人
      以为这条会话真的没内容，转身去终端里翻。 */
   const bodyPending = PortalStore.isMessagesPending(id);
+  /* 正文**没取到**的原因。历史会话与子会话的正文都在那台机器的磁盘上，
+     机器一离线就取不到 —— 那和「这条会话不存在」「网络不通」是三件事，
+     提示与出路都不同，不许合成一句兜底。判据是后端信封里的 `code`，不是文案。 */
+  const bodyFail = PortalStore.messagesFailOf(id);
+  const FAIL_TEXT: Record<string, { icon: string; text: string }> = {
+    // 可恢复：机器回来点一下重试就有了
+    offline: {
+      icon: "🔌",
+      text: "这台设备当前离线，读不到它磁盘上的会话正文。等它上线后点「重试」。",
+    },
+    // 不可恢复：重试多少次都一样
+    missing: {
+      icon: "🗑",
+      text: "找不到这条会话的记录 —— 它可能已经被删掉，或者所属设备换过机器标识。",
+    },
+    network: { icon: "📡", text: "读取失败，请检查网络后重试。" },
+  };
   // 一条任务的去处，取决于它有没有被终端拿去执行：
   //
   //   还没轮到 → 只在下方排队条，可撤回
@@ -717,12 +734,28 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
               feedMessages.length === 0 &&
               queuedItems.length === 0 ? (
                 <div className={styles.chatEmpty}>
-                  <div className={styles.big}>{bodyPending ? "⏳" : "💬"}</div>
+                  <div className={styles.big}>
+                    {bodyPending
+                      ? "⏳"
+                      : (bodyFail && FAIL_TEXT[bodyFail].icon) || "💬"}
+                  </div>
                   <div>
                     {bodyPending
                       ? "正在从那台机器读取这条会话的正文…"
-                      : "该会话暂无可展示的对话内容"}
+                      : bodyFail
+                        ? FAIL_TEXT[bodyFail].text
+                        : "该会话暂无可展示的对话内容"}
                   </div>
+                  {/* 离线是可恢复状态，得给一条出路；不自动轮询（那台机器可能关了一整晚） */}
+                  {bodyFail ? (
+                    <Button
+                      size="small"
+                      icon={<SyncOutlined />}
+                      onClick={() => syncMessages(id)}
+                    >
+                      重试
+                    </Button>
+                  ) : null}
                 </div>
               ) : (
                 <TerminalFeed

@@ -457,6 +457,25 @@
   }
 }
 
+/* 失败说明行右端的「重试」。只有它可点，整行仍是 subHint（不可点） */
+.subRetry {
+  flex: none;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  color: var(--primary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+
+  &:hover {
+    background: var(--overlay-1);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+}
+
 // 「正在读取子会话…」「该会话没有子会话」这类说明行：不可点、更淡
 .subHint {
   cursor: default;

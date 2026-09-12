@@ -177,6 +177,18 @@ const PENDING_RETRY_MAX = 6;
 /** 子会话正文的后台刷新间隔（见 PortalStore._subFetchAt） */
 const SUB_REFRESH_MS = 5000;
 
+/**
+ * 「现读磁盘」这类请求没拿到东西的**原因**。三种要分开说，别合成一句兜底。
+ *
+ * - `offline` 设备离线 —— 历史会话的正文与子任务都在**那台机器的磁盘上**，hub 手里
+ *   没有。机器一离线就取不到，但这是**可恢复**的：机器回来点一下重试就有了。
+ * - `missing` 会话/子会话真的不存在（记录被删了、id 不对）。重试也不会变。
+ * - `network` 请求压根没发出去 / 没回来。
+ */
+export type FetchFailKind = "offline" | "missing" | "network";
+
+
+
 /** 时间桶的标签与顺序（照 VitaAgent 侧栏：今天 / 昨天 / 过去 7 天 / 过去 30 天 / 更早） */
 const BUCKET_ORDER = ["今天", "昨天", "过去 7 天", "过去 30 天", "更早"];
 
@@ -291,6 +303,10 @@ class PortalStore {
   private _pendingIds: string[] = [];
   /** 每条会话已经为「读取中」重试过几次（到 PENDING_RETRY_MAX 就不再问） */
   private _pendingTries: Record<string, number> = {};
+  /** 正文没取到的原因（会话 id / 子会话复合 id → 原因）。取到了就清掉 */
+  private _bodyFailById: Record<string, FetchFailKind> = {};
+  /** 子任务清单没取到的原因（会话 id → 原因）。取到了就清掉 */
+  private _subTasksFailById: Record<string, FetchFailKind> = {};
   /**
    * 历史会话：按客户端（`machineId|provider`）各存一份分页状态。
    *
@@ -719,6 +735,72 @@ class PortalStore {
    */
   isMessagesPending = (id: string): boolean => this._pendingIds.includes(id);
 
+  /** 这条会话（或子会话）的正文为什么没取到。取到了 / 还没问过就是 undefined */
+  public messagesFailOf = (id: string): FetchFailKind | undefined =>
+    this._bodyFailById[id];
+
+  /** 这条会话的子任务清单为什么没取到 */
+  public subTasksFailOf = (id: string): FetchFailKind | undefined =>
+    this._subTasksFailById[id];
+
+  /**
+   * 这次失败该归到哪一类。
+   *
+   * **判据全是结构化的**：后端信封里的 `code`（见 hub `admin.rs` 的 `err()`：
+   * HTTP 恒 200，真正的状态码在 body 的 `code` 上）＋ 设备列表里的 `online`。
+   * 一个中文文案都不匹配 —— 那是上游随时会改的措辞，拿它当接口用改一版就失灵。
+   *
+   * 为什么 404 还要再判一次设备在不在线：机器掉线超过 10 秒，hub 会把**它名下的
+   * 任务一起丢掉**，于是「设备离线」从第 8 秒起就以 `404 任务不存在` 的形式出现
+   * （实测：离线 4s 是 500，8s 起变 404）。只看 code 的话，用户会被告知
+   * 「这条会话已经被删了」—— 而它其实好好躺在那台关着的机器上。
+   */
+  private failKindOf = (id: string, code?: number): FetchFailKind => {
+    if (code === 500) {
+      return "offline";
+    }
+    const own = parseSubId(id)?.parentId ?? id;
+    const machineId =
+      this._tasks.find((t) => t.id === own)?.machineId ??
+      this._histById[own]?.machineId ??
+      "";
+    if (
+      machineId &&
+      this._devices.some((d) => d.id === machineId && !d.online)
+    ) {
+      return "offline";
+    }
+    return "missing";
+  };
+
+  /** 记一笔 / 清掉某条会话正文的失败原因 */
+  private setBodyFail = (id: string, kind?: FetchFailKind) => {
+    if (this._bodyFailById[id] === kind) {
+      return;
+    }
+    const next = { ...this._bodyFailById };
+    if (kind) {
+      next[id] = kind;
+    } else {
+      delete next[id];
+    }
+    this._bodyFailById = next;
+  };
+
+  /** 同 setBodyFail，作用在子任务清单上 */
+  private setSubTasksFail = (id: string, kind?: FetchFailKind) => {
+    if (this._subTasksFailById[id] === kind) {
+      return;
+    }
+    const next = { ...this._subTasksFailById };
+    if (kind) {
+      next[id] = kind;
+    } else {
+      delete next[id];
+    }
+    this._subTasksFailById = next;
+  };
+
   // ---------- 子任务（子会话树）----------
 
   /**
@@ -759,14 +841,26 @@ class PortalStore {
     if (!id || parseSubId(id) || this._subTasksLoading.includes(id)) {
       return;
     }
-    if (!force && tries === 0 && this._subTasksTried.includes(id)) {
+    // 上一次**失败**过的允许再问一次（设备离线是可恢复的）；成功拿到过的才真正缓存住
+    if (
+      !force &&
+      tries === 0 &&
+      this._subTasksTried.includes(id) &&
+      !this._subTasksFailById[id]
+    ) {
       return;
     }
     this._subTasksLoading = [...this._subTasksLoading, id];
+    if (force) {
+      this.setSubTasksFail(id, undefined);
+    }
     getPortalSubTasks(id)
       .then((res) => {
         this._subTasksLoading = this._subTasksLoading.filter((x) => x !== id);
         if (res.code !== 0) {
+          // 设备离线（code 500）与会话不存在（code 404）是两回事：前者点一下重试
+          // 就好，后者重试多少次都一样。判的是结构化的 code，不是 msg 里那句话。
+          this.setSubTasksFail(id, this.failKindOf(id, res.code));
           if (!this._subTasksTried.includes(id)) {
             this._subTasksTried = [...this._subTasksTried, id];
           }
@@ -782,12 +876,16 @@ class PortalStore {
           return;
         }
         this._subTasksById = { ...this._subTasksById, [id]: list };
-        this._subTasksTried = [...this._subTasksTried, id];
+        this.setSubTasksFail(id, undefined);
+        if (!this._subTasksTried.includes(id)) {
+          this._subTasksTried = [...this._subTasksTried, id];
+        }
       })
       .catch(() => {
         this._subTasksLoading = this._subTasksLoading.filter((x) => x !== id);
-        // 404（会话不在 hub 清单里 / 机器离线）：只记「问过了」，**不写空清单** ——
-        // 活跃会话手上还有一份随上报捎带的 `Task.subTasks`，写空等于把它擦掉
+        // **不写空清单**：活跃会话手上还有一份随上报捎带的 `Task.subTasks`，
+        // 写空等于用一次失败把已经拿到的子任务擦掉
+        this.setSubTasksFail(id, "network");
         if (!this._subTasksTried.includes(id)) {
           this._subTasksTried = [...this._subTasksTried, id];
         }
@@ -1269,6 +1367,9 @@ class PortalStore {
     const tries = { ...this._pendingTries };
     delete tries[id];
     this._pendingTries = tries;
+    // 重试就是「从头来过」：上一次的失败原因先清掉，不然重试期间还挂着旧提示
+    this.setBodyFail(id, undefined);
+    this._subFetchAt = { ...this._subFetchAt, [id]: 0 };
     this.fetchMessages(id, true);
   };
 
@@ -1485,7 +1586,14 @@ class PortalStore {
         if (!this._openIds.includes(id)) {
           return;
         }
-        const list = res.code === 0 ? (res.data?.list ?? []) : [];
+        if (res.code !== 0) {
+          // 离线（500）与不存在（404）分开说，判的是结构化 code 不是文案
+          this.setBodyFail(id, this.failKindOf(id, res.code));
+          this._pendingIds = this._pendingIds.filter((x) => x !== id);
+          return;
+        }
+        this.setBodyFail(id, undefined);
+        const list = res.data?.list ?? [];
         if (
           this.markPending(id, !!res.data?.pending, !list.length, () =>
             this.fetchSubMessages(id, sub, false),
@@ -1505,6 +1613,7 @@ class PortalStore {
       .catch(() => {
         this._loadingIds = this._loadingIds.filter((x) => x !== id);
         this._pendingIds = this._pendingIds.filter((x) => x !== id);
+        this.setBodyFail(id, "network");
       });
   };
 
@@ -1528,7 +1637,13 @@ class PortalStore {
         if (!this._openIds.includes(id)) {
           return;
         }
+        if (res.code !== 0) {
+          // 设备离线（500）、会话不存在（404）—— 两条路径的提示不一样，不合并成兜底
+          this.setBodyFail(id, this.failKindOf(id, res.code));
+          this._pendingIds = this._pendingIds.filter((x) => x !== id);
+        }
         if (res.code === 0) {
+          this.setBodyFail(id, undefined);
           const list = res.data?.list ?? [];
           // 历史会话的正文是 hub 点名让那台机器现读磁盘取回来的，一次往返要两轮上报。
           // 这一轮还没到 = **不是空会话**，标一下「读取中」、过 2.5 秒再问一次。
@@ -1655,6 +1770,7 @@ class PortalStore {
       })
       .catch(() => {
         this._loadingIds = this._loadingIds.filter((x) => x !== id);
+        this.setBodyFail(id, "network");
       });
   };
 
