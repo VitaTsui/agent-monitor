@@ -1,8 +1,13 @@
-// 右栏容器。照 VitaAgent 的 ViewerPane
+// 一格内的右栏。照 VitaAgent 的 ViewerPane
 // （`web/src/pages/chat/_components/ViewerPane/index.module.scss`）：
 //   把手 8 宽 col-resize、中央 3×48 圆角小条 hover 才显；
-//   栏本身与正文之间只靠一条描边分开，不做浮卡 —— 本项目正文底是 --primary-subtle，
-//   右栏取 --card，两种面色已经分得开，再叠圆角投影只会多一层噪声。
+//   栏是**一张浮着的卡**：上下右各留 8 露底、圆角 10、`0 0 0 1px` 描边环 ＋ 两层轻投影。
+//
+// 上一版是「撑满高度 + 一条左边框」，看着像把格子横切了一刀；卡片式那 8px 露底
+// 才是「它浮在正文旁边」这件事的全部来源。
+//
+// 投影不写 --vita-shadow-*，用跟着 --foreground 走的 color-mix：
+// 本项目的卡片投影一律这么画（见 PanesView / Sidebar），暗色下才不会是一团死黑。
 
 .sep {
   display: flex;
@@ -13,7 +18,6 @@
   cursor: col-resize;
   // 触屏上别让浏览器把拖动当成滚页
   touch-action: none;
-  background: var(--background);
 
   &:hover .handle,
   &:active .handle {
@@ -32,15 +36,21 @@
 
 .RightPane {
   display: flex;
-  flex: 1 1 0%;
+  // 宽度只由 flex-basis 一处说了算（组件按 ratio 算好塞进来），grow/shrink 都是 0
+  flex: 0 0 auto;
   flex-direction: column;
-  // 不写这两行，栏里一段长内容就能把正文列挤没
+  // 不写这两行，栏里一段长内容就能把正文挤没
   min-width: 0;
   min-height: 0;
+  margin: 8px 8px 8px 0;
   overflow: hidden;
-  border-left: 1px solid var(--overlay-2);
+  border-radius: 10px;
   background: var(--card);
-  transition: flex-grow 0.2s ease;
+  box-shadow:
+    0 0 0 1px var(--overlay-2),
+    0 1px 2px color-mix(in srgb, var(--foreground) 5%, transparent),
+    0 4px 6px -1px color-mix(in srgb, var(--foreground) 8%, transparent);
+  transition: flex-basis 0.2s ease;
 }
 
 // 拖的时候不要过渡，否则把手跟不上指针

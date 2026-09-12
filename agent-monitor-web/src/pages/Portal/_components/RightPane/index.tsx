@@ -1,98 +1,80 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import classNames from "classnames";
+import { observer } from "mobx-react-lite";
 
+import PortalStore, {
+  RIGHT_PANE_MAX_RATIO,
+  RIGHT_PANE_MIN_RATIO,
+} from "../../PortalStore";
 import styles from "./index.module.scss";
 
-/**
- * 分栏比例存这个键：换一个会话、刷新一次仍是上次拖到的位置。
- * 与 VitaAgent 的 `vita.viewerPane.ratio` 同一套语义，键名带本项目前缀。
- */
-const RATIO_KEY = "am.portal.rightPane.ratio";
-const MIN_RATIO = 0.3;
-const MAX_RATIO = 0.7;
-/**
- * 默认取下限而不是一半。
- *
- * VitaAgent 那边 50% 是**产物预览**那一栏的默认值（要看文件，越宽越好）；
- * 本项目右栏装的是「会话状态」，对应的是它另一种形态 —— 固定 320 宽的任务面板。
- * 30% 在 1440 下约 345px，是这块内容真正需要的宽度；给到一半只会让正文白挨一刀。
- */
-const DEFAULT_RATIO = MIN_RATIO;
-
-const clamp = (v: number) => Math.min(MAX_RATIO, Math.max(MIN_RATIO, v));
-
-const readRatio = () => {
-  try {
-    const v = Number(localStorage.getItem(RATIO_KEY));
-    return v >= MIN_RATIO && v <= MAX_RATIO ? v : DEFAULT_RATIO;
-  } catch {
-    return DEFAULT_RATIO;
-  }
-};
-
-const writeRatio = (v: number) => {
-  try {
-    localStorage.setItem(RATIO_KEY, String(v));
-  } catch {
-    // 隐私模式下写不进去也无妨，下次回到默认宽度
-  }
-};
-
 interface RightPaneProps {
+  /**
+   * 这一栏属于哪一格。
+   *
+   * **不是可选项**：开合与宽度都按会话 id 各记一份（见 PortalStore 的
+   * `_rightPaneById`）。从前这里没有 taskId —— 一条全局比例、一个全局布尔，
+   * 拆成 2~4 格后任何一格的开关都在拨同一个值，那是这次要推翻的旧设计。
+   */
+  taskId: string;
   className?: string;
   children: React.ReactNode;
 }
 
 /**
- * 右栏的容器：8px 的拖拽把手 ＋ 一块与正文并排的栏。
+ * 一格内的右栏：8px 的拖拽把手 ＋ 一块浮在格子上的卡。
  *
  * 照 VitaAgent 的 `ViewerPane` 做的（`web/src/pages/chat/_components/ViewerPane/`）：
- * **不是抽屉、不是浮层，是与正文列并排、可拖的分栏** —— 无遮罩、正文照常可操作。
+ * **不是抽屉、不是浮层，是与本格正文并排、可拖的分栏** —— 无遮罩、正文照常可操作。
+ * 卡四周留 8 露底、圆角 10、一圈 1px 描边环加两层轻投影，靠「浮起来」与正文区分，
+ * 而不是拿一条竖线把格子切两半。
  *
- * 比例靠 `flex-grow` 实现：正文列的 `flex: 1` 不动，本栏的 grow 取 `r / (1 − r)`，
- * 两者一比正好是 r。这样不必去改正文列的样式。
+ * 宽度只由 `flex-basis` 一处说了算：`ratio × 本格宽 − 16`（16 = 把手 8 ＋ 右 margin 8），
+ * grow/shrink 都是 0。所以两态之间是一次真正的宽度过渡。
  *
- * 必须放在一个 `display: flex` 的行里、紧跟正文列之后（见 Portal 的 `.contentRow`）。
+ * 必须放在一个 `display: flex` 的行里、紧跟本格正文之后（见 ChatPane 的 `.paneRow`）。
  */
-const RightPane: React.FC<RightPaneProps> = (props) => {
-  const { className, children } = props;
-  const [ratio, setRatio] = useState(readRatio);
+const RightPane: React.FC<RightPaneProps> = observer((props) => {
+  const { taskId, className, children } = props;
+  const ratio = PortalStore.rightPaneRatio(taskId);
   const [dragging, setDragging] = useState(false);
   const sepRef = useRef<HTMLDivElement>(null);
-  const latest = useRef(ratio);
-  latest.current = ratio;
 
-  const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) {
-      return;
-    }
-    e.preventDefault();
-    const sep = sepRef.current;
-    const row = sep?.parentElement;
-    if (!sep || !row) {
-      return;
-    }
-    sep.setPointerCapture(e.pointerId);
-    setDragging(true);
-    const rect = row.getBoundingClientRect();
-    const move = (ev: PointerEvent) => {
-      // 栏在右边：把手离行右缘的距离占整行的比例，就是本栏的份额
-      const r = clamp((rect.right - ev.clientX) / rect.width);
-      latest.current = r;
-      setRatio(r);
-    };
-    const up = () => {
-      sep.removeEventListener("pointermove", move);
-      sep.removeEventListener("pointerup", up);
-      sep.removeEventListener("pointercancel", up);
-      setDragging(false);
-      writeRatio(latest.current);
-    };
-    sep.addEventListener("pointermove", move);
-    sep.addEventListener("pointerup", up);
-    sep.addEventListener("pointercancel", up);
-  }, []);
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) {
+        return;
+      }
+      e.preventDefault();
+      const sep = sepRef.current;
+      const row = sep?.parentElement;
+      if (!sep || !row) {
+        return;
+      }
+      sep.setPointerCapture(e.pointerId);
+      setDragging(true);
+      const rect = row.getBoundingClientRect();
+      let latest = PortalStore.rightPaneRatio(taskId);
+      const move = (ev: PointerEvent) => {
+        // 栏在右边：把手离本格右缘的距离占本格宽的比例，就是这一栏的份额
+        latest = (rect.right - ev.clientX) / rect.width;
+        PortalStore.setRightPaneRatio(taskId, latest);
+      };
+      const up = () => {
+        sep.removeEventListener("pointermove", move);
+        sep.removeEventListener("pointerup", up);
+        sep.removeEventListener("pointercancel", up);
+        setDragging(false);
+        // 松手才落盘：拖动中每帧写一次 localStorage 会发涩
+        PortalStore.setRightPaneRatio(taskId, latest, true);
+      };
+      sep.addEventListener("pointermove", move);
+      sep.addEventListener("pointerup", up);
+      sep.addEventListener("pointercancel", up);
+    },
+    [taskId],
+  );
 
   // 拖的过程中全页禁选：不然把手划过正文会把文字一路选中
   useEffect(() => {
@@ -116,8 +98,8 @@ const RightPane: React.FC<RightPaneProps> = (props) => {
         role="separator"
         aria-orientation="vertical"
         aria-label="调整右栏宽度"
-        aria-valuemin={MIN_RATIO * 100}
-        aria-valuemax={MAX_RATIO * 100}
+        aria-valuemin={RIGHT_PANE_MIN_RATIO * 100}
+        aria-valuemax={RIGHT_PANE_MAX_RATIO * 100}
         aria-valuenow={Math.round(ratio * 100)}
         onPointerDown={onPointerDown}
       >
@@ -129,12 +111,12 @@ const RightPane: React.FC<RightPaneProps> = (props) => {
           { [styles.dragging]: dragging },
           className,
         )}
-        style={{ flexGrow: ratio / (1 - ratio) }}
+        style={{ flexBasis: `calc(${ratio * 100}% - 16px)` }}
       >
         {children}
       </aside>
     </>
   );
-};
+});
 
 export default RightPane;

@@ -23,9 +23,7 @@ import { useIsMobile } from "./_hooks/useIsMobile";
 import { useNativeBack } from "./_hooks/useNativeBack";
 import { ShareReceiveModal } from "./_hooks/useShareReceive";
 import MobileBar from "./_components/MobileBar";
-import RightPane from "./_components/RightPane";
 import SearchPalette from "./_components/SearchPalette";
-import SessionStatePane from "./_components/SessionStatePane";
 import Sidebar from "./_components/Sidebar";
 import { PortalUserContext, PortalUserInfo } from "./_context/portalUser";
 import { PORTAL_BASE, SettingsTab, portalBackTarget } from "./_utils/portalNav";
@@ -347,28 +345,16 @@ const Portal: React.FC = observer(() => {
           onOpenSettings={openSettings}
         />
 
-        {/* 正文 ＋ 右栏并排的那一行。右栏给的条件有三条：
-            **会话页** —— 设置/历史都是自带固定头部的整页内容，右边再钉一栏会话
-              状态既对不上也没地方摆；
-            **宽屏** —— 一块 390 宽的屏摆不下第三栏，状态卡退回对话流末尾
-              （见 ChatPane）；
-            **至少开着一格** —— 一格没开时那栏没有主语，摆一条「暂无」在空问候语
-              旁边只是白占三成宽。 */}
+        {/* 正文那一行。
+            右栏（会话状态）不在这儿 —— 它属于**某一格**，长在 ChatPane 里面
+            （见 ChatPane 的 `.paneRow`）。从前钉在这一层：整页只有一条，四格
+            共用一个开关、共用一份宽度，点哪一格的按钮都是在拨同一个值。 */}
         <div
           className={`${styles.contentRow} ${mobileNav ? styles.mainPushed : ""}`}
         >
           <main className={styles.main}>
             <Outlet />
           </main>
-
-          {atSessions &&
-            !isMobile &&
-            PortalStore.rightPaneOpen &&
-            PortalStore.openTasks.length > 0 && (
-              <RightPane>
-                <SessionStatePane />
-              </RightPane>
-            )}
         </div>
 
         {settingsMounted && (
