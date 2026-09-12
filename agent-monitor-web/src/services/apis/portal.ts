@@ -68,6 +68,52 @@ export interface SelectPayload {
   questions?: SelectQuestion[];
 }
 
+/**
+ * 子任务的**结构化收尾归类**——前端配色一律看它，不要去认 `status` 里那几个英文词。
+ *
+ * - `running` 还在跑
+ * - `completed` 正常收尾（把结果交回去了）
+ * - `failed` **它自己跑砸了**（卡死 / API 报错 / 退出码非零），原因在 `summary` 里
+ * - `interrupted` **被连带终止**：父会话退出或被打断（后端原文 `killed`），
+ *   或有人主动停掉（原文 `stopped`），又或者父会话都结束了它还挂着
+ *   （原文 `orphaned`，这一个是后端合成的：父会话没了，它派生的后台命令不可能还在跑）。
+ *   不是这个子任务的错，别画成失败色。
+ *
+ * 为什么不能看 `status`：实测 `killed` 是父会话被中断时**一次性发给当时所有在跑子代理
+ * 的统一通知**（同一时刻三条同状态），子代理本身一点毛病没有。按字面量配色的结果就是
+ * 「按了一下 Esc，一排子代理全爆红」。归类由后端按磁盘事实（子会话记录有没有交回结果）
+ * 算好，上游改文案不会让它失灵。
+ */
+export type SubTaskOutcome = "running" | "completed" | "failed" | "interrupted";
+
+/** 一个会话名下「在后台跑着（或跑过）的东西」：异步子代理，或后台命令 */
+export interface SubTask {
+  /**
+   * 任务号。`kind === "agent"` 时就是 agentId，也是拉子会话正文
+   * （{@link getPortalSubAgentMessages}）要传的那个 id；`kind === "bg"` 时是后台命令号。
+   */
+  id: string;
+  /** `agent` = 异步子代理（有独立会话记录，可展开看正文）｜`bg` = 后台命令（没有） */
+  kind: "agent" | "bg";
+  /** 展示名（派活时的说明，后端已截到 80 字） */
+  label: string;
+  /**
+   * 上游原文：`running` / `completed` / `failed` / `killed` / `stopped`；
+   * 外加一个后端合成的 `orphaned`（父会话已结束、后台命令不可能还在跑）。
+   * **只用于排障展示**（要能和会话记录里那句通知对上），配色看 {@link outcome}。
+   */
+  status: string;
+  outcome: SubTaskOutcome;
+  /** 起跑时刻 ISO8601；拿不到是空串 */
+  startedAt: string;
+  /** 收尾时刻（epoch 毫秒）。0 = 还没结束，可据此与 startedAt 算耗时 */
+  endedMs: number;
+  /** 「为什么是这个收场」的原文一句话。只有拿到完成通知才有；按磁盘改判状态时会清掉 */
+  summary?: string;
+  /** 磁盘上有它自己的会话记录，可以展开拉正文。`kind === "bg"` 恒为 false */
+  hasBody: boolean;
+}
+
 interface IPortalTaskData {
   id: string;
   title: string;
@@ -126,6 +172,17 @@ interface IPortalTaskData {
    * 没起过名字时后端下发 null。
    */
   note?: string | null;
+  /**
+   * 该会话名下的后台子任务（异步子代理 + 后台命令），可直接当作这条会话的**子节点**渲染。
+   *
+   * 以前这份数据是伪装成一条 `role: "bgtasks"` 的消息塞在消息流末尾的，消费方得自己
+   * 从对话里摘出来再 `JSON.parse`、还得记着别把它渲染成聊天气泡。**那条消息已经没有了**，
+   * 改读这个字段。
+   *
+   * 只带「近期」的：后端按收尾时刻保留 24 小时、最多 50 条终态条目（还在跑的不淘汰）。
+   * 此前从会话开头全量累积且永不淘汰，实测单条会话能挂到 147 条、最老的是 11 天前的。
+   */
+  subTasks: SubTask[];
 }
 export type PortalTaskData = Partial<IPortalTaskData>;
 
@@ -194,11 +251,70 @@ export const getSessionHistory = async (limit?: number, session?: string) => {
   });
 };
 
-// 会话消息
+/**
+ * 会话正文的返回形状。
+ *
+ * `pending === true` 表示「这台机器还没把正文送回来」——不是出错，也不是空会话：
+ * 历史会话的正文是 hub 点名让那台机器现读磁盘取回来的，一次往返要两轮上报
+ * （客户端约 1.5s 一轮），hub 最多等 8 秒。前端此时该显示「读取中」并过一会儿再问一次，
+ * **不要**把它渲染成空对话。
+ */
+export interface MessagesRes {
+  list: PortalMessage[];
+  pending: boolean;
+}
+
+/**
+ * 会话正文。活跃会话读的是客户端随上报捎带的缓存（秒级新鲜）；
+ * **已结束的历史会话**改由后端现去那台机器读磁盘 —— 此前这种会话点开永远是空白。
+ */
 export const getPortalTaskMessages = async (id: string, limit?: number) => {
-  return await get<ListRes<PortalMessage>>(`/monitor/tasks/${id}/messages`, {
+  return await get<MessagesRes>(`/monitor/tasks/${id}/messages`, {
     params: { limit },
   });
+};
+
+/** {@link getPortalSubTasks} 的返回形状；`pending` 语义同 {@link MessagesRes} */
+export interface SubTasksRes {
+  list: SubTask[];
+  pending: boolean;
+}
+
+/**
+ * 一条会话的**全部**子任务清单 —— 左侧列表里把主会话展开成子会话节点用这个。
+ *
+ * 与 `PortalTaskData.subTasks` 是同一个 {@link SubTask} 结构、两种口径：
+ * - `subTasks` 随会话快照下发，是**当前状态面板**（只留近 24 小时、最多 50 条终态，
+ *   而且只有活跃会话才带）；
+ * - 这条是**全量视角**，按需读盘、不套保留窗口，历史会话照样展得开。
+ *   活跃会话调它同样成立，结果是 `subTasks` 的超集。
+ *
+ * 会话不存在 → 404（与 {@link getPortalSubAgentMessages} 对齐）。
+ * 同样要处理 `pending`（后端现去那台机器读盘，最多等 8 秒）。
+ */
+export const getPortalSubTasks = async (id: string) => {
+  return await get<SubTasksRes>(`/monitor/tasks/${id}/subtasks`);
+};
+
+/**
+ * **子会话正文**：把某个子代理展开成一串对话。
+ *
+ * @param id 父会话 id
+ * @param agentId 取自 `PortalTaskData.subTasks[].id`（只有 `kind === "agent"` 且
+ *   `hasBody` 为真的才拉得到；后台命令没有独立记录）
+ *
+ * 返回结构与 {@link getPortalTaskMessages} 完全一致（同一套 {@link PortalMessage}），
+ * 可以直接复用现有的消息渲染。一律现读磁盘、不缓存，所以同样要处理 `pending`。
+ */
+export const getPortalSubAgentMessages = async (
+  id: string,
+  agentId: string,
+  limit?: number,
+) => {
+  return await get<MessagesRes>(
+    `/monitor/tasks/${id}/subagents/${agentId}/messages`,
+    { params: { limit } },
+  );
 };
 
 /**
@@ -255,6 +371,70 @@ export const sendPortalInput = async (
     // source 让 hub 区分「客户端 / 网页」下发来源，用于钉钉推送正文标注
     { text, pid, source: inDesktopClient() ? "client" : "web", fromSelect }
   );
+};
+
+// ---------- 历史会话（含已结束的） ----------
+
+interface IHistorySession {
+  /** 会话 id（jsonl 文件名），拉正文时当 taskId 用 */
+  id: string;
+  /** 会话标题 = 首个用户提示词 */
+  title: string;
+  /** 最近一条真实用户提示词 */
+  prompt: string;
+  /** running / idle / paused / finished */
+  status: string;
+  statusDsr: string;
+  provider: string;
+  providerDsr: string;
+  /** 项目根（归一化，不随会话内 cd 漂移） */
+  project: string;
+  projectName: string;
+  machineId: string;
+  hostname: string;
+  platform: string;
+  platformDsr: string;
+  startedAt: string | null;
+  lastActiveAt: string | null;
+  /** 会话文件最近修改时刻（epoch 毫秒）——列表的排序键，也是翻页游标 */
+  mtimeMs: number;
+  lineCount: number;
+  gitBranch: string | null;
+  /** 用户给这个终端起的名字；没起过是 null */
+  note: string | null;
+}
+export type HistorySession = Partial<IHistorySession>;
+
+export interface HistorySessionRes {
+  list: HistorySession[];
+  /** 过滤后的总条数（不受分页影响） */
+  total: number;
+  /** 还有更旧的：把它原样当下一页的 `before` 传回来。null = 到底了 */
+  nextCursor: number | null;
+}
+
+/**
+ * 历史会话列表（**不过滤已结束的**，这正是它与 {@link getPortalTaskList} 的区别）。
+ *
+ * 回溯多久由客户端的 `AM_HISTORY_DAYS` 决定，默认 30 天。
+ *
+ * 翻页用**时间游标**而不是页码：这份列表的底料是每轮上报刷新的内存快照，翻页期间
+ * 新会话会插进头部，用 offset 会让某条被跳过或看两遍。要下一页就把上一次返回的
+ * `nextCursor` 原样填进 `before`。
+ */
+export const getHistorySessionList = async (params?: {
+  /** 模糊过滤：项目 / 标题 / 提示词 / 主机名 */
+  keyword?: string;
+  /** 只看某台机器 */
+  machineId?: string;
+  /** 只看某个 provider（claude / codex …） */
+  provider?: string;
+  /** 上一页返回的 nextCursor */
+  before?: number;
+  /** 每页条数，1~200，默认 50 */
+  limit?: number;
+}) => {
+  return await get<HistorySessionRes>("/monitor/sessions/history", { params });
 };
 
 // ---------- 设备管理（信任设备）----------

@@ -92,6 +92,70 @@ pub struct MessageBrief {
     pub is_error: bool,
 }
 
+/// 子任务的**结构化收尾归类**。
+///
+/// 为什么不让前端直接看 [`SubTask::status`]：那是上游 Claude Code 写在
+/// `<task-notification>` 里的原文（`completed` / `failed` / `killed` / `stopped`），
+/// 语义并不是「成/败」——实测 `killed` 是**父会话被中断或退出时，一次性给当时所有
+/// 在跑子代理统一发的收尾通知**（同一时刻三条同状态），子代理自己一点毛病没有；
+/// `stopped` 则是有人主动 `TaskStop`。前端若按字面量把这两种一并画成红色失败，
+/// 用户看到的就是「我按了 Esc，结果一排子代理全爆红」。
+///
+/// 归类的判据是**磁盘事实**而不是文案：子会话自己那份 `subagents/agent-<id>.jsonl`
+/// 的收尾形态说明它到底有没有把结果交回去（见 scanner 的 `SubAgentTail`）。
+/// 上游改文案不会让这个归类失灵。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubTaskOutcome {
+    /// 还在跑
+    Running,
+    /// 正常收尾（交回了结果）
+    Completed,
+    /// **它自己跑砸了**：卡死、API 报错、退出码非零，原因在 `summary` 里
+    Failed,
+    /// **被连带终止**：父会话退出/被打断（`killed`），或有人主动停掉（`stopped`）。
+    /// 不是这个子任务的错，前端不该画成失败色。
+    Interrupted,
+}
+
+/// 一个会话名下「在后台跑着（或跑过）的东西」：异步子代理，或后台命令。
+///
+/// 此前这份清单是序列化成一条 `role:"bgtasks"` 的消息塞在消息流末尾的 —— 前端得先
+/// 从对话里把它摘出来再 `JSON.parse`，还得自己滤掉这条不让它出现在聊天记录里。
+/// 现在它是 [`Task`] 上的结构化字段，消息流里不再有这条伪消息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubTask {
+    /// 任务号。`kind == "agent"` 时就是父会话记录里的 `agentId`，也是拉取正文
+    /// （`/monitor/tasks/:id/subagents/:agentId/messages`）要用的那个 id；
+    /// `kind == "bg"` 时是 `backgroundTaskId`。
+    pub id: String,
+    /// `agent`（异步子代理，有独立会话记录）| `bg`（后台命令，没有）
+    pub kind: String,
+    /// 展示名（派活时的 description，截断到 80 字）
+    pub label: String,
+    /// **上游原文**：running / completed / failed / killed / stopped。
+    /// 保留它只为可追溯（排障时要能对上会话记录里那句通知），
+    /// 前端配色一律看 [`Self::outcome`]。
+    pub status: String,
+    /// 结构化归类，见 [`SubTaskOutcome`]
+    pub outcome: SubTaskOutcome,
+    /// 起跑时刻（会话记录里的 ISO8601 时间戳），拿不到就空串
+    pub started_at: String,
+    /// 收尾时刻（epoch 毫秒）。0 = 还没结束。
+    ///
+    /// 此前这个字段是 `#[serde(skip)]` 的纯内部值，于是前端算不出耗时，
+    /// 更要命的是**没有任何东西能据以淘汰旧条目**（见 scanner 的保留窗口）。
+    pub ended_ms: u64,
+    /// 完成通知里的 `<summary>` 原文 —— 唯一说得出「为什么是这个收场」的字段。
+    /// 按磁盘改判状态时会清掉（那句话描述的已不是当前状态）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// 磁盘上有它自己的会话记录，可以按需拉正文。
+    /// 后台命令（`kind == "bg"`）恒为 false —— 它没有独立记录。
+    pub has_body: bool,
+}
+
 /// 聚合后的「任务」：一个代理会话 + 可能匹配到的进程
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -171,6 +235,13 @@ pub struct Task {
     /// 最近若干条消息摘要（agent 上报时携带，供 hub 缓存）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_messages: Vec<MessageBrief>,
+    /// 该会话名下的后台子任务（异步子代理 + 后台命令），agent 上报时携带。
+    ///
+    /// 只带「近期」的：见 scanner 的 `BG_RETAIN_MS` / `BG_MAX_ITEMS` —— 此前这张表
+    /// 从会话开头全量重放且**没有任何淘汰**，实测本机单个会话能累到 147 条、
+    /// 里头最老的已经是 11 天前的事，且永远不会消失。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_tasks: Vec<SubTask>,
     /// 终端里 claude 原生排队、尚未被接受执行的输入（按入队顺序，供前端底部挂载显示）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued_inputs: Vec<String>,
@@ -252,7 +323,19 @@ pub struct ReportPayload {
     /// 认领该设备的用户名（agent 侧 AM_USER）
     #[serde(default)]
     pub owner: Option<String>,
+    /// **热列表**：近期（见 scanner 的 `LIVE_WINDOW_MS`）有活动的会话，每轮全量重报。
     pub tasks: Vec<Task>,
+    /// **历史会话**：比热列表更老、但仍在回溯窗口（`AM_HISTORY_DAYS`，默认 30 天）内的会话。
+    ///
+    /// 为什么单开一条而不是并进 `tasks`：客户端 1.5s 一轮全量重报，实测 30 天窗口下
+    /// 一轮 94 条、序列化 92 KB —— 每天 5 GB 的上行，只为一批一动不动的已结束会话。
+    /// 所以它每 30 秒才带一次（见 client 的 `HISTORY_REPORT_INTERVAL_SECS`），
+    /// 而热列表那条路径的开销一点没变（仍是 8 条、11 KB）。
+    ///
+    /// `None` = 本轮没带（沿用 hub 上一次收到的那份），`Some(空表)` = 确实一条历史都没有。
+    /// 两者必须分开：当成空表处理的话，历史列表会每 30 秒闪空一次。
+    #[serde(default)]
+    pub history_tasks: Option<Vec<Task>>,
     #[serde(default)]
     pub dir_results: Vec<DirResult>,
     /// 上一轮 hub 请求的文件夹操作结果（回传）。旧客户端不带 → 空。
@@ -261,6 +344,9 @@ pub struct ReportPayload {
     /// 上一轮 hub 点名现取的文件内容（回传）。旧客户端不带 → 空。
     #[serde(default)]
     pub file_fetch_results: Vec<FileFetchResult>,
+    /// 上一轮 hub 点名现读的会话数据（回传）。旧客户端不带 → 空。
+    #[serde(default)]
+    pub session_fetch_results: Vec<SessionFetchResult>,
     /// 上一轮下发文件的实际落盘路径（回传）。旧客户端不带 → 空，hub 退回自己算的名字。
     #[serde(default)]
     pub file_results: Vec<FileTransferResult>,
@@ -403,6 +489,65 @@ pub struct FileFetchResult {
     pub mime: String,
     #[serde(default)]
     pub content_b64: String,
+}
+
+/// hub → agent 要的是会话的哪一份数据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionWant {
+    /// 会话本身的正文
+    Messages,
+    /// 某个子会话的正文（要 `agent_id`）
+    Subagent,
+    /// 该会话的**全部**子任务清单（不套保留窗口）
+    Subtasks,
+}
+
+/// hub → agent：**现读一份会话数据**（历史会话正文 / 子会话正文 / 全量子任务清单）。
+///
+/// 为什么必须有这条通路：agent 每轮上报只给「活跃会话」（有进程，或 10 分钟内有写入）
+/// 带最近 80 条消息与近 24 小时的子任务，hub 的 `/messages` 读的就是这份上报缓存 ——
+/// 于是所有已结束的历史会话点开必然是空白；子会话正文更是从来没有被报上来过
+/// （本机实测 422 份 `subagents/agent-*.jsonl`，一个字节都没上去过）。
+///
+/// 全量推是不可行的，所以走「点名现取」：网页要看哪一份，hub 就排一条这个请求，
+/// agent 下一轮上报把结果带回来。与 [`FileFetch`] 同一套节奏。
+///
+/// 三种要求共用一条通路、一个 `want` 判别，不各开各的队列 —— 排队、去重、TTL、
+/// 等待窗口这些全是同一套，复制三份只会三处各错一次。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFetch {
+    /// 本次取件的标识，结果按它认领
+    pub fetch_id: String,
+    /// 会话 id（jsonl 文件名）
+    pub task_id: String,
+    pub want: SessionWant,
+    /// 子会话号（= 父记录里的 `agentId`），只有 `want == Subagent` 时有意义
+    #[serde(default)]
+    pub agent_id: String,
+    /// 正文最多返回多少条（agent 侧会再夹一道上限）；子任务清单忽略它
+    pub limit: usize,
+    /// 这条会话**已经没有进程在跑了**。
+    ///
+    /// 只有 hub 手里有聚合后的进程状态，解析器没有。据此给会话名下仍挂在「执行中」
+    /// 的后台命令收尾 —— 父会话都结束了，它派生的后台命令不可能还在跑。
+    #[serde(default)]
+    pub parent_ended: bool,
+}
+
+/// agent → hub：现读会话数据的结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFetchResult {
+    pub fetch_id: String,
+    /// 失败原因（会话记录不存在 / 读不动）。非空即失败，此时两份内容都为空。
+    #[serde(default)]
+    pub err: String,
+    #[serde(default)]
+    pub messages: Vec<MessageBrief>,
+    #[serde(default)]
+    pub sub_tasks: Vec<SubTask>,
 }
 
 /// hub → agent：会话目录内的文件夹操作（上传选目录弹窗里新建/删除/重命名）

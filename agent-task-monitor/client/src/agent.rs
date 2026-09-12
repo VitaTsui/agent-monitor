@@ -6,26 +6,18 @@ use std::collections::HashMap;
 
 /// 活跃任务才携带消息缓存，且仅在「与结果相关的文件」变化时重读。
 ///
-/// 缓存键必须同时带上**子会话记录目录**的最新写入时刻：消息末尾那条 `bgtasks` 快照里
-/// 「子会话还在不在跑」是由 `<会话>/subagents/*.jsonl` 决定的，父会话 jsonl 不动、
-/// 子会话跑完，答案照样变了。只按父会话 mtime 缓存的话，父会话闲着的那段时间里，
-/// 跑完的子会话胶囊会一直挂着，非得等用户下次敲字才清掉。
+/// 缓存键必须同时带上**子会话记录目录**的最新写入时刻：子任务清单里「子会话还在不在跑」
+/// 是由 `<会话>/subagents/*.jsonl` 决定的，父会话 jsonl 不动、子会话跑完，答案照样变了。
+/// 只按父会话 mtime 缓存的话，父会话闲着的那段时间里，跑完的子会话胶囊会一直挂着，
+/// 非得等用户下次敲字才清掉。
 ///
 /// 还得给缓存**压一个最长寿命**：快照里「子会话跑完没」有两道判定是随墙钟翻的
 /// （静置够久 → 收尾、停在半路太久 → 放弃），翻的那一刻没有任何文件在变，纯按 mtime
 /// 做键的话它们永远轮不到执行。取 `SUBAGENT_SETTLE_MS`（= 那两道判定的时间分辨率），
 /// 代价是活跃会话每 5 分钟多重算一次消息。
 struct MsgCache {
-    /// session_id → (父会话 mtime_ms, 子会话记录最新写入 ms, 算出来的时刻, messages)
-    inner: HashMap<
-        String,
-        (
-            u64,
-            u64,
-            std::time::Instant,
-            Vec<am_core::model::MessageBrief>,
-        ),
-    >,
+    /// session_id → (父会话 mtime_ms, 子会话记录最新写入 ms, 算出来的时刻, 那一刻的全貌)
+    inner: HashMap<String, (u64, u64, std::time::Instant, am_core::scanner::SessionView)>,
 }
 
 /// 下发后「待确认是否真的提交」的记录。Cursor 内嵌终端粘贴态会吞掉提交回车，表现为
@@ -56,6 +48,21 @@ static CHUNK_TARGETS: std::sync::Mutex<Option<HashMap<String, std::path::PathBuf
 /// 每轮都扫盘、都把几百条指纹塞进上报纯属浪费。hub 会把收到的清单缓存住，
 /// 期间的 pull/push 照常每轮推进，所以这里放慢不影响同步速度。
 const CONFIG_SCAN_INTERVAL_SECS: u64 = 30;
+
+/// 现读正文单次最多返回多少条消息。
+///
+/// 与随上报捎带的 80 条不同，这条通路是用户点开一份历史会话/子会话时才走的一次性
+/// 请求，给得宽一些（500）才看得到完整来龙去脉；上限仍要夹住 —— 一份子会话记录
+/// 能到数 MB，全量塞进一次上报会把整轮心跳撑爆。
+const MSG_FETCH_MAX: usize = 500;
+
+/// 历史会话列表的上报间隔。
+///
+/// 这批会话（比 `LIVE_WINDOW_MS` 更老、仍在 `AM_HISTORY_DAYS` 窗口内）一动不动，
+/// 却是上报体积的大头：实测 30 天窗口一轮 94 条、92 KB，其中 86 条属于这一批。
+/// 按 1.5s 一轮算是每天 5 GB 上行 —— 全为了重发一堆不会变的东西。
+/// 30 秒一次足够（历史列表本就不要求秒级新鲜），与配置清单同一个节奏。
+const HISTORY_REPORT_INTERVAL_SECS: u64 = 30;
 
 const RESUBMIT_WAIT_MS: u64 = 2000;
 /// 最多补几次回车，仍不提交就放弃（避免无限补）
@@ -112,6 +119,10 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     let mut pending_dir_results: Vec<am_core::model::DirResult> = Vec::new();
     let mut pending_fs_op_results: Vec<am_core::model::FsOpResult> = Vec::new();
     let mut pending_file_fetches: Vec<am_core::model::FileFetchResult> = Vec::new();
+    // hub 点名现读的会话/子会话正文（历史会话、子会话展开）
+    let mut pending_session_fetches: Vec<am_core::model::SessionFetchResult> = Vec::new();
+    // 历史会话列表上次带出去的时刻（见 HISTORY_REPORT_INTERVAL_SECS）
+    let mut last_history_report: Option<std::time::Instant> = None;
     // 下发文件的落盘回报：hub 拿它回填任务正文里的路径（见 write_transfer）
     let mut pending_file_results: Vec<am_core::model::FileTransferResult> = Vec::new();
     // 配置同步：扫描器带哈希缓存；清单每 CONFIG_SCAN_INTERVAL_SECS 报一次（不是每轮），
@@ -307,11 +318,33 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             .filter(|c| !c.is_empty())
             .map(std::path::PathBuf::from)
             .collect();
-        let tasks = if trusted {
+        // 热列表 / 历史列表分流：只有近期有活动的会话才每轮全量重报（见 LIVE_WINDOW_MS）。
+        // 更老的那批一动不动，却在 30 天窗口下占了一轮上报的 88%（实测 94 条里 86 条），
+        // 每 1.5 秒重发一遍纯属搬运。
+        let (tasks, history) = if trusted {
             attach_messages(&state, &mut scanned, &mut msg_cache).await;
-            scanned
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let (live, old): (Vec<Task>, Vec<Task>) = scanned.into_iter().partition(|t| {
+                t.process.is_some()
+                    || now_ms.saturating_sub(t.mtime_ms) < am_core::scanner::LIVE_WINDOW_MS
+            });
+            (live, old)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
+        };
+        // 历史列表每 HISTORY_REPORT_INTERVAL_SECS 才带一次；不带时给 None，
+        // hub 沿用上一次那份（给空表会让历史列表每 30 秒闪空一次）。
+        let history_due = last_history_report
+            .map(|t: std::time::Instant| t.elapsed().as_secs() >= HISTORY_REPORT_INTERVAL_SECS)
+            .unwrap_or(true);
+        let history_tasks = if trusted && history_due {
+            last_history_report = Some(std::time::Instant::now());
+            Some(history)
+        } else {
+            None
         };
 
         // 配置清单：仅在设备已被信任后才扫、才发 —— 未信任设备一个字节的本机信息都不外发，
@@ -335,9 +368,11 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             version: env!("CARGO_PKG_VERSION").into(),
             owner: owner.clone(),
             tasks,
+            history_tasks,
             dir_results: std::mem::take(&mut pending_dir_results),
             fs_op_results: std::mem::take(&mut pending_fs_op_results),
             file_fetch_results: std::mem::take(&mut pending_file_fetches),
+            session_fetch_results: std::mem::take(&mut pending_session_fetches),
             file_results: std::mem::take(&mut pending_file_results),
             // take：清单发出去就清空，下一轮不再重发。这一轮若上报失败，最多等
             // 一个扫描周期后重来——不值得为此在内存里长期挂一份待发清单。
@@ -580,6 +615,43 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         }
                         pending_file_fetches.push(read_session_file(&f));
                     }
+                    // 现读会话数据（历史会话正文、子会话正文、全量子任务清单）。
+                    // 活跃会话的那份是随上报捎带的，历史会话与子会话从来不捎带 ——
+                    // 全量推 422 份子会话记录是不可能的，所以走点名现取。
+                    let session_fetches: Vec<am_core::model::SessionFetch> = body
+                        .pointer("/data/sessionFetches")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    if !session_fetches.is_empty() {
+                        let mut scanner = state.scanner.lock().await;
+                        for f in session_fetches {
+                            let limit = f.limit.clamp(1, MSG_FETCH_MAX);
+                            let mut out = am_core::model::SessionFetchResult {
+                                fetch_id: f.fetch_id.clone(),
+                                err: String::new(),
+                                messages: Vec::new(),
+                                sub_tasks: Vec::new(),
+                            };
+                            let err = match f.want {
+                                am_core::model::SessionWant::Messages => scanner
+                                    .session_view(&f.task_id, limit, f.parent_ended)
+                                    .map(|v| out.messages = v.messages)
+                                    .err(),
+                                am_core::model::SessionWant::Subagent => scanner
+                                    .subagent_messages(&f.task_id, &f.agent_id, limit)
+                                    .map(|m| out.messages = m)
+                                    .err(),
+                                am_core::model::SessionWant::Subtasks => scanner
+                                    .sub_tasks_all(&f.task_id, f.parent_ended)
+                                    .map(|t| out.sub_tasks = t)
+                                    .err(),
+                            };
+                            if let Some(e) = err {
+                                out.err = e.to_string();
+                            }
+                            pending_session_fetches.push(out);
+                        }
+                    }
                     // 配置同步：hub 点名索要的文件内容（下一轮随上报回传）
                     let cfg_pulls: Vec<String> = body
                         .pointer("/data/configPulls")
@@ -793,18 +865,22 @@ async fn attach_messages(state: &SharedState, tasks: &mut [Task], cache: &mut Ms
         // 父会话与子会话记录都没变化、且没过最长寿命，才复用缓存
         let sub_ms = scanner.subagents_mtime(&t.id);
         let max_age = std::time::Duration::from_millis(am_core::scanner::SUBAGENT_SETTLE_MS);
-        if let Some((mtime, subs, at, msgs)) = cache.inner.get(&t.id) {
+        if let Some((mtime, subs, at, view)) = cache.inner.get(&t.id) {
             if *mtime == t.mtime_ms && *subs == sub_ms && at.elapsed() < max_age {
-                t.recent_messages = msgs.clone();
+                t.recent_messages = view.messages.clone();
+                t.sub_tasks = view.sub_tasks.clone();
                 continue;
             }
         }
-        if let Ok(msgs) = scanner.messages(&t.id, 80) {
+        // 进程没了 = 这条会话已经结束：据此给它名下仍挂在「执行中」的后台命令收尾
+        let ended = t.process.is_none();
+        if let Ok(view) = scanner.session_view(&t.id, 80, ended) {
             cache.inner.insert(
                 t.id.clone(),
-                (t.mtime_ms, sub_ms, std::time::Instant::now(), msgs.clone()),
+                (t.mtime_ms, sub_ms, std::time::Instant::now(), view.clone()),
             );
-            t.recent_messages = msgs;
+            t.recent_messages = view.messages;
+            t.sub_tasks = view.sub_tasks;
         }
     }
     // 清理消失的会话

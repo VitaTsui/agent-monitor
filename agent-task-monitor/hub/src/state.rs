@@ -31,7 +31,15 @@ pub struct MachineEntry {
     pub platform: String,
     pub version: String,
     pub is_hub: bool,
+    /// 热列表：近期有活动的会话，每轮上报全量刷新。**所有既有逻辑只看它**
+    /// （号位、钉钉推送、会话开始/结束判定、`/monitor/tasks`），语义与改动前一致。
     pub tasks: Vec<Task>,
+    /// 历史会话：比热列表更老、仍在回溯窗口内的已结束会话。每 30 秒随上报刷新一次，
+    /// 只服务 `/monitor/sessions/history` 与「按 id 找这条会话在哪台机器」。
+    ///
+    /// 不落盘：客户端每 30 秒就重报一份全的，hub 重启后半分钟内自愈 ——
+    /// 为一份随时能重建的快照上数据库不值得。
+    pub history_tasks: Vec<Task>,
     pub last_report: Instant,
     /// 待下发给该 agent 的控制命令
     pub pending: VecDeque<ControlCmd>,
@@ -45,11 +53,20 @@ pub struct MachineEntry {
     pub pending_fsop: VecDeque<am_core::model::FsOp>,
     /// 待下发的「现取文件」请求（网页要看 agent 输出里引用的截图）
     pub pending_file_fetch: VecDeque<am_core::model::FileFetch>,
+    /// 待下发的「现读正文」请求（历史会话点开、子会话展开）。
+    ///
+    /// 为什么需要它：agent 只给「活跃会话」（有进程，或 10 分钟内有写入）捎带消息，
+    /// 所以 `messages` 那张表对已结束的历史会话恒为空；子会话正文更是从来没上报过。
+    /// 全量推不现实（本机实测 422 份子会话记录），于是改为点名现取。
+    pub pending_session_fetch: VecDeque<am_core::model::SessionFetch>,
     /// 现取结果：fetch_id → (结果, 到达时刻)。
     ///
     /// **只在内存里放一会儿**：交给等着的那个网页请求即删，没人来领的也会过期清掉
     /// （见 FETCH_RESULT_TTL_SECS）。会话内容不落我方存储是既定原则，截图同样算会话内容。
     pub file_fetch_results: HashMap<String, (am_core::model::FileFetchResult, Instant)>,
+    /// 现读正文的结果：fetch_id → (结果, 到达时刻)。与 `file_fetch_results` 同一套
+    /// 「交给等着的那个请求即删、没人领的过期清掉」—— 会话正文不落我方存储。
+    pub session_fetch_results: HashMap<String, (am_core::model::SessionFetchResult, Instant)>,
     /// 文件夹操作结果缓存：op_id → 结果（网页轮询后即读走）
     pub fsop_results: HashMap<String, am_core::model::FsOpResult>,
     /// 下发文件的落盘回报：transfer_id → (结果, 到达时刻)。
@@ -544,6 +561,34 @@ impl AppState {
             };
             rank(a).cmp(&rank(b)).then(b.mtime_ms.cmp(&a.mtime_ms))
         });
+        out
+    }
+
+    /// 热列表 + 历史会话。只给「历史会话列表」和「按会话 id 找机器」用 ——
+    /// 别拿它替换 [`Self::tasks_for`]：那条路径上的消费方（号位、钉钉推送、前台列表）
+    /// 都默认自己看到的是活跃会话，塞进历史会话会让每个消费方都得再加一层过滤。
+    /// （不要在这里嵌套调用 `tasks_for`：两者都取 `machines` 读锁，中间若排进一个写者，
+    /// tokio 的 RwLock 是写优先的，第二次读会等在写者后面而写者又等着第一次读 —— 死锁。）
+    pub async fn all_tasks_for(&self, username: &str) -> Vec<Task> {
+        let machines = self.machines.read().await;
+        let registry = self.registry.read().await;
+        let mut out = Vec::new();
+        for (id, entry) in machines.iter() {
+            if !registry.can_view(id, username) {
+                continue;
+            }
+            let online = entry.last_report.elapsed().as_secs() < OFFLINE_AFTER_SECS;
+            for t in entry.tasks.iter().chain(entry.history_tasks.iter()) {
+                let mut t = t.clone();
+                if !online {
+                    t.status = TaskStatus::Finished;
+                    t.status_dsr = "已离线".into();
+                    t.process = None;
+                    t.pid = None;
+                }
+                out.push(t);
+            }
+        }
         out
     }
 
