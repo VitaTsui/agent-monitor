@@ -223,17 +223,29 @@
     transition: color 0.15s;
   }
 
+  /* 一条链上的节点列。
+     **必须是 flex 列，不能是普通块**：`.step` 自己不撑 BFC（只有 position:relative），
+     而智能体卡那一格里的 `.AgentCard` 带着 `margin: 6px -8px` —— 普通块流里这 6px
+     会穿过 `.step` 合并出去，于是卡片上下各有 6px 落在 `.step` 的盒子外面，
+     而那根线是 `.step::before` 的 top:0/bottom:0，够不到它们：线就在卡片上下各断一口。
+     （VitaAgent `MessageList/index.module.scss:395-410` 记的是同一笔账） */
+  .chainBody {
+    display: flex;
+    flex-direction: column;
+  }
+
   // 跑的时候「还在外面的那几条」与上面那句摘要之间的距离：
   // 它们是两种东西（已收进去的 / 还在外面的），贴着排会被读成「摘要的内容」
   .chainLive {
-    display: flex;
-    flex-direction: column;
     margin-top: 14px;
   }
 
   // 链上的旁白：模型一边干活一边说的那几句。是话，不是一步操作 ——
   // 所以缩到文字列（20 图标列 ＋ 8 间距）、没有图标。
+  // 但它**仍是链上的一格**：那根竖线要从它背后连续穿过去，否则一段旁白就把
+  // 时间轴切成两截（`.step` 与它共用下面那套画线规则）。
   .chainNote {
+    position: relative;
     padding: 6px 0 6px 28px;
 
     // 旁白**不是结论**，不该用正文的重量：markdown 基线给的是 16/1.5 ＋ 正文色，
@@ -247,30 +259,58 @@
     }
   }
 
-  // 一条步骤行
-  .step {
-    position: relative;
-  }
+  /* 一条步骤行。
+     **一根竖线贯穿整条链**，不是每两步之间接一小段。原来是 `.step + .step::before`
+     画 10px 的短线，节点一高（旁白好几段、智能体卡展开成一片网格）线就断成
+     一截一截，读不出「这是一条时间轴」。现在每个节点自己画一条满高的线，
+     图标那枚不透明色块把它在节点处遮断 —— 于是线在**智能体卡那块浅底上也是连续的**。
 
-  // 连接线只画在「上一条也是步骤」时：无条件画的话，一段旁白后面那条
-  // 步骤上方会吊着一截连到空处的线。
-  //
-  // **写全 `.step + .step`，不能写 `& + &`**：这一块嵌在 `.TerminalFeed` 里，
-  // scss 的 `&` 展开成整条复合选择器，`& + &` 出来的是
-  // `.TerminalFeed .step + .TerminalFeed .step` —— 要求相邻兄弟自己是
-  // 一个 .TerminalFeed，永远匹配不上（实测：那条竖线一根都没画出来）。
-  .step + .step {
-    margin-top: 2px;
+     几何三个数与 `AgentCard/index.module.scss` 同源：图标列 20（$tile）、
+     图标到文字 8（$tile-gap）、线画在 10（$tile-mid，图标列的中线）。
+     本项目是 20＋8、VitaAgent 是 18＋10 —— **文字列都落在 28**，所以那边
+     28px 的网格缩进可以原样照抄。 */
+  .step,
+  .chainNote {
+    position: relative;
+
+    /* 这一格的图标中线离节点顶边有多远。多数节点的图标在 36 高的行里居中（18），
+       智能体卡那一格外面还包着卡片的外边距 6 ＋ 内边距 8，要往下让一截 ——
+       线该收在**图标**上，不是收在节点边界上 */
+    --tile-center: 18px;
 
     &::before {
       content: "";
       position: absolute;
-      left: 10px; // 图标列宽 20 的中线
-      top: -8px;
+      left: 10px;
+      top: 0;
+      bottom: 0;
       width: 1px;
-      height: 10px;
       background: var(--border);
+      /* 压在智能体卡那块浅底之上：那块底是节点内部的普通元素（static），
+         定位元素带 z-index 才画得到它上面 */
+      z-index: 1;
     }
+
+    /* 头一条从图标中线起、末一条到图标中线止 —— 否则链的上下各吊着
+       一截连到空处的线。整条链只有一个节点时干脆不画 */
+    &:first-child::before {
+      top: var(--tile-center);
+    }
+
+    &:last-child::before {
+      bottom: auto;
+      height: var(--tile-center);
+    }
+
+    &:first-child:last-child::before {
+      display: none;
+    }
+  }
+
+  /* 智能体卡那一格：图标被卡片的外边距（6）＋ 内边距（8）往下推了 14 ——
+     不告诉线这件事的话，它会停在卡片的上边缘，看着像断在半路 */
+  .stepTask {
+    --tile-center: 24px;
   }
 
   .stepHead {
@@ -278,7 +318,13 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    min-height: 28px; // 这一屏最轻的一档，比正文行还要再紧一档
+    /* 行高与图标大小**脱钩**：36 是这一列的呼吸，图标 20 之后上下各留 8 ——
+       那 8px 正是**竖线露出来的地方**。原来是 28，上下只剩 4px：一条 1px 的
+       发丝线在 4px 的缝里等于没画（实测把它临时染红才看得见），整条时间轴
+       读起来就是一列孤立的图标。36 也与智能体卡的头行（同为 36）对齐 ——
+       两种节点在一列里必须是同一个节奏，照 VitaAgent
+       `MessageList/index.module.scss` 的 `.stepHead`。 */
+    min-height: 36px;
     padding: 0;
     border: none;
     background: transparent;
@@ -300,12 +346,21 @@
     }
   }
 
-  // 图标固定占一列 20px，让所有步骤的文字起点对齐 —— 竖线也按这一列的中线画
+  /* 图标固定占一列 20px，让所有步骤的文字起点对齐 —— 竖线也按这一列的中线画。
+     **底色不透明**：靠它把身后那根贯穿的竖线遮断（见 `.step::before`）。
+     取这一屏的地色，不是灰底 —— 链就落在对话区的底上，画一片灰方块反而多出
+     一列色块 */
   .stepIcon {
     display: inline-flex;
+    align-items: center;
     justify-content: center;
+    position: relative;
+    z-index: 2;
     flex: none;
     width: 20px;
+    height: 20px;
+    border-radius: var(--radius-xs);
+    background: var(--card);
     color: var(--muted-foreground);
     font-size: 16px;
   }
@@ -377,6 +432,19 @@
       .stepStatus {
         color: var(--destructive);
       }
+    }
+  }
+
+  // 读不到子代理内容时那一行末尾的「重试」。离线是可恢复的，得给一条出路
+  .stepRetry {
+    flex: none;
+    margin-left: 10px;
+    color: var(--primary);
+    font-size: var(--text-sm);
+    cursor: pointer;
+
+    &:hover {
+      text-decoration: underline;
     }
   }
 
@@ -464,235 +532,246 @@
       }
     }
   }
-
 }
 
 // 「正在处理…」不再是独立形态：它就是这条链的最后一行，走的是上面那套
 // `.step` / `.stepIcon` / `.stepStatus`（见组件里的 Working）。原先那颗
 // 脉冲圆点与两种「执行中」记号已删 —— 一屏之内只留一套。
 
-  // 交互式选择卡片（AskUserQuestion 同步）：琥珀色调，暗示「等待输入」。
-  //
-  // 底色**自己画**，用 --term-bg。这张卡从头到脚是终端配色（--term-amber /
-  // --term-fg / --term-text，都是压在深底上的浅色），所以它得自带那块深底。
-  // 原先底色由外层的 ChatPane `.pendingSelect { background: var(--foreground) }`
-  // 顶上 —— 那是拿「正文色」当深底使，只在浅色主题下碰巧成立：暗色下
-  // --foreground 翻成近白，浅色字压近白底，整张卡在暗色模式里几乎看不见。
-  .selectCard {
-    border: 1px solid color-mix(in srgb, var(--term-amber) 45%, transparent);
-    border-radius: var(--radius);
-    background: var(--term-bg);
-    margin: 2px 0 6px;
-    overflow: hidden;
+// 交互式选择卡片（AskUserQuestion 同步）：琥珀色调，暗示「等待输入」。
+//
+// 底色**自己画**，用 --term-bg。这张卡从头到脚是终端配色（--term-amber /
+// --term-fg / --term-text，都是压在深底上的浅色），所以它得自带那块深底。
+// 原先底色由外层的 ChatPane `.pendingSelect { background: var(--foreground) }`
+// 顶上 —— 那是拿「正文色」当深底使，只在浅色主题下碰巧成立：暗色下
+// --foreground 翻成近白，浅色字压近白底，整张卡在暗色模式里几乎看不见。
+.selectCard {
+  border: 1px solid color-mix(in srgb, var(--term-amber) 45%, transparent);
+  border-radius: var(--radius);
+  background: var(--term-bg);
+  margin: 2px 0 6px;
+  overflow: hidden;
 
-    .selectHead {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 5px 10px;
-      background: color-mix(in srgb, var(--term-amber) 16%, transparent);
-      color: var(--term-amber);
-      font-size: var(--text-sm);
-      font-weight: 600;
+  .selectHead {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    background: color-mix(in srgb, var(--term-amber) 16%, transparent);
+    color: var(--term-amber);
+    font-size: var(--text-sm);
+    font-weight: 600;
 
-      // 多题时的进度：答完一题卡片内容整个换掉，没有它会以为是出岔子了
-      .selectStep {
-        margin-left: auto;
-        font-weight: 500;
-        font-size: 11.5px;
-        opacity: 0.85;
-      }
+    // 多题时的进度：答完一题卡片内容整个换掉，没有它会以为是出岔子了
+    .selectStep {
+      margin-left: auto;
+      font-weight: 500;
+      font-size: 11.5px;
+      opacity: 0.85;
+    }
+  }
+
+  .selectQ {
+    padding: 8px 10px 2px;
+
+    .selectQuestion {
+      color: var(--term-text);
+      font-size: 12.5px;
+      margin-bottom: 6px;
     }
 
-    .selectQ {
-      padding: 8px 10px 2px;
+    .selectOpts {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
 
-      .selectQuestion {
-        color: var(--term-text);
-        font-size: 12.5px;
-        margin-bottom: 6px;
+    .selectOpt {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 6px 8px;
+      border-radius: var(--radius-sm);
+      background: color-mix(in srgb, var(--term-fg) 4%, transparent);
+      border: 1px solid color-mix(in srgb, var(--term-fg) 8%, transparent);
+
+      &.clickable {
+        cursor: pointer;
+        transition:
+          background 0.12s,
+          border-color 0.12s;
+
+        // 触屏没有 hover，靠按下瞬间的高亮告诉用户「点到了」——
+        // 手机上点完到终端回消息之间有一两秒空窗，没这个反馈就会以为没点上而重复点。
+        &:active {
+          background: color-mix(in srgb, var(--term-amber) 28%, transparent);
+        }
+
+        @media (hover: hover) {
+          &:hover {
+            background: color-mix(in srgb, var(--term-amber) 16%, transparent);
+            border-color: color-mix(
+              in srgb,
+              var(--term-amber) 50%,
+              transparent
+            );
+          }
+        }
       }
 
-      .selectOpts {
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
+      // 多选已勾选：边框与底色都点亮，序号位换成 ✓（见 SelectCard）。
+      // 多选是「攒够了再提交」，没有选中态就完全不知道自己勾了什么。
+      &.selectOptPicked {
+        background: color-mix(in srgb, var(--term-amber) 20%, transparent);
+        border-color: color-mix(in srgb, var(--term-amber) 62%, transparent);
       }
 
-      .selectOpt {
-        display: flex;
-        align-items: flex-start;
-        gap: 8px;
-        padding: 6px 8px;
+      .selectOptIdx {
+        flex: none;
+        width: 18px;
+        height: 18px;
         border-radius: var(--radius-sm);
-        background: color-mix(in srgb, var(--term-fg) 4%, transparent);
-        border: 1px solid color-mix(in srgb, var(--term-fg) 8%, transparent);
-
-        &.clickable {
-          cursor: pointer;
-          transition: background 0.12s, border-color 0.12s;
-
-          // 触屏没有 hover，靠按下瞬间的高亮告诉用户「点到了」——
-          // 手机上点完到终端回消息之间有一两秒空窗，没这个反馈就会以为没点上而重复点。
-          &:active {
-            background: color-mix(in srgb, var(--term-amber) 28%, transparent);
-          }
-
-          @media (hover: hover) {
-            &:hover {
-              background: color-mix(in srgb, var(--term-amber) 16%, transparent);
-              border-color: color-mix(in srgb, var(--term-amber) 50%, transparent);
-            }
-          }
-        }
-
-        // 多选已勾选：边框与底色都点亮，序号位换成 ✓（见 SelectCard）。
-        // 多选是「攒够了再提交」，没有选中态就完全不知道自己勾了什么。
-        &.selectOptPicked {
-          background: color-mix(in srgb, var(--term-amber) 20%, transparent);
-          border-color: color-mix(in srgb, var(--term-amber) 62%, transparent);
-        }
-
-        .selectOptIdx {
-          flex: none;
-          width: 18px;
-          height: 18px;
-          border-radius: var(--radius-sm);
-          background: color-mix(in srgb, var(--term-amber) 22%, transparent);
-          color: var(--term-amber);
-          font-size: var(--text-xs);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-        }
-
-        .selectOptBody {
-          display: flex;
-          flex-direction: column;
-          min-width: 0;
-
-          .selectOptLabel {
-            color: var(--term-text);
-            font-size: 12.5px;
-          }
-
-          .selectOptDesc {
-            color: color-mix(in srgb, var(--term-text) 60%, transparent);
-            font-size: 11.5px;
-            margin-top: 1px;
-          }
-        }
-
-        // 自行输入行：body 改横向（输入框 + 发送钮）
-        &.selectOptCustom {
-          align-items: center;
-
-          .selectOptBody {
-            flex: 1;
-            flex-direction: row;
-            align-items: center;
-            gap: 6px;
-          }
-
-          .selectCustomInput {
-            flex: 1;
-            min-width: 0;
-            padding: 4px 8px;
-            border-radius: var(--radius-sm);
-            border: 1px solid color-mix(in srgb, var(--term-fg) 12%, transparent);
-            background: color-mix(in srgb, var(--foreground) 22%, transparent);
-            color: var(--term-text);
-            font-size: 12.5px;
-            outline: none;
-
-            &::placeholder {
-              color: color-mix(in srgb, var(--term-text) 40%, transparent);
-            }
-
-            &:focus {
-              border-color: color-mix(in srgb, var(--term-amber) 50%, transparent);
-            }
-
-            &:disabled {
-              opacity: 0.5;
-            }
-          }
-
-          .selectCustomSend {
-            flex: none;
-            padding: 3px 10px;
-            border-radius: var(--radius-sm);
-            font-size: var(--text-sm);
-            background: color-mix(in srgb, var(--term-amber) 22%, transparent);
-            color: var(--term-amber);
-
-            &.clickable {
-              cursor: pointer;
-
-              &:hover {
-                background: color-mix(in srgb, var(--term-amber) 36%, transparent);
-              }
-            }
-
-            &.disabled {
-              opacity: 0.4;
-              pointer-events: none;
-            }
-          }
-        }
-
-      }
-
-      // 多选的提交行，对应终端选择卡底部的 Submit。做成整行按钮而不是小标签：
-      // 它是多选的唯一出口，漏看了就会以为卡片没反应。
-      //
-      // 必须与 .selectOpt **同级**：JSX 里它是 .selectOpts 的直接子元素、选项行的兄弟。
-      // 曾经写在 .selectOpt 里面，编译出来是 `.selectOpt .selectSubmit`，永远匹配不到 ——
-      // 按钮照常渲染却一丝样式都没有，看着就是一行普通小字。表现为「能勾选，但选完不知道
-      // 怎么提交」，而多选除了它没有别的出口。
-      .selectSubmit {
-        margin-top: 2px;
-        padding: 7px 8px;
-        border-radius: var(--radius-sm);
-        text-align: center;
-        font-size: var(--text-sm);
         background: color-mix(in srgb, var(--term-amber) 22%, transparent);
         color: var(--term-amber);
-        border: 1px solid color-mix(in srgb, var(--term-amber) 42%, transparent);
+        font-size: var(--text-xs);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
 
-        &.clickable {
-          cursor: pointer;
+      .selectOptBody {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
 
-          @media (hover: hover) {
+        .selectOptLabel {
+          color: var(--term-text);
+          font-size: 12.5px;
+        }
+
+        .selectOptDesc {
+          color: color-mix(in srgb, var(--term-text) 60%, transparent);
+          font-size: 11.5px;
+          margin-top: 1px;
+        }
+      }
+
+      // 自行输入行：body 改横向（输入框 + 发送钮）
+      &.selectOptCustom {
+        align-items: center;
+
+        .selectOptBody {
+          flex: 1;
+          flex-direction: row;
+          align-items: center;
+          gap: 6px;
+        }
+
+        .selectCustomInput {
+          flex: 1;
+          min-width: 0;
+          padding: 4px 8px;
+          border-radius: var(--radius-sm);
+          border: 1px solid color-mix(in srgb, var(--term-fg) 12%, transparent);
+          background: color-mix(in srgb, var(--foreground) 22%, transparent);
+          color: var(--term-text);
+          font-size: 12.5px;
+          outline: none;
+
+          &::placeholder {
+            color: color-mix(in srgb, var(--term-text) 40%, transparent);
+          }
+
+          &:focus {
+            border-color: color-mix(
+              in srgb,
+              var(--term-amber) 50%,
+              transparent
+            );
+          }
+
+          &:disabled {
+            opacity: 0.5;
+          }
+        }
+
+        .selectCustomSend {
+          flex: none;
+          padding: 3px 10px;
+          border-radius: var(--radius-sm);
+          font-size: var(--text-sm);
+          background: color-mix(in srgb, var(--term-amber) 22%, transparent);
+          color: var(--term-amber);
+
+          &.clickable {
+            cursor: pointer;
+
             &:hover {
-              background: color-mix(in srgb, var(--term-amber) 36%, transparent);
+              background: color-mix(
+                in srgb,
+                var(--term-amber) 36%,
+                transparent
+              );
             }
           }
 
-          &:active {
-            background: color-mix(in srgb, var(--term-amber) 44%, transparent);
+          &.disabled {
+            opacity: 0.4;
+            pointer-events: none;
+          }
+        }
+      }
+    }
+
+    // 多选的提交行，对应终端选择卡底部的 Submit。做成整行按钮而不是小标签：
+    // 它是多选的唯一出口，漏看了就会以为卡片没反应。
+    //
+    // 必须与 .selectOpt **同级**：JSX 里它是 .selectOpts 的直接子元素、选项行的兄弟。
+    // 曾经写在 .selectOpt 里面，编译出来是 `.selectOpt .selectSubmit`，永远匹配不到 ——
+    // 按钮照常渲染却一丝样式都没有，看着就是一行普通小字。表现为「能勾选，但选完不知道
+    // 怎么提交」，而多选除了它没有别的出口。
+    .selectSubmit {
+      margin-top: 2px;
+      padding: 7px 8px;
+      border-radius: var(--radius-sm);
+      text-align: center;
+      font-size: var(--text-sm);
+      background: color-mix(in srgb, var(--term-amber) 22%, transparent);
+      color: var(--term-amber);
+      border: 1px solid color-mix(in srgb, var(--term-amber) 42%, transparent);
+
+      &.clickable {
+        cursor: pointer;
+
+        @media (hover: hover) {
+          &:hover {
+            background: color-mix(in srgb, var(--term-amber) 36%, transparent);
           }
         }
 
-        &.disabled {
-          opacity: 0.45;
-          pointer-events: none;
+        &:active {
+          background: color-mix(in srgb, var(--term-amber) 44%, transparent);
         }
       }
-    }
 
-    .selectHint {
-      padding: 4px 10px 8px;
-      color: color-mix(in srgb, var(--term-text) 50%, transparent);
-      font-size: var(--text-xs);
-
-      // 提示语按端择一（「回车」在手机虚拟键盘上不存在）
-      .hintMobile {
-        display: none;
+      &.disabled {
+        opacity: 0.45;
+        pointer-events: none;
       }
     }
-
   }
+
+  .selectHint {
+    padding: 4px 10px 8px;
+    color: color-mix(in srgb, var(--term-text) 50%, transparent);
+    font-size: var(--text-xs);
+
+    // 提示语按端择一（「回车」在手机虚拟键盘上不存在）
+    .hintMobile {
+      display: none;
+    }
+  }
+}
 
 // 移动端：选择卡是「人不在电脑前时唯一能替终端做决定」的入口，
 // 触摸目标必须够大（44px 是 iOS 的可点击下限），字号也要够看。

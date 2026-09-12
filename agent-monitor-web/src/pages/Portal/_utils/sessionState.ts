@@ -11,7 +11,9 @@ import { PortalMessage, SubTask, SubTaskOutcome } from "@/services/apis/portal";
  * `JSON.parse`，还得记着别把它渲染成聊天气泡。**后端已经把那条消息删掉了**，
  * 这里一并改读字段；旧的解析路径整条拆掉，不保留两套判断。
  *
- * 头部的子会话胶囊、右侧的 SessionPanels、侧栏的子会话树都吃这一份，过滤口径必须一致。
+ * **子代理不在这一份里**：它是执行链上的一步（谁派的、派了什么、跑成什么样），
+ * 由正文里的智能体卡就地展示（见 `_components/AgentCard`）。这里只剩「没有对应
+ * 执行链节点」的那两样 —— 任务清单与后台命令 —— 它们在链上无处可挂，才需要一块状态区。
  */
 
 /**
@@ -66,37 +68,28 @@ export const isSubTaskRunning = (t: SubTask) => t.outcome === "running";
 export const hasSubTaskBody = (t: SubTask) => t.kind === "agent" && t.hasBody;
 
 /**
- * **值得展示**的子任务：还在跑的，以及跑砸/被中断的。
+ * **值得展示**的后台命令：还在跑的，以及跑砸 / 被中断的。
  *
- * 只有 `completed` 掉出去 —— 正常跑完的结论已经并回主对话，清单里不必再占位置。
- * 反过来，异常收场的几种**必须留着**：成功的产出会出现在正文里，失败的什么都不会留下，
- * 滤掉就等于让一个跑砸的子代理在界面上**无声消失**。
+ * 只有 `completed` 掉出去 —— 正常跑完的后台命令没有关注价值。反过来，异常收场的
+ * 必须留着：成功的产出会出现在正文里，失败的什么都不会留下，滤掉就等于让一个
+ * 跑砸的后台命令在界面上**无声消失**。
+ *
+ * **这一条只管后台命令。** 子代理从前也走同一个过滤，于是跑完的子代理会从界面上
+ * 消失；现在子代理归执行链管（链要的是完整的「它派过谁」，一条都不能少），
+ * 那套过滤随旧设计一并撤销，不留第二个入口。
  */
-export const aliveSubTasks = (list?: SubTask[]): SubTask[] =>
-  (list ?? []).filter((t) => t.outcome !== "completed");
+export const aliveBgCommands = (list?: SubTask[]): SubTask[] =>
+  (list ?? []).filter((t) => t.kind !== "agent" && t.outcome !== "completed");
 
 /**
- * 还在跑的子会话（异步子代理）—— 头部胶囊专用。
+ * 一条会话此刻的「当前状态」：未完成的清单条目、活着的后台命令。
  *
- * 胶囊上写的是「运行中的子会话 · N」，所以比 `aliveSubTasks` 多滤一道收场：
- * 异常收场的该留在清单里被看见，但不该被数进「还在跑」的条数。
+ * **不含子代理** —— 它有自己的执行链节点（智能体卡），状态区再列一遍就是同一件事
+ * 说两遍，而且那一份还得自己再定义一次「哪些算值得展示」。
  */
-export const runningSubAgents = (list?: SubTask[]): SubTask[] =>
-  (list ?? []).filter((t) => t.kind === "agent" && isSubTaskRunning(t));
-
-/** 展示用的子会话（含失败 / 被中断的）—— 清单里要看得见 */
-export const visibleSubAgents = (list?: SubTask[]): SubTask[] =>
-  aliveSubTasks(list).filter((t) => t.kind === "agent");
-
-/** 值得展示的后台命令（子代理之外的那些，含失败 / 被中断的） */
-export const aliveBgCommands = (list?: SubTask[]): SubTask[] =>
-  aliveSubTasks(list).filter((t) => t.kind !== "agent");
-
-/** 一条会话此刻的「当前状态」：未完成的清单条目、活着的后台命令、子代理。 */
 export interface SessionState {
   todos: TodoItem[];
   bgTasks: SubTask[];
-  subAgents: SubTask[];
 }
 
 /**
@@ -125,8 +118,8 @@ export function parseLast<T>(messages: PortalMessage[], role: string): T[] {
  * （`SessionStatePane`）还要先问「这条会话有没有东西可展示」才决定要不要给它一个
  * 标题。两处各写一遍筛选条件，改一处漏一处就会出现「右栏列了标题、底下却空着」。
  *
- * 清单只留没做完的：做完的条目没有关注价值。子任务同理只留没正常跑完的
- * （理由见 `aliveSubTasks`）。
+ * 清单只留没做完的：做完的条目没有关注价值。后台命令同理只留没正常跑完的
+ * （理由见 `aliveBgCommands`）。
  */
 export const sessionStateOf = (
   messages: PortalMessage[],
@@ -136,12 +129,11 @@ export const sessionStateOf = (
     (t) => t.status !== "completed",
   ),
   bgTasks: aliveBgCommands(subTasks),
-  subAgents: visibleSubAgents(subTasks),
 });
 
 /** 这条会话此刻没有任何可展示的状态 —— 状态卡整块不渲染、右栏不给它标题 */
 export const isEmptySessionState = (s: SessionState): boolean =>
-  !s.todos.length && !s.bgTasks.length && !s.subAgents.length;
+  !s.todos.length && !s.bgTasks.length;
 
 /**
  * 耗时口语化：37秒 / 4分12秒 / 1小时3分。

@@ -25,6 +25,10 @@ interface SessionStatePaneProps {
  * 它没有主语，只能把几格的状态堆在一起。现在栏长在每一格里，主语就是本格：
  * 一栏一会话，不再有「这张卡是哪一格的」这种要靠小标题才能分清的事。
  *
+ * **这一栏里没有子代理**：它是执行链上的一步，就地画在正文里（见 `AgentCard`）。
+ * 留在这儿的两样都有同一个理由 —— 它们在链上无处可挂：任务清单是每轮重算的状态，
+ * 后台命令压根不产生链节点。
+ *
  * 会话状态本来排在每一格对话流的末尾。搬到这里之后它不再跟着对话滚走 ——
  * 「这个会话正在办什么」是**此刻的状态**，不是时序事件，往上翻历史时它不该消失。
  * 窄屏没有第三栏可摆，仍旧留在对话流末尾（见 ChatPane）。
@@ -33,7 +37,10 @@ const SessionStatePane: React.FC<SessionStatePaneProps> = observer((props) => {
   const { task } = props;
   const id = task.id ?? "";
   const messages = PortalStore.messagesOf(id);
-  const empty = isEmptySessionState(sessionStateOf(messages, task.subTasks));
+  /* 全量那份（按需拉回来的），不是上报捎带的 `task.subTasks` —— 后者只有活跃会话
+     才有、且只覆盖近 24 小时 / 50 条。ChatPane 已经负责把它拉上来了 */
+  const subTasks = PortalStore.subTasksOf(id);
+  const empty = isEmptySessionState(sessionStateOf(messages, subTasks));
 
   return (
     <div className={styles.SessionStatePane}>
@@ -54,14 +61,12 @@ const SessionStatePane: React.FC<SessionStatePaneProps> = observer((props) => {
         {empty ? (
           /* 空态照实说，不藏起整栏：栏一会儿在一会儿不在，正文宽度就会自己跳。
              也顺带告诉用户这块会长出什么来 —— 藏起来的话没人知道有这回事。 */
-          <div className={styles.empty}>
-            暂无进行中的任务清单、后台命令或子代理
-          </div>
+          <div className={styles.empty}>暂无进行中的任务清单或后台命令</div>
         ) : (
           <SessionPanels
             className={styles.panels}
             messages={messages}
-            subTasks={task.subTasks}
+            subTasks={subTasks}
             running={task.status === "running"}
           />
         )}

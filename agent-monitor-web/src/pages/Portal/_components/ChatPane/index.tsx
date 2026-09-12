@@ -19,14 +19,13 @@ import {
 import { observer } from "mobx-react-lite";
 
 import { PortalMessage, PortalTaskData } from "@/services/apis/portal";
-import PortalStore, { parseSubId } from "../../PortalStore";
+import PortalStore from "../../PortalStore";
 import Composer from "../Composer";
 import TerminalFeed, { SelectCard } from "../TerminalFeed";
 import RightPane from "../RightPane";
 import SessionPanels from "../SessionPanels";
 import SessionRename from "../SessionRename";
 import SessionStatePane from "../SessionStatePane";
-import SubAgentChip from "../SubAgentChip";
 import { sessionTitle } from "../../_utils/sessionNote";
 import { useIsMobile } from "../../_hooks/useIsMobile";
 import styles from "./index.module.scss";
@@ -94,6 +93,8 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     setFocused,
     isRightPaneOpen,
     toggleRightPane,
+    subTasksOf,
+    loadSubTasks,
   } = PortalStore;
   // 状态卡去哪儿：宽屏进右栏，窄屏留在对话流末尾（那儿摆不下第三栏）
   const isMobile = useIsMobile();
@@ -119,10 +120,6 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   const [atBottom, setAtBottom] = useState(true);
 
   const id = task.id ?? "";
-  /* 这一格装的是**子会话**（复合 id，见 PortalStore.parseSubId）。
-     它是一份只读的会话记录：没有自己的进程、没有队列、也不归备注管 ——
-     备注挂在终端窗口上，子会话没有终端窗口可挂，改名请求会被后端 404 掉。 */
-  const isSubSession = !!parseSubId(id);
   /* 这一格摆不摆得下右栏。摆不下时按钮**置灰**、栏也不渲染 ——
      开关亮着却不出栏是更糟的那一种：人会以为功能坏了。
      记录不动：格子重新变宽（或放大这一格）时，原来开着的那一栏自己回来。 */
@@ -196,6 +193,18 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
       );
     };
   }, [task.queuedInputs, graceNow]);
+
+  /* 子任务清单。执行链靠它把「派子代理那次调用」认出来（`tool.id === toolUseId`），
+     右栏的后台命令也吃同一份。
+     **必须按需拉一次**：上报捎带的 `Task.subTasks` 只有活跃会话才有，且只覆盖近
+     24 小时 / 50 条 —— 只靠它的话，历史会话一张智能体卡都画不出来。
+     `loadSubTasks` 自带幂等（拿到过就不再问），所以这里无脑调一遍即可。 */
+  const subTasks = subTasksOf(id);
+  useEffect(() => {
+    if (id) {
+      loadSubTasks(id);
+    }
+  }, [id, loadSubTasks]);
 
   // 宽限期的时钟：只在真有回显处在宽限期内时上表，到点走一次即停。
   // 不是每秒空转 —— 没有待出窗的回显就压根不建定时器。
@@ -484,7 +493,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
               <SessionRename
                 taskId={id}
                 note={task.note}
-                disabled={compact || !id || isSubSession}
+                disabled={compact || !id}
                 className={styles.headTitleEdit}
               >
                 <span className={styles.headTitleText}>
@@ -505,10 +514,6 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                   </span>
                 </Tooltip>
               ) : null}
-              {/* 子会话胶囊：只在有子会话跑着时出现，点开看名字/状态/耗时。
-                摆在这一行而不是右上那排图标里 —— 那排低于 FLAT_MIN_W 就整排折成
-                ⋯ 菜单，再塞个非按钮元素会让折叠提前发生。 */}
-              <SubAgentChip subTasks={task.subTasks} />
             </div>
           </div>
           <div
@@ -759,7 +764,9 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 </div>
               ) : (
                 <TerminalFeed
+                  taskId={id}
                   messages={feedMessages}
+                  subTasks={subTasks}
                   running={task.status === "running"}
                   providerDsr={task.providerDsr}
                   imageCtx={imageCtx}
@@ -777,7 +784,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
               {!compact && isMobile && (
                 <SessionPanels
                   messages={messages}
-                  subTasks={task.subTasks}
+                  subTasks={subTasks}
                   running={task.status === "running"}
                 />
               )}

@@ -3,7 +3,6 @@ import React, { useEffect, useState } from "react";
 import { Tooltip } from "antd";
 import {
   CheckSquareOutlined,
-  PartitionOutlined,
   ThunderboltOutlined,
   WarningFilled,
 } from "@ant-design/icons";
@@ -21,10 +20,10 @@ import styles from "./index.module.scss";
 interface SessionPanelsProps {
   messages: PortalMessage[];
   /**
-   * 这条会话名下的子任务（子代理 + 后台命令）。取自 `PortalTaskData.subTasks`。
+   * 这条会话名下的子任务。取自 `PortalTaskData.subTasks`。
    *
-   * 从前是从 `messages` 里那条 `role: "bgtasks"` 伪消息 `JSON.parse` 出来的 ——
-   * 后端已经把那条消息删掉了，改从这里进来。任务清单（todos）仍在 `messages` 里。
+   * **只用其中的后台命令**：子代理有自己的执行链节点（正文里的智能体卡），
+   * 状态区再列一遍就是同一件事说两遍。筛选口径在 `aliveBgCommands` 里，只有一份。
    */
   subTasks?: SubTask[];
   /** 会话是否正在运行：非运行时清单里的「进行中」降级为「未完成」，
@@ -64,7 +63,7 @@ const StateCard: React.FC<CardProps> = ({ icon, title, meta, children }) => (
 );
 
 /**
- * 后台任务 / 子代理的一行。
+ * 后台命令的一行。
  *
  * 三种收场分色（与 VitaAgent 一致，见 `TaskCard/index.module.scss:94-104`）：
  * 执行中走主色（墨黑）+ 脉冲，异常收场走 destructive，其余中性。
@@ -112,7 +111,10 @@ const TaskRow: React.FC<{ task: SubTask; now: number }> = ({ task, now }) => {
 };
 
 /**
- * 会话的「当前状态」：任务清单、后台任务、子代理三块。
+ * 会话的「当前状态」：任务清单、后台命令两块。
+ *
+ * **子代理不在这儿**：它是执行链上的一步，就地画在正文里（见 `AgentCard`）。
+ * 后台命令留下来是因为它**没有对应的执行链节点** —— 删了就没地方看了。
  *
  * **宽屏在右栏**（`SessionStatePane`）：与正文并排、不滚走、不挡任何东西。
  * **窄屏排在对话流末尾**：手机上摆不下第三栏，它跟着对话一起滚。
@@ -126,10 +128,10 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
 
   // 「有哪些东西要展示」只有一处定义（见 sessionStateOf）：右栏要先问同一个问题
   // 才知道该不该给这条会话一个标题，两边各写一遍筛选条件迟早会对不上。
-  const { todos, bgTasks, subAgents } = sessionStateOf(messages, subTasks);
+  const { todos, bgTasks } = sessionStateOf(messages, subTasks);
 
   // 耗时要走字：只在真有后台任务时上表，且 tick 只驱动本组件重渲染。
-  const ticking = bgTasks.length > 0 || subAgents.length > 0;
+  const ticking = bgTasks.length > 0;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!ticking) {
@@ -139,7 +141,7 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
     return () => window.clearInterval(timer);
   }, [ticking]);
 
-  if (isEmptySessionState({ todos, bgTasks, subAgents })) {
+  if (isEmptySessionState({ todos, bgTasks })) {
     return null;
   }
 
@@ -200,18 +202,6 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
           meta={countMeta(bgTasks)}
         >
           {bgTasks.map((t) => (
-            <TaskRow key={t.id} task={t} now={now} />
-          ))}
-        </StateCard>
-      )}
-
-      {subAgents.length > 0 && (
-        <StateCard
-          icon={<PartitionOutlined />}
-          title="子代理"
-          meta={countMeta(subAgents)}
-        >
-          {subAgents.map((t) => (
             <TaskRow key={t.id} task={t} now={now} />
           ))}
         </StateCard>
