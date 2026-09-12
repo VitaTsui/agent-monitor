@@ -30,14 +30,24 @@
 - **任务发现**：解析 `~/.claude/projects/**/*.jsonl` 会话文件（增量缓存），提取当前提示词、
   最近动作（正在调用的工具）、时间线；同时扫描系统进程找出 `claude`（及 `codex`）进程，
   沿父进程链识别宿主（Cursor / VSCode / Terminal/iTerm/Warp 等），按 cwd + 启动时间与会话配对。
+  会话默认回溯 **30 天**（`AM_HISTORY_DAYS` 可调）。
+- **子会话（子代理 / 后台命令）**：会话对象上带 `subTasks[]`，每条给出 `outcome`
+  ——`running` / `completed` / `failed` / `interrupted`。归类看的是磁盘事实（子会话
+  `subagents/agent-<id>.jsonl` 有没有把结果交回去），不是上游文案；`interrupted` 表示
+  被父会话退出连带终止，**不是失败**，前端配色与判断一律只看 `outcome`
+  （`status` 是上游原文，另有后端合成的 `orphaned`，仅供排障追溯）。
 - **状态判定**：`执行中`（回合未结束）/ `等待输入`（助手已答复）/ `已暂停`（SIGSTOP）/ `已结束`（进程退出）。
 - **任务控制**：暂停 SIGSTOP、恢复 SIGCONT、中断 SIGINT、终止 SIGTERM、强杀 SIGKILL
   （Windows 走 taskkill，暂不支持暂停/恢复）。远程机器的控制命令经 hub 命令队列由 agent 拉取执行。
 - **发布任务**：前台每个会话面板底部有对话框，可直接向正在运行的会话注入一行输入（回车发布）。
   macOS 优先用 AppleScript 按 tty 匹配 Terminal/iTerm 会话写入（只需一次"自动化"授权，无需 root）；
   匹配不到时回退 TIOCSTI（跨会话注入通常需以 root 运行监控端）。远程机器经命令队列由 agent 执行。
-- **多机聚合**：agent 每 1.5s 向 hub `POST /monitor/report` 上报快照（活跃会话附带最近对话），
-  10s 未上报判离线。任务/机器均带 `hostname`、`platform`（macos / windows / linux）标识。
+- **多机聚合**：agent 向 hub `POST /monitor/report` 上报快照，10s 未上报判离线。
+  上报分两条：**热列表**（近 7 天有活动的会话，附带最近对话）每 1.5s 全量重报一轮，
+  实测 8 条 / 11 KB；**历史列表**（更老、仍在回溯窗口内的会话）每 30s 才带一次
+  ——30 天窗口实测一轮 94 条 / 92 KB，若每 1.5s 全量重发就是每天约 5 GB 上行。
+  hub 不落盘，重启后 30s 内由客户端重报自愈。任务/机器均带 `hostname`、
+  `platform`（macos / windows / linux）标识。
 
 ## 应用程序形态（Mac / Windows）
 
@@ -60,12 +70,22 @@
 - 识别的宿主：**Cursor / VSCode 内嵌终端**（父进程链优先判 IDE，Windows 下不会被
   powershell/cmd 误判），以及**独立终端**——mac 的 Terminal/iTerm/Warp/kitty 等、
   Windows 的 Windows Terminal / PowerShell / CMD、tmux。
-- 前台左侧：**设备 → 终端类型（项目终端 = IDE 内嵌 / 外部终端）→ 会话** 三级可折叠树；
-  会话项紧凑单行（状态点 + 名称 + 状态 + 拆分按钮）。
+- 前台左侧：按**客户端**（机器 + provider，Claude / Codex 各一组）分组，组内按最近活动
+  分桶（今天 / 昨天 / 过去 7 天 / 过去 30 天 / 更早）。列的是回溯窗口内的**全部会话**，
+  已结束的也在，走 `/monitor/sessions/history` 的时间游标翻页、滚动加载；侧栏筛选框
+  筛的就是这同一份全量（关键字一并传给历史接口）。
+- 会话行在**执行中**时第二行直接显示当前动作（如「正在调用工具: Bash, Read」）。
+- 主会话可展开出**子会话树**，点开即在对话区里查看它的正文（前端用复合 id
+  `<父会话 id>::<agentId>` 把它当成一条只读会话，拆分视图 / 右栏 / 关闭全部复用）；
+  后台命令（`kind=bg`）与 `hasBody=false` 的条目没有独立记录，置灰不可点。
 - 前台右侧支持**拆分视图**：像 IDE 终端拆分一样并排显示最多 4 个任务，各自独立控制；
   每格底部是 hsu-ui `Chat.Input` 对话框，可**直接发布任务/终端命令**（按 provider 提供
   `/clear`、`/compact`、`/model` 等快捷键）。
-- 前台只显示**活跃会话**（有存活进程），退出后已结束的会话不再累积。
+- **状态右栏按格独立**：每格自己开关、自己记宽度，不再是全局共用一条；整格宽度不足
+  640px 时摆不下，按钮置灰、栏不渲染。
+- 界面基准字号 14px，语义令牌（字号 / 颜色 / 圆角）直接引用组件库 `@hsu-react/ui` 的
+  `--vita-*`，不再另抄一套字面值；全局下拉菜单几何统一走 `.va-menu`
+  （用法 `rootClassName="va-menu"`）。
 
 ## 用户体系与信任设备（隐私）
 
@@ -140,6 +160,16 @@ $env:AM_HUB_URL="http://<hub-ip>:8383"; .\agent-monitor.exe
 | `AM_CRYPTO_KEY` | 内置开发密钥 | 登录 AES 密钥，需与前端 `.env` 的 `CRYPTO_KEY` 一致 |
 | `AM_RSA_KEY_PATH` | 内置开发私钥 | RSA 私钥（PKCS#8 PEM），与前端 `RSA_PUB_KEY` 配对 |
 | `AM_CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Claude Code 会话目录 |
+| `AM_HISTORY_DAYS` | `30` | 会话列表回溯天数（扫描多久以前的会话文件）。非数字 / 0 等非法值回落默认；进程内只读一次，改完要重启客户端 |
+
+> `AM_HISTORY_DAYS` 与代码里的 `LIVE_WINDOW_MS`（固定 7 天）是两回事，改前者不会动后者：
+> 前者决定**列表里能看到多久以前的会话**；后者决定哪些会话算「热」——参与会话 ↔ 进程配对、
+> 并进每 1.5s 的热列表上报。放宽回溯窗口是为了看得见历史，放宽热窗口只会让配对判断变差。
+
+> 桌面客户端启动时会用配置文件补齐没设的 `AM_*` 变量（环境变量优先），所以上表里的键
+> 写进 `config.txt` 同样生效，不必设系统环境变量。每行 `KEY=VALUE`、`#` 开头为注释；
+> 查找顺序：`AM_CONFIG` 指定的路径 > 可执行文件同级 `config.txt` > macOS `.app` 的
+> `Contents/Resources/config.txt` > `~/.agent-monitor/config.txt`。
 
 > ⚠️ 内置密钥仅供本地开发。对外部署请用 `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048`
 > 重新生成密钥对，私钥走 `AM_RSA_KEY_PATH`，公钥（SPKI base64）填入前端 `.env` 的 `RSA_PUB_KEY`。
@@ -151,7 +181,10 @@ $env:AM_HUB_URL="http://<hub-ip>:8383"; .\agent-monitor.exe
 | GET | `/monitor/tasks?status=&keyword=` | 任务列表（前台，平铺参数） |
 | GET | `/monitor/tasks/page?query=` | 任务分页（后管，vita-admin Query 格式） |
 | GET | `/monitor/tasks/detail/:id` | 任务详情 |
-| GET | `/monitor/tasks/:id/messages?limit=` | 会话对话流（远程机器读上报缓存） |
+| GET | `/monitor/sessions/history` | 历史会话列表（**不过滤已结束**）。`keyword`（项目/标题/提示词/主机名）、`machineId`、`provider`、`before`（时间游标）、`limit`（1–200，默认 50）；返回 `{list, total, nextCursor}` |
+| GET | `/monitor/tasks/:id/messages?limit=` | 会话对话流。活跃会话读上报缓存，历史会话按需现读磁盘；返回 `{list, pending}` |
+| GET | `/monitor/tasks/:id/subtasks` | 该会话**全部**子任务（现读磁盘、不套保留窗口，是快照里 `subTasks` 的超集）；返回 `{list, pending}` |
+| GET | `/monitor/tasks/:id/subagents/:agentId/messages?limit=` | 单个子会话正文（`limit` 默认 200、上限 500）。`agentId` 取自 `subTasks[]` 里 `kind=agent` 且 `hasBody` 为真的条目 |
 | POST | `/monitor/tasks/:id/control` | `{action: pause/resume/interrupt/stop/kill, pid?}` |
 | POST | `/monitor/tasks/:id/input` | `{text, pid?}` —— 向会话发布一行输入（TTY 注入） |
 | GET | `/monitor/machines` | 机器列表（在线状态 / 系统 / 会话数） |
@@ -159,6 +192,10 @@ $env:AM_HUB_URL="http://<hub-ip>:8383"; .\agent-monitor.exe
 | GET | `/monitor/ws` | WebSocket 实时任务快照 |
 | POST | `/monitor/report` | agent 上报（内部协议） |
 | GET/POST | `/auth/access/*`、`/sys/menu/*` | vita-admin 登录 / 菜单 / 权限契约 |
+
+> 上面几条带 `pending` 的接口：`pending: true` 表示 hub 已点名让那台机器现读磁盘、但结果
+> 还没回来（最多等 8 秒）。调用方应显示「读取中」并重试，**不能当成空结果**。
+> 现读磁盘是同步开销，大会话约 0.8–2 秒，**不要轮询**。
 
 ## 扩展新代理（如 Codex）
 
