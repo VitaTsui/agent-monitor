@@ -987,7 +987,9 @@ fn render_monitor_push(msgs: &[&am_core::model::MessageBrief]) -> String {
             "assistant" => "🤖 ",
             _ => "• ",
         };
-        let c: String = m.content.chars().take(280).collect();
+        // 走 text()：role=="tool" 的消息正文在 tools 里、content 是空的，
+        // 直接读 content 会推出一行空白（见 MessageBrief::text）
+        let c: String = m.text().chars().take(280).collect();
         lines.push(format!("{who}{c}"));
     }
     let mut out = lines.join("\n");

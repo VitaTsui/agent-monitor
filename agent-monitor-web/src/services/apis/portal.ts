@@ -20,8 +20,31 @@ export interface PortalTaskProcess {
   command: string;
 }
 
+/** 执行链上的一次工具调用 */
+export interface ToolCall {
+  /**
+   * 这次调用的 `tool_use_id`（Codex 那边是 `call_id`）。
+   *
+   * 它就是 {@link SubTask.toolUseId} 要对上的那个值：`tool.id === subTask.toolUseId`
+   * 即为同一次派活，据此在正文的执行链里就地画出子代理卡片。
+   * **老记录可能没有（空串/缺失）——配不上就别显示成智能体卡，不要退回按名字猜**：
+   * 一条消息可能对应多次调用，展示名两边截断长度还不一样（120 vs 80）。
+   */
+  id?: string;
+  /** 工具名（Read / Bash / Agent …） */
+  name: string;
+  /** 入参摘要（命令 / 文件路径 / 描述，最长 120 字）；没有可展示入参时不下发 */
+  hint?: string;
+}
+
 export interface PortalMessage {
   role: string;
+  /**
+   * 正文。**`role === "tool"` 时是空的** —— 那类消息的内容在 {@link tools} 里。
+   *
+   * 此前一条记录里的多次工具调用被 `" | "` 拼进这里，拼完就再也认不出哪一段是哪一次
+   * 调用；那条旧路径已经删掉，不存在「两个字段都能用」的过渡期。
+   */
   content: string;
   timestamp: string;
   /** 本地乐观回显（发送后立即上屏，终端同步回同内容后被替换） */
@@ -45,6 +68,17 @@ export interface PortalMessage {
    * 这个键，执行链退回改前的样子（每一步都不标失败），不会报错。
    */
   isError?: boolean;
+  /**
+   * **这条记录里的每一次工具调用**，一次一个元素（只有 `role === "tool"` 才有）。
+   * 渲染执行链请遍历它，不要再读 `content`。
+   */
+  tools?: ToolCall[];
+  /**
+   * **它回应的是哪一次调用**（只有 `role === "tool_result"` 才有）：那次调用的
+   * `tool_use_id`。据此把结果贴回执行链上对应的那一步，不必按先后顺序猜。
+   * 老记录拿不到时不下发。
+   */
+  toolUseId?: string;
 }
 
 /** AskUserQuestion 的一道题 */
@@ -112,6 +146,15 @@ export interface SubTask {
   summary?: string;
   /** 磁盘上有它自己的会话记录，可以展开拉正文。`kind === "bg"` 恒为 false */
   hasBody: boolean;
+  /**
+   * **起跑那次工具调用的 `tool_use_id`** —— 与 {@link ToolCall.id} 相等即为同一次。
+   *
+   * 执行链里就地画子代理卡片靠的就是它：`tool.id === subTask.toolUseId`。
+   * 拿不到时不下发（老记录、或起跑记录落在重放窗口之外）；
+   * **空就是空，别拿 label 去凑**。热路径的 `subTasks` 与按需读盘的
+   * {@link getPortalSubTasks} 都带这个字段。
+   */
+  toolUseId?: string;
 }
 
 interface IPortalTaskData {

@@ -4393,6 +4393,8 @@ mod selecting_tests {
             content: String::new(),
             timestamp: String::new(),
             is_error: false,
+            tools: Vec::new(),
+            tool_use_id: String::new(),
         }
     }
     fn msgs(roles: &[&str]) -> Vec<MessageBrief> {

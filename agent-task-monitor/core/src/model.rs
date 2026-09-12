@@ -71,6 +71,43 @@ pub struct ProcessInfo {
     pub shared_host: bool,
 }
 
+/// 一次工具调用。
+///
+/// 此前一条 assistant 记录里的多次工具调用被 `" | "` 拼成一个字符串塞进
+/// [`MessageBrief::content`] —— 一条消息对多个调用，谁也认不出哪一段对应哪一次。
+/// 于是执行链上那次派子代理的 `Task` 调用，和它派出来的 [`SubTask`]，
+/// 除了「展示名长得像」之外没有任何可靠的对应关系（而且两边截断长度还不一样：
+/// 120 vs 80）。要在正文里就地画出子代理卡片，就必须一次调用一个元素、各带自己的 id。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCall {
+    /// 这次调用的 `tool_use_id`（Codex 那边是 `call_id`）。
+    ///
+    /// 它就是 [`SubTask::tool_use_id`] 要对上的那个值。老记录里可能没有，那就是空串 ——
+    /// **不要猜**，配不上就当作「这次调用没派出子代理」。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    /// 工具名（Read / Bash / Agent …）
+    pub name: String,
+    /// 入参摘要（命令 / 文件路径 / 描述，截到 120 字）。没有可展示的入参时是空串。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hint: String,
+}
+
+impl ToolCall {
+    /// 一行人读的说法：`名字: 摘要`。
+    ///
+    /// 钉钉推送、MCP 会话摘要这类纯文本出口用它 —— 渲染只此一处，
+    /// 不在各消费方各拼一遍（那正是当初 `" | "` 拼接扩散开的原因）。
+    pub fn line(&self) -> String {
+        if self.hint.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{}: {}", self.name, self.hint)
+        }
+    }
+}
+
 /// 会话内一条简要消息（用于详情展示）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,6 +127,37 @@ pub struct MessageBrief {
     /// 前端按「有这个键且为真 = 失败」判，缺失即不失败，老客户端上报的数据不受影响。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_error: bool,
+    /// **这条记录里的每一次工具调用**，一次一个元素（只有 `role == "tool"` 才有）。
+    ///
+    /// 取代了原先把多次调用 `" | "` 拼进 [`Self::content`] 的做法 —— 那样拼出来的
+    /// 字符串没法反查是哪几次调用，执行链上也就画不出「这一次派了哪个子代理」。
+    /// `role == "tool"` 时 `content` 不再下发，纯文本出口走 [`ToolCall::line`]。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolCall>,
+    /// **它回应的是哪一次调用**（只有 `role == "tool_result"` 才有）：那次调用的
+    /// `tool_use_id`。前端据此把结果贴回执行链上对应的那一步，不必按顺序猜。
+    /// 老记录拿不到就是空串。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tool_use_id: String,
+}
+
+impl MessageBrief {
+    /// 这条消息的**纯文本形态**：给钉钉推送、MCP 摘要这类只能出文字的出口用。
+    ///
+    /// `role == "tool"` 的消息正文在 [`Self::tools`] 里而不在 `content` 上，
+    /// 直接读 `content` 会拿到空串（那正是「钉钉推送里工具调用变成一行空白」的来源）。
+    /// 所有纯文本出口都走这里，渲染只此一处。
+    pub fn text(&self) -> String {
+        if self.tools.is_empty() {
+            self.content.clone()
+        } else {
+            self.tools
+                .iter()
+                .map(ToolCall::line)
+                .collect::<Vec<_>>()
+                .join(" | ")
+        }
+    }
 }
 
 /// 子任务的**结构化收尾归类**。
@@ -154,6 +222,16 @@ pub struct SubTask {
     /// 磁盘上有它自己的会话记录，可以按需拉正文。
     /// 后台命令（`kind == "bg"`）恒为 false —— 它没有独立记录。
     pub has_body: bool,
+    /// **起跑那次工具调用的 `tool_use_id`** —— 与 [`ToolCall::id`] 相等即为同一次。
+    ///
+    /// 前端靠它把执行链上那次 `Agent`/`Bash` 调用，精确对应到这个子任务，
+    /// 从而在正文里就地画出子代理卡片。此前两边唯一的交集是展示名字符串，而
+    /// 一条消息可能对应多次调用，按名字配根本不可靠。
+    ///
+    /// 拿不到就是空串（老记录、或起跑记录落在重放窗口之外）。
+    /// **空就是空，不要猜** —— 配不上时前端不把这次调用显示成子代理卡。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tool_use_id: String,
 }
 
 /// 聚合后的「任务」：一个代理会话 + 可能匹配到的进程

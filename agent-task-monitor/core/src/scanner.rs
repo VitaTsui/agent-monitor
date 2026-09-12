@@ -719,6 +719,8 @@ impl SessionScanner {
                 content: m,
                 timestamp: ts,
                 is_error: false,
+                tools: Vec::new(),
+                tool_use_id: String::new(),
             });
         }
         Ok(SessionView {
@@ -866,6 +868,8 @@ impl SessionScanner {
                         String::new(),
                         None,
                         0,
+                        // 上游把起跑那次调用的 id 写在 sidecar 里，直接取，不必猜
+                        subs.meta_str(id, "toolUseId").unwrap_or_default(),
                     )
                 })
                 .collect()
@@ -1863,6 +1867,8 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 content: t,
                 timestamp: ts,
                 is_error: false,
+                tools: Vec::new(),
+                tool_use_id: String::new(),
             }),
             "assistant" => {
                 let mut buf = String::new();
@@ -1879,6 +1885,8 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     content: truncate(t, FLOW_TEXT_MAX),
                     timestamp: ts,
                     is_error: false,
+                    tools: Vec::new(),
+                    tool_use_id: String::new(),
                 })
             }
             _ => None, // developer 等注入角色不进对话流
@@ -1891,16 +1899,23 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 .or_else(|| p.get("input"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            let content = if args.is_empty() {
-                name.to_string()
-            } else {
-                format!("{name}: {}", truncate(args, 120))
-            };
             Some(MessageBrief {
                 role: "tool".into(),
-                content,
+                content: String::new(),
                 timestamp: ts,
                 is_error: false,
+                // Codex 一条记录就是一次调用，但形状要与 Claude 那边一致 ——
+                // 前端只认一套结构，不为来源分叉。它的 id 叫 call_id。
+                tools: vec![crate::model::ToolCall {
+                    id: p
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    name: name.to_string(),
+                    hint: truncate(args, 120),
+                }],
+                tool_use_id: String::new(),
             })
         }
         "function_call_output" | "custom_tool_call_output" => {
@@ -1910,6 +1925,12 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 content: truncate(out.trim(), 400),
                 timestamp: ts,
                 is_error: false,
+                tools: Vec::new(),
+                tool_use_id: p
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
             })
         }
         _ => None,
@@ -1962,6 +1983,8 @@ fn parse_entry(v: &Value, skip_sidechain: bool) -> Option<MessageBrief> {
                     content: text,
                     timestamp: ts,
                     is_error: false,
+                    tools: Vec::new(),
+                    tool_use_id: String::new(),
                 });
             }
             // tool_result：展示简要执行结果
@@ -1973,6 +1996,14 @@ fn parse_entry(v: &Value, skip_sidechain: bool) -> Option<MessageBrief> {
                             role: "tool_result".into(),
                             content: truncate(&text, 400),
                             timestamp: ts,
+                            tools: Vec::new(),
+                            // 它回应的是哪一次调用 —— 记录里本来就有，前端据此把结果
+                            // 贴回执行链上对应那一步，不必按先后顺序猜。
+                            tool_use_id: item
+                                .get("tool_use_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
                             // 这一步是不是跑砸了 —— 记录里本来就有，别再丢一次。
                             // 缺这个键（老记录 / 别的形态）按「没出错」算，与改前一致。
                             is_error: item
@@ -1993,7 +2024,7 @@ fn parse_entry(v: &Value, skip_sidechain: bool) -> Option<MessageBrief> {
         "assistant" => {
             let items = v.pointer("/message/content")?.as_array()?;
             let mut text_buf = String::new();
-            let mut tools = Vec::new();
+            let mut tools: Vec<crate::model::ToolCall> = Vec::new();
             let mut plan: Option<&str> = None;
             // 交互式选择/权限确认（AskUserQuestion）：把问题与选项整份同步给前端渲染成卡片
             let mut select_input: Option<&Value> = None;
@@ -2020,11 +2051,17 @@ fn parse_entry(v: &Value, skip_sidechain: bool) -> Option<MessageBrief> {
                             select_input = item.get("input");
                             continue;
                         }
-                        let hint = tool_input_hint(item.get("input"));
-                        tools.push(if hint.is_empty() {
-                            name.to_string()
-                        } else {
-                            format!("{name}: {hint}")
+                        // 一次调用一个元素、各带自己的 tool_use_id。此前是
+                        // `format!("{name}: {hint}")` 推进 Vec<String> 再 `" | "` 拼成
+                        // 一个字符串 —— 拼完就再也认不出哪一段是哪一次调用了。
+                        tools.push(crate::model::ToolCall {
+                            id: item
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            name: name.to_string(),
+                            hint: tool_input_hint(item.get("input")),
                         });
                     }
                     _ => {}
@@ -2037,6 +2074,8 @@ fn parse_entry(v: &Value, skip_sidechain: bool) -> Option<MessageBrief> {
                     content: truncate(p.trim(), FLOW_TEXT_MAX),
                     timestamp: ts,
                     is_error: false,
+                    tools: Vec::new(),
+                    tool_use_id: String::new(),
                 });
             }
             // 交互式选择卡片：整份 input（questions/options）序列化给前端
@@ -2046,6 +2085,8 @@ fn parse_entry(v: &Value, skip_sidechain: bool) -> Option<MessageBrief> {
                     content: truncate(&inp.to_string(), 4000),
                     timestamp: ts,
                     is_error: false,
+                    tools: Vec::new(),
+                    tool_use_id: String::new(),
                 });
             }
             if !text_buf.trim().is_empty() {
@@ -2054,13 +2095,19 @@ fn parse_entry(v: &Value, skip_sidechain: bool) -> Option<MessageBrief> {
                     content: truncate(text_buf.trim(), FLOW_TEXT_MAX),
                     timestamp: ts,
                     is_error: false,
+                    tools: Vec::new(),
+                    tool_use_id: String::new(),
                 })
             } else if !tools.is_empty() {
                 Some(MessageBrief {
                     role: "tool".into(),
-                    content: truncate(&tools.join(" | "), 400),
+                    // 正文在 tools 里，不再另拼一份字符串：两份并存必然漂移，
+                    // 纯文本出口统一走 MessageBrief::text()。
+                    content: String::new(),
                     timestamp: ts,
                     is_error: false,
+                    tools,
+                    tool_use_id: String::new(),
                 })
             } else {
                 None
@@ -2119,6 +2166,7 @@ struct TodoItem {
 ///
 /// 字段语义见 [`SubTask`] 本身；下面这个构造器只是省掉每处都写全 `outcome` / `has_body`
 /// 这两个「产出时才定得下来」的字段。
+#[allow(clippy::too_many_arguments)]
 fn new_sub_task(
     id: String,
     kind: &str,
@@ -2127,6 +2175,7 @@ fn new_sub_task(
     started_at: String,
     summary: Option<String>,
     ended_ms: u64,
+    tool_use_id: String,
 ) -> SubTask {
     SubTask {
         id,
@@ -2140,6 +2189,7 @@ fn new_sub_task(
         ended_ms,
         summary,
         has_body: false,
+        tool_use_id,
     }
 }
 
@@ -2284,10 +2334,21 @@ impl BgTracker {
             t.summary = summary;
             t.started_at = started_at;
             t.ended_ms = ended_ms;
+            // 续跑是新的一次调用，配对键跟着换 —— 留着上一轮的 id 会让执行链把卡片
+            // 挂回上一次那一步
+            t.tool_use_id = use_id.to_string();
             return;
         }
         self.items.push(new_sub_task(
-            id, kind, label, status, started_at, summary, ended_ms,
+            id,
+            kind,
+            label,
+            status,
+            started_at,
+            summary,
+            ended_ms,
+            // 这条结果的 tool_use_id 就是起跑那次调用的 id，执行链靠它精确配对
+            use_id.to_string(),
         ));
     }
 
@@ -2755,16 +2816,22 @@ impl SubAgentDir {
     /// （实测形如 `{"agentType":"Explore","description":"Extract VitaAgent UI reference",…}`），
     /// 直接取 `description`，没有就退回 `agentType`。读不到就返回 None。
     fn meta_label(&self, id: &str) -> Option<String> {
-        let txt = fs::read_to_string(self.dir.join(format!("agent-{id}.meta.json"))).ok()?;
-        let v: Value = serde_json::from_str(&txt).ok()?;
         for key in ["description", "agentType"] {
-            if let Some(t) = v.get(key).and_then(Value::as_str) {
-                if !t.trim().is_empty() {
-                    return Some(truncate(t, 80));
-                }
+            if let Some(t) = self.meta_str(id, key) {
+                return Some(truncate(&t, 80));
             }
         }
         None
+    }
+
+    /// 读 `agent-<id>.meta.json` 里的一个字符串字段（空串当没有）。
+    /// 实测内容形如
+    /// `{"agentType":"Explore","description":"…","toolUseId":"toolu_016u29…","model":"opus"}`。
+    fn meta_str(&self, id: &str, key: &str) -> Option<String> {
+        let txt = fs::read_to_string(self.dir.join(format!("agent-{id}.meta.json"))).ok()?;
+        let v: Value = serde_json::from_str(&txt).ok()?;
+        let t = v.get(key).and_then(Value::as_str)?;
+        (!t.trim().is_empty()).then(|| t.to_string())
     }
 
     /// 目录里所有子会话记录的最新写入时刻（没有就 0）。供上层做缓存键。
@@ -2908,6 +2975,8 @@ impl TodoTracker {
             content: serde_json::to_string(&self.items).ok()?,
             timestamp: ts.to_string(),
             is_error: false,
+            tools: Vec::new(),
+            tool_use_id: String::new(),
         })
     }
 }
@@ -3731,6 +3800,7 @@ mod subagent_tests {
             "2026-09-08T02:55:52.284Z".into(),
             Some("Agent \"子会话\" failed: Agent stalled".into()),
             ended_ms,
+            "toolu_test_agent".into(),
         )
     }
 
@@ -3922,6 +3992,7 @@ mod subagent_tests {
             "2026-09-08T02:55:52.284Z".into(),
             None,
             0,
+            "toolu_test_bg".into(),
         )
     }
 
@@ -4000,6 +4071,7 @@ mod subagent_tests {
             String::new(),
             None,
             0,
+            String::new(),
         )];
         let wrote = HashMap::from([
             ("known".to_string(), now - 209 * HOUR),
@@ -4019,6 +4091,15 @@ mod subagent_tests {
         assert_eq!(ids, vec!["known", "missing"], "两条都要在，且不被保留窗口淘汰");
         assert!(out.iter().all(|t| t.outcome == SubTaskOutcome::Completed));
         assert!(out.iter().all(|t| t.has_body));
+        // 配不上起跑调用的（sidecar 里没有 toolUseId 的老数据）：字段整个不下发，
+        // 不报错、也不拿 label 去凑 —— 前端据此不把它画成执行链上的智能体卡。
+        let wire: Value =
+            serde_json::from_str(&serde_json::to_string(&out[1]).unwrap()).unwrap();
+        assert!(
+            wire.get("toolUseId").is_none(),
+            "拿不到起跑调用 id 时不该下发这个键"
+        );
+        assert!(wire.get("label").is_some(), "其余字段照常"); 
     }
 
     /// 一天之内也能爆量，光有时间窗兜不住：超过上限时按收尾时刻留最近的，顺序不乱。
@@ -4366,6 +4447,43 @@ mod brief_tests {
         let b = entry_to_brief(&v).expect("应产出一条简报");
         assert_eq!(b.role, "select", "AskUserQuestion 必须解析成 select 角色");
         assert!(b.content.contains("questions"), "select 内容应含 questions");
+    }
+
+    /// 一条 assistant 记录里的多次 `tool_use` 必须拆成多个元素、各带自己的 id。
+    ///
+    /// 旧实现把它们 `format!("{name}: {hint}")` 后 `" | "` 拼成一个字符串 —— 拼完就
+    /// 再也认不出哪一段对应哪一次调用，执行链上那次派子代理的调用便无法与它派出的
+    /// [`SubTask`] 对应（两边唯一的交集是展示名，截断长度还不一样：120 vs 80）。
+    ///
+    /// **本机 67 份会话记录里一条这样的样本都没有**（上游目前一条记录只写一次
+    /// `tool_use`），所以这是个没被触发过的隐患而不是现行 bug —— 正因为触发不到，
+    /// 更要用构造样本把行为钉住，别等上游哪天改了批量下发才发现链全乱了。
+    #[test]
+    fn multiple_tool_uses_in_one_record_stay_separate() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{
+              "type":"assistant",
+              "message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"toolu_A","name":"Read","input":{"file_path":"/a.rs"}},
+                {"type":"tool_use","id":"toolu_B","name":"Bash","input":{"command":"cargo test"}},
+                {"type":"tool_use","id":"toolu_C","name":"Agent","input":{"description":"查一下根因"}}
+              ]},
+              "timestamp":"2026-09-12T17:05:07.934Z"
+            }"#,
+        )
+        .unwrap();
+        let m = entry_to_brief(&v).expect("应产出一条 tool 简报");
+        assert_eq!(m.role, "tool");
+        assert_eq!(m.tools.len(), 3, "三次调用必须是三个元素");
+        let ids: Vec<&str> = m.tools.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["toolu_A", "toolu_B", "toolu_C"], "各带自己的 id");
+        assert_eq!(m.tools[2].hint, "查一下根因");
+        assert!(m.content.is_empty(), "正文在 tools 里，content 不再另存一份");
+        // 纯文本出口（钉钉推送 / MCP 摘要）的能力不能丢
+        assert_eq!(
+            m.text(),
+            "Read: /a.rs | Bash: cargo test | Agent: 查一下根因"
+        );
     }
 
     /// 子会话记录里**每一条**都是 `isSidechain: true`。读父会话时要跳过它们
@@ -5182,17 +5300,24 @@ mod codex_tests {
         assert_eq!(codex_entry_to_brief(&a).unwrap().role, "assistant");
 
         let f = line(serde_json::json!({
-            "type": "function_call", "name": "spawn_agent",
+            "type": "function_call", "name": "spawn_agent", "call_id": "call_7",
             "arguments": "{\"task\":\"x\"}"
         }));
         let m = codex_entry_to_brief(&f).unwrap();
         assert_eq!(m.role, "tool");
-        assert!(m.content.starts_with("spawn_agent"));
+        // 结构化：一次调用一个元素、带自己的 id；纯文本出口走 text()
+        assert_eq!(m.tools.len(), 1);
+        assert_eq!(m.tools[0].id, "call_7");
+        assert_eq!(m.tools[0].name, "spawn_agent");
+        assert!(m.text().starts_with("spawn_agent"));
 
         let o = line(serde_json::json!({
-            "type": "custom_tool_call_output", "output": "done"
+            "type": "custom_tool_call_output", "call_id": "call_7", "output": "done"
         }));
-        assert_eq!(codex_entry_to_brief(&o).unwrap().role, "tool_result");
+        let ob = codex_entry_to_brief(&o).unwrap();
+        assert_eq!(ob.role, "tool_result");
+        // 结果认得回它对应的那次调用
+        assert_eq!(ob.tool_use_id, "call_7");
 
         let r = line(serde_json::json!({ "type": "reasoning", "summary": [] }));
         assert!(codex_entry_to_brief(&r).is_none(), "思考过程不进流");
