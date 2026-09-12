@@ -433,6 +433,30 @@
   }
 }
 
+/* 子会话截断行「展开全部（共 N 条）」/「收起」。
+   几何照参照的 `.viewAll`（32 高 / 14px / muted）：它是这串子会话的最后一行，
+   不是一颗按钮。左内边距跟着子行的 30，与上面那串对齐。 */
+.subMore {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 10px 0 30px;
+  border-radius: var(--radius);
+  color: var(--muted-foreground);
+  font-size: var(--text-base);
+  cursor: pointer;
+
+  &:hover {
+    background: var(--overlay-1);
+    color: var(--foreground);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+}
+
 // 「正在读取子会话…」「该会话没有子会话」这类说明行：不可点、更淡
 .subHint {
   cursor: default;
