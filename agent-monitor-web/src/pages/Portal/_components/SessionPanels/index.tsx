@@ -8,19 +8,25 @@ import {
   WarningFilled,
 } from "@ant-design/icons";
 
-import { PortalMessage } from "@/services/apis/portal";
+import { PortalMessage, SubTask } from "@/services/apis/portal";
 import {
-  BG_LABEL,
-  BgTask,
-  fmtElapsed,
-  isBgFailed,
+  SUB_OUTCOME_LABEL,
+  fmtSubTaskElapsed,
   isEmptySessionState,
+  isSubTaskFailed,
   sessionStateOf,
 } from "../../_utils/sessionState";
 import styles from "./index.module.scss";
 
 interface SessionPanelsProps {
   messages: PortalMessage[];
+  /**
+   * 这条会话名下的子任务（子代理 + 后台命令）。取自 `PortalTaskData.subTasks`。
+   *
+   * 从前是从 `messages` 里那条 `role: "bgtasks"` 伪消息 `JSON.parse` 出来的 ——
+   * 后端已经把那条消息删掉了，改从这里进来。任务清单（todos）仍在 `messages` 里。
+   */
+  subTasks?: SubTask[];
   /** 会话是否正在运行：非运行时清单里的「进行中」降级为「未完成」，
       不再显示会动的进行态（会话都停了就没有正在做的任务）。 */
   running?: boolean;
@@ -72,9 +78,9 @@ const StateCard: React.FC<CardProps> = ({ icon, title, meta, children }) => (
  * `aliveBgTasks`），所以不必再判一次状态 —— 后端给完成条目也带 `summary`
  * （`Agent "X" finished`），那句话和上面的名字是重复的，正好一条都进不来。
  */
-const TaskRow: React.FC<{ task: BgTask; now: number }> = ({ task, now }) => {
-  const failed = isBgFailed(task.status);
-  const elapsed = fmtElapsed(task.startedAt, now);
+const TaskRow: React.FC<{ task: SubTask; now: number }> = ({ task, now }) => {
+  const failed = isSubTaskFailed(task);
+  const elapsed = fmtSubTaskElapsed(task, now);
   const reason = task.summary?.trim();
   return (
     <li className={`${styles.item} ${failed ? styles.failed : ""}`}>
@@ -82,13 +88,13 @@ const TaskRow: React.FC<{ task: BgTask; now: number }> = ({ task, now }) => {
         {failed ? (
           <WarningFilled className={styles.itemIcon} />
         ) : (
-          <span className={`${styles.dot} ${styles[task.status] ?? ""}`} />
+          <span className={`${styles.dot} ${styles[task.outcome] ?? ""}`} />
         )}
         <Tooltip title={task.label}>
           <span className={styles.itemName}>{task.label}</span>
         </Tooltip>
         <span className={styles.itemStatus}>
-          {BG_LABEL[task.status] ?? task.status}
+          {SUB_OUTCOME_LABEL[task.outcome] ?? task.status}
         </span>
         {/* 耗时做成胶囊而不是裸字：与名字同处一行，裸字会连成一片
             （VitaAgent `TaskCard/index.module.scss:376-388` 的 `.cellMeta`） */}
@@ -116,11 +122,11 @@ const TaskRow: React.FC<{ task: BgTask; now: number }> = ({ task, now }) => {
  * 这件最该被看到的事，反倒需要先点一下才看得见。
  */
 const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
-  const { messages, running, className } = props;
+  const { messages, subTasks, running, className } = props;
 
   // 「有哪些东西要展示」只有一处定义（见 sessionStateOf）：右栏要先问同一个问题
   // 才知道该不该给这条会话一个标题，两边各写一遍筛选条件迟早会对不上。
-  const { todos, bgTasks, subAgents } = sessionStateOf(messages);
+  const { todos, bgTasks, subAgents } = sessionStateOf(messages, subTasks);
 
   // 耗时要走字：只在真有后台任务时上表，且 tick 只驱动本组件重渲染。
   const ticking = bgTasks.length > 0 || subAgents.length > 0;
@@ -137,15 +143,26 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
     return null;
   }
 
-  const countMeta = (list: BgTask[]) => {
-    const bad = list.filter((t) => isBgFailed(t.status)).length;
-    const alive = list.length - bad;
+  /**
+   * 一行计数。**三种收场分开数，不许把「被中断」并进「未跑成」** ——
+   * 被父会话连带终止和自己跑砸是两回事，合成一句话就是在冤枉前者
+   * （用户原话：「实际结束了却显示失败」）。
+   */
+  const countMeta = (list: SubTask[]) => {
     const parts: string[] = [];
-    if (alive) {
-      parts.push(`${alive} 个进行中`);
+    const count = (o: SubTask["outcome"]) =>
+      list.filter((t) => t.outcome === o).length;
+    const running_ = count("running");
+    const failed = count("failed");
+    const interrupted = count("interrupted");
+    if (running_) {
+      parts.push(`${running_} 个进行中`);
     }
-    if (bad) {
-      parts.push(`${bad} 个未跑成`);
+    if (failed) {
+      parts.push(`${failed} 个失败`);
+    }
+    if (interrupted) {
+      parts.push(`${interrupted} 个已中断`);
     }
     return parts.join(" · ");
   };

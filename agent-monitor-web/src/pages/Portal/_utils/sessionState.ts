@@ -1,21 +1,29 @@
-import { PortalMessage } from "@/services/apis/portal";
+import { PortalMessage, SubTask, SubTaskOutcome } from "@/services/apis/portal";
 
 /**
- * 会话的「当前状态」快照解析。
+ * 会话的「当前状态」解析。
  *
- * 后端（am-core scanner）把任务清单与后台任务作为两条状态快照消息挂在消息流末尾，
- * 每次只产出最终一份。头部的子会话胶囊与右侧的 SessionPanels 都吃这份数据，
- * 过滤口径必须一致 —— 所以集中在这里，两处共用，别各写各的。
+ * 两份来源，语义不同、别混：
+ *   - **任务清单**（todos）仍是挂在消息流末尾的一条状态快照消息，每轮重算、新的顶掉旧的；
+ *   - **子任务**（异步子代理 + 后台命令）走 `Task.subTasks` 这个结构化字段。
+ *
+ * 子任务从前也是一条伪消息（`role: "bgtasks"`），消费方得自己从对话里摘出来再
+ * `JSON.parse`，还得记着别把它渲染成聊天气泡。**后端已经把那条消息删掉了**，
+ * 这里一并改读字段；旧的解析路径整条拆掉，不保留两套判断。
+ *
+ * 头部的子会话胶囊、右侧的 SessionPanels、侧栏的子会话树都吃这一份，过滤口径必须一致。
  */
 
 /**
  * 「当前状态」快照消息的 role。
  *
- * 这两条与对话消息**语义相反**：对话是只增不减的事件流，它们是每轮重算的当前状态，
+ * 它与对话消息**语义相反**：对话是只增不减的事件流，它是每轮重算的当前状态，
  * 新的一份就该整个顶掉旧的。混进对话流的累积去重里会被当成重复丢掉 —— 见
  * PortalStore.fetchMessages 里的说明。
+ *
+ * 只剩 `todos` 一条：`bgtasks` 已被后端删除，改由 `Task.subTasks` 下发。
  */
-export const STATE_ROLES = ["todos", "bgtasks"];
+export const STATE_ROLES = ["todos"];
 
 /** 这条消息是状态快照而非对话内容 */
 export const isStateSnapshot = (role: string) => STATE_ROLES.includes(role);
@@ -27,63 +35,73 @@ export interface TodoItem {
   status: string;
 }
 
-/** 后台运行的任务（后端 bgtasks 消息的 JSON 结构） */
-export interface BgTask {
-  id: string;
-  label: string;
-  status: string;
-  /** "agent"=异步子代理 / "bg"=后台命令（缺省按后台命令） */
-  kind?: string;
-  /** 起跑时刻（ISO8601）。老客户端上报的数据里可能没有，此时不显示耗时 */
-  startedAt?: string;
-  /**
-   * **为什么是这个收场**：完成通知里 `<summary>` 的英文原文，≤300 字符、单行。
-   *
-   * 退出码、限流原因、卡死时长都嵌在这一句话里（`Agent "X" failed: Agent stalled:
-   * no progress for 600s`）。**原样显示，不解析**：那是上游随时会改的英文文案，
-   * 去里面抠 `exit code (\d+)` 就是拿字面量当接口用，上游改一版就整条哑掉。
-   *
-   * 只有收到完成通知才有值；后端为空时该键整个不出现（不是空串），
-   * 老客户端上报的数据里没有它，退回改前的样子（只说「哪一条、什么收场」）。
-   */
-  summary?: string;
-}
-
 /**
- * **正常跑完**的后台任务：结论已经并回主对话，清单里不必再占位置。
+ * 子任务四种收场的中文说法。
  *
- * 这里曾经把 `failed / killed / stopped` 一起算作「已结束」滤掉 —— 于是一个跑砸的
- * 子代理在界面上是**无声消失**的：它先显示「执行中」，某一刻自己没了，既没有失败提示
- * 也没有痕迹，人只会以为它跑完了。而恰恰是失败/被终止这几种收场需要被看见：
- * 成功的产出会出现在正文里，失败的什么都不会留下。
+ * **`interrupted` 是「已中断」不是「失败」**：它表示这条子会话被父会话退出连带终止，
+ * 子代理本身一点毛病没有。上游对这种情况发的是 `killed`，实测是父会话被中断时
+ * **一次性发给当时所有在跑子代理的统一通知**（同一时刻三条同状态）—— 按上游那个字面量
+ * 配色的结果就是「按了一下 Esc，一排子代理全爆红」。归类由后端按磁盘事实
+ * （子会话记录有没有交回结果）算好，所以这里只看 `outcome`，一个字面量都不匹配。
  */
-export const BG_DONE = ["completed"];
-
-/**
- * **异常收场**的后台任务：跑砸了、被杀了、被停了。
- *
- * 与 `BG_DONE` 分开的原因见上：这几种不能滤掉，要留在清单里并标成失败态。
- * 失败原因走 [`BgTask.summary`]（后端从完成通知的 `<summary>` 里带出来），
- * 所以这几条现在说得出「为什么」，不只是「什么收场」。
- */
-export const BG_FAILED = ["failed", "killed", "stopped"];
-
-/** 这条后台任务是异常收场（跑砸 / 被终止） */
-export const isBgFailed = (status: string) => BG_FAILED.includes(status);
-
-/** 后台任务状态的中文说法 */
-export const BG_LABEL: Record<string, string> = {
+export const SUB_OUTCOME_LABEL: Record<SubTaskOutcome, string> = {
   running: "执行中",
-  pending: "等待中",
-  queued: "等待中",
+  completed: "已完成",
   failed: "失败",
-  killed: "已终止",
-  stopped: "已停止",
+  interrupted: "已中断",
 };
 
 /**
+ * 这条子任务**它自己跑砸了** —— 只有这一种才画成告警红。
+ *
+ * `interrupted` 不算：那是被父会话连带终止的，标红等于冤枉它（用户第一反应是
+ * 「明明正常结束了，为什么显示失败」）。
+ */
+export const isSubTaskFailed = (t: SubTask) => t.outcome === "failed";
+
+/** 这条子任务还在跑 */
+export const isSubTaskRunning = (t: SubTask) => t.outcome === "running";
+
+/** 能点开看正文的子会话：有独立会话记录的异步子代理。后台命令没有正文 */
+export const hasSubTaskBody = (t: SubTask) => t.kind === "agent" && t.hasBody;
+
+/**
+ * **值得展示**的子任务：还在跑的，以及跑砸/被中断的。
+ *
+ * 只有 `completed` 掉出去 —— 正常跑完的结论已经并回主对话，清单里不必再占位置。
+ * 反过来，异常收场的几种**必须留着**：成功的产出会出现在正文里，失败的什么都不会留下，
+ * 滤掉就等于让一个跑砸的子代理在界面上**无声消失**。
+ */
+export const aliveSubTasks = (list?: SubTask[]): SubTask[] =>
+  (list ?? []).filter((t) => t.outcome !== "completed");
+
+/**
+ * 还在跑的子会话（异步子代理）—— 头部胶囊专用。
+ *
+ * 胶囊上写的是「运行中的子会话 · N」，所以比 `aliveSubTasks` 多滤一道收场：
+ * 异常收场的该留在清单里被看见，但不该被数进「还在跑」的条数。
+ */
+export const runningSubAgents = (list?: SubTask[]): SubTask[] =>
+  (list ?? []).filter((t) => t.kind === "agent" && isSubTaskRunning(t));
+
+/** 展示用的子会话（含失败 / 被中断的）—— 清单里要看得见 */
+export const visibleSubAgents = (list?: SubTask[]): SubTask[] =>
+  aliveSubTasks(list).filter((t) => t.kind === "agent");
+
+/** 值得展示的后台命令（子代理之外的那些，含失败 / 被中断的） */
+export const aliveBgCommands = (list?: SubTask[]): SubTask[] =>
+  aliveSubTasks(list).filter((t) => t.kind !== "agent");
+
+/** 一条会话此刻的「当前状态」：未完成的清单条目、活着的后台命令、子代理。 */
+export interface SessionState {
+  todos: TodoItem[];
+  bgTasks: SubTask[];
+  subAgents: SubTask[];
+}
+
+/**
  * 取某个 role 的最后一条并解析成数组。
- * 后端对这两类「状态快照」只产出最终一份，所以这里取到的就是当前状态 ——
+ * 后端对「状态快照」只产出最终一份，所以这里取到的就是当前状态 ——
  * 状态更新表现为原地刷新，而不是往对话流里堆一条新的。
  */
 export function parseLast<T>(messages: PortalMessage[], role: string): T[] {
@@ -101,56 +119,24 @@ export function parseLast<T>(messages: PortalMessage[], role: string): T[] {
 }
 
 /**
- * 值得展示的后台任务：还在跑的、在等的，**以及跑砸/被终止的**。
- * 只有正常跑完的那些掉出去（理由见 `BG_DONE`）。
- */
-export const aliveBgTasks = (messages: PortalMessage[]): BgTask[] =>
-  parseLast<BgTask>(messages, "bgtasks").filter(
-    (t) => !BG_DONE.includes(t.status),
-  );
-
-/**
- * 还在跑的子会话（异步子代理）—— 头部胶囊专用。
- *
- * 胶囊上写的是「运行中的子会话 · N」，所以这里比 `aliveBgTasks` 多滤一道异常收场：
- * 失败的子代理该留在清单里被看见，但不该被数进「还在跑」的条数。
- */
-export const runningSubAgents = (messages: PortalMessage[]): BgTask[] =>
-  aliveBgTasks(messages).filter(
-    (t) => t.kind === "agent" && !isBgFailed(t.status),
-  );
-
-/** 展示用的子会话（含失败/被终止的）—— 清单里要看得见 */
-export const visibleSubAgents = (messages: PortalMessage[]): BgTask[] =>
-  aliveBgTasks(messages).filter((t) => t.kind === "agent");
-
-/** 值得展示的后台命令（子代理之外的那些，含失败/被终止的） */
-export const aliveBgCommands = (messages: PortalMessage[]): BgTask[] =>
-  aliveBgTasks(messages).filter((t) => t.kind !== "agent");
-
-/** 一条会话此刻的「当前状态」：未完成的清单条目、活着的后台命令、子代理。 */
-export interface SessionState {
-  todos: TodoItem[];
-  bgTasks: BgTask[];
-  subAgents: BgTask[];
-}
-
-/**
  * 取一条会话的当前状态。
  *
  * **这一份是唯一定义**：状态卡（`SessionPanels`）自己渲染它，右栏
  * （`SessionStatePane`）还要先问「这条会话有没有东西可展示」才决定要不要给它一个
  * 标题。两处各写一遍筛选条件，改一处漏一处就会出现「右栏列了标题、底下却空着」。
  *
- * 清单只留没做完的：做完的条目没有关注价值。后台任务同理只留没正常跑完的，
- * 跑砸/被终止的**要留着**（理由见 `BG_DONE`）。
+ * 清单只留没做完的：做完的条目没有关注价值。子任务同理只留没正常跑完的
+ * （理由见 `aliveSubTasks`）。
  */
-export const sessionStateOf = (messages: PortalMessage[]): SessionState => ({
+export const sessionStateOf = (
+  messages: PortalMessage[],
+  subTasks?: SubTask[],
+): SessionState => ({
   todos: parseLast<TodoItem>(messages, "todos").filter(
     (t) => t.status !== "completed",
   ),
-  bgTasks: aliveBgCommands(messages),
-  subAgents: visibleSubAgents(messages),
+  bgTasks: aliveBgCommands(subTasks),
+  subAgents: visibleSubAgents(subTasks),
 });
 
 /** 这条会话此刻没有任何可展示的状态 —— 状态卡整块不渲染、右栏不给它标题 */
@@ -182,3 +168,12 @@ export function fmtElapsed(startedAt?: string, now = Date.now()): string {
   const restMin = min % 60;
   return restMin ? `${hour}小时${restMin}分` : `${hour}小时`;
 }
+
+/**
+ * 子任务的耗时：还在跑的走「到现在为止」，已经收场的走「跑了多久」。
+ *
+ * 收场的那些不能再跟着 `now` 走 —— 一条昨天就结束的子代理显示「17小时」是在说
+ * 它跑了 17 小时，而它其实只跑了 40 秒。`endedMs` 为 0 表示还没结束。
+ */
+export const fmtSubTaskElapsed = (t: SubTask, now = Date.now()): string =>
+  fmtElapsed(t.startedAt, t.endedMs > 0 ? t.endedMs : now);

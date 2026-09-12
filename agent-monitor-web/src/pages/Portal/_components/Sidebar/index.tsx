@@ -1,19 +1,23 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 
-import { Badge, Popover, Tooltip } from "antd";
+import { Input } from "@hsu-react/ui";
+import { Badge, Dropdown, Tooltip } from "antd";
 import {
-  CodeOutlined,
-  DownOutlined,
+  ControlOutlined,
+  LaptopOutlined,
+  LogoutOutlined,
+  SafetyOutlined,
   SearchOutlined,
+  SettingOutlined,
   UnorderedListOutlined,
+  UpOutlined,
 } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 import { useNavigate } from "react-router-dom";
 
+import { inNativeShell } from "@/utils/clientAuth";
 import PortalStore from "../../PortalStore";
-import UserMenu from "../UserMenu";
-import DeviceList from "./_components/DeviceList";
-import SessionList from "./_components/SessionList";
+import SessionTree from "./_components/SessionTree";
 import type { PortalUserInfo } from "../../_context/portalUser";
 import { HISTORY_LIST_PATH, type SettingsTab } from "../../_utils/portalNav";
 import styles from "./index.module.scss";
@@ -37,6 +41,9 @@ export const SidebarIcon: React.FC<{ folded?: boolean }> = ({ folded }) => (
   </svg>
 );
 
+/** 搜索框敲完到真正发请求之间的等待。逐字发请求会把历史接口打成打字机 */
+const SEARCH_DEBOUNCE_MS = 300;
+
 interface SidebarProps {
   folded: boolean;
   onToggleFold: () => void;
@@ -58,7 +65,7 @@ interface SidebarProps {
   onLogout: () => void;
 }
 
-/** 前台左侧栏：品牌 ＋ 搜索按钮 ＋ 设备 ＋ 会话 ＋ 底部账户。 */
+/** 前台左侧栏：品牌 ＋ 搜索 ＋ 客户端会话树 ＋ 底部账户。 */
 const Sidebar: React.FC<SidebarProps> = observer((props) => {
   const {
     folded,
@@ -74,10 +81,91 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
     onOpenSearch,
     onLogout,
   } = props;
-  const { pendingCount } = PortalStore;
+  const { pendingCount, keyword, setKeyword } = PortalStore;
   const navigate = useNavigate();
 
   const nickname = user.nickname ?? user.username ?? "";
+
+  /* 输入框里的字与真正生效的关键字分开两份：前者每敲一下就变（不然输入框会卡顿），
+     后者隔 300ms 才跟上（历史列表是要发请求的，逐字发等于把接口打成打字机）。 */
+  const [draft, setDraft] = useState(keyword);
+  useEffect(() => {
+    const timer = window.setTimeout(
+      () => setKeyword(draft),
+      SEARCH_DEBOUNCE_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [draft, setKeyword]);
+
+  /**
+   * 账户菜单的条目。
+   *
+   * 从前是一个自绘的 `Popover` ＋ `.userMenu`（248 宽、自己写行高与分隔线）。
+   * 换成 `Dropdown rootClassName="va-menu"` 之后，圆角 / 行高 / 图标槽 / 分隔线 /
+   * 危险项配色全部由 `styles/antd-overload.scss` 里那份统一几何提供，
+   * 这里只声明「有哪几项」。功能一项没增没减。
+   */
+  const accountMenu = [
+    {
+      key: "who",
+      // 账号那一行本身不是一个动作，点它什么都不该发生
+      disabled: true,
+      label: (
+        <span className={styles.menuWho}>
+          <span className={styles.menuWhoName}>{user.username}</span>
+          <span className={styles.menuWhoRole}>
+            {user.isSuper ? "超级管理员" : "普通用户"}
+          </span>
+        </span>
+      ),
+    },
+    { type: "divider" as const },
+    {
+      key: "settings",
+      icon: <SettingOutlined />,
+      label: "设置",
+      onClick: () => onOpenSettings("account"),
+    },
+    {
+      key: "devices",
+      icon: <LaptopOutlined />,
+      label: (
+        <span className={styles.menuRow}>
+          设备管理
+          {pendingCount ? <Badge count={pendingCount} size="small" /> : null}
+        </span>
+      ),
+      onClick: () => onOpenSettings("devices"),
+    },
+    {
+      key: "security",
+      icon: <SafetyOutlined />,
+      label: "安全防护",
+      onClick: () => onOpenSettings("security"),
+    },
+    // 后台管理只在浏览器里显示：客户端 / 移动端原生壳内隐藏（那里开新标签打不开后管）
+    ...(user.isSuper && !inNativeShell()
+      ? [
+          {
+            key: "admin",
+            icon: <ControlOutlined />,
+            label: "后台管理",
+            onClick: () => {
+              window.open("/admin", "_blank");
+              onUserMenuOpenChange(false);
+            },
+          },
+        ]
+      : []),
+    { type: "divider" as const },
+    {
+      key: "logout",
+      icon: <LogoutOutlined />,
+      label: "退出登录",
+      danger: true,
+      onClick: onLogout,
+    },
+  ];
 
   return (
     <aside
@@ -85,13 +173,11 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
         underTopBar ? styles.underBar : ""
       }`}
     >
-      <div className={styles.siderHeader}>
-        <div className={styles.brand}>
-          <span className={styles.logo}>
-            <CodeOutlined />
-          </span>
-          {!folded && <span className={styles.brandName}>终端任务监控</span>}
-        </div>
+      {/* 顶部一行：字标把两颗按钮顶到右端（`.brandName { margin-right: auto }`）。
+          高 44 / 左右 14 / **两颗之间 gap 2** —— 原来是 space-between，
+          搜索和收起被推到一左一右，中间隔着半条侧栏那么宽。 */}
+      <div className={styles.head}>
+        {!folded && <span className={styles.brandName}>终端任务监控</span>}
         <Tooltip title="搜索（⌘K）" placement="right">
           <span
             className={styles.headBtn}
@@ -111,7 +197,7 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
         </Tooltip>
         <Tooltip title={folded ? "展开侧栏" : "收起侧栏"} placement="right">
           <span
-            className={styles.foldBtn}
+            className={styles.headBtn}
             role="button"
             tabIndex={0}
             aria-label={folded ? "展开侧栏" : "收起侧栏"}
@@ -129,21 +215,34 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
         </Tooltip>
       </div>
 
-      {/* 这里原来是一个「搜索会话 / 项目」的输入框。撤掉了：它只筛得动**当前选中
-          设备**下的那一列，而顶部那颗搜索按钮（⌘K 也是它）开的命令面板搜的是
-          全部设备的全部会话，还能搜到设备与设置项。两个搜索摆在一起，用户会以为
-          它们搜的是同一份东西，实际结果却对不上 —— 只留强的那个。 */}
       {!folded && (
         <>
+          {/* 侧栏筛选框。这里曾经撤掉过一个同样位置的输入框 —— 理由是它只筛得动
+              「当前选中设备」下的那一列，而顶部那颗搜索按钮（⌘K）搜的是全部。
+              两个搜索摆在一起、结果却对不上，用户会以为是同一份东西。
+              现在侧栏列的就是**全部客户端的全部会话**，这个框筛的也是同一份
+              （关键字还会原样传给历史接口），两者不再是两套口径。 */}
+          <div className={styles.searchRow}>
+            <Input
+              className={styles.searchInput}
+              size="small"
+              allowClear
+              value={draft}
+              placeholder="筛选会话 / 项目 / 主机"
+              prefix={<SearchOutlined className={styles.searchIcon} />}
+              onChange={setDraft}
+            />
+          </div>
+
           <div className={styles.siderScroll}>
-            <div className={styles.sectionLabel}>设备</div>
-            <DeviceList localId={localId} />
+            <SessionTree
+              isMobile={isMobile}
+              localId={localId}
+              onSelect={onSelectSession}
+            />
 
-            <div className={styles.sectionLabel}>会话</div>
-            <SessionList isMobile={isMobile} onSelect={onSelectSession} />
-
-            {/* 列表末尾的「查看全部会话」。侧栏按设备/项目分组，只看得到当前
-                选中设备下的那些；跨设备的全量在 /portal/history 那一页。
+            {/* 列表末尾的「查看全部会话」。侧栏按客户端分组、每组翻页；
+                跨设备、纯按最近活动排的全量在 /portal/history 那一页。
                 做成与会话行同高的一行而不是一颗按钮 —— 它就是列表的最后一行。 */}
             <div
               className={styles.viewAll}
@@ -165,61 +264,39 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
       )}
       {folded && <div className={styles.siderScroll} />}
 
-      {/* 底部用户区（Claude 式） */}
-      <Popover
-        open={userMenuOpen}
-        onOpenChange={(o) => {
-          // 移动端：不弹菜单，直接进整屏设置（Claude App 式头像入口）。
-          // 不再顺手收起侧栏——点头像只是开设置，关掉后侧栏仍在。
-          if (o && isMobile) {
-            onOpenSettings("account");
-            return;
-          }
-          onUserMenuOpenChange(o);
-        }}
-        content={
-          <UserMenu
-            user={user}
-            pendingCount={pendingCount}
-            onOpenSettings={onOpenSettings}
-            onLogout={onLogout}
-            onClose={() => onUserMenuOpenChange(false)}
-          />
-        }
-        trigger="click"
-        placement="topLeft"
-        arrow={false}
-        overlayClassName={styles.userMenuOverlay}
-      >
-        {/* Popover 的 click 触发挂在本元素注入的 onClick 上，键盘路径合成一次
-            click 即可复用；不加 role/tabIndex 的话，设置/设备管理/安全防护/
-            后台管理/退出登录全部无法用键盘抵达（它们没有别的入口）。 */}
-        <div
-          className={styles.userRow}
-          title="账户与设置"
-          role="button"
-          tabIndex={0}
-          aria-label="账户与设置"
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              e.currentTarget.click();
+      {/* 底部账户（Claude / VitaAgent 式）：一行 32 高的按钮，点开是 va-menu 下拉 */}
+      <div className={styles.foot}>
+        <Dropdown
+          rootClassName="va-menu"
+          trigger={["click"]}
+          placement="topLeft"
+          open={userMenuOpen}
+          onOpenChange={(o) => {
+            // 移动端：不弹菜单，直接进整屏设置（Claude App 式头像入口）。
+            // 不再顺手收起侧栏——点头像只是开设置，关掉后侧栏仍在。
+            if (o && isMobile) {
+              onOpenSettings("account");
+              return;
             }
+            onUserMenuOpenChange(o);
           }}
+          menu={{ items: accountMenu }}
         >
-          <span className={styles.userAvatar}>{nickname.slice(0, 1) || "U"}</span>
-          {!folded && (
-            <>
-              <div className={styles.userText}>
-                <div className={styles.userName}>{nickname}</div>
-              </div>
-              <Badge count={pendingCount} size="small">
-                <DownOutlined className={styles.userChevron} />
-              </Badge>
-            </>
-          )}
-        </div>
-      </Popover>
+          <button type="button" className={styles.account} title="账户与设置">
+            <span className={styles.accountAvatar}>
+              {nickname.slice(0, 1).toUpperCase() || "U"}
+            </span>
+            {!folded && (
+              <>
+                <span className={styles.accountName}>{nickname}</span>
+                <Badge count={pendingCount} size="small">
+                  <UpOutlined className={styles.accountCaret} />
+                </Badge>
+              </>
+            )}
+          </button>
+        </Dropdown>
+      </div>
     </aside>
   );
 });

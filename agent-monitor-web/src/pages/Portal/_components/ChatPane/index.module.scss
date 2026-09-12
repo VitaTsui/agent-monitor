@@ -1,7 +1,21 @@
 @use "@hsu-react/ui/es/styles/responsive" as r;
 
+/* 一格 = 正文 ＋（可选）本格的右栏，并排一行。
+   这一层才是网格/放大布局眼里的「一格」，所以撑满格子的活由它干。
+   底色取正文同色：右栏卡四周留的那 8px 露底，露的就是它。 */
+.paneRow {
+  display: flex;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--primary-subtle);
+}
+
 .ChatPane {
   display: flex;
+  // 右栏的宽度由它自己的 flex-basis 定死，正文吃掉剩下的全部并且能被压窄
+  flex: 1 1 0%;
   flex-direction: column;
   min-width: 0;
   min-height: 0;

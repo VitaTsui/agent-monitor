@@ -3,16 +3,22 @@ import React, { useEffect, useState } from "react";
 import { Popover } from "antd";
 import { PartitionOutlined } from "@ant-design/icons";
 
-import { PortalMessage } from "@/services/apis/portal";
+import { SubTask } from "@/services/apis/portal";
 import {
-  BG_LABEL,
-  fmtElapsed,
+  SUB_OUTCOME_LABEL,
+  fmtSubTaskElapsed,
   runningSubAgents,
 } from "../../_utils/sessionState";
 import styles from "./index.module.scss";
 
 interface SubAgentChipProps {
-  messages: PortalMessage[];
+  /**
+   * 会话名下的子任务，取自 `PortalTaskData.subTasks`。
+   *
+   * 从前是把整份 `messages` 传进来、再从那条 `role: "bgtasks"` 伪消息里 `JSON.parse`
+   * 出来 —— 后端已经把那条消息删掉了，胶囊也就跟着永远不显示。
+   */
+  subTasks?: SubTask[];
 }
 
 /**
@@ -25,8 +31,8 @@ interface SubAgentChipProps {
  * 因为 headActions 那排按钮已在塌缩临界（低于 FLAT_MIN_W 会整排折成 ⋯），
  * 再插非按钮元素会提前触发折叠。真要挪回图标同行，改 ChatPane 里那一行即可。
  */
-const SubAgentChip: React.FC<SubAgentChipProps> = ({ messages }) => {
-  const agents = runningSubAgents(messages);
+const SubAgentChip: React.FC<SubAgentChipProps> = ({ subTasks }) => {
+  const agents = runningSubAgents(subTasks);
   const count = agents.length;
 
   // 耗时要走字。只在有子会话时起表，且 tick 只驱动这枚胶囊重渲染，
@@ -47,15 +53,15 @@ const SubAgentChip: React.FC<SubAgentChipProps> = ({ messages }) => {
   const list = (
     <div className={styles.list}>
       {agents.map((a) => {
-        const elapsed = fmtElapsed(a.startedAt);
+        const elapsed = fmtSubTaskElapsed(a);
         return (
           <div key={a.id} className={styles.item}>
-            <span className={`${styles.dot} ${styles[a.status] ?? ""}`} />
+            <span className={`${styles.dot} ${styles[a.outcome] ?? ""}`} />
             <span className={styles.name} title={a.label}>
               {a.label}
             </span>
             <span className={styles.status}>
-              {BG_LABEL[a.status] ?? a.status}
+              {SUB_OUTCOME_LABEL[a.outcome] ?? a.status}
             </span>
             {elapsed ? <span className={styles.elapsed}>{elapsed}</span> : null}
           </div>

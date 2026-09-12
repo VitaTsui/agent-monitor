@@ -2,10 +2,8 @@
 // 颜色一律直接写 styles/tokens.scss 的令牌：侧栏面 --card、描边与按下底 --overlay-2、
 // hover 底 --overlay-1。
 //
-// 本文件只管侧栏这个框：品牌头（含搜索/收起两颗）、滚动区、底部账户行、移动端抽屉形态。
-// 设备行与会话行各自成组件（_components/DeviceList、_components/SessionList），
-// 样式跟着组件走 —— 原来这三块连同用户菜单、移动端顶栏一起挤在 Portal 那份
-// 1036 行的巨石里。
+// 本文件只管侧栏这个框：顶部一行（字标 + 搜索 + 收起）、筛选框、滚动区、
+// 底部账户行、移动端抽屉形态。会话树自成组件（_components/SessionTree），样式跟着它走。
 
 // ---------- 左侧栏（Claude 式） ----------
 .Sidebar {
@@ -23,70 +21,86 @@
   border-right: 1px solid var(--border);
   transition: width 0.2s ease, min-width 0.2s ease;
 
+  // 52（参照实测值）。原来 60 —— 收起态一条竖轨只放 32 宽的按钮，
+  // 两侧各留 14 就正好 60？不是：参照是 52，两侧各 10
   &.folded {
-    width: 60px;
-    min-width: 60px;
+    width: 52px;
+    min-width: 52px;
+    align-items: center;
 
-    .siderHeader {
+    .head {
       flex-direction: column;
-      gap: 10px;
+      height: auto;
+      gap: 4px;
+      padding: 10px 0 0;
+    }
+
+    .foot {
+      padding: 0 0 8px;
     }
   }
 
-  .siderHeader {
+  /* 顶部一行：字标 ＋ 搜索 ＋ 收起。高 44、左右 14、**gap 2**。
+     原来是 `justify-content: space-between` —— 字标在最左、两颗按钮被推到最右，
+     但它俩之间也被 space-between 撑开了，中间空出小半条侧栏。
+     参照的做法是让字标 `margin-right: auto` 把两颗顶过去，两颗自己只隔 2px。 */
+  .head {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 14px 14px 8px;
+    gap: 2px;
+    height: 44px;
+    padding: 0 14px;
+  }
 
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
+  /* 字标。参照是 20/500 衬线；这里保留中文站名，压到 15/600 无衬线 ——
+     「终端任务监控」六个字用 20px 衬线会占掉整行，两颗按钮就挤没了 */
+  .brandName {
+    margin-right: auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 20px;
+    color: var(--foreground);
+  }
 
-      .logo {
-        width: 28px;
-        height: 28px;
-        min-width: 28px;
-        border-radius: var(--radius);
-        background: var(--primary);
-        color: var(--primary-foreground);
-        font-size: var(--text-md);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
+  /* 头部那两颗（搜索、收起）：32×32 方按钮、圆角 8、字形 16、次级灰。
+     它们都是**对整个侧栏**的操作 —— 找东西、把它收起来。 */
+  .headBtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius);
+    font-size: var(--text-lg);
+    color: var(--muted-foreground);
+    cursor: pointer;
 
-      .brandName {
-        font-size: var(--text-md);
-        font-weight: 600;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
+    &:hover {
+      background: var(--overlay-1);
+      color: var(--foreground);
     }
 
-    /* 头部右侧那两颗（搜索、收起）：同一档方按钮。
-       它们都是**对整个侧栏**的操作 —— 找东西、把它收起来，摆在与品牌同一行。 */
-    .headBtn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      font-size: var(--text-md);
+    &:focus-visible {
+      outline: 2px solid var(--primary);
+      outline-offset: 2px;
+    }
+  }
+
+  // 侧栏筛选框。左右 14：与上面的顶栏、下面的列表同一条竖线
+  .searchRow {
+    padding: 2px 14px 6px;
+
+    .searchInput {
+      width: 100%;
+    }
+
+    .searchIcon {
       color: var(--muted-foreground);
-      cursor: pointer;
-      padding: 4px;
-      border-radius: var(--radius-sm);
-
-      &:hover {
-        background: var(--overlay-1);
-        color: var(--foreground);
-      }
-    }
-
-    .foldBtn {
-      @extend .headBtn;
     }
   }
 
@@ -96,18 +110,6 @@
     flex: 1;
     overflow-y: auto;
     padding: 0 14px 8px;
-  }
-
-  /* 分组标签：13 / 行高 16 / 常规字重 / 次级灰。
-     原来是 11px ＋ 字重 600 ＋ 额外字距 —— 小两档又重一档，三种手段方向相反，
-     读起来是个被压扁的标签。它只是一行小灰字，不需要靠加粗争地位。 */
-  .sectionLabel {
-    font-size: 13px;
-    font-weight: 400;
-    line-height: 16px;
-    color: var(--muted-foreground);
-    padding: 18px 10px 6px;
-    user-select: none;
   }
 
   /* 列表末尾的「查看全部会话」：与会话行同高(32)、同圆角(8)，
@@ -121,7 +123,7 @@
     padding: 0 10px;
     border-radius: var(--radius);
     color: var(--muted-foreground);
-    font-size: var(--text-md);
+    font-size: var(--text-base);
     cursor: pointer;
 
     &:hover {
@@ -136,80 +138,110 @@
 
     .viewAllIcon {
       flex: none;
-      font-size: var(--text-md);
+      font-size: var(--text-base);
     }
   }
 
-  // 底部用户区
-  /* 40 高、**单行**：原来是「30 的头像 ＋ 上下各 8 的内边距」＝ 50 高，里面还塞了
-     两行字（昵称 ＋ 角色）。侧栏里所有行都是 32，只有它高出 18px 又多一行，
-     钉在底部像块垫脚石。角色（超级管理员 / 普通用户）挪进点开的用户菜单里 ——
-     它是一条一天看一次的信息，不该常驻在最显眼的底栏。 */
-  .userRow {
+  // ---------- 底部账户 ----------
+
+  // 14：与顶栏、列表同一条左轨
+  .foot {
     display: flex;
     align-items: center;
-    gap: 10px;
-    height: 40px;
-    margin: 8px 14px;
-    padding: 0 8px;
+    padding: 0 14px 8px;
+  }
+
+  /* 账号行。参照实测：高 32、gap 8、padding `0 8px 0 4px`、圆角 8、hover 起底。
+     左 4 是倒推出来的 —— 头像 26 比会话行的引导槽宽 6，左内边距就得小一档，
+     名字才落在与会话标题同一条竖线上。
+     **必须显式给 font-size**：<button> 不继承页面字体，UA 样式表把它钉成
+     `400 13.3333px Arial`，那个字号不属于任何令牌档。 */
+  .account {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+    height: 32px;
+    padding: 0 8px 0 4px;
+    border: none;
     border-radius: var(--radius);
+    background: transparent;
+    color: var(--foreground);
+    font-size: var(--text-base);
+    text-align: left;
     cursor: pointer;
-    border-top: none;
 
     &:hover {
       background: var(--overlay-1);
     }
 
-    .userAvatar {
-      width: 26px;
-      height: 26px;
-      min-width: 26px;
-      border-radius: 50%;
-      background: var(--primary);
-      color: var(--primary-foreground);
-      font-size: var(--text-base);
-      font-weight: 600;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .userText {
-      flex: 1;
-      min-width: 0;
-
-      .userName {
-        font-size: var(--text-md);
-        font-weight: 500;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-    }
-
-    .userChevron {
-      font-size: var(--text-xs);
-      color: var(--muted-foreground);
+    &:focus-visible {
+      outline: 2px solid var(--primary);
+      outline-offset: 2px;
     }
   }
 
-  // 键盘可达元素的焦点可见性（role=button 的 span/div）。
-  // 设备行 / 会话行的同款规则跟着各自的组件走（_components/*）。
-  .headBtn:focus-visible {
-    outline: 2px solid var(--primary);
-    outline-offset: 2px;
-    border-radius: var(--radius);
+  .accountAvatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 26px;
+    height: 26px;
+    border-radius: 999px;
+    background: var(--primary);
+    color: var(--primary-foreground);
+    font-size: var(--text-sm);
+    font-weight: 600;
+  }
+
+  .accountName {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: var(--text-base);
+  }
+
+  .accountCaret {
+    flex: none;
+    font-size: var(--text-xs);
+    color: var(--muted-foreground);
   }
 }
 
-// 用户菜单弹层由 Portal 壳 portal 到 body，overlayClassName 需从本模块导出
-.userMenuOverlay {
-  :global(.ant-popover-inner) {
-    padding: 4px;
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--overlay-2);
-    box-shadow: 0 4px 24px color-mix(in srgb, var(--foreground) 12%, transparent);
-  }
+/* 账户菜单里那条「我是谁」。它挂在 `.va-menu` 的菜单项上（几何由那份统一样式给），
+   这里只管这一行内部的两段文字怎么排 */
+.menuWho {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.menuWhoName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--foreground);
+}
+
+// 角色（超级管理员 / 普通用户）：跟在账号后面的一枚小灰字，不换行不占额外高度
+.menuWhoRole {
+  flex: none;
+  font-size: var(--text-sm);
+  color: var(--muted-foreground);
+}
+
+// 带角标的菜单项（设备管理的待信任数）
+.menuRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 @include r.down(md) {
@@ -241,7 +273,7 @@
 
       // 品牌名与搜索按钮顶栏里都已经有一份，让位之后两份会上下摞着同时露出来。
       // 头部整块不渲染：顶栏承担的就是它，之前那 48px 也不再白占。
-      .siderHeader {
+      .head {
         display: none;
       }
     }
@@ -250,18 +282,23 @@
     &.folded {
       width: var(--drawer-w);
       min-width: 0;
+      align-items: stretch;
     }
 
     // 桌面折叠按钮在移动端隐藏（用顶部栏汉堡）
-    .siderHeader .foldBtn {
+    .head .headBtn:last-child {
       display: none;
     }
 
-    // 侧栏底部用户区 → 悬浮圆头像（Claude App 式）
-    .userRow {
+    // 侧栏底部账户区 → 悬浮圆头像（Claude App 式）
+    .foot {
       // 头像离左边远一点(16 + 左安全区)，不贴边
-      margin: 10px 14px calc(10px + env(safe-area-inset-bottom))
+      padding: 10px 14px calc(10px + env(safe-area-inset-bottom))
         calc(16px + env(safe-area-inset-left));
+    }
+
+    .account {
+      flex: none;
       padding: 0;
       width: 46px;
       height: 46px;
@@ -273,7 +310,7 @@
         background: transparent;
       }
 
-      .userAvatar {
+      .accountAvatar {
         width: 46px;
         height: 46px;
         min-width: 46px;
@@ -281,8 +318,8 @@
         box-shadow: 0 4px 14px color-mix(in srgb, var(--primary) 35%, transparent);
       }
 
-      .userText,
-      .userChevron,
+      .accountName,
+      .accountCaret,
       :global(.ant-badge) {
         display: none;
       }
