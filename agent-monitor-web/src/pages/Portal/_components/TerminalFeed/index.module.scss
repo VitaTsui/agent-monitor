@@ -450,25 +450,6 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
     line-height: 18px;
   }
 
-  /* 一行的「量」靠右，与参照的 `.stepMeta` 同一处
-     （`VitaAgent/web/src/pages/chat/_components/MessageList/index.module.scss:458`：
-     `margin-left: auto` ＋ 左留 12）。用在「正在处理…」那一行的耗时上 ——
-     它不是名字的一部分，不跟着名字用间隔点粘在一起。 */
-  .stepMeta {
-    display: flex;
-    flex: none;
-    align-items: center;
-    gap: 6px;
-    margin-left: auto;
-    padding-left: 12px;
-  }
-
-  .stepMetaText {
-    color: var(--muted-foreground);
-    font-size: var(--text-sm);
-    font-variant-numeric: tabular-nums;
-  }
-
   // 状态紧跟名称、用间隔点连起来，不甩到行尾：耗时/状态是这一步的一部分，
   // 推到右边缘之后名称和它之间隔着一整行空白，要来回扫两次才读得到一句话
   .stepStatus {
@@ -609,11 +590,10 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
   }
 }
 
-// 执行中那一行不是独立形态：它就是这条链的最后一行，走的是上面那套
-// `.step` / `.stepIcon` / `.stepStatus`（见组件里的 Working）。原先那颗
-// 脉冲圆点与两种「执行中」记号已删 —— 一屏之内只留一套。
-// 「正在处理…」那四个字也一并删了（`.stepNameLive` 随之退役）：转圈图标
-// ＋ 走字的耗时已经把「在动」说清楚了，链上最后几步写着具体在干什么。
+// 「执行中」在这条链上**没有独立形态**：跑着的那一轮按普通的模型返回渲染，
+// 「还在跑」由链上最后那一步自己的转圈图标说（见组件里的 `runningKey`）。
+// 曾经在流末尾顶着的那行 `⟳ 正在处理… · 5分`、以及更早的脉冲圆点，都已删除 ——
+// 它们不是这一轮产出的任何东西，只是状态记号占着一行。
 
 // 交互式选择卡片（AskUserQuestion 同步）：琥珀色调，暗示「等待输入」。
 //

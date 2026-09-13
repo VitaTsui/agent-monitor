@@ -9,7 +9,6 @@ import { observer } from "mobx-react-lite";
 
 import { PortalMessage, SelectPayload, SubTask } from "@/services/apis/portal";
 import PortalStore from "../../PortalStore";
-import { fmtElapsed } from "../../_utils/sessionState";
 import AgentCard from "../AgentCard";
 import StatusIcon, { CHAIN_ICON } from "../StatusIcon";
 import styles from "./index.module.scss";
@@ -681,62 +680,6 @@ const summarizeChain = (items: ChainItem[]): string => {
   return head ? `${head}，其中 ${bad} 步没跑成` : `${bad} 步没跑成`;
 };
 
-/**
- * 一轮执行中的秒表：**一枚转圈 ＋ 7秒 ＋ 已 3 步**。
- *
- * 「正在处理…」那四个字删掉了。它在这一行是纯冗余：转圈图标已经说了「在动」，
- * 而它上面那条链的最后几步正写着**具体在干什么**（`正在调用工具: Bash, Read`），
- * 顶一句没有主语的「正在处理」只是把同一件事用更空的说法再讲一遍
- * （用户原话：「"正在处理"这个还有留着的必要吗」）。
- * 语义没丢：这一行带 `role="status"` ＋ `aria-label="正在处理"`，
- * 读屏与鼠标悬停照样说得出它是什么。
- *
- * 原先只有「执行中… + 已 N 步」——步数在两次工具调用之间是不动的，一段长
- * 推理里它能十几秒纹丝不动，看着和卡死没有区别。**耗时是「还在跑」与
- * 「卡住了」的唯一区别**，所以它每秒走字。
- *
- * 形态与链上的步骤行统一（`.step`）：它就是这条链的最后一行 ——
- * 照 VitaAgent `MessageList/index.tsx:158-186` 的 `Working`。
- *
- * 「最近动作」不再单列：链上摊着的最后三步已经把它说得更清楚，
- * 再在这里印一遍就是同一句话说两回。
- *
- * 口径与 SessionPanels / SubAgentChip 共用 `fmtElapsed`：起点取这一轮的
- * 起始时间戳（会话记录里的时刻），全项目只有这一套算法。
- */
-const Working: React.FC<{ since?: string }> = ({ since }) => {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  const elapsed = fmtElapsed(since, now);
-
-  return (
-    <div className={styles.step}>
-      <div className={styles.stepHead} role="status" aria-label="正在处理">
-        <StepTile>
-          <StatusIcon kind="running" className={styles.stepIcon} />
-        </StepTile>
-        {/* **这一行必须有名字。** 上一版把「正在处理…」删了，于是它成了一行
-            「一枚转圈 ＋ 一个 14秒」的空壳 —— 信息量为零，用户直接指出来了。
-            参照那一行是 `⟳ 正在处理… · 7s`（`VitaAgent/web/src/pages/chat/
-            _components/MessageList/index.tsx:235`），名字与耗时缺一不可：
-            名字说「还在做」，耗时说「做了多久」—— 后者是「还在跑」与「卡死了」
-            的唯一区别。删名字省不下什么，只是把这一行变成看不懂的噪音。 */}
-        <span className={styles.stepNameLive}>正在处理…</span>
-        {/* 耗时靠右，与参照的 `.stepMeta` 同一处（它是这一行的「量」，
-            不是名字的一部分，所以不跟着名字用间隔点粘在一起） */}
-        {elapsed ? (
-          <span className={styles.stepMeta}>
-            <span className={styles.stepMetaText}>{elapsed}</span>
-          </span>
-        ) : null}
-      </div>
-    </div>
-  );
-};
 
 /**
  * 命令的原始输出。**这一块仍然是终端形态**：等宽字 ＋ 深色终端面。
@@ -1356,11 +1299,6 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
       chain,
       body,
       ckey: `chain|${turn.key}`,
-      // 执行中时报一下已走的步数。「最近动作」不再单列 ——
-      // 链上摊着的最后三步已经把它说得更清楚（见 ExecChain）
-      runSteps: inProgress
-        ? turn.items.filter((m) => m.role === "tool").length
-        : 0,
     };
   });
 
@@ -1508,12 +1446,15 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                       ...body.map(({ m, k }) => renderItem(m, k)),
                     ]
                   : keyed.map(({ m, k }) => renderItem(m, k))}
-                {inProgress ? (
-                  <Working
-                    // 起点取这一轮的起始时刻：有用户消息就用它，否则退回首条产出
-                    since={turn.user?.timestamp ?? turn.items[0]?.timestamp}
-                  />
-                ) : null}
+                {/* **这里不再挂「进行中」那一行。**
+                    跑着的那一轮**按普通的模型返回渲染**：已经产出的内容走与跑完
+                    完全相同的那条路（`renderItem` / `ExecChain`），「还在跑」由链上
+                    最后那一步自己的转圈图标说（`runningKey`，见 `ExecChain`）。
+                    从前这儿顶着一行 `⟳ 正在处理… · 5分4秒`：它不是这一轮产出的任何
+                    东西，只是一枚状态记号占着一行——用户的原话是「当做一般的模型
+                    返回来处理」。会话在不在跑，顶栏的状态胶囊与侧栏都已经在说了。
+                    一轮刚开跑、还什么都没产出时这里因此是空的 —— 那正是「一次还没有
+                    内容的模型返回」该有的样子，不为了填空发明占位内容。 */}
                 {/* 落款：来源代理 + 时间。原先挂在终端卡的标题栏上，卡片撤掉之后
                     这两样仍要有地方待着 —— 时间是回看时定位用的。 */}
                 {keyed.length > 0 ? (
