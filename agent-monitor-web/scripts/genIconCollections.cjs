@@ -17,6 +17,11 @@
  * 为什么不让运行时去 Iconify 公共 API 拉：这是要在内网/离线环境跑的监控工具，
  * 断网就是一片空白图标。注册过的名字 `@iconify/react` 一律走本地、不发请求。
  *
+ * 只扫 `src`，不扫依赖：`@hsu-react/ui` 自己写死的那几十枚图标，从 2.5.11 起
+ * 由库自己 `addCollection` 注册（`@hsu-react/ui/es/components/Icon/collections.generated`）。
+ * 此前这儿还扫过 `node_modules/@hsu-react/ui/es` 来替它兜底 —— 那是消费方在替库擦屁股，
+ * 上游修好之后就该收回来。
+ *
  * 用法：`pnpm gen:icons`（`pnpm start` / `pnpm build` 前会自动跑）
  */
 
@@ -34,23 +39,6 @@ const path = require("path");
  * 注册那头是遍历。
  */
 const PREFIXES = ["ph", "fa-regular", "ep"];
-
-/**
- * 额外扫描的**依赖**目录 —— 只列自身写死了 iconify 图标名的库。
- *
- * 为什么必须扫库：`@iconify/react` 的规矩是「没 `addCollection` 过的名字就去
- * `api.iconify.design` 拉」，它不管这名字是谁写的。`@hsu-react/ui` 在自己组件里
- * 写死了几十枚（Select 的下拉箭头 `ep:arrow-down`、Table 翻页、Copy、Tree 搜索、
- * Chat…… 见 `es/components/**`），这些在本项目 src 里一个字都搜不到，于是**全部
- * 走外网**。这是个要在内网/离线跑的监控工具，那就是一片空白图标 —— 而且不报错。
- *
- * 这一路**不套 PREFIXES 白名单**（库里用了哪些集是库说了算，列不全也会漂），改用
- * 「前缀确实是 @iconify/json 里的一个图标集 **且** 名字在该集里真能解析出来」这条
- * 更硬的判据。要同时满足这两条才会被当成图标名，误收的概率可以忽略。
- *
- * 库升级后图标有增减也不用管：每次 start / build 都重扫一遍，自动跟上。
- */
-const LIB_SCAN_DIRS = ["node_modules/@hsu-react/ui/es"];
 
 const ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(ROOT, "src");
@@ -88,17 +76,14 @@ function scan(dir, onHit) {
 }
 
 /**
- * 收集候选图标名。两路来源，判据不同：
+ * 收集候选图标名：扫 `src`，按 PREFIXES 白名单收，**不验证名字是否存在** ——
+ * 存不存在留给后面报，这样把 `ph:` 图标名拼错了才会有一行「查无此图标」，
+ * 而不是悄悄少一枚。
  *
- * - `src`：按 PREFIXES 白名单收，**不验证名字是否存在** —— 存不存在留给后面报，
- *   这样把 `ph:` 图标名拼错了才会有一行「查无此图标」，而不是悄悄少一枚。
- * - `LIB_SCAN_DIRS`：库里用了哪些集不受我们控制，改用 `isRealIcon` 兜底（前缀是
- *   真图标集 + 名字真能解析），不认识的字面量直接丢掉、不报噪音。
- *
- * 两路都是纯文本匹配、不区分注释与代码：注释里写成 `` `ph:caret-down` `` 的举例也
- * 会被当真收进来。刻意接受 —— 想精确就得上 AST，而多收一枚不过几百字节。
+ * 纯文本匹配、不区分注释与代码：注释里写成 `` `ph:caret-down` `` 的举例也会被当真
+ * 收进来。刻意接受 —— 想精确就得上 AST，而多收一枚不过几百字节。
  */
-function collectCandidates(isRealIcon) {
+function collectCandidates() {
   const byPrefix = new Map();
   const add = (prefix, name) => {
     if (!byPrefix.has(prefix)) byPrefix.set(prefix, new Set());
@@ -109,21 +94,7 @@ function collectCandidates(isRealIcon) {
     if (PREFIXES.includes(prefix)) add(prefix, name);
   });
 
-  let fromLib = 0;
-  for (const rel of LIB_SCAN_DIRS) {
-    const dir = path.join(ROOT, rel);
-    if (!fs.existsSync(dir)) {
-      console.warn(`[gen:icons] 找不到待扫目录 ${rel}，跳过（依赖没装？）`);
-      continue;
-    }
-    scan(dir, (prefix, name) => {
-      if (!isRealIcon(prefix, name)) return;
-      add(prefix, name);
-      fromLib += 1;
-    });
-  }
-
-  return { byPrefix, fromLib };
+  return byPrefix;
 }
 
 /** 把一枚图标（可能是 alias）连同它的 parent 链一起收进结果 */
@@ -176,21 +147,13 @@ function main() {
   }
 
   const loadSource = makeSourceLoader();
-  /** 扫库那一路的判据：前缀是真图标集，且名字在该集里真解析得出来 */
-  const isRealIcon = (prefix, name) => {
-    const source = loadSource(prefix);
-    if (!source) return false;
-    return resolveIcon(source, { icons: {} }, name);
-  };
-
-  const { byPrefix: candidates, fromLib } = collectCandidates(isRealIcon);
+  const candidates = collectCandidates();
 
   const collections = [];
   const missing = [];
   let total = 0;
 
-  // 扫依赖可能带来白名单之外的集合，所以取并集而不是只走 PREFIXES
-  const prefixes = [...new Set([...PREFIXES, ...candidates.keys()])].sort();
+  const prefixes = [...PREFIXES].sort();
 
   for (const prefix of prefixes) {
     const names = candidates.get(prefix);
@@ -228,8 +191,7 @@ function main() {
 
   const size = fs.statSync(OUT_FILE).size;
   console.log(
-    `[gen:icons] 已生成 ${collections.length} 个精简图标集、${total} 枚图标，共 ${size} B（${(size / 1024).toFixed(1)} KB）` +
-      `；其中扫依赖命中 ${fromLib} 处`
+    `[gen:icons] 已生成 ${collections.length} 个精简图标集、${total} 枚图标，共 ${size} B（${(size / 1024).toFixed(1)} KB）`
   );
   if (missing.length) {
     console.log(
