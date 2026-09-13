@@ -1186,7 +1186,14 @@ async fn task_messages(
     if let Some(list) = cached {
         return ok(json!({ "list": list, "pending": false }));
     }
-    match fetch_session_data(&state, &task, am_core::model::SessionWant::Messages, "", limit).await
+    match fetch_session_data(
+        &state,
+        &task,
+        am_core::model::SessionWant::Messages,
+        "",
+        limit,
+    )
+    .await
     {
         Ok(r) => ok(json!({ "list": r.messages, "pending": false })),
         Err(FetchMiss::Offline) => err(500, "任务所属机器已离线"),
@@ -4459,10 +4466,7 @@ mod selecting_tests {
             Some(&msgs(&["select", "assistant"]))
         ));
         // 状态快照追加在末尾，要跳过
-        assert!(task_is_selecting(
-            None,
-            Some(&msgs(&["select", "todos"]))
-        ));
+        assert!(task_is_selecting(None, Some(&msgs(&["select", "todos"]))));
         // 已被应答 → 不算
         assert!(!task_is_selecting(
             None,

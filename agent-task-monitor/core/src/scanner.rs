@@ -711,7 +711,10 @@ impl SessionScanner {
         }
 
         // 状态快照：从会话开头增量重放得来，不受上面 limit 窗口影响。
-        let ts = messages.last().map(|m| m.timestamp.clone()).unwrap_or_default();
+        let ts = messages
+            .last()
+            .map(|m| m.timestamp.clone())
+            .unwrap_or_default();
         let (todos, sub_tasks) = self.replay_state(&path, parent_ended, false)?;
         if let Some(m) = todos {
             messages.push(MessageBrief {
@@ -2739,8 +2742,7 @@ fn retain_recent(items: Vec<SubTask>, now_ms: u64) -> Vec<SubTask> {
     let mut kept: Vec<SubTask> = items
         .into_iter()
         .filter(|t| {
-            t.outcome == SubTaskOutcome::Running
-                || age_of(t).is_none_or(|age| age <= BG_RETAIN_MS)
+            t.outcome == SubTaskOutcome::Running || age_of(t).is_none_or(|age| age <= BG_RETAIN_MS)
         })
         .collect();
     let over = kept
@@ -3937,9 +3939,12 @@ mod subagent_tests {
         let mut t = BgTracker::default();
         t.items.push(agent("a320f1242950d09d0", "running", 0));
         let now = 12 * HOUR;
-        let out = t.reconciled(&writes("a320f1242950d09d0", now - 8 * HOUR), now, &|_| {
-            Some(SubAgentTail::Finished)
-        }, ReconcileOpts::default());
+        let out = t.reconciled(
+            &writes("a320f1242950d09d0", now - 8 * HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "completed", "交回结果了就是跑完了，别再挂着");
         assert_eq!(
             t.items[0].status, "running",
@@ -3961,9 +3966,12 @@ mod subagent_tests {
             Some(&serde_json::json!({"agentId":"a1"})),
             "2026-09-13T00:00:00.000Z",
         );
-        let out = t.reconciled(&writes("a1", now - 60_000), now, &|_| {
-            Some(SubAgentTail::Midflight)
-        }, ReconcileOpts::default());
+        let out = t.reconciled(
+            &writes("a1", now - 60_000),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "running");
         assert_eq!(out[0].summary, None, "翻回执行中就不该再挂着失败原因");
 
@@ -3971,9 +3979,12 @@ mod subagent_tests {
         let mut t = BgTracker::default();
         t.items.push(agent("a2", "running", 0));
         t.items[0].summary = Some("Agent \"x\" failed: 过期的原因".into());
-        let out = t.reconciled(&writes("a2", now - 8 * HOUR), now, &|_| {
-            Some(SubAgentTail::Finished)
-        }, ReconcileOpts::default());
+        let out = t.reconciled(
+            &writes("a2", now - 8 * HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "completed");
         assert_eq!(out[0].summary, None);
     }
@@ -3987,9 +3998,12 @@ mod subagent_tests {
         t.items.push(agent("a1", "running", 0));
         let now = 12 * HOUR;
         // 才静了 1 分钟：可能只是下一个内容块还没落盘
-        let out = t.reconciled(&writes("a1", now - 60_000), now, &|_| {
-            Some(SubAgentTail::Finished)
-        }, ReconcileOpts::default());
+        let out = t.reconciled(
+            &writes("a1", now - 60_000),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "running", "回合内空窗不该判死");
     }
 
@@ -4002,9 +4016,12 @@ mod subagent_tests {
         t.items.push(agent("a1", "running", 0));
         let now = 12 * HOUR;
         // 空窗 30 分钟，远超原先那个 5 分钟阈值
-        let out = t.reconciled(&writes("a1", now - 30 * 60 * 1000), now, &|_| {
-            Some(SubAgentTail::Midflight)
-        }, ReconcileOpts::default());
+        let out = t.reconciled(
+            &writes("a1", now - 30 * 60 * 1000),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "running", "慢工具的合法空窗不该判死");
     }
 
@@ -4014,9 +4031,12 @@ mod subagent_tests {
         let mut t = BgTracker::default();
         t.items.push(agent("a1", "running", 0));
         let now = 12 * HOUR;
-        let out = t.reconciled(&writes("a1", now - 3 * HOUR), now, &|_| {
-            Some(SubAgentTail::Midflight)
-        }, ReconcileOpts::default());
+        let out = t.reconciled(
+            &writes("a1", now - 3 * HOUR),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "stopped");
     }
 
@@ -4032,9 +4052,12 @@ mod subagent_tests {
         let now = 12 * HOUR;
         // 通知在 10 小时前，记录最后写入只比它晚 100 毫秒
         t.items.push(agent("a1", "failed", now - 10 * HOUR));
-        let out = t.reconciled(&writes("a1", now - 10 * HOUR + 100), now, &|_| {
-            Some(SubAgentTail::Midflight)
-        }, ReconcileOpts::default());
+        let out = t.reconciled(
+            &writes("a1", now - 10 * HOUR + 100),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "failed");
         assert_eq!(out[0].outcome, SubTaskOutcome::Failed);
         assert!(out[0].summary.is_some(), "死因不能被兜底逻辑抹掉");
@@ -4048,9 +4071,12 @@ mod subagent_tests {
         let mut t = BgTracker::default();
         let now = 200 * HOUR;
         t.items.push(agent("a1", "killed", now - HOUR));
-        let out = t.reconciled(&writes("a1", now - HOUR), now, &|_| {
-            Some(SubAgentTail::Finished)
-        }, ReconcileOpts::default());
+        let out = t.reconciled(
+            &writes("a1", now - HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "completed");
         assert_eq!(out[0].outcome, SubTaskOutcome::Completed);
     }
@@ -4062,9 +4088,12 @@ mod subagent_tests {
         let mut t = BgTracker::default();
         let now = 12 * HOUR;
         t.items.push(agent("a1", "killed", now - HOUR));
-        let out = t.reconciled(&writes("a1", now - HOUR), now, &|_| {
-            Some(SubAgentTail::Midflight)
-        }, ReconcileOpts::default());
+        let out = t.reconciled(
+            &writes("a1", now - HOUR),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "killed");
         assert_eq!(out[0].outcome, SubTaskOutcome::Interrupted);
     }
@@ -4095,17 +4124,23 @@ mod subagent_tests {
         // 1 小时前交回结果、父记录没写通知 → 纠成 completed，收尾时刻用记录最后写入
         let mut fresh = BgTracker::default();
         fresh.items.push(agent("a1", "running", 0));
-        let out = fresh.reconciled(&writes("a1", now - HOUR), now, &|_| {
-            Some(SubAgentTail::Finished)
-        }, ReconcileOpts::default());
+        let out = fresh.reconciled(
+            &writes("a1", now - HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "completed");
         assert_eq!(out[0].ended_ms, now - HOUR);
         // 209 小时前交回的：补上收尾时刻后当场就过了保留窗口，同一轮即消失
         t.items.push(agent("a1", "running", 0));
         assert!(t
-            .reconciled(&writes("a1", now - 209 * HOUR), now, &|_| Some(
-                SubAgentTail::Finished
-            ), ReconcileOpts::default())
+            .reconciled(
+                &writes("a1", now - 209 * HOUR),
+                now,
+                &|_| Some(SubAgentTail::Finished),
+                ReconcileOpts::default()
+            )
             .is_empty());
     }
 
@@ -4214,18 +4249,21 @@ mod subagent_tests {
             },
         );
         let ids: Vec<&str> = out.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, vec!["known", "missing"], "两条都要在，且不被保留窗口淘汰");
+        assert_eq!(
+            ids,
+            vec!["known", "missing"],
+            "两条都要在，且不被保留窗口淘汰"
+        );
         assert!(out.iter().all(|t| t.outcome == SubTaskOutcome::Completed));
         assert!(out.iter().all(|t| t.has_body));
         // 配不上起跑调用的（sidecar 里没有 toolUseId 的老数据）：字段整个不下发，
         // 不报错、也不拿 label 去凑 —— 前端据此不把它画成执行链上的智能体卡。
-        let wire: Value =
-            serde_json::from_str(&serde_json::to_string(&out[1]).unwrap()).unwrap();
+        let wire: Value = serde_json::from_str(&serde_json::to_string(&out[1]).unwrap()).unwrap();
         assert!(
             wire.get("toolUseId").is_none(),
             "拿不到起跑调用 id 时不该下发这个键"
         );
-        assert!(wire.get("label").is_some(), "其余字段照常"); 
+        assert!(wire.get("label").is_some(), "其余字段照常");
     }
 
     /// 一天之内也能爆量，光有时间窗兜不住：超过上限时按收尾时刻留最近的，顺序不乱。
@@ -4234,8 +4272,11 @@ mod subagent_tests {
         let mut t = BgTracker::default();
         let now = 100 * HOUR;
         for i in 0..(BG_MAX_ITEMS + 10) {
-            t.items
-                .push(agent(&format!("a{i}"), "completed", now - (60 - i as u64) * 1000));
+            t.items.push(agent(
+                &format!("a{i}"),
+                "completed",
+                now - (60 - i as u64) * 1000,
+            ));
         }
         let out = t.reconciled(&HashMap::new(), now, &|_| None, ReconcileOpts::default());
         assert_eq!(out.len(), BG_MAX_ITEMS);
@@ -4323,7 +4364,10 @@ mod subagent_tests {
             ReconcileOpts::default(),
         );
         assert_eq!(second[0].status, "completed", "定案之后不因一次写入翻案");
-        assert_eq!(second[0].ended_ms, ended, "收尾时刻必须稳定，不能每轮换一个");
+        assert_eq!(
+            second[0].ended_ms, ended,
+            "收尾时刻必须稳定，不能每轮换一个"
+        );
         assert_eq!(second[0].runs, 1, "没有新派活，runs 不该动");
     }
 
@@ -4361,9 +4405,12 @@ mod subagent_tests {
         let mut t = BgTracker::default();
         let now = 12 * HOUR;
         t.items.push(agent("a1", "completed", now - 2 * HOUR));
-        let out = t.reconciled(&writes("a1", now - HOUR), now, &|_| {
-            Some(SubAgentTail::Finished)
-        }, ReconcileOpts::default());
+        let out = t.reconciled(
+            &writes("a1", now - HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "completed");
     }
 
@@ -4374,9 +4421,14 @@ mod subagent_tests {
         let run = |idle: u64, tail: SubAgentTail| {
             let mut t = BgTracker::default();
             t.items.push(agent("a1", "running", 0));
-            t.reconciled(&writes("a1", now - idle), now, &|_| Some(tail), ReconcileOpts::default())[0]
-                .status
-                .clone()
+            t.reconciled(
+                &writes("a1", now - idle),
+                now,
+                &|_| Some(tail),
+                ReconcileOpts::default(),
+            )[0]
+            .status
+            .clone()
         };
         // 静置窗口：正好 300s 还不收尾，多 1ms 才收
         assert_eq!(run(SUBAGENT_SETTLE_MS, SubAgentTail::Finished), "running");
@@ -4406,10 +4458,16 @@ mod subagent_tests {
             "2026-09-13T00:00:00.000Z",
         );
         // 这一轮已交回结果且静置够久
-        let out = t.reconciled(&writes("a1", now - HOUR), now, &|_| {
-            Some(SubAgentTail::Finished)
-        }, ReconcileOpts::default());
-        assert_eq!(out[0].status, "completed", "重新派活跑完了就不该还挂着 failed");
+        let out = t.reconciled(
+            &writes("a1", now - HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
+        assert_eq!(
+            out[0].status, "completed",
+            "重新派活跑完了就不该还挂着 failed"
+        );
         assert_eq!(out[0].runs, 2);
         assert_eq!(out[0].tool_use_id, "toolu_RUN2");
     }
@@ -4422,9 +4480,12 @@ mod subagent_tests {
         cmd.kind = "bg".into();
         t.items.push(cmd);
         let now = 12 * HOUR;
-        let out = t.reconciled(&writes("b1", now - 8 * HOUR), now, &|_| {
-            Some(SubAgentTail::Finished)
-        }, ReconcileOpts::default());
+        let out = t.reconciled(
+            &writes("b1", now - 8 * HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "running");
     }
 
@@ -4433,7 +4494,12 @@ mod subagent_tests {
     fn without_subagent_dir_nothing_changes() {
         let mut t = BgTracker::default();
         t.items.push(agent("a1", "running", 0));
-        let out = t.reconciled(&HashMap::new(), 12 * HOUR, &|_| unreachable!(), ReconcileOpts::default());
+        let out = t.reconciled(
+            &HashMap::new(),
+            12 * HOUR,
+            &|_| unreachable!(),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].status, "running");
     }
@@ -4687,7 +4753,10 @@ mod brief_tests {
         let ids: Vec<&str> = m.tools.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, vec!["toolu_A", "toolu_B", "toolu_C"], "各带自己的 id");
         assert_eq!(m.tools[2].hint, "查一下根因");
-        assert!(m.content.is_empty(), "正文在 tools 里，content 不再另存一份");
+        assert!(
+            m.content.is_empty(),
+            "正文在 tools 里，content 不再另存一份"
+        );
         // 纯文本出口（钉钉推送 / MCP 摘要）的能力不能丢
         assert_eq!(
             m.text(),
@@ -6016,7 +6085,10 @@ mod desktop_session_tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].pid, None, "CLI 会话不能被桌面宿主认领");
         assert_eq!(tasks[0].provider_dsr, "Codex");
-        assert!(!tasks[0].desktop, "终端 CLI 的 desktop 必须为假 —— 同机两个客户端靠它分开");
+        assert!(
+            !tasks[0].desktop,
+            "终端 CLI 的 desktop 必须为假 —— 同机两个客户端靠它分开"
+        );
     }
 
     /// 桌面宿主只认自己那个 provider 的桌面会话。
