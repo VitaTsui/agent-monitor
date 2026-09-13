@@ -42,7 +42,11 @@ interface AgentCardProps {
  *
  * **跑中默认展开、跑完默认收起**：跑的时候人要看它到哪一步了；跑完要看的是结论，
  * 而结论已经并回主对话了，过程再摊着只会把它推走一屏。展开态**不持久化**
- * （纯 useState），换一条会话就回到默认。
+ * （纯 useState），换一条会话就回到默认。手动收起过之后又有新的活跑起来时，
+ * 手动态作废、回到默认展开 —— 见下面的 `staleManual`。
+ *
+ * 卡片自身收起来**只收下面那片小卡网格**，卡头（转着的图标 ＋ 走字的耗时）始终在。
+ * 「在跑的东西看得见」由卡头担保，用户手动收起的是明细，不是那个事实。
  */
 const AgentCard: React.FC<AgentCardProps> = ({
   goal,
@@ -51,13 +55,17 @@ const AgentCard: React.FC<AgentCardProps> = ({
   onPick,
 }) => {
   /**
-   * 手动展开态。`undefined` = 还没动过，跟着「在不在跑」走；
-   * 一旦点过就以用户的选择为准，否则跑完的那一刻会把他刚展开的东西合上。
+   * 手动展开态：用户的选择 ＋ **他做这个选择时，这张卡里在跑的是哪几次活**。
+   *
+   * `undefined` = 还没动过，跟着「在不在跑」走；点过之后以用户的选择为准，
+   * 否则跑完的那一刻会把他刚展开的东西合上。
    */
-  const [manual, setManual] = useState<boolean | undefined>();
+  const [manual, setManual] = useState<{ open: boolean; seen: string[] }>();
 
   const running = agents.filter(isSubTaskRunning);
   const isRunning = running.length > 0;
+  /** 此刻在跑的那几**次**活。同一个子代理被重新派一次（`runs`）算新的一次 */
+  const runningKeys = running.map((a) => `${a.id}#${a.runs ?? 1}`);
   /**
    * **有小卡被点开就必然是展开的**，这一条压过手动收起态。
    *
@@ -67,7 +75,18 @@ const AgentCard: React.FC<AgentCardProps> = ({
    * 压住：下面那个头按钮收起时先 `onPick("")` 把小卡松开，`picked` 一空，
    * 展开与否就交还给 `manual`。
    */
-  const expanded = !!picked || (manual ?? isRunning);
+  /**
+   * 手动态**只对用户当时看到的那批活有效**。
+   *
+   * 他收起的是「这几个我不看了」，不是「这张卡以后永远收着」——之后又有活跑起来
+   * （新的子代理翻成 running，或同一个被重新派了一次）是个**新事件**，那时该回到
+   * 「在跑就展开」。判据是结构性的：比对在跑的那几次活，没见过的就算新的；
+   * 原来那些陆续跑完（集合只是缩小）不算，手动收起继续生效。
+   */
+  const staleManual =
+    !!manual && runningKeys.some((k) => !manual.seen.includes(k));
+  const expanded =
+    !!picked || (manual && !staleManual ? manual.open : isRunning);
 
   // 耗时要走字：只在真有子代理跑着时上表，且 tick 只驱动这张卡重渲染
   const [now, setNow] = useState(() => Date.now());
@@ -127,7 +146,8 @@ const AgentCard: React.FC<AgentCardProps> = ({
           if (expanded) {
             onPick("");
           }
-          setManual(!expanded);
+          // 记下「他是在哪几次活跑着的时候做的这个决定」，理由见 staleManual
+          setManual({ open: !expanded, seen: runningKeys });
         }}
       >
         <span className={styles.headTile}>

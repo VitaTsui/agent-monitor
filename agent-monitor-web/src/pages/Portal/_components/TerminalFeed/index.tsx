@@ -9,7 +9,7 @@ import { observer } from "mobx-react-lite";
 
 import { PortalMessage, SelectPayload, SubTask } from "@/services/apis/portal";
 import PortalStore from "../../PortalStore";
-import { fmtElapsed } from "../../_utils/sessionState";
+import { fmtElapsed, isSubTaskRunning } from "../../_utils/sessionState";
 import AgentCard from "../AgentCard";
 import StatusIcon, { CHAIN_ICON } from "../StatusIcon";
 import styles from "./index.module.scss";
@@ -479,6 +479,16 @@ const agentsGoal = (it: ChainAgents) =>
 const isStep = (it: ChainItem) => it.kind === "call" || it.kind === "agents";
 
 /**
+ * 这一格里**还有子代理在跑**。
+ *
+ * 折叠的全部判据都从这一条来：折叠是给「已经结束、可以不看」的内容用的，
+ * 还在跑的东西必须一直看得见。判据是**结构性**的 —— 清单里那个子任务的
+ * `outcome` 是不是 `running`，不看时间戳、不看「最近多少秒有没有动静」。
+ */
+const hasLiveAgent = (it: ChainItem) =>
+  it.kind === "agents" && it.agents.some(isSubTaskRunning);
+
+/**
  * 把一段消息排成执行链。
  *
  * 主会话与子代理**共用这一份**：后端下发的子代理正文与主会话结构完全一致
@@ -872,9 +882,12 @@ const RECENT_STEPS = 3;
  * 一个子代理的链默认摊开多少步。
  *
  * 一个子代理跑一两百步很常见（本机实测单条会话 149 / 132 条子任务）。全渲染出来是
- * 几百个节点，这一屏会明显卡。头 40 步足够看清「它是怎么开的头」，其余收在一颗
- * 「展开全部」后面 —— 分页/虚拟滚动在这儿是杀鸡用牛刀：展开全部是低频动作，
- * 点了才付那份代价。照 VitaAgent `MessageList/index.tsx:443`。
+ * 几百个节点，这一屏会明显卡。40 步足够看清它在干什么，其余收在一颗「展开全部」
+ * 后面 —— 分页/虚拟滚动在这儿是杀鸡用牛刀：展开全部是低频动作，点了才付那份代价。
+ * 数目照 VitaAgent `MessageList/index.tsx:444`。
+ *
+ * **留头还是留尾不一样**（这一条是 VitaAgent 没有的）：跑完的那条留头 40 步，
+ * 跑着的那条留**尾** 40 步 —— 理由见下面那段截断代码。
  */
 const SUB_STEP_CAP = 40;
 
@@ -1103,25 +1116,46 @@ const SubAgentChain: React.FC<{
     { subByToolUse: EMPTY_SUB_MAP, split: { flat: true } },
   );
 
-  // 按「步」截断，不按链项：旁白是围着某一步说的话，跟着它一起留下
-  let steps = 0;
-  let cut = chain.length;
-  if (!all) {
-    for (let i = 0; i < chain.length; i += 1) {
-      if (isStep(chain[i])) {
-        steps += 1;
-        if (steps > SUB_STEP_CAP) {
-          cut = i;
-          break;
-        }
-      }
-    }
-  }
-  const shown = chain.slice(0, cut);
-  const rest = chain.slice(cut).filter(isStep).length;
+  /* 按「步」截断，不按链项：旁白是围着某一步说的话，跟着它一起留下。
+     **留头还是留尾，看它还在不在跑**：
+       跑完了 → 留头 40 步。那条链不会再长，「它是怎么开的头」才是要看的。
+       跑着呢 → **留尾 40 步**，被截掉的是更早的那些。新步骤是从尾巴上长出来的，
+                留头等于把最新进展永久挡在按钮后面 —— 而这条子链每 5 秒刷一次
+                （见 SUB_REFRESH_MS）就是为了看它此刻到哪一步了，两者是一回事。
+     两档都保留「展开全部」，折叠能力没有被删掉。 */
+  const stepAt = chain
+    .map((it, i) => (isStep(it) ? i : -1))
+    .filter((i) => i >= 0);
+  const over = !all && stepAt.length > SUB_STEP_CAP;
+  /** 截掉的那几步在头上（跑着的那条）还是在尾上（跑完的那条） */
+  const cutHead = over && live;
+  const from = cutHead ? stepAt[stepAt.length - SUB_STEP_CAP] : 0;
+  const to = over && !live ? stepAt[SUB_STEP_CAP] : chain.length;
+  const shown = chain.slice(from, to);
+  const rest = over ? stepAt.length - SUB_STEP_CAP : 0;
+
+  /** 「还有 N 步」那一行。跑着的那条摆在**上面**（截掉的是更早的那些） */
+  const more =
+    rest > 0 ? (
+      <div className={styles.step}>
+        <button
+          type="button"
+          className={styles.stepHead}
+          onClick={() => setAll(true)}
+        >
+          <StepTile>
+            <StepGlyph icon={CHAIN_ICON.more} />
+          </StepTile>
+          <span className={styles.stepName}>
+            {cutHead ? `更早还有 ${rest} 步，展开全部` : `还有 ${rest} 步，展开全部`}
+          </span>
+        </button>
+      </div>
+    ) : null;
 
   return (
     <>
+      {cutHead ? more : null}
       <ChainNodes
         items={shown}
         taskId={parentId}
@@ -1131,20 +1165,7 @@ const SubAgentChain: React.FC<{
         toggleExpand={toggleExpand}
         renderNote={renderNote}
       />
-      {rest > 0 ? (
-        <div className={styles.step}>
-          <button
-            type="button"
-            className={styles.stepHead}
-            onClick={() => setAll(true)}
-          >
-            <StepTile>
-              <StepGlyph icon={CHAIN_ICON.more} />
-            </StepTile>
-            <span className={styles.stepName}>还有 {rest} 步，展开全部</span>
-          </button>
-        </div>
-      ) : null}
+      {cutHead ? null : more}
     </>
   );
 });
@@ -1163,6 +1184,16 @@ const noop = () => undefined;
  *            那时人要读的是结论，过程该让位。
  *   跑着呢 → **最近三步摊在外面**、更早的收进摘要行。那会儿用户盯的正是
  *            「现在到哪一步了」，全折起来等于把它在干什么藏了。
+ *
+ * 再压一条，它盖过上面两条：**链里还有子代理在跑，就从它那一格起一律摊在外面**。
+ * 子代理是异步派出去的，父会话写完结论收工时它照样在跑 —— 只按「这一轮跑完没有」
+ * 收链的话，结论一出来那张转着的卡就被埋进摘要行里。折叠是给「已经结束、可以不看」
+ * 的内容用的，在跑的东西必须一直看得见。判据见 `hasLiveAgent`（结构性，不看时间）。
+ *
+ * 与 VitaAgent 的偏离（`MessageList/index.tsx:655-693`）：那边的判据只有一条
+ * 「链外有没有结论」（`bodiless`），编排任务在后台接着跑那段全靠「结论还没落库」
+ * 顺带盖住，结论一落库链照样收起。那条通路上任务卡另有入口，这里没有 ——
+ * 子代理只能从链里看到，所以这条必须自己成立，不能搭结论的便车。
  *
  * 摘要行为空（一次工具都没调）时整条链不成立，调用方直接按正文渲染 ——
  * 否则跑完之后这一轮会渲染成一个空的折叠块，内容凭空消失。
@@ -1206,12 +1237,29 @@ const ExecChain: React.FC<{
     .filter((i) => i >= 0);
   const firstKeep =
     stepAt.length > RECENT_STEPS ? stepAt[stepAt.length - RECENT_STEPS] : 0;
-  const hidden = live && !open ? firstKeep : 0;
-  const shown = open ? items : live ? items.slice(hidden) : [];
-  /** 头一行概括谁：跑的时候是收进去的那些，展开或跑完了是整条链 */
-  const headText = summarizeChain(
-    open || !live ? items : items.slice(0, hidden),
-  );
+
+  /* **还有子代理在跑 → 从它那一格起一律摊在外面。**
+     这一轮跑完（`live` 翻假）就把整条链收成一行，是这一版特意要的行为 ——
+     但它此前只看「这一轮有没有结论」，不看链里有没有东西还在跑：子代理是异步派出去的，
+     父会话写完结论收工时它照样在跑，于是结论一落库整条链收起、那张转着的卡跟着被埋掉
+     （用户原话：「结果发出来了，但是子会话还在执行，现在执行链会被收起」）。
+     判据因此改成**复合**的：有结论就收起**仍然成立**，但只收到「最早那个还在跑的
+     子代理」为止，它和它之后的一切留在外面。跑完的那些照旧收进摘要行。 */
+  const liveAgentAt = items.findIndex(hasLiveAgent);
+  /** 自动摊开的起点（`open` = 用户手动展开，整条都摊开，不走这里） */
+  const autoFrom = live
+    ? liveAgentAt >= 0
+      ? Math.min(firstKeep, liveAgentAt)
+      : firstKeep
+    : liveAgentAt >= 0
+      ? liveAgentAt
+      : items.length; // 跑完了、也没有在跑的子代理 → 整条收起
+  const hidden = open ? 0 : autoFrom;
+  const shown = open ? items : items.slice(hidden);
+  /** 头一行概括谁：收起时是收进去的那些，展开了是整条链 */
+  const headText = summarizeChain(open ? items : items.slice(0, hidden));
+  /** 摘要行下面还留着东西 —— 那两块要拉开距离，理由见下面的 `chainLive` */
+  const someOutside = !open && hidden > 0 && shown.length > 0;
 
   /* 「还在跑的那一步」：跑着的这一轮里，最后一次调用还没有任何输出。
      判据是结构上的（调用与它的输出成对出现），不是拿时间戳猜的 */
@@ -1243,7 +1291,7 @@ const ExecChain: React.FC<{
           贴着排的话看上去就成了「摘要展开后的内容」，正好是反的 */}
       <div
         className={`${styles.chainBody} ${
-          live && headText && !open ? styles.chainLive : ""
+          someOutside && headText ? styles.chainLive : ""
         }`}
       >
         <ChainNodes
