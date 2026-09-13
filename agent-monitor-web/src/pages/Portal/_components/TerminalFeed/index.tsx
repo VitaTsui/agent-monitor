@@ -9,6 +9,7 @@ import { observer } from "mobx-react-lite";
 
 import { PortalMessage, SelectPayload, SubTask } from "@/services/apis/portal";
 import PortalStore from "../../PortalStore";
+import { fmtElapsed } from "../../_utils/sessionState";
 import AgentCard from "../AgentCard";
 import StatusIcon, { CHAIN_ICON } from "../StatusIcon";
 import styles from "./index.module.scss";
@@ -680,6 +681,52 @@ const summarizeChain = (items: ChainItem[]): string => {
   return head ? `${head}，其中 ${bad} 步没跑成` : `${bad} 步没跑成`;
 };
 
+
+/**
+ * **空窗期那一行**：任务刚发下去、这一轮还什么都没落盘时，顶在这儿的
+ * `⟳ 正在处理… · 耗时`。
+ *
+ * **它只在「这一轮一个节点都还没有」时出现**（判据见调用处的 `keyed.length === 0`），
+ * 第一个节点一落盘就立刻消失。这正是 VitaAgent 那行的**原始条件**
+ * （`MessageList/index.tsx:1676-1678` 的注释写明：原来是「且这一轮还没有任何内容」，
+ * 后来才改成无条件）。他们改成无条件是为了**流式**场景下的连续感 —— 我们是轮询
+ * 磁盘、不是流式，那个理由不成立，而「链上已经写着在干什么、底下再顶一句没有主语
+ * 的正在处理」的代价对我们是实打实的（用户为此提过两次）。
+ *
+ * **这个场景下状态词是有信息量的**：它是屏幕上唯一的东西，不存在「占着位置重复
+ * 别人已经说过的话」的问题。没有它，任务发下去之后到第一条记录落盘之间就是一片纯
+ * 空白，用户不知道发没发出去。
+ *
+ * 耗时每秒走字：**「还在跑」与「卡住了」的唯一区别**就是它动不动。
+ * 口径与 SessionPanels / SubAgentChip 共用 `fmtElapsed`，全项目只有这一套算法。
+ */
+const Working: React.FC<{ since?: string }> = ({ since }) => {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const elapsed = fmtElapsed(since, now);
+
+  return (
+    <div className={styles.step}>
+      <div className={styles.stepHead} role="status" aria-label="正在处理">
+        <StepTile>
+          <StatusIcon kind="running" className={styles.stepIcon} />
+        </StepTile>
+        <span className={styles.stepNameLive}>正在处理…</span>
+        {/* 耗时靠右，与参照的 `.stepMeta` 同一处：它是这一行的「量」，
+            不是名字的一部分，所以不跟着名字用间隔点粘在一起 */}
+        {elapsed ? (
+          <span className={styles.stepMeta}>
+            <span className={styles.stepMetaText}>{elapsed}</span>
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+};
 
 /**
  * 命令的原始输出。**这一块仍然是终端形态**：等宽字 ＋ 深色终端面。
@@ -1446,15 +1493,20 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                       ...body.map(({ m, k }) => renderItem(m, k)),
                     ]
                   : keyed.map(({ m, k }) => renderItem(m, k))}
-                {/* **这里不再挂「进行中」那一行。**
-                    跑着的那一轮**按普通的模型返回渲染**：已经产出的内容走与跑完
-                    完全相同的那条路（`renderItem` / `ExecChain`），「还在跑」由链上
-                    最后那一步自己的转圈图标说（`runningKey`，见 `ExecChain`）。
-                    从前这儿顶着一行 `⟳ 正在处理… · 5分4秒`：它不是这一轮产出的任何
-                    东西，只是一枚状态记号占着一行——用户的原话是「当做一般的模型
-                    返回来处理」。会话在不在跑，顶栏的状态胶囊与侧栏都已经在说了。
-                    一轮刚开跑、还什么都没产出时这里因此是空的 —— 那正是「一次还没有
-                    内容的模型返回」该有的样子，不为了填空发明占位内容。 */}
+                {/* **只有空窗期才顶这一行。**
+                    有内容的时候它是冗余噪音：链上最后那一步正写着具体在干什么、
+                    自己的图标也在转，底下再挂一句没有主语的「正在处理」就是同一件事
+                    说两遍（用户为此提过两次）。所以判据是**结构性**的
+                    —— `keyed.length === 0`，即这一轮的 `turn.items` 一条都还没有
+                    （正文、工具调用、旁白、智能体卡全都来自它）。第一个节点一落盘，
+                    这一行立刻消失；不看文本长度、不看时间阈值。
+                    没有它的话，任务发下去到第一条记录落盘之间是一片纯空白。 */}
+                {inProgress && keyed.length === 0 ? (
+                  <Working
+                    // 起点取这一轮的起始时刻：有用户消息就用它，否则退回首条产出
+                    since={turn.user?.timestamp ?? turn.items[0]?.timestamp}
+                  />
+                ) : null}
                 {/* 落款：来源代理 + 时间。原先挂在终端卡的标题栏上，卡片撤掉之后
                     这两样仍要有地方待着 —— 时间是回看时定位用的。 */}
                 {keyed.length > 0 ? (
