@@ -2,15 +2,6 @@ import React, { useEffect, useState } from "react";
 
 import { Icon, Input } from "@hsu-react/ui";
 import { Badge, Dropdown, Tooltip } from "antd";
-import {
-  ControlOutlined,
-  LaptopOutlined,
-  LogoutOutlined,
-  SafetyOutlined,
-  SearchOutlined,
-  SettingOutlined,
-  UnorderedListOutlined,
-} from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 import { useNavigate } from "react-router-dom";
 
@@ -119,13 +110,13 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
     { type: "divider" as const },
     {
       key: "settings",
-      icon: <SettingOutlined />,
+      icon: <Icon icon="ph:gear" />,
       label: "设置",
       onClick: () => onOpenSettings("account"),
     },
     {
       key: "devices",
-      icon: <LaptopOutlined />,
+      icon: <Icon icon="ph:laptop" />,
       label: (
         <span className={styles.menuRow}>
           设备管理
@@ -136,7 +127,7 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
     },
     {
       key: "security",
-      icon: <SafetyOutlined />,
+      icon: <Icon icon="ph:shield-check" />,
       label: "安全防护",
       onClick: () => onOpenSettings("security"),
     },
@@ -145,7 +136,7 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
       ? [
           {
             key: "admin",
-            icon: <ControlOutlined />,
+            icon: <Icon icon="ph:sliders-horizontal" />,
             label: "后台管理",
             onClick: () => {
               window.open("/admin", "_blank");
@@ -157,7 +148,7 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
     { type: "divider" as const },
     {
       key: "logout",
-      icon: <LogoutOutlined />,
+      icon: <Icon icon="ph:sign-out" />,
       label: "退出登录",
       danger: true,
       onClick: onLogout,
@@ -189,7 +180,7 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
               }
             }}
           >
-            <SearchOutlined />
+            <Icon icon="ph:magnifying-glass" />
           </span>
         </Tooltip>
         <Tooltip title={folded ? "展开侧栏" : "收起侧栏"} placement="right">
@@ -234,7 +225,7 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
               allowClear
               value={draft}
               placeholder="筛选会话 / 项目 / 主机"
-              prefix={<SearchOutlined className={styles.searchIcon} />}
+              prefix={<Icon icon="ph:magnifying-glass" className={styles.searchIcon} />}
               onChange={setDraft}
             />
           </div>
@@ -257,7 +248,7 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
                 }
               }}
             >
-              <UnorderedListOutlined className={styles.viewAllIcon} />
+              <Icon icon="ph:list-bullets" className={styles.viewAllIcon} />
               查看全部会话
             </div>
           </div>
