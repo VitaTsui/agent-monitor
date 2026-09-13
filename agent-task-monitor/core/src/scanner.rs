@@ -74,6 +74,17 @@ pub struct SessionSummary {
     /// 对应 tool_use 的 id，不是「文件又写过 ⇒ 大概答完了」那种会误伤的启发式
     /// （见 client::state 回填处的说明）。
     pub select_answered_ms: Option<u64>,
+    /// **这条会话里有没有任何实质内容**：真实用户输入，或助手的回复。
+    ///
+    /// 只在斜杠命令里打过转的会话（`/clear`、`/model`…）两样都没有 —— 那些命令被记成
+    /// `type=user`，正文是 `<command-name>…</command-name>` 信封，[`user_text`] 剥完
+    /// 就什么都不剩。实测本机 73 份会话记录里有 **11 份**是这种空壳，且**全部**
+    /// assistant 记录数为 0、图片附件数为 0。
+    ///
+    /// 判据取「用户输入 **或** 助手回复」而不是只看标题：只发了图片、或只有工具调用的
+    /// 会话标题也可能是空的，那种有内容、不该丢。（本机没有这类样本，所以这道保险是
+    /// 按可能性留的，不是按现象留的。）
+    pub has_content: bool,
 }
 
 /// 一个会话的「当前全貌」：对话消息 + 后台子任务。
@@ -161,6 +172,92 @@ fn history_window_ms() -> u64 {
             .filter(|d| *d > 0)
             .unwrap_or(HISTORY_DAYS_DEFAULT);
         days.saturating_mul(24 * 3600 * 1000)
+    })
+}
+
+/// 同一个会话号只留一条。
+///
+/// [`SessionScanner::scan`] 会走**三个来源**（CLI 根、桌面版本地代理的每个隔离家目录、
+/// Codex），而且每个 `projects` 根下还可以有多个项目目录 —— 没有任何东西保证同一个
+/// 会话号不会在两处同时出现（`~/.claude/projects/<A>/<id>.jsonl` 与
+/// `<B>/<id>.jsonl` 就能撞上）。此前产出侧不去重，重复与否全靠运气，
+/// 而网页那头用 Map 压着才没发作 —— **靠消费方兜着的不算修好**。
+///
+/// 冲突时**留 mtime 大的那份**：同一个会话号在两处，新的那份才是还在写的；
+/// 并列时留先扫到的（扫描顺序 CLI → 桌面版 → Codex，确定）。
+/// 入参已按 mtime 倒序排好，所以只要保留首次出现即可。
+///
+/// 实测本机 73 份会话记录里没有撞号的 —— 这是一道结构性保险，不是在修一个正在发作的
+/// 现象；但它的代价只是一个 HashSet。
+fn dedup_by_session_id(sorted_by_mtime_desc: Vec<SessionSummary>) -> Vec<SessionSummary> {
+    let mut seen = HashSet::new();
+    sorted_by_mtime_desc
+        .into_iter()
+        .filter(|s| seen.insert(s.session_id.clone()))
+        .collect()
+}
+
+/// 环境变量名：把 cwd 落在**系统临时目录**里的会话也一并列出来。
+///
+/// 默认不列（见 [`is_throwaway_cwd`]）。万一真有人把活干在 /tmp 里，设
+/// `AM_KEEP_TEMP_SESSIONS=1` 即可恢复原样。沿用本项目既有的 `AM_*` 方式，
+/// 客户端启动时还会把 `config.txt` 里的同名键补进环境。
+pub const KEEP_TEMP_SESSIONS_ENV: &str = "AM_KEEP_TEMP_SESSIONS";
+
+/// 系统临时目录的根。
+///
+/// 两个来源，都不是我发明的路径：
+/// - [`std::env::temp_dir()`]：各平台由系统/环境给出（Windows 的 `%TEMP%`、
+///   Unix 的 `$TMPDIR`）。macOS 上它是每用户的 `/var/folders/…`。
+/// - Unix 上再加一个 `/tmp`：POSIX 规定的共享临时目录，Rust 标准库自己在
+///   `$TMPDIR` 缺失时也回落到它。macOS 给每个用户单独的 `$TMPDIR`，但很多工具
+///   （包括 Claude Code 自己的 scratchpad）照样写 `/tmp` —— 实测本机 17 条一次性
+///   会话的 cwd 全在 `/private/tmp/claude-501/…` 下，一条都不在 `$TMPDIR` 里。
+///
+/// **不枚举具体的一次性目录名**（`claude-501`、`am-verify-wt`、`worktrees`…）：
+/// 那是拿字面量当判据，换个工具、换台机器就失效。这里判的是「操作系统说这块地方是
+/// 临时的」，与谁在里面建了什么无关。
+///
+/// 每个根同时给出原样与 canonical 两种形态：macOS 上 `/tmp` 是 `/private/tmp` 的
+/// 符号链接，而会话记录里写的是解析后的 `/private/tmp/…`，只比原样会一条都匹配不上。
+fn temp_roots() -> &'static [PathBuf] {
+    static ROOTS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    ROOTS.get_or_init(|| {
+        let mut roots = vec![std::env::temp_dir()];
+        if cfg!(unix) {
+            roots.push(PathBuf::from("/tmp"));
+        }
+        let mut out = Vec::new();
+        for r in roots {
+            if let Ok(c) = r.canonicalize() {
+                if c != r {
+                    out.push(c);
+                }
+            }
+            out.push(r);
+        }
+        out
+    })
+}
+
+/// 这条会话的工作目录是不是**一次性的**（落在系统临时目录里）。
+///
+/// 这类会话本来就不该当项目列出来：实测本机 73 份会话记录里有 **17 份**的 cwd 在
+/// `/private/tmp/claude-501/<项目>/<会话号>/scratchpad` 这类目录下 —— 都是工具自己
+/// 开的草稿地，用完即弃，路径大多已经不存在了。scanner 此前从不校验 cwd，于是它们
+/// 全都以「项目」的身份出现在侧栏里。
+///
+/// 判据只认「系统临时目录前缀」，不认「目录是否还存在」：后者会把插着的外置盘没挂上、
+/// 或仓库临时挪过位置的**真项目**一起丢掉，那比多列几行糟得多。（本机实测两者抓到的
+/// 是同一批 17 条，但失效方式完全不同。）
+fn is_throwaway_cwd(cwd: &str) -> bool {
+    if cwd.is_empty() {
+        return false;
+    }
+    let p = Path::new(cwd);
+    let canon = p.canonicalize().ok();
+    temp_roots().iter().any(|root| {
+        p.starts_with(root) || canon.as_deref().is_some_and(|c| c.starts_with(root))
     })
 }
 
@@ -312,8 +409,12 @@ impl SessionScanner {
         }
         // Codex CLI 会话（~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl）
         self.scan_codex_into(&mut out, now_ms);
+        // 工作目录是一次性草稿地的会话不算项目，默认不列（见 is_throwaway_cwd）
+        if std::env::var(KEEP_TEMP_SESSIONS_ENV).is_err() {
+            out.retain(|s| !is_throwaway_cwd(&s.cwd));
+        }
         out.sort_by_key(|b| std::cmp::Reverse(b.mtime_ms));
-        out
+        dedup_by_session_id(out)
     }
 
     /// 扫一个 `projects` 根：`<root>/<项目目录>/<会话 uuid>.jsonl`。
@@ -543,6 +644,8 @@ impl SessionScanner {
             last_action,
             turn_ended,
             cleared: false,
+            // Codex 会话没有斜杠命令信封那套，能解析出来就是有内容的
+            has_content: true,
             started_at,
             last_active_at: last_active,
             version: None,
@@ -613,6 +716,16 @@ impl SessionScanner {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| summary.prompt.clone()),
         );
+        // **空壳会话不产出**：整份记录里只有斜杠命令信封（/clear、/model…），
+        // 剥完什么都不剩 —— 既没有用户说过的话，也没有助手回过的话。
+        // 这种会话在侧栏里是一串一模一样的空白行（实测本机 73 份里有 11 份）。
+        //
+        // 判据是「用户输入 **或** 助手回复 **或** 任何一处兜出来的提示词」三者全空，
+        // 而不是「标题为空」：标题可能因为只发了图片、只有工具调用而为空，那种有内容。
+        // prompt 已经过 上一轮缓存 → 头部 两级兜底，所以长会话的尾窗里没提示词也不会误伤。
+        if !summary.has_content && summary.prompt.is_empty() {
+            return None;
+        }
         // 会话开始时间以头部第一条为准
         if head.started_at.is_some() {
             summary.started_at = head.started_at.clone();
@@ -1445,6 +1558,8 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
     let mut turn_ended = false;
     // 是否见过 /clear 命令块（尾窗内）。与「无真实 prompt」合起来 → cleared：刚清空、未输入。
     let mut saw_clear = false;
+    // 这条会话里有没有任何实质内容（真实用户输入 / 助手回复），见 SessionSummary::has_content
+    let mut has_content = false;
     // 忠实回放 claude 原生输入队列：(匹配键=原始 content, 展示文本=Some 时才是真实用户
     // 输入)。通知类（task-notification 等）也占位（展示文本 None），这样按位置的「空
     // content 出列」能对上正确的项，最终只把「真实用户输入」拿去展示。
@@ -1529,6 +1644,7 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                     turn_ended = true;
                     last_action = "已中断".into();
                 } else if let Some(text) = user_text(content) {
+                    has_content = true;
                     prompt = text;
                     last_action = "等待助手响应".into();
                     turn_ended = false;
@@ -1586,6 +1702,7 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                 _ => {}
             },
             "assistant" => {
+                has_content = true;
                 // 统计 5h 窗口内 token 用量（input+output+cache_creation）
                 if let Some(u) = v.pointer("/message/usage") {
                     let in_window = v
@@ -1663,6 +1780,7 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         // cleared 会话没有进行中的回合 → 视为回合结束（显示 Idle 而非 Running）
         turn_ended: turn_ended || cleared,
         cleared,
+        has_content,
         started_at,
         last_active_at,
         version,
@@ -4701,6 +4819,140 @@ mod replay_state_tests {
 }
 
 #[cfg(test)]
+mod noise_filter_tests {
+    use super::*;
+
+    fn write_session(dir: &Path, id: &str, lines: &[String]) -> PathBuf {
+        let proj = dir.join("-tmp-p");
+        fs::create_dir_all(&proj).unwrap();
+        let p = proj.join(format!("{id}.jsonl"));
+        fs::write(&p, lines.join("\n") + "\n").unwrap();
+        p
+    }
+
+    fn row(ty: &str, content: Value, cwd: &str) -> String {
+        serde_json::json!({
+            "type": ty, "cwd": cwd, "sessionId": "s", "isSidechain": false,
+            "message": { "role": ty, "content": content },
+            "timestamp": "2026-09-13T00:00:00.000Z"
+        })
+        .to_string()
+    }
+
+    /// **只在斜杠命令里打过转的会话不产出**：`/clear`、`/model` 这些被记成 type=user，
+    /// 正文是 `<command-name>…</command-name>` 信封，剥完什么都不剩。
+    /// 实测本机 105 条里有 11 条是这种空壳，侧栏里就是一串一模一样的空白行。
+    #[test]
+    fn command_only_session_is_not_reported() {
+        let tmp = std::env::temp_dir().join(format!("am-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let home = "/Users/u/proj";
+        let p = write_session(
+            &tmp,
+            "11111111-1111-1111-1111-111111111111",
+            &[
+                row("user", Value::String("<command-name>/clear</command-name>".into()), home),
+                row("user", Value::String("<command-name>/model</command-name>".into()), home),
+            ],
+        );
+        let mut sc = SessionScanner::new(tmp.clone());
+        let meta = fs::metadata(&p).unwrap();
+        assert!(
+            sc.summarize(&p, meta.len(), now_ms()).is_none(),
+            "全是命令信封的空壳不该产出一条会话"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// **别误伤**：没有可解析的用户文本、但助手回过话的会话要保留
+    /// （只发了图片、或只有工具调用时标题就是空的）。判据是「用户输入**或**助手回复」。
+    #[test]
+    fn session_with_assistant_output_is_kept_even_without_user_text() {
+        let tmp = std::env::temp_dir().join(format!("am-img-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let home = "/Users/u/proj";
+        let p = write_session(
+            &tmp,
+            "22222222-2222-2222-2222-222222222222",
+            &[
+                // 只发了一张图片：user_text 取不出文本
+                row(
+                    "user",
+                    serde_json::json!([{ "type": "image", "source": {} }]),
+                    home,
+                ),
+                row(
+                    "assistant",
+                    serde_json::json!([{ "type": "text", "text": "看到了" }]),
+                    home,
+                ),
+            ],
+        );
+        let mut sc = SessionScanner::new(tmp.clone());
+        let meta = fs::metadata(&p).unwrap();
+        assert!(
+            sc.summarize(&p, meta.len(), now_ms()).is_some(),
+            "有助手回复就说明这条会话有内容，不能丢"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// **一次性目录里的会话不算项目**：判据是「操作系统说这块地方是临时的」，
+    /// 不是枚举 `claude-501` / `am-verify-wt` 这类具体名字（那是字面量匹配）。
+    #[test]
+    fn throwaway_cwd_is_recognised_by_system_temp_root() {
+        let scratch = std::env::temp_dir().join("am-scratch/xyz");
+        assert!(is_throwaway_cwd(&scratch.to_string_lossy()));
+        if cfg!(unix) {
+            assert!(is_throwaway_cwd("/tmp/claude-501/whatever/scratchpad"));
+            // 名字里带 tmp 但不在临时根下的真项目不能误伤
+            assert!(!is_throwaway_cwd("/Users/u/tmpproj"));
+            assert!(!is_throwaway_cwd("/Users/u/Desktop/Program/tmp/real"));
+        }
+        assert!(!is_throwaway_cwd(""), "拿不到 cwd 时不做判断");
+    }
+
+    /// 同一个会话号在两个项目目录下各有一份时，产出侧只留一条（留 mtime 大的）。
+    /// 此前不去重，重复与否全靠运气，只是网页那头用 Map 压着才没发作。
+    #[test]
+    fn duplicate_session_ids_collapse_to_one() {
+        let mk = |id: &str, mtime: u64| {
+            let mut s = SessionSummary {
+                provider: "claude".into(),
+                desktop: false,
+                session_id: id.into(),
+                project_key: "k".into(),
+                cwd: "/p".into(),
+                live_cwd: String::new(),
+                shell_cwd: String::new(),
+                title: String::new(),
+                prompt: String::new(),
+                last_action: String::new(),
+                turn_ended: true,
+                cleared: false,
+                has_content: true,
+                started_at: None,
+                last_active_at: None,
+                version: None,
+                git_branch: None,
+                mtime_ms: mtime,
+                created_ms: 0,
+                line_count: 0,
+                used_tokens_5h: 0,
+                queued_inputs: Vec::new(),
+                select_answered_ms: None,
+            };
+            s.title = format!("t{mtime}");
+            s
+        };
+        // 入参按 mtime 倒序（与 scan 里一致）
+        let out = dedup_by_session_id(vec![mk("a", 200), mk("a", 100), mk("b", 50)]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].title, "t200", "同号冲突留 mtime 大的那份");
+    }
+}
+
+#[cfg(test)]
 mod brief_tests {
     use super::*;
 
@@ -4879,6 +5131,7 @@ mod pairing_tests {
             last_action: String::new(),
             turn_ended: true,
             cleared: false,
+            has_content: true,
             started_at: Some(started.into()),
             last_active_at: None,
             version: None,
@@ -5619,6 +5872,7 @@ mod codex_tests {
             last_action: String::new(),
             turn_ended: true,
             cleared: false,
+            has_content: true,
             started_at: None,
             last_active_at: None,
             version: None,
@@ -5951,6 +6205,7 @@ mod desktop_session_tests {
             last_action: String::new(),
             turn_ended: true,
             cleared: false,
+            has_content: true,
             started_at: None,
             last_active_at: None,
             version: None,
