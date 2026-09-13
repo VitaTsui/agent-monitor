@@ -97,9 +97,6 @@ interface SessionTreeProps {
  *   1. 设备是**单选**的，一次只看得到一台机器下的会话；
  *   2. 会话列表把「已结束且两小时没动」的整条滤掉 —— 于是历史会话永远看不到，
  *      看得到的只有正在回答的那几条（用户原话：「只会显示正在回答中的」）；
- *   3. 会话行只有标题和一个状态胶囊，**`lastAction` 一个字都没渲染**，
- *      所以「执行中」三个字之外看不到它到底在干什么。
- *
  * 交互照 VitaAgent 的项目树：**整行点击 = 打开这条会话，只有左边那个图标槽
  * 点击 = 展开/收起**。两个动作各有各的落点，不会互相抢。
  */
@@ -194,20 +191,12 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
     const active = openIds.includes(id);
     const status = t.status ?? "";
     const statusLabel = STATUS_LABEL[status] ?? t.statusDsr ?? "";
-    /**
-     * **执行中的会话第二行显示它此刻在干什么**（`正在调用工具: Bash` 这类）。
-     *
-     * 这条数据后端一直在下发（`PortalTaskData.lastAction`），但全前端一处都没渲染 ——
-     * 于是「执行中」永远只有那三个字。用户为此提了三次。
-     */
-    const lastAction = status === "running" ? (t.lastAction ?? "").trim() : "";
-
     return (
       <div
         key={id}
         className={`${styles.item} ${styles.sessionItem} ${
           active ? styles.itemActive : ""
-        } ${lastAction ? styles.itemTall : ""}`}
+        }`}
         role="button"
         tabIndex={0}
         aria-current={active}
@@ -230,23 +219,21 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
           <StatusIcon kind={statusOfSession(status)} />
         </span>
 
-        <div className={styles.sessBody}>
-          <div className={styles.sessRow}>
-            <ScrollText
-              className={styles.itemTitle}
-              active={active}
-              plain={sessionTitle(t, "新会话")}
-              text={sessionTitle(t, "新会话")}
-            />
-          </div>
-          {/* 正在干什么。单行截断 —— 它是一眼扫过去的补充信息，
-              不该把一行会话撑成三行 */}
-          {lastAction ? (
-            <div className={styles.sessAction} title={lastAction}>
-              {lastAction}
-            </div>
-          ) : null}
-        </div>
+        {/* 只剩标题一行。**第二行那个 `lastAction`（`正在调用工具: Bash…`）撤掉了** ——
+            它是「侧栏看不出在执行什么」那一版的补丁；现在右缘的徽章已经全清、层级
+            也收成三级，侧栏回答的是「我在哪个项目上开着哪几个终端」，而「此刻在干
+            什么」执行链上写得更清楚、还带着上下文。一条信息不摆两处。
+            `PortalTaskData.lastAction` 这个字段没动，后端照常产出，只是侧栏不读它。
+
+            外面那两层 `.sessBody` / `.sessRow` 也一并去掉：它们当初是为「标题 ＋ 第二行」
+            与「标题 ＋ 状态胶囊」这两种并排才存在的，现在里面只剩一个标题，
+            留着就是两层什么都不做的盒子（`.itemTitle` 自己带 flex:1 / min-width:0）。 */}
+        <ScrollText
+          className={styles.itemTitle}
+          active={active}
+          plain={sessionTitle(t, "新会话")}
+          text={sessionTitle(t, "新会话")}
+        />
 
         {/* 移动端窄屏不支持拆分并排，去掉拆分按钮，只单会话查看 */}
         {!isMobile && (
