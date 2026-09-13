@@ -127,18 +127,6 @@
   opacity: 1;
 }
 
-// 这台客户端此刻有几条在执行。收起时这是唯一还看得见的动静
-.groupRunning {
-  flex: none;
-  padding: 0 6px;
-  border-radius: var(--radius-full);
-  background: color-mix(in srgb, var(--primary) 12%, transparent);
-  color: var(--primary);
-  font-size: var(--text-xs);
-  line-height: 16px;
-  white-space: nowrap;
-}
-
 .groupBody {
   padding-bottom: 2px;
 }
@@ -349,21 +337,6 @@
   color: var(--muted-foreground);
 }
 
-/* 这个项目下开着几个终端。收起时这是唯一还看得见的动静 —— 与客户端组标题右侧
-   那枚「N 执行中」同一档（11px / 次级色 / 淡底胶囊）。 */
-.projCount {
-  flex: none;
-  min-width: 18px;
-  padding: 0 5px;
-  border-radius: var(--radius-full);
-  background: var(--overlay-1);
-  color: var(--muted-foreground);
-  font-size: var(--text-xs);
-  line-height: 17px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-
 /**
  * 项目展开后的那一片。**多的那一级缩进在这里下发**，底下的会话行、子代理行、
  * 列表末尾行、以及会话那条导引线全都跟着挪，不必各自再加一遍。
@@ -408,42 +381,11 @@
   gap: 8px;
 }
 
-/**
- * 会话状态图标的配色。与 VitaAgent 的任务状态同一套
- * （`TaskCard/index.module.scss:109-119`）：**只有「在跑」和「成了」给颜色**，
- * 等待与暂停都是中性 —— 它们不是异常，用告警色（上一版的 warning / destructive）
- * 等于天天在报警。
- *
- * 「执行中」走主色（墨黑 / 暗色下近白）而不是绿：绿留给「成功」。
- * 全项目一个口径：SessionPanels、TerminalFeed、AgentCard 同此。
- */
-.statusIcon {
-  &.running {
-    color: var(--primary);
-  }
+/* 状态图标的配色与转圈**不在这儿** —— 四处共用 `_components/StatusIcon`，
+   那一份自带颜色与动画。这里只给尺寸（`.leadSlot` 的 font-size: 12px）。
+   从前这两块（`.statusIcon` / `.subIcon`）各配一遍色，是「同一个执行中长出好几个
+   样子」的来源之一。 */
 
-  &.finished {
-    color: var(--success);
-  }
-
-  // idle / paused 走槽本身的 --muted-foreground，不另外配色
-}
-
-/* 号位徽标：与钉钉「#N」是同一个编号。人在手机上看网页、用钉钉下发，
-   这个号是两端唯一的对照物，所以放在最显眼的行首（状态点之后）。 */
-.sessSlot {
-  flex: none;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--primary) 12%, transparent);
-  color: var(--primary);
-  font-family: "SF Mono", Menlo, Consolas, monospace;
-  font-size: 11.5px;
-  line-height: 18px;
-  text-align: center;
-}
 
 /**
  * 「正在干什么」那一行（lastAction）。
@@ -526,26 +468,6 @@
   padding-left: calc(30px + var(--caret-col) + var(--level-indent));
 }
 
-/**
- * 子代理的收场配色。**只有 `failed` 走告警红** —— `interrupted` 是「被父会话退出
- * 连带终止」，子代理本身一点毛病没有，标红就是冤枉它（用户原话：「实际结束了却
- * 显示失败」）。与 `AgentCard` 的小卡同一口径。
- */
-.subIcon {
-  &.running {
-    color: var(--primary);
-  }
-
-  &.completed {
-    color: var(--success);
-  }
-
-  &.failed {
-    color: var(--destructive);
-  }
-
-  // interrupted 走槽本身的 --muted-foreground：它是中性的收场，不是失败
-}
 
 /* 「定位不到」：点过但正文里没有它那一步。走 warning 而不是 destructive ——
    这不是出错，是**当前能看到的范围里没有**，往上翻历史把正文补齐就可能找得到。 */
@@ -553,15 +475,6 @@
   flex: none;
   color: var(--warning);
   font-size: var(--text-xs);
-  white-space: nowrap;
-}
-
-// 子代理的耗时。裸字会和名字连成一片，所以自成一列、右端对齐、等宽数字
-.subMeta {
-  flex: none;
-  color: var(--muted-foreground);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 

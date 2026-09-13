@@ -4,32 +4,23 @@ import { Tooltip } from "antd";
 import {
   CaretDownOutlined,
   CaretRightOutlined,
-  CheckCircleFilled,
-  ClockCircleOutlined,
-  CloseCircleFilled,
   DownOutlined,
   FolderOpenOutlined,
   FolderOutlined,
   LaptopOutlined,
-  LoadingOutlined,
-  MinusCircleOutlined,
-  PauseCircleFilled,
   SplitCellsOutlined,
 } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
-import {
-  PortalTaskData,
-  SubTask,
-  SubTaskOutcome,
-} from "@/services/apis/portal";
+import { PortalTaskData, SubTask } from "@/services/apis/portal";
 import PortalStore from "../../../../PortalStore";
-import {
-  SUB_OUTCOME_LABEL,
-  fmtSubTaskElapsed,
-} from "../../../../_utils/sessionState";
+import { SUB_OUTCOME_LABEL } from "../../../../_utils/sessionState";
 import { sessionTitle } from "../../../../_utils/sessionNote";
 import ScrollText from "../../../ScrollText";
+import StatusIcon, {
+  statusOfOutcome,
+  statusOfSession,
+} from "../../../StatusIcon";
 import styles from "./index.module.scss";
 
 const STATUS_LABEL: Record<string, string> = {
@@ -37,27 +28,6 @@ const STATUS_LABEL: Record<string, string> = {
   idle: "等待输入",
   paused: "已暂停",
   finished: "已结束",
-};
-
-/**
- * 会话状态的图标，与 VitaAgent 的任务状态是**同一套语言**
- * （`web/src/pages/chat/_components/TaskCard/index.tsx:80-86`）：
- * 运行中是转圈、等待是圈、终态是实心。
- *
- *   running  转圈（antd 自带 1s linear）＋ 主色  ← 对 `ph:circle-notch`
- *   idle     时钟圈、中性                        ← 对 `ph:circle-dashed`（等着人接话）
- *   paused   暂停圈、中性                        ← 对 `ph:minus-circle`（被按停，不是错）
- *   finished 实心勾、success                     ← 对 `ph:check-circle-fill`
- *
- * 原先这里是一枚 7×7 的彩色圆点，四态只靠颜色分（暂停还借了告警红 —— 按停不是
- * 出错）。执行链与智能体卡早就是这套字形图标了，侧栏再留一套色点，同一件事
- * 在一屏里就有两种画法。
- */
-const STATUS_ICON: Record<string, React.ReactNode> = {
-  running: <LoadingOutlined />,
-  idle: <ClockCircleOutlined />,
-  paused: <PauseCircleFilled />,
-  finished: <CheckCircleFilled />,
 };
 
 /**
@@ -73,13 +43,15 @@ const SUB_FAIL_TEXT: Record<string, string> = {
   network: "读取子代理清单失败，请检查网络",
 };
 
-/** 子代理的收场图标。与 `AgentCard` 的 `OUTCOME_ICON` 同一份字形，不另起一套 */
-const OUTCOME_ICON: Record<SubTaskOutcome, React.ReactNode> = {
-  running: <LoadingOutlined />,
-  completed: <CheckCircleFilled />,
-  failed: <CloseCircleFilled />,
-  interrupted: <MinusCircleOutlined />,
-};
+/*
+ * 状态图标**不在这儿定义**。四处（侧栏会话行 / 侧栏子代理行 / 执行链 / 智能体卡）
+ * 共用 `_components/StatusIcon`：那一份是 Phosphor 本尊（`ph:circle-notch` 等），
+ * 颜色与转圈由它自带，调用方只负责给尺寸（写在槽的 `font-size` 上）。
+ *
+ * 从前这里自带一份 antd 映射（`LoadingOutlined` / `CheckCircleFilled` …）——
+ * 尺寸颜色对齐过三轮，形状始终对不上，两套图标集的字形本来就不同；一屏里同时
+ * 出现 antd 的细弧线和 Phosphor 的缺口圆，一眼看得出是两套。整份删掉，不留并存。
+ */
 
 /**
  * 收起了的客户端分组。**记「收起」而不是「展开」**，默认值就是全部展开 ——
@@ -237,22 +209,6 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /**
-   * 子代理耗时要走字（「还在跑」与「卡死了」的唯一区别就是它在不在动）。
-   * **只在真有子代理在跑时上表**，否则整棵树每秒白重渲染一次。
-   */
-  const ticking = expandedSessions.some((id) =>
-    subTasksOf(id).some((t) => t.outcome === "running"),
-  );
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!ticking) {
-      return;
-    }
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [ticking]);
-
   const toggleClient = (key: string) =>
     setCollapsedClients((prev) => {
       const next = prev.includes(key)
@@ -330,7 +286,6 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
        不弹飘过去的全局提示（得让人回头找刚点的是哪条），也不装作没事发生。 */
     const missed = PortalStore.focusMissId === st.id;
     const label = SUB_OUTCOME_LABEL[st.outcome] ?? st.status;
-    const elapsed = fmtSubTaskElapsed(st, now);
     const hint = !locatable
       ? "这个子代理没有留下起跑记录（tool_use_id），在执行链上定位不到它"
       : missed
@@ -365,21 +320,14 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
         {/* 收场**只看 outcome**，一个上游字面量都不匹配：`killed` 是父会话被中断时
             一次性发给所有在跑子代理的统一通知，按它配色就会「按一下 Esc 一排全爆红」。
             `interrupted` 因此走中性的减号圈，不是失败的叉。 */}
-        <span
-          className={`${styles.leadSlot} ${styles.subIcon} ${
-            styles[st.outcome] ?? ""
-          }`}
-          aria-label={label}
-        >
-          {OUTCOME_ICON[st.outcome]}
+        <span className={styles.leadSlot} aria-label={label}>
+          <StatusIcon kind={statusOfOutcome(st.outcome)} />
         </span>
         <span className={styles.itemTitle}>{st.label}</span>
-        {/* 定位失败就把话说在这儿，替掉耗时那一格（那一眼要的是「为什么没反应」） */}
-        {missed ? (
-          <span className={styles.subMiss}>定位不到</span>
-        ) : elapsed ? (
-          <span className={styles.subMeta}>{elapsed}</span>
-        ) : null}
+        {/* 「定位不到」留着：它回答的是「我刚点了为什么没反应」，不是装饰。
+            耗时那一格去掉了 —— 侧栏右缘那一列数字是噪音，要看跑了多久去执行链上
+            的智能体卡（那儿每张小卡都写着），参照的侧栏行本来也只有图标 ＋ 标题。 */}
+        {missed ? <span className={styles.subMiss}>定位不到</span> : null}
       </div>
     );
   };
@@ -522,12 +470,10 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
             <span className={styles.caret} aria-hidden>
               {expandable ? caretIcon : null}
             </span>
-            <span
-              className={`${styles.leadSlot} ${styles.statusIcon} ${
-                styles[status] ?? ""
-              }`}
-            >
-              <span className={styles.leadRest}>{STATUS_ICON[status]}</span>
+            <span className={styles.leadSlot}>
+              <span className={styles.leadRest}>
+                <StatusIcon kind={statusOfSession(status)} />
+              </span>
               {/* 悬停时顶替状态图标的那枚箭头。只有能展开的行才有 */}
               {expandable ? (
                 <span className={styles.leadHover} aria-hidden>
@@ -545,20 +491,6 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                 plain={sessionTitle(t, "新会话")}
                 text={sessionTitle(t, "新会话")}
               />
-              {/* 号位：与钉钉「#N」同一个编号，在手机上照着这个号下发。
-                  **放在标题行的末尾，不放在标题前面** —— 它从前插在图标槽与标题
-                  之间，把会话行的文字列往右推了 26px（徽标 18 ＋ gap 8），比子行
-                  30px 缩进带来的 20px 还多。于是「父的字比子的字更靠右」，一列扫
-                  下去父子完全分不出层级（用户原话：「子会话，为什么是都堆在和主
-                  会话同一层级」）。而且这 26px 只有**带号位的会话**才有 ——
-                  同一棵树里，有号位的看着是平的、没号位的又是缩进的。
-                  现在文字列上只剩 `[缩进][图标槽 20][标题]`，每一行都一样，
-                  父子差就恒等于那 20px 的缩进。 */}
-              {t.slot != null && (
-                <Tooltip title={`钉钉里发「#${t.slot} 内容」即下发到这个终端`}>
-                  <span className={styles.sessSlot}>{t.slot}</span>
-                </Tooltip>
-              )}
             </div>
             {/* 正在干什么。单行截断 —— 它是一眼扫过去的补充信息，
                 不该把一行会话撑成三行 */}
@@ -590,7 +522,9 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                 className={`${styles.item} ${styles.subItem} ${styles.subHint}`}
               >
                 <span className={styles.leadSlot}>
-                  <LoadingOutlined />
+                  {/* 读取中那一枚也走同一副字形。`plain` = 不要它自带的主色，
+                      跟着这行说明文字的次级色走 */}
+                  <StatusIcon kind="running" plain />
                 </span>
                 <span className={styles.itemTitle}>正在读取子代理…</span>
               </div>
@@ -763,8 +697,6 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
             </span>
           </span>
           <span className={styles.itemTitle}>{proj.title}</span>
-          {/* 这个项目下开着几个终端。收起时这是唯一还看得见的动静 */}
-          <span className={styles.projCount}>{proj.items.length}</span>
         </div>
         {open ? (
           <div className={styles.projectBody}>
@@ -800,12 +732,6 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                   }`}
                 />
               </button>
-              {/* 这台客户端此刻有几条在跑。收起时这是唯一还看得见的动静 */}
-              {sec.running > 0 ? (
-                <span className={styles.groupRunning}>
-                  {sec.running} 执行中
-                </span>
-              ) : null}
             </div>
 
             {!collapsed ? (
@@ -826,7 +752,7 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                 {/* 还没拉回历史时说一声，别让人以为这台机器只有这几条 */}
                 {sec.loading && !sec.buckets.length && !sec.projects.length ? (
                   <div className={styles.groupHint}>
-                    <LoadingOutlined /> 正在读取历史会话…
+                    <StatusIcon kind="running" plain /> 正在读取历史会话…
                   </div>
                 ) : null}
                 {!sec.loading && !sec.buckets.length && !sec.projects.length ? (
@@ -859,7 +785,7 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                   >
                     {sec.loading ? (
                       <>
-                        <LoadingOutlined /> 加载中…
+                        <StatusIcon kind="running" plain /> 加载中…
                       </>
                     ) : (
                       `加载更早的会话（共 ${sec.total} 条）`
