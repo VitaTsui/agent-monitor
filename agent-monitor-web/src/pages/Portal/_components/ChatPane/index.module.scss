@@ -19,7 +19,14 @@
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  background: var(--primary-subtle);
+  /* **执行链的地色由画这块底的人说了算。**
+     链上每个节点左边那枚图标槽要拿不透明底把身后那根贯穿的竖线遮断
+     （见 `TerminalFeed` 的 `.stepTile`），所以槽底必须与**它压着的那块底**
+     同色 —— 不是某个固定的语义色。从前槽底写死成 `--card`（白），而这块底是
+     `--primary-subtle`（浅灰），于是一列白方块贴在灰底上。
+     声明与 `background` 挨着写、共用同一个令牌，两者不可能再各走各的。 */
+  --chain-surface: var(--primary-subtle);
+  background: var(--chain-surface);
   overflow: hidden;
 
   // 紧凑只读卡片（放大布局右侧那一列）：整卡可点，用来与主区对调。

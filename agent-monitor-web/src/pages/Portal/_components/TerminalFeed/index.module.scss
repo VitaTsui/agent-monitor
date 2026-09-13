@@ -372,9 +372,14 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
   }
 
   /* 图标槽固定占一列 18px，让所有步骤的文字起点对齐 —— 竖线也按这一列的中线画。
-     **底色不透明**：靠它把身后那根贯穿的竖线遮断（见 `.step::before`）。
-     取这一屏的地色，不是灰底 —— 链就落在对话区的底上，画一片灰方块反而多出
-     一列色块。
+
+     **底色不透明，且必须与它身后那块底同色。** 槽的职责只有一个：把贯穿整条链的
+     那根竖线在图标处遮断（见 `.step::before`）。所以它取的是 `--chain-surface`
+     —— 由**画那块底的容器**自己声明（主区是 `ChatPane` 的 `--primary-subtle`，
+     智能体卡内是 `AgentCard` 的 `--muted`），不是某个固定的语义色。
+     从前这里写死 `--card`（白），而两种容器的底都是浅灰，于是一列白方块贴在
+     灰底上。**故意不给兜底值**：将来多一种容器却忘了声明时，槽会变透明、竖线
+     从图标中间穿过去，一眼就看得出漏了；给个兜底反而把「遮错了颜色」藏起来。
 
      **色块与字形必须分两层**（与 `AgentCard` 的 `.headTile` / `.headIcon` 同一个
      理由）：执行中那枚是 antd 的 `LoadingOutlined`，它的转圈动画
@@ -391,7 +396,7 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
     width: $tile;
     height: $tile;
     border-radius: var(--radius-xs);
-    background: var(--card);
+    background: var(--chain-surface);
     overflow: hidden;
   }
 
