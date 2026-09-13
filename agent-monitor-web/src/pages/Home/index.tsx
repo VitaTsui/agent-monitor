@@ -63,7 +63,7 @@ const STEPS = [
 /** 客户端安装包直链（hub /downloads 托管；开发经 /api 代理）。
  * 文件名统一英文 + 版本号（AgentMonitor-x.y.z-setup.exe）；版本号从
  * /monitor/version 动态获取，取不到时回退无版本的稳定别名。 */
-const DL_BASE = `${process.env.API_BASE ?? ""}/downloads`;
+const DL_BASE = `${import.meta.env.API_BASE}/downloads`;
 
 const Home: React.FC = () => {
   const navigate = useNavigate();

@@ -3,10 +3,9 @@
  * 不一致说明本地是缓存的旧页（WKWebView 壳内常见）→ 带缓存戳强刷。
  * 启动即查一次；回到前台（visibilitychange）再查，兜住长驻壳。
  */
-// prod 构建由 vite.config.ts 的 define 注入 process.env.BUILD_ID；dev 构建没有 `process`，
-// 直接引用会在浏览器里抛 `process is not defined` 崩掉整个应用 —— 加 typeof 守卫。
-const embedded =
-  (typeof process !== "undefined" ? process.env.BUILD_ID : undefined) ?? "";
+// BUILD_ID 由 vite.config.ts 的 injectClientEnv 注入：生产是构建号，dev 恒为空串 ——
+// 下面 `if (!embedded)` 就直接跳过检查，dev 本来也没有产物可比对。
+const embedded = import.meta.env.BUILD_ID;
 
 let reloading = false;
 

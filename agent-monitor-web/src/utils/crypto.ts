@@ -1,10 +1,11 @@
 import { gcm } from "@noble/ciphers/aes";
 import forge from "node-forge";
 
-// 必须使用「process.env.XXX」这种成员表达式，Vite 的 define 才会在构建时把值内联进来；
-// 写成 const e = process.env; e.CRYPTO_KEY 不会被替换，浏览器里 process 未定义会得到 undefined。
-const DEF_KEY = process.env.CRYPTO_KEY as string;
-const PUB_KEY = process.env.RSA_PUB_KEY as string;
+// 必须写成 `import.meta.env.XXX` 这种成员表达式：dev 下它是 client 运行时注入的真对象、
+// 生产下由打包器内联成字面量，两边都认这个形状。解构成 `const { CRYPTO_KEY } = import.meta.env`
+// 在生产下拿不到内联（打包器只认整段成员表达式），别改写法。
+const DEF_KEY = import.meta.env.CRYPTO_KEY;
+const PUB_KEY = import.meta.env.RSA_PUB_KEY;
 
 const GCM_IV_LENGTH = 12;
 

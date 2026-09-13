@@ -227,8 +227,8 @@ window.fetch = async (...args) => {
  */
 axios.interceptors.request.use((config) => {
   const { url } = config;
-  const dev = process.env.NODE_ENV === "development";
-  const apiBase = process.env.API_BASE;
+  const dev = import.meta.env.DEV;
+  const apiBase = import.meta.env.API_BASE;
   if (dev && apiBase && url && !url.startsWith(apiBase)) {
     config.url = `${apiBase}${config.url}`;
   }

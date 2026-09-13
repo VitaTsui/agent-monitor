@@ -29,7 +29,7 @@ function newer(a: string, b: string): boolean {
 
 /** APK 直链：英文 + 版本号命名，稳定别名兜底 */
 const apkUrl = (version?: string | null) =>
-  `${process.env.API_BASE ?? ""}/downloads/${
+  `${import.meta.env.API_BASE}/downloads/${
     version ? `AgentMonitor-${version}.apk` : "AgentMonitor.apk"
   }`;
 
