@@ -5,11 +5,10 @@ import {
   CaretDownOutlined,
   CaretRightOutlined,
   DownOutlined,
-  FolderOpenOutlined,
-  FolderOutlined,
   LaptopOutlined,
   SplitCellsOutlined,
 } from "@ant-design/icons";
+import { Icon } from "@hsu-react/ui";
 import { observer } from "mobx-react-lite";
 
 import { PortalTaskData, SubTask } from "@/services/apis/portal";
@@ -688,8 +687,20 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
               {open ? <CaretDownOutlined /> : <CaretRightOutlined />}
             </span>
             <span className={`${styles.leadSlot} ${styles.projectIcon}`}>
+              {/* 文件夹取 Phosphor 的 `ph:folder-simple`，与旁边那一列状态图标同一套
+                  笔画 —— antd 的 `FolderOutlined` 比它细一档，并排能看出是两套。
+
+                  **开合两态用同一枚字形**，照参照（VitaAgent `Sidebar/index.tsx:1024-1034`
+                  实测：静止恒为 `ph:folder-simple`，只有 hover 才换 caret）。
+                  从前是 `FolderOutlined` / `FolderOpenOutlined` 对着切，两个文件夹
+                  的轮廓本来就不一样，一开一合等于图标在跳；而「开没开」这件事
+                  底下有没有铺出东西已经说得很清楚了，hover 上来还有 caret。
+
+                  **不塞进 `StatusIcon`**：那个组件按 `StatusKind` 配色配动画，
+                  文件夹不是状态。按项目既有约定直接用 `@hsu-react/ui` 的 `Icon`
+                  （`StatusIcon` 内部用的也是它），不新起第二套图标组件。 */}
               <span className={styles.leadRest}>
-                {open ? <FolderOpenOutlined /> : <FolderOutlined />}
+                <Icon icon="ph:folder-simple" />
               </span>
               <span className={styles.leadHover} aria-hidden>
                 {open ? <CaretDownOutlined /> : <CaretRightOutlined />}

@@ -30,7 +30,7 @@ import { SingleRouter } from "@hsu-react/single-router";
 import { addCollection, type IconifyJSON } from "@iconify/react";
 import phSubset from "./assets/iconify/ph.subset.json";
 
-/* Phosphor 图标子集，**构建期打进产物**（3.6 KB，11 枚）。
+/* Phosphor 图标子集，**构建期打进产物**（3.9 KB，12 枚）。
  *
  * 状态图标（执行中 / 成功 / 失败 / 中断…）一律走 Phosphor，与 VitaAgent 逐字相同
  * （见 `pages/Portal/_components/StatusIcon`）；此前在 antd 图标里挑「语义最近的
@@ -41,8 +41,9 @@ import phSubset from "./assets/iconify/ph.subset.json";
  * 注册过的名字 `@iconify/react` 一律走本地，不发任何请求。
  *
  * 子集由 `@iconify/json` 的 `ph.json` 裁出来（只留用到的那几枚），整集 4.3 MB
- * 不进产物、也不进依赖。要加图标：把名字加进 `StatusIcon` 的映射，再把对应条目
- * 补进 `assets/iconify/ph.subset.json`。 */
+ * 不进产物、也不进依赖。要加图标：把对应条目补进 `assets/iconify/ph.subset.json`
+ * （`viewBox` 必须与子集的 256×256 一致，否则不能直接并进去），再在用它的地方
+ * 按名字引 —— 状态类的进 `StatusIcon` 的映射，非状态的直接用 `Icon icon="ph:xxx"`。 */
 addCollection(phSubset as unknown as IconifyJSON);
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
