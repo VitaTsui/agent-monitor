@@ -75,6 +75,26 @@ const Routes: React.FC = observer(() => {
           // zinc-50，白字压在近白底上等于看不见（实测「保存」按钮对比度 1.02）。
           // 主色是从令牌取的，它的前景也必须从令牌取。
           colorTextLightSolid: primaryForegroundOf(headerTheme !== "light"),
+          // 危险色的 ramp 与染底交给本项目令牌。
+          //
+          // 为什么不在这里接 `colorError` 本身：它是 antd 的 **seed**，会被
+          // @ant-design/colors 拿去推一整条 10 级色板（antd/es/theme/themes/shared/
+          // genColorMapToken.js:14），只能吃字面量 —— 喂 `var(--destructive)` 推出来
+          // 的是一条黑。而且它已经由 @hsu-react/ui 的 ConfigProvider 从同一份
+          // tokens.json 接好了（`colorError: t.error` = `--vita-error` = `--destructive`），
+          // 这里再写一遍就成了两个源。
+          //
+          // 下面这四支都**不是** seed，antd 在 formatToken 的最后一步原样采信
+          // （antd/es/theme/util/alias.js:17 把 seed 名从 override 里删掉，其余原样合并），
+          // 所以可以走 CSS 变量、明暗由变量自己切，不用在 JS 里写两套色值。
+          //
+          // 非接不可的是 hover/active：antd 推的 hover 是**更浅**的一级
+          // （#dc2626 → #e8524d），落到 `type="text" danger` 这种「文字本身是红的」
+          // 按钮上，悬停等于把字调淡 —— 浅色实测 3.34:1，正文要 4.5:1。
+          colorErrorHover: "var(--destructive-hover)",
+          colorErrorActive: "var(--destructive-active)",
+          colorErrorBg: "var(--destructive-subtle)",
+          colorErrorText: "var(--destructive-subtle-foreground)",
         },
       }}
     >

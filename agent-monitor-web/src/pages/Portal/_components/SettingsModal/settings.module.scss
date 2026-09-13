@@ -169,19 +169,8 @@
       box-shadow: 0 2px 6px color-mix(in srgb, var(--primary) 25%, transparent);
     }
 
-    // 删除：极低调，hover 才显红。
-    // TODO(本项目令牌层): 这条 hover 跟 antd 的 (0,4,0) 只是打平、靠源码顺序赢，
-    // 不稳。想彻底拆掉它得把 `--destructive` 接进 Routes.tsx 那个 ConfigProvider 的
-    // `colorError`/`colorErrorHover`——那是全站令牌改动，先不在这一次里做。
-    // 实测：删掉这条改吃 antd 自带的 danger 红，浅色下 hover 会从 #dc2626(4.42:1)
-    // 退成 #e8524d(3.34:1)，更糟，所以保留。
-    .delBtn {
-      color: var(--muted-foreground);
-
-      &:hover {
-        color: var(--destructive);
-      }
-    }
+    // 「删除」那颗 text danger 按钮的配色现在全由 antd 令牌给（见 Routes.tsx 里
+    // 接上的 colorErrorHover / colorErrorBg），这里不再有颜色覆盖。
   }
 
   // 窄屏：操作按钮换行到设备信息下方，不再横向挤压设备名

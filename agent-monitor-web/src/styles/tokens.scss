@@ -57,9 +57,32 @@
   // #dc2626 / #16a34a / #f59e0b（暗色 #f87171 / #22c55e / #fbbf24）。
   // 这里原先把 destructive 单独写成 #ef4444（red-500），比组件库按钮、
   // 表单报错用的 red-600 浅一档 —— 同一个「危险」在页面里出现两种红。
+  // 危险色这一支按 --primary 同一套结构展开，六个名字各管一件事：
+  //   --destructive                 基准：实心填充 / 描边 / 图标。它就是组件库的
+  //                                 --vita-error，与 VitaAgent 同源，**不要在本项目
+  //                                 改它**，改了两边的红就分叉。
+  //   --destructive-foreground      压在实心危险底上的文字。
+  //   --destructive-hover/-active   交互加深档，浅色往深走、暗色往亮走。
+  //   --destructive-subtle          浅染底（唯一一份）。页面里别再自己
+  //                                 color-mix 调百分比 —— 同一条提示条曾经出现过
+  //                                 8% / 10% / 14% 三个值，深浅不一，也没法保证对比度。
+  //   --destructive-subtle-foreground 压在 --destructive-subtle 上的文字。
+  //
+  // 为什么 subtle 上的文字必须另给一档：基准色压纯白才 4.83:1，一旦底色染上同色系
+  // 就掉到 4.5 以下 —— 浅色 4.41:1、暗色 4.21:1（正文门槛 4.5:1）。而且这差的一点
+  // 补不回来：浅色底顶到纯白也才 4.83。所以让文字自己走一档 —— 浅色更深、暗色更亮。
+  // （与 --primary-subtle-foreground 同样的分工，那一支也是「面」与「面上的字」分开命名。）
+  //
+  // hover 档除了按钮的悬停态，还要喂给 antd 的 colorErrorHover：antd 自己推的 hover 是
+  // **更浅**的一级（#dc2626 → #e8524d），那套推导只对实心按钮成立，落到
+  // `type="text" danger` 这种「文字本身是红的」按钮上就是越悬停越看不清
+  // （浅色实测 3.34:1，暗色 3.31:1）。
   --destructive: var(--vita-error);
   --destructive-foreground: #fafafa;
+  --destructive-hover: #b91c1c; // red-700
+  --destructive-active: #991b1b; // red-800
   --destructive-subtle: #fef2f2;
+  --destructive-subtle-foreground: #b91c1c; // red-700
   --success: var(--vita-success);
   --success-subtle: #f0fdf4;
   --warning: var(--vita-warning);
@@ -146,9 +169,13 @@ html[data-prefers-color-scheme="dark"] {
   --primary-subtle: #27272a; // zinc-800
   --primary-subtle-foreground: #fafafa;
 
-  // --destructive 跟着 --vita-error 走（暗色已是 #f87171），这里只翻前景
+  // --destructive 跟着 --vita-error 走（暗色已是 #f87171），这里翻前景、
+  // 并把加深档换成「加亮档」—— 暗色下更醒目 = 更亮，方向与浅色相反。
   --destructive-foreground: #18181b;
+  --destructive-hover: #fca5a5; // red-300
+  --destructive-active: #fecaca; // red-200
   --destructive-subtle: rgba(248, 113, 113, 0.16);
+  --destructive-subtle-foreground: #fca5a5; // red-300
   --success-subtle: rgba(34, 197, 94, 0.16);
   --warning-subtle: rgba(245, 158, 11, 0.16);
 }
