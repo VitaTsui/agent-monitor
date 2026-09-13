@@ -448,6 +448,49 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     }
   };
 
+  /* ---------- 侧栏「点一条子代理 → 滚到它那张智能体卡」 ---------- */
+
+  /* 这一格是不是那次定位的目标。请求带 `seq`，同一个子代理连点两次也能再滚一次 */
+  const focusReq = PortalStore.focusAgent;
+  const focusMine =
+    focusReq && focusReq.taskId === id
+      ? { agentId: focusReq.agentId, seq: focusReq.seq }
+      : null;
+
+  /**
+   * 定位的结果回到这里。
+   *
+   * **滚动必须在这一层做**：滚动容器与「钉底」那套开关都在这儿。
+   * 不先把钉底关掉的话，子链正文一到、内容高度一变，下面那个 ResizeObserver
+   * 立刻把视图拽回最底下 —— 表现就是「滚过去了又弹回来」。
+   */
+  const onFocusAgent = (el: HTMLElement | null, seq: number) => {
+    if (el) {
+      stickBottomRef.current = false;
+      setAtBottom(false);
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+      PortalStore.clearFocusAgent(seq);
+      return;
+    }
+    /* 找不到：正文还在路上就什么都别说，消息一到 TerminalFeed 会自己再试一次。
+       真读完了还找不到，就把原因**说在用户点的那一行上**（侧栏那条子代理）——
+       不许点了没反应，也不弹一条飘过去的全局提示（那得让人回头找刚才点的是哪条）。 */
+    if (loading || bodyPending) {
+      return;
+    }
+    PortalStore.reportFocusMiss(seq);
+  };
+
+  /* 这一格压根没有正文可渲染时 TerminalFeed 不挂载，上面那条回路就不会被触发；
+     这里把同一句话补上，免得请求悬在半空、点了像没反应。 */
+  useEffect(() => {
+    if (!focusMine || loading || bodyPending || feedMessages.length > 0) {
+      return;
+    }
+    onFocusAgent(null, focusMine.seq);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusMine?.seq, loading, bodyPending, feedMessages.length]);
+
   const paused = task.status === "paused";
   const controllable = !!task.pid;
   const running = task.status === "running";
@@ -805,6 +848,8 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                   running={task.status === "running"}
                   providerDsr={task.providerDsr}
                   imageCtx={imageCtx}
+                  focusAgent={focusMine}
+                  onFocusAgent={onFocusAgent}
                 />
               )}
 

@@ -42,6 +42,9 @@ const MAX_PANES = 4;
  */
 const RIGHT_PANE_KEY = "am.portal.rightPane.byId";
 
+/** 侧栏顶部选中的那台设备。刷新后要停在同一台上，否则每次进来都跳回本机 */
+const SELECTED_MACHINE_KEY = "am.portal.sidebar.machine";
+
 /** 上一版的两个全局键。只在加载时清一次，不再有任何代码读它们 */
 const RIGHT_PANE_LEGACY_KEYS = [
   "am.portal.rightPane.open",
@@ -232,8 +235,21 @@ const readRightPaneState = (): Record<string, RightPaneState> => {
 class PortalStore {
   private _tasks: PortalTaskData[] = [];
   private _devices: PortalDevice[] = [];
-  /** 顶部选中的设备 */
-  private _selectedMachineId = "";
+  /**
+   * 侧栏顶部选中的设备（手动选过才有值）。
+   *
+   * 初值从 localStorage 读：刷新后要停在同一台机器上 —— 否则远程看另一台机器的
+   * 人每刷一次页面就被扔回本机。存的是 machineId，那台机器暂时不在列表里时
+   * 这个值仍然留着（见 `selectedMachineId` 的兜底），机器回来就自动选回去。
+   */
+  private _selectedMachineId = ((): string => {
+    try {
+      return localStorage.getItem(SELECTED_MACHINE_KEY) ?? "";
+    } catch {
+      // 隐私模式读不到就当没选过，退回默认（本机优先）
+      return "";
+    }
+  })();
   /** 拆分视图中打开的会话（有序，全局跨设备） */
   private _openIds: string[] = [];
   /**
@@ -298,6 +314,15 @@ class PortalStore {
   /** 正在拉子任务清单的会话 */
   private _subTasksLoading: string[] = [];
   /**
+   * 清单**还没送回来**的会话（`/subtasks` 一路 `pending: true` 问到头）。
+   *
+   * 这不是「没有子会话」。那个接口是 hub 点名让那台机器现读磁盘，机器慢半拍、
+   * 上报节律没跟上都会一直 pending —— 从前问到第 6 次就把空清单写进缓存，
+   * 界面于是说「该会话没有子会话」，一句假话，而且缓存住了再也不会自己纠正。
+   * 单独记一份，侧栏才说得出「读取中」并给一条重试的出路。
+   */
+  private _subTasksPending: string[] = [];
+  /**
    * 已经问过 `/subtasks` 的会话（无论成没成）。
    *
    * 与 `_subTasksById` 分开记，是为了让**失败**也算「问过」，却不覆盖已有数据：
@@ -331,6 +356,56 @@ class PortalStore {
   composerRefill: { taskId: string; text: string; nonce: number } | null = null;
   private _refillNonce = 0;
 
+  /**
+   * 「把执行链滚到这个子代理那张卡上」的一次请求。
+   *
+   * 侧栏的子会话行只负责**定位**：点它 = 打开父会话 ＋ 让正文滚到派出它的那一步。
+   * 内容一律在执行链里看（见 `AgentCard`）—— 不再有「子会话当成一条独立会话打开」
+   * 那条复合 id 路径，那套的毛病记在 `SessionTree` 的注释里。
+   *
+   * 做成一次性的请求（带 `seq`）而不是一个选中态：定位是个**动作**，
+   * 做完就该消失；留成状态的话，用户手动滚开之后它还会把视图抢回去。
+   * 同一个子代理连点两次也要能再滚一次，所以 `seq` 每次递增。
+   */
+  focusAgent: { taskId: string; agentId: string; seq: number } | null = null;
+  private _focusSeq = 0;
+  /**
+   * 上一次**没定位到**的那个子代理。
+   *
+   * 定位不到是有原因的（派出它的那次工具调用不在已加载的正文里），但**原因要说在
+   * 用户点的那个地方** —— 侧栏那一行上。弹一条飘过去的全局提示等于让人回头找
+   * 刚才点的是哪条；而什么都不说就成了「点了没反应」，那是最让人反复戳的一种。
+   */
+  private _focusMissId = "";
+
+  get focusMissId() {
+    return this._focusMissId;
+  }
+
+  /** 请求把某条会话的执行链滚到某个子代理的卡片上并展开它 */
+  public focusAgentCard = (taskId: string, agentId: string) => {
+    this._focusSeq += 1;
+    this.focusAgent = { taskId, agentId, seq: this._focusSeq };
+    // 新的一次定位开始，上一次的「定位不到」就该收回去
+    this._focusMissId = "";
+  };
+
+  /** 这次定位落地了（真的滚过去了），把请求消费掉 */
+  public clearFocusAgent = (seq: number) => {
+    if (this.focusAgent?.seq === seq) {
+      this.focusAgent = null;
+    }
+  };
+
+  /** 这次定位**找不到**目标：把原因记在那一行上，并把请求消费掉 */
+  public reportFocusMiss = (seq: number) => {
+    if (this.focusAgent?.seq !== seq) {
+      return;
+    }
+    this._focusMissId = this.focusAgent.agentId;
+    this.focusAgent = null;
+  };
+
   constructor() {
     // 连接管理字段是命令式状态（WS 句柄、定时器句柄、世代号、关闭标志），
     // 没有任何视图观测它们，纳入 observable 既多余、又会在 WS 回调（裸闭包、
@@ -356,32 +431,61 @@ class PortalStore {
     });
   }
 
-  /** 顶部设备选择器的设备列表（有会话的设备，去重） */
+  /**
+   * 侧栏顶部那个设备选择器的列表，**数据源只有 `/monitor/devices` 一处**。
+   *
+   * 从前这份是拿 `_tasks` 去重现拼的 —— `_tasks` 只含**此刻有活进程**的会话，
+   * 于是「我有哪几台机器」被偷换成「哪几台机器此刻有东西在跑」：一台合上盖的
+   * 笔记本、一台只剩历史会话的机器，都会从选择器里整台消失，而它们的会话在
+   * 下面的分组里明明还列着。分组（`clientSections`）用的就是 `_devices`，
+   * 两处必须同源，否则「选不到但列得出」这种自相矛盾的状态一定会再出现。
+   *
+   * 顺序 = `_sortedDevices`：本机优先、其次主机名。选择器与分组同一个顺序。
+   */
   get deviceList(): {
     machineId: string;
     hostname: string;
     platform: string;
     platformDsr: string;
+    /** 这台机器上一共有多少条会话（含历史，取自 `providers[].sessionCount`） */
     count: number;
+    /** 此刻有几条在执行 */
     running: number;
+    /** 此刻在不在线。离线设备**照样列出来**（历史会话仍然看得到） */
+    online: boolean;
+    /** 是不是客户端窗口所在的这台机器 */
+    isLocal: boolean;
   }[] {
-    const byDevice = new Map<string, PortalTaskData[]>();
-    this._tasks.forEach((t) => {
-      const key = t.machineId || t.hostname || "unknown";
-      const list = byDevice.get(key) ?? [];
-      list.push(t);
-      byDevice.set(key, list);
-    });
-    const out = Array.from(byDevice.entries()).map(([machineId, list]) => ({
-      machineId,
-      hostname: list[0]?.hostname ?? machineId,
-      platform: list[0]?.platform ?? "",
-      platformDsr: list[0]?.platformDsr ?? "",
-      count: list.length,
-      running: list.filter((t) => t.status === "running").length,
+    return this._sortedDevices.map((d) => ({
+      machineId: d.id,
+      hostname: d.hostname || d.id,
+      platform: d.platform,
+      platformDsr: d.platformDsr,
+      count:
+        d.providers.reduce((n, p) => n + (p.sessionCount ?? 0), 0) ||
+        d.sessionCount,
+      running: d.runningCount,
+      online: d.online,
+      isLocal: !!this._localMachineId && d.id === this._localMachineId,
     }));
-    out.sort((a, b) => a.hostname.localeCompare(b.hostname));
-    return out;
+  }
+
+  /**
+   * 设备的固定顺序：**本机优先、其次主机名**。
+   *
+   * 抽成一处的理由：选择器与分组都要照它排，各排各的就是两套排序并存，
+   * 后端调了口径这边不跟，每轮还可能抖。
+   */
+  private get _sortedDevices(): PortalDevice[] {
+    return [...this._devices].sort((a, b) => {
+      const local =
+        Number(b.id === this._localMachineId) -
+        Number(a.id === this._localMachineId);
+      if (local !== 0) {
+        return local;
+      }
+      return (a.hostname || a.id).localeCompare(b.hostname || b.id, "zh");
+    });
   }
 
   /** 客户端窗口里由页面注入的本机 machineId（浏览器为空） */
@@ -391,34 +495,46 @@ class PortalStore {
     this._localMachineId = id;
   };
 
+  /**
+   * 侧栏此刻在看哪一台设备。
+   *
+   * 优先级：**手动选过的 > 本机 > 列表里第一台**。
+   *
+   * 最后那一档是这一版新加的，它不是兜底而是必需：侧栏的列表现在按设备**分**了，
+   * 选不中任何一台就等于整列空着。上一版之所以能返回空串，是因为那时列表铺的是
+   * 全部设备的全部客户端，选中与否只影响一处高亮。浏览器/远程端没有本机 id，
+   * 头一回进来必须落在某一台上，才有东西可看。
+   */
   get selectedMachineId() {
-    // 选中优先级：手动选择 > 本机（仅客户端窗口注入了本机 id 时）。
-    // 非本机端（浏览器/远程）进来不自动选任何设备 —— 展示设备列表让用户自己挑，
-    // 不再回退到「第一个设备」。
-    const list = this.deviceList;
+    const list = this._sortedDevices;
+    if (list.length === 0) {
+      return "";
+    }
     if (
       this._selectedMachineId &&
-      list.some((d) => d.machineId === this._selectedMachineId)
+      list.some((d) => d.id === this._selectedMachineId)
     ) {
       return this._selectedMachineId;
     }
-    if (
-      this._localMachineId &&
-      list.some((d) => d.machineId === this._localMachineId)
-    ) {
+    if (this._localMachineId && list.some((d) => d.id === this._localMachineId)) {
       return this._localMachineId;
     }
-    return "";
+    return list[0].id;
   }
 
   public selectMachine = (id: string) => {
-    if (id === this.selectedMachineId) {
+    if (id === this._selectedMachineId) {
       return;
     }
-    // 切设备只改左侧列表的筛选，不动已打开的会话：打开的会话是全局的（可跨多设备），
-    // 配合拆分可同时查看多设备的多个会话；也不默认选中任何会话。各会话属于哪台设备由
-    // 内容区标题下方的设备名标识（见 ChatPane）。
+    // 切设备只改左侧列表看的是哪一台，不动已打开的会话：打开的会话是全局的
+    //（可跨多设备），配合拆分可同时查看多设备的多个会话；也不默认选中任何会话。
+    // 各会话属于哪台设备由内容区标题下方的设备名标识（见 ChatPane）。
     this._selectedMachineId = id;
+    try {
+      localStorage.setItem(SELECTED_MACHINE_KEY, id);
+    } catch {
+      // 隐私模式下写不进去也无妨，本次会话内仍然生效，下次回到默认
+    }
   };
 
   /**
@@ -443,8 +559,15 @@ class PortalStore {
    * 200 条历史倒推」，也一并删掉了 —— 某个终端最近一条会话排到 200 条之外就会凭空
    * 消失，那是将就不是答案。两套来源不并存。
    *
+   * **只铺 `selectedMachineId` 那一台设备的客户端。** 设备这一维被提到了侧栏顶部的
+   * 选择器上（见 `DeviceSelect`），组标题里因此不再带主机名 —— 组名就是客户端名
+   * （`Claude Code` / `Codex` / `ChatGPT 桌面版`）。上一版是「设备 × 客户端」二合一，
+   * 组标题形如 `MacBook Pro · Claude Code`：机器一多，同一个客户端名在一列里重复
+   * 出现好几遍，而「我现在在看哪台机器」没有任何一处说得清。两套分组判断不并存 ——
+   * 顶部选设备之后，这里就只按客户端分。
+   *
    * **组的顺序就是这里的建组顺序**（Map 保序），末尾不再排一次：
-   *   设备（本机优先、其次主机名）× 该设备的 `providers`（后端已按会话数降序给好）。
+   *   该设备的 `providers`（后端已按会话数降序给好）。
    * 前端再排一遍就是两套排序并存，每轮还可能抖。
    *
    * `_tasks` 与历史仍然参与，但只负责**补**：一种终端第一次跑起来时它的会话会先出现在
@@ -498,30 +621,30 @@ class PortalStore {
         t,
       );
 
-    /* 先按设备把全集建出来：**有没有会话可铺是另一回事**，组本身必须先在。
-       设备顺序在这儿定死（本机优先、其次主机名），组内顺序照后端给的 `providers`
-       原样来 —— 末尾因此不需要再 sort 一次。 */
-    const devices = [...this._devices].sort((a, b) => {
-      const local =
-        Number(b.id === this._localMachineId) -
-        Number(a.id === this._localMachineId);
-      if (local !== 0) {
-        return local;
-      }
-      return (a.hostname || a.id).localeCompare(b.hostname || b.id, "zh");
-    });
-    for (const d of devices) {
-      for (const p of d.providers) {
-        ensure(d.id, p.provider, p.desktop, {
-          hostname: d.hostname,
+    /* 先把**选中那台设备**的客户端全集建出来：**有没有会话可铺是另一回事**，
+       组本身必须先在。组内顺序照后端给的 `providers` 原样来 ——
+       末尾因此不需要再 sort 一次。 */
+    const mid = this.selectedMachineId;
+    const device = this._sortedDevices.find((d) => d.id === mid);
+    if (device) {
+      for (const p of device.providers) {
+        ensure(device.id, p.provider, p.desktop, {
+          hostname: device.hostname,
           providerDsr: p.providerDsr,
-          platformDsr: d.platformDsr,
+          platformDsr: device.platformDsr,
         });
       }
     }
 
+    /** 这条会话属于选中的那台设备吗。不属于就不进这一列 */
+    const mine = (t: PortalTaskData | HistorySession) =>
+      (t.machineId || t.hostname || "unknown") === mid;
+
     // 再铺活跃会话：它们优先级最高，后面历史里的同 id 不覆盖它
     for (const t of this._tasks) {
+      if (!mine(t)) {
+        continue;
+      }
       const key = ensureOf(t);
       if (t.status === "running") {
         byClient.get(key)!.running += 1;
@@ -536,6 +659,9 @@ class PortalStore {
     // 两处各筛一遍就会出现「服务端说 30 条、列表只显示 12 条」。
     for (const state of Object.values(this._historyByClient)) {
       for (const h of state.list) {
+        if (!mine(h)) {
+          continue;
+        }
         const key = ensureOf(h);
         const sec = byClient.get(key)!;
         sec.total = Math.max(sec.total, state.total);
@@ -547,7 +673,8 @@ class PortalStore {
         }
       }
     }
-    // 分页状态也要落到「历史一条都没返回」的那些组上（空结果同样是结果）
+    /* 分页状态也要落到「历史一条都没返回」的那些组上（空结果同样是结果）。
+       **按 key 找组，找不到就跳过** —— 别的设备的分页状态本来就不在这一列里 */
     Object.entries(this._historyByClient).forEach(([key, state]) => {
       const sec = byClient.get(key);
       if (sec) {
@@ -579,7 +706,7 @@ class PortalStore {
       }));
     }
     /* **这里不再排序**：顺序就是上面的建组顺序（Map 保序）——
-       设备（本机优先、其次主机名）× 后端给好的 `providers`（会话数降序）。
+       选中设备的 `providers`（后端已按会话数降序给好）。
        再排一遍就是两套排序并存，后端调了口径这边不跟，每轮还可能抖。 */
     return sections;
   }
@@ -795,6 +922,16 @@ class PortalStore {
     this._subTasksFailById = next;
   };
 
+  private setSubTasksPending = (id: string, on: boolean) => {
+    const has = this._subTasksPending.includes(id);
+    if (has === on) {
+      return;
+    }
+    this._subTasksPending = on
+      ? [...this._subTasksPending, id]
+      : this._subTasksPending.filter((x) => x !== id);
+  };
+
   // ---------- 子任务（子会话树）----------
 
   /**
@@ -847,6 +984,10 @@ class PortalStore {
   public isSubTasksLoading = (id: string): boolean =>
     this._subTasksLoading.includes(id);
 
+  /** 清单问到头仍是 `pending` —— 显示「读取中」并给重试，**不当成空** */
+  public isSubTasksPending = (id: string): boolean =>
+    this._subTasksPending.includes(id);
+
   /**
    * 这条会话的全量子任务清单拉过了没有。
    *
@@ -871,7 +1012,15 @@ class PortalStore {
    * 空清单，不再重试 —— 那条会话确实没有子会话可展，重试也只是白问。
    */
   public loadSubTasks = (id: string, force = false, tries = 0) => {
-    if (!id || this._subTasksLoading.includes(id)) {
+    if (!id) {
+      return;
+    }
+    /* 「已经在读」这一条只挡**新发起**的读（`tries === 0`）。
+       `tries > 0` 是 pending 重试 —— 它就是同一次读的下一轮，而这条会话在
+       整个重试窗口里都留在 `_subTasksLoading` 里（界面得一直说「正在读取」，
+       不能每 2.5 秒闪一句「没有子代理」）。两件事别用同一个判据：
+       挡住重试的后果是**只问一次就永远停在读取中**。 */
+    if (tries === 0 && this._subTasksLoading.includes(id)) {
       return;
     }
     // 上一次**失败**过的允许再问一次（设备离线是可恢复的）；成功拿到过的才真正缓存住
@@ -883,14 +1032,21 @@ class PortalStore {
     ) {
       return;
     }
-    this._subTasksLoading = [...this._subTasksLoading, id];
-    if (force) {
-      this.setSubTasksFail(id, undefined);
+    if (!this._subTasksLoading.includes(id)) {
+      this._subTasksLoading = [...this._subTasksLoading, id];
     }
+    if (force || tries === 0) {
+      this.setSubTasksFail(id, undefined);
+      this.setSubTasksPending(id, false);
+    }
+    /** 这一轮问完了（不再重试）才算「不在拉」 */
+    const settle = () => {
+      this._subTasksLoading = this._subTasksLoading.filter((x) => x !== id);
+    };
     getPortalSubTasks(id)
       .then((res) => {
-        this._subTasksLoading = this._subTasksLoading.filter((x) => x !== id);
         if (res.code !== 0) {
+          settle();
           // 设备离线（code 500）与会话不存在（code 404）是两回事：前者点一下重试
           // 就好，后者重试多少次都一样。判的是结构化的 code，不是 msg 里那句话。
           this.setSubTasksFail(id, this.failKindOf(id, res.code));
@@ -900,22 +1056,34 @@ class PortalStore {
           return;
         }
         const list = res.data?.list ?? [];
-        // pending 且一条都没有 = 那台机器还没把清单送回来，过一会儿再问
-        if (res.data?.pending && !list.length && tries < PENDING_RETRY_MAX) {
-          setTimeout(
-            () => this.loadSubTasks(id, force, tries + 1),
-            PENDING_RETRY_MS,
-          );
+        // pending 且一条都没有 = 那台机器还没把清单送回来，过一会儿再问。
+        // **重试窗口里不松开 loading**：松开的话这 2.5 秒界面会先说一句
+        // 「该会话没有子会话」，下一轮又变回来，一眼看过去就是在骗人。
+        if (res.data?.pending && !list.length) {
+          if (tries < PENDING_RETRY_MAX) {
+            setTimeout(
+              () => this.loadSubTasks(id, force, tries + 1),
+              PENDING_RETRY_MS,
+            );
+            return;
+          }
+          /* 问到头了还是 pending。**不写空清单**：那会把「读不到」永久缓存成
+             「没有」，而且 `_subTasksTried` 一旦落定就再也不会自己重问。
+             记成 pending，界面显示「读取中」并给一颗重试。 */
+          settle();
+          this.setSubTasksPending(id, true);
           return;
         }
+        settle();
         this._subTasksById = { ...this._subTasksById, [id]: list };
         this.setSubTasksFail(id, undefined);
+        this.setSubTasksPending(id, false);
         if (!this._subTasksTried.includes(id)) {
           this._subTasksTried = [...this._subTasksTried, id];
         }
       })
       .catch(() => {
-        this._subTasksLoading = this._subTasksLoading.filter((x) => x !== id);
+        settle();
         // **不写空清单**：活跃会话手上还有一份随上报捎带的 `Task.subTasks`，
         // 写空等于用一次失败把已经拿到的子任务擦掉
         this.setSubTasksFail(id, "network");

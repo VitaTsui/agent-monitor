@@ -17,6 +17,7 @@ import { useNavigate } from "react-router-dom";
 
 import { inNativeShell } from "@/utils/clientAuth";
 import PortalStore from "../../PortalStore";
+import DeviceSelect from "./_components/DeviceSelect";
 import SessionTree from "./_components/SessionTree";
 import type { PortalUserInfo } from "../../_context/portalUser";
 import { HISTORY_LIST_PATH, type SettingsTab } from "../../_utils/portalNav";
@@ -51,8 +52,6 @@ interface SidebarProps {
   /** 移动端顶栏是否在场（仅会话页）。在场时侧栏从顶栏下沿起，把那 48px 让出来 ——
    *  顶栏是半透明毛玻璃，侧栏留在底下会透出来跟顶栏的图标叠字。 */
   underTopBar: boolean;
-  /** 客户端窗口内的本机 machineId（浏览器里为 null，不标「本机」） */
-  localId: string | null;
   user: PortalUserInfo;
   userMenuOpen: boolean;
   onUserMenuOpenChange: (open: boolean) => void;
@@ -72,7 +71,6 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
     onToggleFold,
     isMobile,
     underTopBar,
-    localId,
     user,
     userMenuOpen,
     onUserMenuOpenChange,
@@ -217,6 +215,14 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
 
       {!folded && (
         <>
+          {/* 设备选择器。**独立成顶部的一行，不挤进上面那条工具条** ——
+              那一行（字标 ＋ 搜索 ＋ 收起）是对整个侧栏的操作，44 / 0 14px / gap 2
+              是照参照量过的，塞第四样东西进去就没法对齐了。
+              设备是「下面这一列讲的是哪台机器」，它该在列表的正上方。 */}
+          <div className={styles.deviceRow}>
+            <DeviceSelect />
+          </div>
+
           {/* 侧栏筛选框。这里曾经撤掉过一个同样位置的输入框 —— 理由是它只筛得动
               「当前选中设备」下的那一列，而顶部那颗搜索按钮（⌘K）搜的是全部。
               两个搜索摆在一起、结果却对不上，用户会以为是同一份东西。
@@ -235,11 +241,7 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
           </div>
 
           <div className={styles.siderScroll}>
-            <SessionTree
-              isMobile={isMobile}
-              localId={localId}
-              onSelect={onSelectSession}
-            />
+            <SessionTree isMobile={isMobile} onSelect={onSelectSession} />
 
             {/* 列表末尾的「查看全部会话」。侧栏按客户端分组、每组翻页；
                 跨设备、纯按最近活动排的全量在 /portal/history 那一页。

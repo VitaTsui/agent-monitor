@@ -1,6 +1,16 @@
 @use "@hsu-react/ui/es/styles/responsive" as r;
 @use "@/styles/chatMarkdown" as md;
 
+/* 执行链的三个几何数，与 `AgentCard/index.module.scss` 同源（那边改这边要一起改）。
+   照 VitaAgent `MessageList/index.module.scss:332-335` 对齐：**图标槽 18、字形 12、
+   图标到文字 10**。原来是「槽 20 ＋ 字形 16 ＋ 间距 8」——
+   文字列缩进同为 28（20+8 = 18+10），所以那一列没错位，但字形比参照大 4px，
+   一列扫下来先看见的是一排图标而不是一句句话。要守住的是**缩进 28** 这个结果，
+   槽宽与字形本身该跟参照走。 */
+$tile: 18px; // 图标槽边长
+$tile-mid: 9px; // 槽的中线 —— 贯穿的竖线画在这儿
+$tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字列缩进）
+
 // 对话流。**模型正文与命令输出是两类东西，排版也分开**：
 //
 //   模型正文（role `assistant` / `plan`）——它是一段写给人读的话，
@@ -240,19 +250,26 @@
     margin-top: 14px;
   }
 
-  // 链上的旁白：模型一边干活一边说的那几句。是话，不是一步操作 ——
-  // 所以缩到文字列（20 图标列 ＋ 8 间距）、没有图标。
-  // 但它**仍是链上的一格**：那根竖线要从它背后连续穿过去，否则一段旁白就把
-  // 时间轴切成两截（`.step` 与它共用下面那套画线规则）。
+  /* 链上的旁白：模型一边干活一边说的那几句。
+     **它和别的节点一样带图标槽**（照 VitaAgent `MessageList` 的 `NoteBlock`：
+     同一枚 `StepTile`，只是字形换成一枚对话气泡）。原来这里是「缩进 28、不给图标」
+     —— 那根贯穿的竖线从它背后穿过去时没有不透明色块遮断，于是**线正好从旁白
+     那一格的空白里穿过去**，一列节点里只有它没有记号，看着像时间轴中间掉了一格。 */
   .chainNote {
+    display: flex;
+    align-items: flex-start;
+    gap: $tile-gap;
     position: relative;
-    padding: 6px 0 6px 28px;
+    padding: 6px 0;
 
     // 旁白**不是结论**，不该用正文的重量：markdown 基线给的是 16/1.5 ＋ 正文色，
     // 摆在一列 12px 的步骤中间，过程反倒比答案还显眼。
     // 压到 13/1.7 ＋ 次级色（VitaAgent `.chainNote` 同一档）。
     // 多套一层类就压得住，不需要 !important。
     .assistantText {
+      // 话占满图标右边的整列：不给 flex:1 的话它只有内容那么宽，右边空一大片
+      flex: 1;
+      min-width: 0;
       color: var(--muted-foreground);
       font-size: var(--text-base);
       line-height: 1.7;
@@ -265,10 +282,9 @@
      一截一截，读不出「这是一条时间轴」。现在每个节点自己画一条满高的线，
      图标那枚不透明色块把它在节点处遮断 —— 于是线在**智能体卡那块浅底上也是连续的**。
 
-     几何三个数与 `AgentCard/index.module.scss` 同源：图标列 20（$tile）、
-     图标到文字 8（$tile-gap）、线画在 10（$tile-mid，图标列的中线）。
-     本项目是 20＋8、VitaAgent 是 18＋10 —— **文字列都落在 28**，所以那边
-     28px 的网格缩进可以原样照抄。 */
+     几何三个数见本文件顶部（与 `AgentCard/index.module.scss` 同源）：
+     图标列 18（$tile）、图标到文字 10（$tile-gap）、线画在 9（$tile-mid，图标列的
+     中线）。**文字列落在 28**，与 VitaAgent 一致。 */
   .step,
   .chainNote {
     position: relative;
@@ -281,7 +297,7 @@
     &::before {
       content: "";
       position: absolute;
-      left: 10px;
+      left: $tile-mid;
       top: 0;
       bottom: 0;
       width: 1px;
@@ -308,17 +324,26 @@
   }
 
   /* 智能体卡那一格：图标被卡片的外边距（6）＋ 内边距（8）往下推了 14 ——
-     不告诉线这件事的话，它会停在卡片的上边缘，看着像断在半路 */
+     不告诉线这件事的话，它会停在卡片的上边缘，看着像断在半路。
+     **跟着 $tile-mid 算，不写死**：槽宽一改这个数就得改，写死必然漏 */
   .stepTask {
-    --tile-center: 24px;
+    --tile-center: #{6px + 8px + $tile-mid};
+  }
+
+  /* 旁白那一格的图标比步骤行低一档：这里没有 36 的行高把它居中，
+     槽顶 = 上内边距 6 ＋ 槽自己的 2（见 `.noteTile`），中线落在 17。
+     **必须写在上面那条 `.step, .chainNote` 之后**：两条特指度相同，
+     写在前面会被那条 18px 覆盖掉（实测过一次，线在旁白处短 1px） */
+  .chainNote {
+    --tile-center: #{6px + 2px + $tile-mid};
   }
 
   .stepHead {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: $tile-gap;
     width: 100%;
-    /* 行高与图标大小**脱钩**：36 是这一列的呼吸，图标 20 之后上下各留 8 ——
+    /* 行高与图标大小**脱钩**：36 是这一列的呼吸，图标 18 之后上下各留 9 ——
        那 8px 正是**竖线露出来的地方**。原来是 28，上下只剩 4px：一条 1px 的
        发丝线在 4px 的缝里等于没画（实测把它临时染红才看得见），整条时间轴
        读起来就是一列孤立的图标。36 也与智能体卡的头行（同为 36）对齐 ——
@@ -346,23 +371,41 @@
     }
   }
 
-  /* 图标固定占一列 20px，让所有步骤的文字起点对齐 —— 竖线也按这一列的中线画。
+  /* 图标槽固定占一列 18px，让所有步骤的文字起点对齐 —— 竖线也按这一列的中线画。
      **底色不透明**：靠它把身后那根贯穿的竖线遮断（见 `.step::before`）。
      取这一屏的地色，不是灰底 —— 链就落在对话区的底上，画一片灰方块反而多出
-     一列色块 */
-  .stepIcon {
+     一列色块。
+
+     **色块与字形必须分两层**（与 `AgentCard` 的 `.headTile` / `.headIcon` 同一个
+     理由）：执行中那枚是 antd 的 `LoadingOutlined`，它的转圈动画
+     （`anticon-spin`）挂在**图标自己的那个 `<span>`** 上。色块和字形合成一个元素时，
+     转的就是这枚 18×18 的不透明方块 —— 实测它的外接盒从 20 被转到 25.18，
+     方块的角一圈圈扫过竖线，看着就是「图标在抖」。 */
+  .stepTile {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     position: relative;
     z-index: 2;
     flex: none;
-    width: 20px;
-    height: 20px;
+    width: $tile;
+    height: $tile;
     border-radius: var(--radius-xs);
     background: var(--card);
+    overflow: hidden;
+  }
+
+  // 槽里那枚字形。大小由这里定、槽的尺寸不受它影响（照 VitaAgent 的 12px）
+  .stepIcon {
+    flex: none;
     color: var(--muted-foreground);
-    font-size: 16px;
+    font-size: 12px;
+  }
+
+  /* 旁白那一格的图标对齐到**第一行文字的中线**，不是整段的中线 ——
+     旁白可以有好几段，居中会把图标丢到中间去 */
+  .noteTile {
+    margin-top: 2px;
   }
 
   // 执行中：与 SessionPanels 同一口径走 --primary（墨黑 / 暗色下近白），
@@ -378,16 +421,6 @@
     text-overflow: ellipsis;
     font-size: var(--text-sm);
     transition: color 0.15s;
-  }
-
-  // 「正在处理…」那一行的名称走正文色：它是这一刻唯一在动的东西
-  .stepNameLive {
-    min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    font-size: var(--text-sm);
-    color: var(--foreground);
   }
 
   // 工具名：一枚淡底小标，不与这次的入参抢字重
@@ -414,6 +447,13 @@
       content: "·";
       margin: 0 6px;
     }
+  }
+
+  /* 那个「·」是**分隔号**，前面得真有东西可分隔。
+     执行中那一行（`Working`）删掉「正在处理…」之后，耗时直接跟在图标槽后面 ——
+     再印一个点就成了行首挂一个孤零零的「·」。 */
+  .stepTile + .stepStatus::before {
+    content: none;
   }
 
   // 跑砸的那一步：整行走 destructive，与 SessionPanels 里失败的后台任务同一套色。
@@ -534,9 +574,11 @@
   }
 }
 
-// 「正在处理…」不再是独立形态：它就是这条链的最后一行，走的是上面那套
+// 执行中那一行不是独立形态：它就是这条链的最后一行，走的是上面那套
 // `.step` / `.stepIcon` / `.stepStatus`（见组件里的 Working）。原先那颗
 // 脉冲圆点与两种「执行中」记号已删 —— 一屏之内只留一套。
+// 「正在处理…」那四个字也一并删了（`.stepNameLive` 随之退役）：转圈图标
+// ＋ 走字的耗时已经把「在动」说清楚了，链上最后几步写着具体在干什么。
 
 // 交互式选择卡片（AskUserQuestion 同步）：琥珀色调，暗示「等待输入」。
 //

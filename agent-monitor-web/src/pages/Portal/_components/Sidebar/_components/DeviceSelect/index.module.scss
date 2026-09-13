@@ -1,0 +1,148 @@
+// 侧栏顶部的设备选择器。
+//
+// 数值全部照侧栏既有的那一档，不新造：行高 32、gap 8、圆角 var(--radius)(8)、
+// 字号 14（--text-base）、hover 底 --overlay-1、选中/按下底 --overlay-2。
+// 横向留白由外层 `.deviceRow`（Sidebar/index.module.scss）给的 14 承担，
+// 与顶栏、筛选框、列表同一条左轨 —— 这里只管这一行内部。
+
+.DeviceSelect {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 一行 32 高的按钮，与会话行、「查看全部会话」、底部账户行同一档。
+   **必须显式给 font-size**：<button> 不继承页面字体，UA 样式表把它钉成
+   `400 13.3333px Arial`，那个字号不属于任何令牌档（与 `.account` 同一个坑）。 */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--overlay-1);
+  color: var(--foreground);
+  font-size: var(--text-base);
+  // 选中态：它回答的是「你在看哪一台」，字重比普通行重一档
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--overlay-2);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+}
+
+/* 只有一台设备时：它不是个可选的东西，就别长得像按钮 ——
+   无底、无 hover、不可点、不进 Tab 序。但仍然占这一行，说明「你在看哪台机器」 */
+.rowStatic {
+  background: transparent;
+  cursor: default;
+
+  &:hover {
+    background: transparent;
+  }
+}
+
+.icon {
+  flex: none;
+  font-size: var(--text-base);
+  color: var(--muted-foreground);
+}
+
+.name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 「本机」徽标：客户端窗口里标出当前这台电脑。
+   规格照被删掉的那个 DeviceList（`e094716^`）原样搬过来，一个数没改 */
+.localTag {
+  flex: none;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  line-height: 16px;
+}
+
+// 离线：说一声而不是禁用它 —— 离线机器的历史会话仍然看得到
+.offTag {
+  flex: none;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  line-height: 16px;
+}
+
+/* 这台机器此刻有东西在跑。走 --primary ＋ 光晕，与会话行的状态点同一口径
+   （绿留给「成功」，见 SessionTree 的 `.dot`） */
+.dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent);
+}
+
+.caret {
+  flex: none;
+  font-size: var(--text-xs);
+  color: var(--muted-foreground);
+}
+
+// 一台设备都没有：一行灰字，与列表空态同一个量级
+.empty {
+  padding: 6px 10px;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+}
+
+// ---------- 下拉菜单里的一项 ----------
+// 行高 / 圆角 / 图标槽由全局那份 `.va-menu` 给（styles/antd-overload.scss），
+// 这里只管一项内部怎么排
+
+.menuRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.menuName {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.menuMeta {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+}
+
+// 当前这一台。主色，与「本机」徽标同一支
+.menuCheck {
+  flex: none;
+  margin-left: 2px;
+  color: var(--primary);
+  font-size: var(--text-sm);
+}

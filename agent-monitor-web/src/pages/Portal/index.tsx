@@ -50,8 +50,6 @@ const Portal: React.FC = observer(() => {
   const { pathname } = useLocation();
   const { init, refresh, loadDevices, stopPolling, select } = PortalStore;
 
-  // 客户端窗口内标出「本机」（浏览器里为 null，不标）
-  const [localId, setLocalId] = useState<string | null>(null);
   const [siderFolded, setSiderFolded] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   // 移动端：侧栏抽屉开合
@@ -78,9 +76,10 @@ const Portal: React.FC = observer(() => {
   const atSessions = pathname.replace(/\/+$/, "") === PORTAL_BASE;
 
   useEffect(() => {
+    /* 客户端窗口内标出「本机」并默认选中它（浏览器里拿不到 id，不标也不选）。
+       **只交给 store 一处**：从前这里还另存一份 `localId` 往下透传给侧栏，
+       两份同一个事实，改一处就漏一处。侧栏顶部的设备选择器读 store 那一份。 */
     localMachineId().then((id) => {
-      setLocalId(id);
-      // 客户端窗口默认选中本机（用户手动切换过则不覆盖）
       if (id) {
         PortalStore.setLocalMachineId(id);
       }
@@ -325,7 +324,6 @@ const Portal: React.FC = observer(() => {
           onToggleFold={() => setSiderFolded(!siderFolded)}
           isMobile={isMobile}
           underTopBar={atSessions}
-          localId={localId}
           user={user}
           userMenuOpen={userMenuOpen}
           onUserMenuOpenChange={setUserMenuOpen}

@@ -30,8 +30,10 @@ interface RightPaneProps {
  * 卡四周留 8 露底、圆角 10、一圈 1px 描边环加两层轻投影，靠「浮起来」与正文区分，
  * 而不是拿一条竖线把格子切两半。
  *
- * 宽度只由 `flex-basis` 一处说了算：`ratio × 本格宽 − 16`（16 = 把手 8 ＋ 右 margin 8），
- * grow/shrink 都是 0。所以两态之间是一次真正的宽度过渡。
+ * 宽度只由 `flex-basis` 一处说了算：`ratio × 本格宽 − 8`（8 = 把手 `.sep` 的宽）。
+ * 右边那 8 的露底现在是这一栏**自己的 padding**（border-box，算在 basis 里），
+ * 不再是外挂的 margin —— 所以要减掉的只剩把手那一份。grow/shrink 都是 0，
+ * 两态之间是一次真正的宽度过渡。
  *
  * 必须放在一个 `display: flex` 的行里、紧跟本格正文之后（见 ChatPane 的 `.paneRow`）。
  */
@@ -111,7 +113,7 @@ const RightPane: React.FC<RightPaneProps> = observer((props) => {
           { [styles.dragging]: dragging },
           className,
         )}
-        style={{ flexBasis: `calc(${ratio * 100}% - 16px)` }}
+        style={{ flexBasis: `calc(${ratio * 100}% - 8px)` }}
       >
         {children}
       </aside>
