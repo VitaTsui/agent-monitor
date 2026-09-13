@@ -256,9 +256,9 @@ fn is_throwaway_cwd(cwd: &str) -> bool {
     }
     let p = Path::new(cwd);
     let canon = p.canonicalize().ok();
-    temp_roots().iter().any(|root| {
-        p.starts_with(root) || canon.as_deref().is_some_and(|c| c.starts_with(root))
-    })
+    temp_roots()
+        .iter()
+        .any(|root| p.starts_with(root) || canon.as_deref().is_some_and(|c| c.starts_with(root)))
 }
 
 /// 「这条会话还可能活着」的窗口（毫秒）。两处在用，是同一个判断：
@@ -4851,8 +4851,16 @@ mod noise_filter_tests {
             &tmp,
             "11111111-1111-1111-1111-111111111111",
             &[
-                row("user", Value::String("<command-name>/clear</command-name>".into()), home),
-                row("user", Value::String("<command-name>/model</command-name>".into()), home),
+                row(
+                    "user",
+                    Value::String("<command-name>/clear</command-name>".into()),
+                    home,
+                ),
+                row(
+                    "user",
+                    Value::String("<command-name>/model</command-name>".into()),
+                    home,
+                ),
             ],
         );
         let mut sc = SessionScanner::new(tmp.clone());

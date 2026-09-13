@@ -496,7 +496,10 @@ pub struct BotMonitor {
 /// 被重新打开后立刻进热列表，而 hub 手里那份历史快照还带着它 —— 最长 30 秒内两边都有。
 /// 此前直接 chain、同一个 id 出两条，全靠网页那头用 Map 压着才没发作；
 /// **靠消费方兜着的不算修好**，在产出侧收口。
-fn dedup_by_id(tasks: impl Iterator<Item = Task>, seen: &mut std::collections::HashSet<String>) -> Vec<Task> {
+fn dedup_by_id(
+    tasks: impl Iterator<Item = Task>,
+    seen: &mut std::collections::HashSet<String>,
+) -> Vec<Task> {
     tasks.filter(|t| seen.insert(t.id.clone())).collect()
 }
 
@@ -660,7 +663,11 @@ impl AppState {
             // 靠消费方兜着的不算修好，在产出侧收口。
             // 冲突取热列表那份：它每轮刷新，带着进程、子任务这些只有活跃会话才有的东西。
             for mut t in dedup_by_id(
-                entry.tasks.iter().chain(entry.history_tasks.iter()).cloned(),
+                entry
+                    .tasks
+                    .iter()
+                    .chain(entry.history_tasks.iter())
+                    .cloned(),
                 &mut seen,
             ) {
                 if !online {
