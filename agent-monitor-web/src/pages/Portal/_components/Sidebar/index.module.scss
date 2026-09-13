@@ -212,9 +212,11 @@
     font-size: var(--text-base);
   }
 
+  /* 14 ＋ muted，与参照实测一致（`Sidebar/index.module.scss:444-448`）。
+     原来是 --text-xs(11)，那是角标的档，用在一枚要被点的记号上偏小了半档。 */
   .accountCaret {
     flex: none;
-    font-size: var(--text-xs);
+    font-size: var(--text-base);
     color: var(--muted-foreground);
   }
 }
