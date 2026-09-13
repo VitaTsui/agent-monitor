@@ -94,10 +94,14 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
       bottom: 0;
       height: 48px;
       pointer-events: none;
+      /* 渐隐要收在**这一格实际压着的那块底**上。默认取 `--chain-surface`
+         （容器自己声明的那支，见 `.stepTile`）—— 原来写死 `--background`
+         （画布 #fafafa），而正文面是 `--card`（#ffffff），于是渐隐的末端
+         比它盖住的底深一档，长内容底下多出一条灰边。 */
       background: linear-gradient(
         to bottom,
         transparent,
-        var(--clamp-fade, var(--background))
+        var(--clamp-fade, var(--chain-surface))
       );
     }
 
@@ -116,9 +120,11 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
     }
   }
 
-  // 用户气泡里的遮罩要压在气泡底色上，不是画布底色
+  // 用户气泡里的遮罩要压在气泡底色上，不是画布底色。
+  // 气泡本身是 `--foreground 8%` 叠在这块面上（见 `.userBubble`），
+  // 所以混的底同样得是 `--chain-surface`，不是画布
   .userBubble .clampBox {
-    --clamp-fade: color-mix(in srgb, var(--foreground) 8%, var(--background));
+    --clamp-fade: color-mix(in srgb, var(--foreground) 8%, var(--chain-surface));
   }
 
   // ---------- 助手回合：平铺，无卡片 ----------
@@ -373,13 +379,17 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
 
   /* 图标槽固定占一列 18px，让所有步骤的文字起点对齐 —— 竖线也按这一列的中线画。
 
-     **底色不透明，且必须与它身后那块底同色。** 槽的职责只有一个：把贯穿整条链的
-     那根竖线在图标处遮断（见 `.step::before`）。所以它取的是 `--chain-surface`
-     —— 由**画那块底的容器**自己声明（主区是 `ChatPane` 的 `--primary-subtle`，
-     智能体卡内是 `AgentCard` 的 `--muted`），不是某个固定的语义色。
-     从前这里写死 `--card`（白），而两种容器的底都是浅灰，于是一列白方块贴在
-     灰底上。**故意不给兜底值**：将来多一种容器却忘了声明时，槽会变透明、竖线
-     从图标中间穿过去，一眼就看得出漏了；给个兜底反而把「遮错了颜色」藏起来。
+     **底色不透明，且由容器说了算。** 槽有两件事要办：把贯穿整条链的那根竖线在
+     图标处遮断（见 `.step::before`），以及让「一节点一格」读得出来。所以它取的是
+     `--chain-tile` —— 由**画那块底的容器**一处声明的「槽用哪支面」：
+     主区这块面是 `--card`（白），槽就是 `--muted`（浅灰小色块）；智能体卡内
+     整个翻过来（卡是 `--muted`，槽是 `--card`）。照 VitaAgent
+     `MessageList/index.module.scss:415` 与 `TaskCard/index.module.scss:60` ——
+     参照里槽**始终是与容器互补的那一支**，不是与容器同色的隐形块。
+     从前这里写死 `--card`：主区那块面一旦不是白（曾被改成 `--primary-subtle`），
+     它就成了贴在浅灰上的白方块，而卡内又碰巧对 —— 值对理由错，换个容器必错。
+     **故意不给兜底值**：将来多一种容器却忘了声明时，槽会变透明、竖线从图标中间
+     穿过去，一眼就看得出漏了；给个兜底反而把「取错了面」藏起来。
 
      **色块与字形必须分两层**（与 `AgentCard` 的 `.headTile` / `.headIcon` 同一个
      理由）：执行中那枚是 antd 的 `LoadingOutlined`，它的转圈动画
@@ -396,7 +406,7 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
     width: $tile;
     height: $tile;
     border-radius: var(--radius-xs);
-    background: var(--chain-surface);
+    background: var(--chain-tile);
     overflow: hidden;
   }
 

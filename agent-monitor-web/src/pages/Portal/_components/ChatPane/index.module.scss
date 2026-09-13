@@ -2,14 +2,15 @@
 
 /* 一格 = 正文 ＋（可选）本格的右栏，并排一行。
    这一层才是网格/放大布局眼里的「一格」，所以撑满格子的活由它干。
-   底色取正文同色：右栏卡四周留的那 8px 露底，露的就是它。 */
+   底色取正文同色（`--card`）—— 正文与右栏都是实底、把它盖满，它只在两者之间
+   那条缝里露一线，露出别的颜色就是一条色带。 */
 .paneRow {
   display: flex;
   height: 100%;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background: var(--primary-subtle);
+  background: var(--card);
 }
 
 .ChatPane {
@@ -19,13 +20,28 @@
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  /* **执行链的地色由画这块底的人说了算。**
-     链上每个节点左边那枚图标槽要拿不透明底把身后那根贯穿的竖线遮断
-     （见 `TerminalFeed` 的 `.stepTile`），所以槽底必须与**它压着的那块底**
-     同色 —— 不是某个固定的语义色。从前槽底写死成 `--card`（白），而这块底是
-     `--primary-subtle`（浅灰），于是一列白方块贴在灰底上。
-     声明与 `background` 挨着写、共用同一个令牌，两者不可能再各走各的。 */
-  --chain-surface: var(--primary-subtle);
+  /* 正文面 = `--card`（→ `--vita-surface` #ffffff / #18181b），与 VitaAgent 前台
+     对话页的 `.Chat` 同一支（`VitaAgent/web/src/pages/chat/index.module.scss:22`）；
+     外层 `.main` 早就写着「正文取面色(--card)、侧栏取画布色(--background)」，
+     这里曾被改成 `--primary-subtle`（#f4f4f5）—— 那支是**选中/标签的淡染底**，
+     不是一块面。后果有三条，都是实测出来的：
+       · 它与智能体卡的 `--muted` **同值**，卡片整块消失（1.00:1）；
+       · 贯穿执行链那根 `--border` 竖线压在它上面只有 1.21:1，等于没画；
+       · 顶部那条毛玻璃头是按「与正文同色」调的，于是多出一条可见色带。
+     三层递进（画布 `--background` → 面 `--card` → 卡 `--muted`）是 VitaAgent
+     的原始关系，回到它即可，不必给卡片或竖线另挑颜色。
+
+     **执行链的两支色由画这块底的人一处说了算**，声明与 `background` 挨着写，
+     不可能再各走各的：
+       · `--chain-surface` = 这块面本身。渐隐遮罩这类「要收在底色上」的东西取它。
+       · `--chain-tile` = 链上那枚图标槽的底。它取的是**另一支面**（这块面是
+         `--card` 白，槽就是 `--muted` 浅灰；卡内反过来），照 VitaAgent
+         `MessageList/index.module.scss:415`（槽 `--vita-muted`）与
+         `TaskCard/index.module.scss:60`（卡内槽 `--vita-surface`）。
+         槽的第一职责是把身后那根贯穿竖线遮断，但参照并不让它隐形 ——
+         它是一枚**看得见的小色块**，一列扫下来「一节点一格」才读得出来。 */
+  --chain-surface: var(--card);
+  --chain-tile: var(--muted);
   background: var(--chain-surface);
   overflow: hidden;
 
@@ -59,7 +75,10 @@
     gap: 10px;
     padding: 10px 18px;
     border-bottom: 1px solid var(--overlay-2);
-    background: color-mix(in srgb, var(--primary-subtle) 90%, transparent);
+    // 毛玻璃头：底色必须是**正文那块面**的 90%，不是别的面 ——
+    // 取错一支就在正文顶上多出一条看得见的色带（VitaAgent 的 `.groupHead`
+    // 踩过同一个坑，见 `MessageList/index.module.scss:866`）
+    background: color-mix(in srgb, var(--card) 90%, transparent);
     backdrop-filter: blur(6px);
 
     .headInfo {
