@@ -1,8 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 
 import { Segmented, Tag, Tooltip } from "antd";
-import { message } from "@hsu-react/ui";
-import { CheckOutlined, CopyOutlined } from "@ant-design/icons";
+import { Icon, message } from "@hsu-react/ui";
 
 import { Button, Input, Modal } from "@hsu-react/ui";
 
@@ -41,7 +40,7 @@ const CopyBtn: React.FC<{ text: string }> = ({ text }) => {
   return (
     <Tooltip title="复制">
       <span className={styles.copyBtn} role="button" onClick={copy}>
-        {done ? <CheckOutlined /> : <CopyOutlined />}
+        {done ? <Icon icon="ph:check" /> : <Icon icon="ph:copy" />}
       </span>
     </Tooltip>
   );
@@ -84,7 +83,11 @@ const ShareModal: React.FC<ShareModalProps> = ({ device, onClose }) => {
       return;
     }
     setLoading(true);
-    createShare(device.id, mode === "temp", mode === "fixed" ? fixedPwd.trim() : undefined)
+    createShare(
+      device.id,
+      mode === "temp",
+      mode === "fixed" ? fixedPwd.trim() : undefined,
+    )
       .then((res) => {
         if (res.code === 0 && res.data) {
           setInfo({
@@ -153,7 +156,9 @@ const ShareModal: React.FC<ShareModalProps> = ({ device, onClose }) => {
               <div className={styles.codeRow}>
                 <span className={styles.codeLabel}>密码</span>
                 <span className={styles.codeMuted}>
-                  {info.temporary ? "临时密码仅在生成时显示，如需请重新生成" : "固定密码已设置"}
+                  {info.temporary
+                    ? "临时密码仅在生成时显示，如需请重新生成"
+                    : "固定密码已设置"}
                 </span>
               </div>
             )}
@@ -197,7 +202,9 @@ const ShareModal: React.FC<ShareModalProps> = ({ device, onClose }) => {
                 style={{ marginTop: 12 }}
               />
             ) : (
-              <div className={styles.tempHint}>系统将生成一个 8 位数字临时密码，30 分钟内有效。</div>
+              <div className={styles.tempHint}>
+                系统将生成一个 8 位数字临时密码，30 分钟内有效。
+              </div>
             )}
             <Button
               type="primary"
@@ -213,11 +220,18 @@ const ShareModal: React.FC<ShareModalProps> = ({ device, onClose }) => {
 
         {guests.length > 0 && (
           <div className={styles.guests}>
-            <div className={styles.guestsTitle}>当前接入（{guests.length}）</div>
+            <div className={styles.guestsTitle}>
+              当前接入（{guests.length}）
+            </div>
             {guests.map((g) => (
               <div key={g} className={styles.guestRow}>
                 <span>{g}</span>
-                <Button size="small" className={styles.kickBtn} type="text" onClick={() => kick(g)}>
+                <Button
+                  size="small"
+                  className={styles.kickBtn}
+                  type="text"
+                  onClick={() => kick(g)}
+                >
                   移除
                 </Button>
               </div>

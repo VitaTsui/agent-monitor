@@ -1,15 +1,7 @@
+import { Icon } from "@hsu-react/ui";
 import React, { useState } from "react";
 
 import { Modal, Popover } from "antd";
-import {
-  EllipsisOutlined,
-  PauseCircleOutlined,
-  PlayCircleOutlined,
-  SearchOutlined,
-  StopOutlined,
-  SyncOutlined,
-  ThunderboltOutlined,
-} from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
 import PortalStore from "../../PortalStore";
@@ -68,7 +60,7 @@ const MobileBar: React.FC<MobileBarProps> = observer((props) => {
           }
         }}
       >
-        <SearchOutlined />
+        <Icon icon="ph:magnifying-glass" />
       </span>
       <span className={styles.mobileTitle}>
         {t0 ? (
@@ -102,7 +94,7 @@ const MobileBar: React.FC<MobileBarProps> = observer((props) => {
           aria-label="中断当前任务"
           onClick={() => control(t0.id ?? "", "interrupt")}
         >
-          <ThunderboltOutlined />
+          <Icon icon="ph:lightning" />
         </span>
       ) : null}
       {t0 ? (
@@ -131,22 +123,32 @@ const MobileBar: React.FC<MobileBarProps> = observer((props) => {
                       className={styles.mobileActItem}
                       onClick={act(() => syncMessages(id0))}
                     >
-                      <SyncOutlined /> 重新同步
+                      <Icon icon="ph:arrows-clockwise" /> 重新同步
                     </div>
                     <div
                       className={styles.mobileActItem}
-                      onClick={act(() => control(id0, paused ? "resume" : "pause"))}
+                      onClick={act(() =>
+                        control(id0, paused ? "resume" : "pause"),
+                      )}
                     >
-                      {paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
+                      {paused ? (
+                        <Icon icon="ph:play-circle" />
+                      ) : (
+                        <Icon icon="ph:pause-circle" />
+                      )}
                       {paused ? " 恢复" : " 暂停"}
                     </div>
                     <div
                       className={`${styles.mobileActItem} ${
                         canInterrupt ? "" : styles.disabled
                       }`}
-                      onClick={canInterrupt ? act(() => control(id0, "interrupt")) : undefined}
+                      onClick={
+                        canInterrupt
+                          ? act(() => control(id0, "interrupt"))
+                          : undefined
+                      }
                     >
-                      <ThunderboltOutlined /> 中断
+                      <Icon icon="ph:lightning" /> 中断
                       {/* 条目名保持动作，不可用的缘由另起一行小字 ——
                           把状态描述塞进名字里，读着就不像个能点的东西 */}
                       {canInterrupt ? null : (
@@ -168,7 +170,7 @@ const MobileBar: React.FC<MobileBarProps> = observer((props) => {
                         }),
                       )}
                     >
-                      <StopOutlined /> 终止进程
+                      <Icon icon="ph:prohibit" /> 终止进程
                     </div>
                   </>
                 );
@@ -176,8 +178,12 @@ const MobileBar: React.FC<MobileBarProps> = observer((props) => {
             </div>
           }
         >
-          <span className={styles.mobileMoreBtn} role="button" aria-label="会话操作">
-            <EllipsisOutlined />
+          <span
+            className={styles.mobileMoreBtn}
+            role="button"
+            aria-label="会话操作"
+          >
+            <Icon icon="ph:dots-three" />
           </span>
         </Popover>
       ) : null}

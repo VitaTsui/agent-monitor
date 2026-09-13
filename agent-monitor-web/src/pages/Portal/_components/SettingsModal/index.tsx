@@ -1,19 +1,7 @@
 import React, { Suspense, lazy, useEffect } from "react";
 
-import { Modal } from "@hsu-react/ui";
+import { Icon, Modal } from "@hsu-react/ui";
 import { Badge, Spin } from "antd";
-import {
-  BgColorsOutlined,
-  CloseOutlined,
-  CloudSyncOutlined,
-  InfoCircleOutlined,
-  LaptopOutlined,
-  LeftOutlined,
-  RightOutlined,
-  RobotOutlined,
-  SafetyOutlined,
-  UserOutlined,
-} from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
 import PortalStore from "../../PortalStore";
@@ -81,18 +69,26 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
     icon: React.ReactNode;
     badge?: number;
   }[] = [
-    { key: "account", label: "账户", icon: <UserOutlined /> },
-    { key: "appearance", label: "外观", icon: <BgColorsOutlined /> },
+    { key: "account", label: "账户", icon: <Icon icon="ph:user" /> },
+    { key: "appearance", label: "外观", icon: <Icon icon="ph:palette" /> },
     {
       key: "devices",
       label: "设备管理",
-      icon: <LaptopOutlined />,
+      icon: <Icon icon="ph:laptop" />,
       badge: pendingCount,
     },
-    { key: "configs", label: "配置同步", icon: <CloudSyncOutlined /> },
-    { key: "bots", label: "机器人管理", icon: <RobotOutlined /> },
-    { key: "security", label: "安全防护", icon: <SafetyOutlined /> },
-    { key: "about", label: "关于", icon: <InfoCircleOutlined /> },
+    {
+      key: "configs",
+      label: "配置同步",
+      icon: <Icon icon="ph:cloud-arrow-up" />,
+    },
+    { key: "bots", label: "机器人管理", icon: <Icon icon="ph:robot" /> },
+    {
+      key: "security",
+      label: "安全防护",
+      icon: <Icon icon="ph:shield-check" />,
+    },
+    { key: "about", label: "关于", icon: <Icon icon="ph:info" /> },
   ];
 
   // 移动端一级菜单 = 没选分栏；桌面没有这一态，右边落到「账户」
@@ -134,7 +130,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
               onClick={() => onTabChange(null)}
               onKeyDown={onKeyActivate(() => onTabChange(null))}
             >
-              <LeftOutlined className={styles.mobileBackIcon} />
+              <Icon icon="ph:caret-left" className={styles.mobileBackIcon} />
               设置
             </span>
           )}
@@ -149,7 +145,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
             onClick={onClose}
             onKeyDown={onKeyActivate(onClose)}
           >
-            <CloseOutlined />
+            <Icon icon="ph:x" />
           </span>
         </div>
 
@@ -169,7 +165,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
             <span className={styles.identityName}>
               {user.nickname ?? user.username}
             </span>
-            <RightOutlined className={styles.identityArrow} />
+            <Icon icon="ph:caret-right" className={styles.identityArrow} />
           </div>
           <div className={styles.navList} role="tablist" aria-label="设置分类">
             {navItems.map((n) => (
@@ -187,7 +183,7 @@ const SettingsModal: React.FC<SettingsModalProps> = observer((props) => {
                 <span className={styles.navIcon}>{n.icon}</span>
                 <span className={styles.navLabel}>{n.label}</span>
                 {n.badge ? <Badge count={n.badge} size="small" /> : null}
-                <RightOutlined className={styles.navChevron} />
+                <Icon icon="ph:caret-right" className={styles.navChevron} />
               </div>
             ))}
           </div>

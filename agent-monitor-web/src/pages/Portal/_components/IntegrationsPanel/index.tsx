@@ -2,12 +2,8 @@ import React, { useCallback, useEffect, useState } from "react";
 
 // Modal.confirm 这类命令式弹窗 hsu-ui 未提供，按约定用 antd 兜底（组件式仍用 hsu-ui 的 Modal）
 import { Modal as AntdModal, QRCode, Spin } from "antd";
-import { message } from "@hsu-react/ui";
-import {
-  DingtalkOutlined,
-  FolderOutlined,
-  RightOutlined,
-} from "@ant-design/icons";
+import { Icon, message } from "@hsu-react/ui";
+import { DingtalkOutlined } from "@ant-design/icons";
 
 import { Button, Copy, Input, Modal } from "@hsu-react/ui";
 
@@ -52,7 +48,12 @@ const IntegrationsPanel: React.FC = () => {
   const [qrErr, setQrErr] = useState("");
 
   // 机器人文件接收目录（通用）：按设备分组的项目
-  type RecvProj = { cwd: string; name: string; dir: string; taskId?: string | null };
+  type RecvProj = {
+    cwd: string;
+    name: string;
+    dir: string;
+    taskId?: string | null;
+  };
   const [recvDevices, setRecvDevices] = useState<
     { machineId: string; hostname: string; projects: RecvProj[] }[]
   >([]);
@@ -61,7 +62,7 @@ const IntegrationsPanel: React.FC = () => {
   const [recvEdits, setRecvEdits] = useState<Record<string, string>>({});
   const recvConfiguredCount = recvDevices.reduce(
     (n, d) => n + d.projects.filter((p) => p.dir).length,
-    0
+    0,
   );
   // 目录选择器：为哪个项目开着 + 浏览态
   const [picker, setPicker] = useState<{
@@ -87,7 +88,10 @@ const IntegrationsPanel: React.FC = () => {
             return;
           }
           if (res.data?.pending && attempt < 8) {
-            window.setTimeout(() => loadPickDirs(taskId, rel, attempt + 1), 1200);
+            window.setTimeout(
+              () => loadPickDirs(taskId, rel, attempt + 1),
+              1200,
+            );
             return;
           }
           setPickDirs(res.data?.dirs ?? []);
@@ -95,7 +99,7 @@ const IntegrationsPanel: React.FC = () => {
         })
         .catch(() => seq === pickSeq.current && setPickLoading(false));
     },
-    []
+    [],
   );
 
   const openPicker = (p: RecvProj) => {
@@ -108,7 +112,9 @@ const IntegrationsPanel: React.FC = () => {
     const cur = (recvEdits[p.cwd] ?? p.dir).trim().replace(/^\.\//, "");
     const isAbs = cur.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(cur);
     const startRel =
-      cur && !isAbs ? cur.split("/").filter(Boolean).slice(0, -1).join("/") : "";
+      cur && !isAbs
+        ? cur.split("/").filter(Boolean).slice(0, -1).join("/")
+        : "";
     setPicker({ cwd: p.cwd, name: p.name, taskId: p.taskId });
     setPickRel(startRel);
     setPickDirs([]);
@@ -123,8 +129,10 @@ const IntegrationsPanel: React.FC = () => {
         setRecvDevices((devs) =>
           devs.map((d) => ({
             ...d,
-            projects: d.projects.map((x) => (x.cwd === cwd ? { ...x, dir } : x)),
-          }))
+            projects: d.projects.map((x) =>
+              x.cwd === cwd ? { ...x, dir } : x,
+            ),
+          })),
         );
         setPicker(null);
       })
@@ -149,7 +157,9 @@ const IntegrationsPanel: React.FC = () => {
         setRecvDevices(devs);
         // 输入框初值 = 各项目已配目录
         const edits: Record<string, string> = {};
-        devs.forEach((dev) => dev.projects.forEach((p) => (edits[p.cwd] = p.dir)));
+        devs.forEach((dev) =>
+          dev.projects.forEach((p) => (edits[p.cwd] = p.dir)),
+        );
         setRecvEdits(edits);
         // 自己的机器人（密钥不回显，只知道配没配）
         setAppKey(d.dingtalk?.appKey ?? "");
@@ -214,7 +224,9 @@ const IntegrationsPanel: React.FC = () => {
     claimDingtalkBind(token)
       .then((res) => {
         if (res.code !== 0) return message.error(res.msg ?? "绑定失败");
-        message.success(`已绑定钉钉号${res.data?.nick ? ` · ${res.data.nick}` : ""}`);
+        message.success(
+          `已绑定钉钉号${res.data?.nick ? ` · ${res.data.nick}` : ""}`,
+        );
         getDingtalkIds().then((r) => setBoundIds(r.data?.list ?? []));
       })
       .catch(() => message.error("绑定失败，请检查网络"));
@@ -272,7 +284,7 @@ const IntegrationsPanel: React.FC = () => {
         }}
       >
         <span className={`${styles.icon} ${styles.folder}`}>
-          <FolderOutlined />
+          <Icon icon="ph:folder-simple" />
         </span>
         <div className={styles.headText}>
           <div className={styles.headTitle}>机器人文件接收目录</div>
@@ -283,7 +295,7 @@ const IntegrationsPanel: React.FC = () => {
         <span className={styles.status}>
           {recvConfiguredCount ? `已配 ${recvConfiguredCount}` : "默认"}
         </span>
-        <RightOutlined className={styles.arrow} />
+        <Icon icon="ph:caret-right" className={styles.arrow} />
       </div>
 
       {/* 自己的钉钉机器人：一个账号一个，配好即归自己 */}
@@ -296,7 +308,9 @@ const IntegrationsPanel: React.FC = () => {
             <span
               className={`${styles.botState} ${linked ? styles.botOk : ""}`}
               // 配好了但还没人跟它说过话时，hub 不知道该把推送发给谁
-              title={linked ? "已扫码绑定，推送会私聊发给你" : "还差扫码绑定这一步"}
+              title={
+                linked ? "已扫码绑定，推送会私聊发给你" : "还差扫码绑定这一步"
+              }
             >
               {linked ? "已连通" : "待扫码绑定"}
             </span>
@@ -310,7 +324,9 @@ const IntegrationsPanel: React.FC = () => {
           />
           <Input
             type="password"
-            placeholder={hasSecret ? "AppSecret（已保存，留空则不改）" : "AppSecret"}
+            placeholder={
+              hasSecret ? "AppSecret（已保存，留空则不改）" : "AppSecret"
+            }
             value={appSecret}
             onChange={(v: string) => setAppSecret(v)}
           />
@@ -338,8 +354,8 @@ const IntegrationsPanel: React.FC = () => {
             ) : null}
           </div>
           <div className={styles.botHint}>
-            在钉钉开放平台建一个「企业内部应用 · 机器人」，开启 Stream
-            模式，把 ClientID / ClientSecret 填到这里。保存后**还要在下面扫码绑定**
+            在钉钉开放平台建一个「企业内部应用 · 机器人」，开启 Stream 模式，把
+            ClientID / ClientSecret 填到这里。保存后**还要在下面扫码绑定**
             你的钉钉号，机器人才知道该把消息推给谁 —— 收件人由你本人授权确认，
             而不是谁跟它说过话就推给谁。
           </div>
@@ -352,42 +368,44 @@ const IntegrationsPanel: React.FC = () => {
           <div className={styles.boundTitle}>
             <DingtalkOutlined className={styles.boundTitleIcon} />
             绑定钉钉号
-            <span className={`${styles.botState} ${boundIds.length ? styles.botOk : ""}`}>
+            <span
+              className={`${styles.botState} ${boundIds.length ? styles.botOk : ""}`}
+            >
               {boundIds.length ? `已绑 ${boundIds.length}` : "未绑定"}
             </span>
           </div>
 
           <div className={styles.qrRow}>
-              <div className={styles.qrBox}>
-                {qrLoading ? (
-                  <Spin />
-                ) : qr ? (
-                  <QRCode value={qr.url} size={148} bordered={false} />
-                ) : (
-                  <div className={styles.qrErr}>
-                    {qrErr || "二维码未就绪"}
-                    <Button size="small" onClick={loadQr}>
-                      重试
-                    </Button>
-                  </div>
-                )}
-              </div>
-              <div className={styles.qrSide}>
-                <div className={styles.qrTitle}>用钉钉扫一扫</div>
-                <div className={styles.qrSub}>
-                  {hasSecret
-                    ? "用你自己的机器人扫码授权，绑定后才会开始推送。"
-                    : "扫码授权后，这个钉钉号就绑到当前账号。"}
-                  会话提醒私聊推给你，也能直接在钉钉里控制会话。手机、电脑可各绑一个。
+            <div className={styles.qrBox}>
+              {qrLoading ? (
+                <Spin />
+              ) : qr ? (
+                <QRCode value={qr.url} size={148} bordered={false} />
+              ) : (
+                <div className={styles.qrErr}>
+                  {qrErr || "二维码未就绪"}
+                  <Button size="small" onClick={loadQr}>
+                    重试
+                  </Button>
                 </div>
-                {qr ? (
-                  <div className={styles.qrAlt}>
-                    扫不了？在钉钉里把这句话发给机器人也一样：
-                    <code className={styles.qrCmd}>{qr.command}</code>
-                    <Copy id="dt-bind-cmd" text={qr.command} />
-                  </div>
-                ) : null}
+              )}
+            </div>
+            <div className={styles.qrSide}>
+              <div className={styles.qrTitle}>用钉钉扫一扫</div>
+              <div className={styles.qrSub}>
+                {hasSecret
+                  ? "用你自己的机器人扫码授权，绑定后才会开始推送。"
+                  : "扫码授权后，这个钉钉号就绑到当前账号。"}
+                会话提醒私聊推给你，也能直接在钉钉里控制会话。手机、电脑可各绑一个。
               </div>
+              {qr ? (
+                <div className={styles.qrAlt}>
+                  扫不了？在钉钉里把这句话发给机器人也一样：
+                  <code className={styles.qrCmd}>{qr.command}</code>
+                  <Copy id="dt-bind-cmd" text={qr.command} />
+                </div>
+              ) : null}
+            </div>
           </div>
 
           {boundIds.length ? (
@@ -396,10 +414,15 @@ const IntegrationsPanel: React.FC = () => {
                 <div key={b.staffId} className={styles.idRow}>
                   <DingtalkOutlined className={styles.idIcon} />
                   <div className={styles.idName}>
-                    <div className={styles.idNick}>{b.nick || "（未取到昵称）"}</div>
+                    <div className={styles.idNick}>
+                      {b.nick || "（未取到昵称）"}
+                    </div>
                     <div className={styles.idStaff}>{b.staffId}</div>
                   </div>
-                  <Button size="small" onClick={() => doUnbind(b.staffId, b.nick)}>
+                  <Button
+                    size="small"
+                    onClick={() => doUnbind(b.staffId, b.nick)}
+                  >
                     解绑
                   </Button>
                 </div>
@@ -419,11 +442,13 @@ const IntegrationsPanel: React.FC = () => {
         centered
       >
         <div className={styles.recvModalHint}>
-          发给机器人的文件，随下一条任务落到对应会话项目的这个目录。
-          留空 = 默认 <code>项目/tmp</code>。点「浏览」在项目目录树里选。
+          发给机器人的文件，随下一条任务落到对应会话项目的这个目录。 留空 = 默认{" "}
+          <code>项目/tmp</code>。点「浏览」在项目目录树里选。
         </div>
         {recvDevices.length === 0 ? (
-          <div className={styles.recvEmpty}>暂无项目（有活跃会话后自动出现）</div>
+          <div className={styles.recvEmpty}>
+            暂无项目（有活跃会话后自动出现）
+          </div>
         ) : (
           recvDevices.map((dev) => (
             <div key={dev.machineId || dev.hostname} className={styles.recvDev}>
@@ -439,7 +464,9 @@ const IntegrationsPanel: React.FC = () => {
                       className={styles.recvProjInput}
                       placeholder="tmp（默认）· 可直接输入或点浏览"
                       value={recvEdits[p.cwd] ?? p.dir}
-                      onChange={(v) => setRecvEdits((m) => ({ ...m, [p.cwd]: v }))}
+                      onChange={(v) =>
+                        setRecvEdits((m) => ({ ...m, [p.cwd]: v }))
+                      }
                     />
                     <Button size="small" onClick={() => openPicker(p)}>
                       浏览
@@ -447,7 +474,9 @@ const IntegrationsPanel: React.FC = () => {
                     <Button
                       size="small"
                       type="primary"
-                      onClick={() => commitRecvDir(p.cwd, (recvEdits[p.cwd] ?? "").trim())}
+                      onClick={() =>
+                        commitRecvDir(p.cwd, (recvEdits[p.cwd] ?? "").trim())
+                      }
                     >
                       保存
                     </Button>
@@ -526,9 +555,9 @@ const IntegrationsPanel: React.FC = () => {
                   picker && loadPickDirs(picker.taskId, next);
                 }}
               >
-                <FolderOutlined className={styles.pickIcon} />
+                <Icon icon="ph:folder-simple" className={styles.pickIcon} />
                 <span className={styles.pickItemName}>{name}</span>
-                <RightOutlined className={styles.pickArrow} />
+                <Icon icon="ph:caret-right" className={styles.pickArrow} />
               </div>
             ))
           )}

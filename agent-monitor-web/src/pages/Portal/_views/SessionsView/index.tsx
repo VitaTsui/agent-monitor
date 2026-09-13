@@ -1,7 +1,8 @@
+import { Icon } from "@hsu-react/ui";
 import React from "react";
 
 import { Empty } from "antd";
-import { CodeOutlined, LeftOutlined } from "@ant-design/icons";
+import { CodeOutlined } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 import { useNavigate } from "react-router-dom";
 
@@ -78,7 +79,7 @@ const SessionsView: React.FC = observer(() => {
                 }
               }}
             >
-              <LeftOutlined />
+              <Icon icon="ph:caret-left" />
             </span>
             <span className={views.headTitle}>全部会话</span>
             <span className={styles.count}>{items.length}</span>
