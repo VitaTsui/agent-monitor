@@ -19,22 +19,15 @@
   }
 }
 
-// 检查更新：主题色胶囊描边，悬停填充
+// 检查更新：主题色胶囊描边，悬停填充。
+// 这里只留形状 —— 描边色与 hover 填充由 index.tsx 的 OutlineFillButton
+// （antd Button 组件令牌）给，CSS 覆盖在 hover 上压不过 antd，见那边的注释。
 .checkUpdateBtn {
   height: 26px;
   border-radius: var(--radius-full);
   padding-inline: 14px;
   font-size: var(--text-sm);
-  color: var(--primary);
-  border-color: color-mix(in srgb, var(--primary) 45%, transparent);
-  background: transparent;
   transition: all 0.2s;
-
-  &:hover {
-    color: var(--primary-foreground);
-    border-color: var(--primary);
-    background: var(--primary);
-  }
 }
 
 // 有新版时的「更新」按钮：只管胶囊形状，颜色交给 antd 的 type="primary"。
