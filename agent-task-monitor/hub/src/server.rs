@@ -59,7 +59,7 @@ fn worth_finish_notice(mtime_ms: u64, now_secs: u64) -> bool {
 ///
 /// 光靠文本口径挡不住它：占位任务的标题恒为终端名「Claude Code」、提示词恒为
 ///「（会话尚未产生记录）」，两者都非空。只能认 id。
-fn is_proc_placeholder(t: &am_core::model::Task) -> bool {
+pub(crate) fn is_proc_placeholder(t: &am_core::model::Task) -> bool {
     is_proc_placeholder_id(&t.id, &t.machine_id)
 }
 
@@ -131,6 +131,12 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/tasks/page", get(page_tasks))
         .route("/monitor/tasks/detail/:id", get(task_detail))
         .route("/monitor/tasks/:id/messages", get(task_messages))
+        .route("/monitor/sessions/history", get(list_session_history))
+        .route("/monitor/tasks/:id/subtasks", get(task_subtasks))
+        .route(
+            "/monitor/tasks/:id/subagents/:agentId/messages",
+            get(task_subagent_messages),
+        )
         .route(
             "/monitor/tasks/:id/slash-commands",
             get(task_slash_commands),
@@ -474,7 +480,7 @@ pub(crate) fn task_is_selecting(
     let Some(ms) = msgs else { return false };
     for m in ms.iter().rev() {
         match m.role.as_str() {
-            "todos" | "bgtasks" => continue,
+            "todos" => continue,
             "select" => return true,
             "user" | "tool_result" => return false,
             _ => continue, // assistant/tool/plan：继续往前看
@@ -733,6 +739,142 @@ async fn list_tasks(
         .filter(|t| t.status != TaskStatus::Finished && q.matches(t))
         .collect();
     ok(json!({ "list": with_slots(&state, &user, &filtered).await }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionHistoryQuery {
+    /// 模糊过滤（项目 / 首个提示词 / 主机名），与 `/monitor/tasks` 同一套判据
+    keyword: Option<String>,
+    /// 只看某台机器
+    machine_id: Option<String>,
+    /// 只看某个 provider（claude / codex …）
+    provider: Option<String>,
+    /// 只看终端 CLI（`false`）或只看桌面客户端（`true`）；不传 = 两者都要。
+    ///
+    /// 与 `provider` 配合就是 `/monitor/devices` 里 `providers[]` 的那个分组键：
+    /// 同一个 `codex` 下 Codex CLI 与 ChatGPT 桌面版是两个客户端，光靠 `provider`
+    /// 分不开。**不用展示名当筛选参数** —— 那是给人看的中文串，不是接口契约。
+    desktop: Option<bool>,
+    /// 游标：上一页最后一条的 `mtimeMs`，要更旧的就把它带回来。
+    /// 用时间游标而不是 offset —— 这份列表的底料是每轮上报刷新的内存快照，
+    /// 翻页期间新会话插进头部，offset 会让某条被跳过或看两遍。
+    before: Option<u64>,
+    /// 每页条数（1~200，默认 50）
+    limit: Option<usize>,
+}
+
+/// GET /monitor/sessions/history —— **历史会话列表（含已结束的）**。
+///
+/// 为什么新开一条而不是给 `/monitor/tasks` 加参数：`/monitor/tasks` 是整个前台
+/// 轮询的那条热路径，它「只出活跃会话」是被所有消费方（网页列表、号位分配、
+/// 钉钉推送）默认的前提；往里塞历史会话会让每个消费方都得再加一层过滤。
+/// 而 `/monitor/history` 这个名字已经被**远程交互记录**占了（见 `list_history`），
+/// 不能复用，故取 `/monitor/sessions/history`。
+///
+/// 筛选键与 `/monitor/devices` 的 `providers[]` 对齐：`machineId` + `provider` + `desktop`
+/// 三个一起，才唯一确定「哪台机器上的哪个客户端」。
+///
+/// 数据来自各机器每轮上报的快照，扫描窗口见 am-core 的 `AM_HISTORY_DAYS`（默认 30 天）。
+/// hub 不落盘：历史列表由客户端每 30 秒随上报刷新一份全的。hub 重启后这份是空的，
+/// 但会在下发响应里带 `wantHistory` 主动索要，约一个上报周期（1.5~3 秒）即恢复 ——
+/// 不这么做就得干等客户端那 30 秒定时器，期间历史会话按 id 取数全是 404。
+async fn list_session_history(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<SessionHistoryQuery>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let keyword = q
+        .keyword
+        .as_deref()
+        .map(|k| k.trim().to_lowercase())
+        .filter(|k| !k.is_empty());
+    let mut list: Vec<Task> = state
+        .all_tasks_for(&user)
+        .await
+        .into_iter()
+        .filter(|t| {
+            // 占位任务（进程有了但会话记录还没生成）不是历史，没有正文可看。
+            // 判据走统一那份，别在这里另认一遍「id 里有没有 pid-」——
+            // 设备 providers 的计数要与这里的 total 严丝合缝地对上。
+            if is_proc_placeholder(t) {
+                return false;
+            }
+            if let Some(m) = &q.machine_id {
+                if !m.is_empty() && &t.machine_id != m {
+                    return false;
+                }
+            }
+            if let Some(p) = &q.provider {
+                if !p.is_empty() && &t.provider != p {
+                    return false;
+                }
+            }
+            if let Some(d) = q.desktop {
+                if t.desktop != d {
+                    return false;
+                }
+            }
+            if let Some(k) = &keyword {
+                if !t.project.to_lowercase().contains(k)
+                    && !t.title.to_lowercase().contains(k)
+                    && !t.prompt.to_lowercase().contains(k)
+                    && !t.hostname.to_lowercase().contains(k)
+                {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+    // 最近活动倒序 —— 与游标 `before` 同一个键
+    list.sort_by_key(|t| std::cmp::Reverse(t.mtime_ms));
+    let total = list.len();
+    if let Some(before) = q.before {
+        list.retain(|t| t.mtime_ms < before);
+    }
+    let has_more = list.len() > limit;
+    list.truncate(limit);
+    let next_cursor = has_more.then(|| list.last().map(|t| t.mtime_ms)).flatten();
+    let notes = crate::notes::map_for(&state, &user).await;
+    let items: Vec<Value> = list
+        .iter()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "title": t.title,
+                "prompt": t.prompt,
+                "status": status_key(t.status),
+                "statusDsr": t.status_dsr,
+                "provider": t.provider,
+                "providerDsr": t.provider_dsr,
+                // 这条会话属于哪个客户端（终端 CLI / 桌面版）——与 devices 的
+                // providers[].desktop 同一个键，前端据此把会话归回对应分组
+                "desktop": t.desktop,
+                "project": t.project,
+                "projectName": t.project_name,
+                "machineId": t.machine_id,
+                "hostname": t.hostname,
+                "platform": t.platform,
+                "platformDsr": t.platform_dsr,
+                "startedAt": t.started_at,
+                "lastActiveAt": t.last_active_at,
+                "mtimeMs": t.mtime_ms,
+                "lineCount": t.line_count,
+                "gitBranch": t.git_branch,
+                "note": notes.get(&crate::slots::anchor_of(t)),
+            })
+        })
+        .collect();
+    ok(json!({
+        "list": items,
+        "total": total,
+        "nextCursor": next_cursor,
+    }))
 }
 
 /// 给会话补上「号位」（钉钉里 `#N` 的 N），让网页/移动端与钉钉看到同一个编号 ——
@@ -1006,7 +1148,15 @@ struct MsgQuery {
     limit: Option<usize>,
 }
 
-/// GET /monitor/tasks/:id/messages —— 读所属机器上报的消息缓存
+/// GET /monitor/tasks/:id/messages —— 会话正文。
+///
+/// 两条来源，**优先级固定**：
+/// 1. agent 随上报捎带的缓存（活跃会话，约 1.5s 一刷，最新）；
+/// 2. 缓存里没有 → 点名让那台机器**现读会话记录**（历史会话走这条）。
+///
+/// 第 2 条是这次补上的。此前只有第 1 条，而 agent 只给「有进程或 10 分钟内有写入」
+/// 的会话捎带消息（client/src/agent.rs 的 `attach_messages`）—— 于是所有已结束的
+/// 历史会话点开必然是一片空白，且没有任何提示，看起来像坏了。
 async fn task_messages(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -1016,25 +1166,184 @@ async fn task_messages(
     let Some(user) = auth_user(&state, &headers).await else {
         return err(401, "未登录");
     };
-    let _limit = q.limit.unwrap_or(120).clamp(1, 500);
-    let machine_id = {
-        let tasks = state.tasks_for(&user).await;
-        tasks
-            .iter()
-            .find(|t| t.id == id)
-            .map(|t| t.machine_id.clone())
+    let limit = q.limit.unwrap_or(120).clamp(1, 500);
+    // 用 all_tasks_for：历史会话不在热列表里，按 tasks_for 查会一律 404
+    let task = {
+        let tasks = state.all_tasks_for(&user).await;
+        tasks.into_iter().find(|t| t.id == id)
     };
-    let Some(machine_id) = machine_id else {
+    let Some(task) = task else {
         return err(404, "任务不存在");
     };
 
-    let machines = state.machines.read().await;
-    let list = machines
-        .get(&machine_id)
-        .and_then(|m| m.messages.get(&id))
-        .cloned()
-        .unwrap_or_default();
-    ok(json!({ "list": list }))
+    let cached = {
+        let machines = state.machines.read().await;
+        machines
+            .get(&task.machine_id)
+            .and_then(|m| m.messages.get(&id))
+            .cloned()
+    };
+    if let Some(list) = cached {
+        return ok(json!({ "list": list, "pending": false }));
+    }
+    match fetch_session_data(
+        &state,
+        &task,
+        am_core::model::SessionWant::Messages,
+        "",
+        limit,
+    )
+    .await
+    {
+        Ok(r) => ok(json!({ "list": r.messages, "pending": false })),
+        Err(FetchMiss::Offline) => err(500, "任务所属机器已离线"),
+        Err(FetchMiss::Failed(e)) => err(404, &e),
+        // 没等到不是错：客户端下一轮就会带回来，前端隔一会儿再问一次即可
+        Err(FetchMiss::Pending) => ok(json!({ "list": [], "pending": true })),
+    }
+}
+
+/// GET /monitor/tasks/:id/subagents/:agentId/messages —— **子会话正文**。
+///
+/// `agentId` 取自 `Task.subTasks[].id`（`kind == "agent"` 且 `hasBody` 为真的那些）。
+/// 返回结构与 `/messages` 完全一致（同一个 `MessageBrief`），前端复用同一套渲染。
+///
+/// 一律现读磁盘、不缓存：子会话正文从来没随上报上来过，也不该上来 ——
+/// 本机实测 422 份 `subagents/agent-*.jsonl`，全量推是不可能的。
+async fn task_subagent_messages(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((id, agent_id)): Path<(String, String)>,
+    Query(q): Query<MsgQuery>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let limit = q.limit.unwrap_or(200).clamp(1, 500);
+    let task = {
+        let tasks = state.all_tasks_for(&user).await;
+        tasks.into_iter().find(|t| t.id == id)
+    };
+    let Some(task) = task else {
+        return err(404, "任务不存在");
+    };
+    match fetch_session_data(
+        &state,
+        &task,
+        am_core::model::SessionWant::Subagent,
+        &agent_id,
+        limit,
+    )
+    .await
+    {
+        Ok(r) => ok(json!({ "list": r.messages, "pending": false })),
+        Err(FetchMiss::Offline) => err(500, "任务所属机器已离线"),
+        Err(FetchMiss::Failed(e)) => err(404, &e),
+        Err(FetchMiss::Pending) => ok(json!({ "list": [], "pending": true })),
+    }
+}
+
+/// 现读正文没拿到的三种原因。必须分开：机器离线要说清楚（再等也没用），
+/// 客户端明确说「这份记录不存在」是 404，而「这一轮还没回来」只是要再等一下。
+enum FetchMiss {
+    Offline,
+    Failed(String),
+    Pending,
+}
+
+/// 点名让某台机器现读一份会话数据，等它回报。
+///
+/// 与 [`fetch_session_file`] 同一套请求-回报节奏：排进队列 → agent 下一轮上报取走 →
+/// 再下一轮把结果带回来。客户端约 1.5s 一轮，两轮是理论下限，等 8 秒留足余量。
+///
+/// 三种要求（会话正文 / 子会话正文 / 全量子任务清单）共用这一条 —— 排队去重、TTL、
+/// 等待窗口全是同一套，各开一条只会三处各错一次。
+async fn fetch_session_data(
+    state: &SharedState,
+    task: &Task,
+    want: am_core::model::SessionWant,
+    agent_id: &str,
+    limit: usize,
+) -> Result<am_core::model::SessionFetchResult, FetchMiss> {
+    let machine_id = task.machine_id.clone();
+    // 会话有没有进程在跑，只有 hub 这层知道（解析器看不到进程表）——
+    // 带过去，客户端才能给这条会话名下卡住的后台命令收尾。
+    let parent_ended = task.process.is_none();
+    let kind = match want {
+        am_core::model::SessionWant::Messages => "msg",
+        am_core::model::SessionWant::Subagent => "sub",
+        am_core::model::SessionWant::Subtasks => "tasks",
+    };
+    let fetch_id = format!("{}:{kind}:{agent_id}:{limit}", task.id);
+    {
+        let mut machines = state.machines.write().await;
+        let Some(entry) = machines.get_mut(&machine_id) else {
+            return Err(FetchMiss::Offline);
+        };
+        if entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS {
+            return Err(FetchMiss::Offline);
+        }
+        // 同一份被反复点（前端轮询）时只排一条，别把队列堆成同一个请求的副本
+        if !entry
+            .pending_session_fetch
+            .iter()
+            .any(|f| f.fetch_id == fetch_id)
+        {
+            entry
+                .pending_session_fetch
+                .push_back(am_core::model::SessionFetch {
+                    fetch_id: fetch_id.clone(),
+                    task_id: task.id.clone(),
+                    want,
+                    agent_id: agent_id.to_string(),
+                    limit,
+                    parent_ended,
+                });
+        }
+    }
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let mut machines = state.machines.write().await;
+        let Some(entry) = machines.get_mut(&machine_id) else {
+            return Err(FetchMiss::Offline);
+        };
+        if let Some((r, _)) = entry.session_fetch_results.remove(&fetch_id) {
+            if !r.err.is_empty() {
+                return Err(FetchMiss::Failed(r.err));
+            }
+            return Ok(r);
+        }
+    }
+    Err(FetchMiss::Pending)
+}
+
+/// GET /monitor/tasks/:id/subtasks —— 该会话的**全部**子任务清单。
+///
+/// 与随快照下发的 `Task.subTasks` 是同一个结构、两种口径：那份是「当前状态面板」
+/// （只留近 24 小时、最多 50 条终态，且只有活跃会话才带），这条是**全量视角**，
+/// 按需读盘、不套保留窗口 —— 从历史列表点开一条五天前的会话，把它的子会话展开来看，
+/// 靠的就是它。活跃会话调它同样成立，结果是 `Task.subTasks` 的超集。
+async fn task_subtasks(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Json<Value> {
+    let Some(user) = auth_user(&state, &headers).await else {
+        return err(401, "未登录");
+    };
+    let task = {
+        let tasks = state.all_tasks_for(&user).await;
+        tasks.into_iter().find(|t| t.id == id)
+    };
+    let Some(task) = task else {
+        return err(404, "任务不存在");
+    };
+    match fetch_session_data(&state, &task, am_core::model::SessionWant::Subtasks, "", 0).await {
+        Ok(r) => ok(json!({ "list": r.sub_tasks, "pending": false })),
+        Err(FetchMiss::Offline) => err(500, "任务所属机器已离线"),
+        Err(FetchMiss::Failed(e)) => err(404, &e),
+        Err(FetchMiss::Pending) => ok(json!({ "list": [], "pending": true })),
+    }
 }
 
 /// GET /monitor/tasks/:id/slash-commands —— 该会话模型的可用斜杠命令（只读扫描）
@@ -3149,6 +3458,10 @@ async fn report(
                 pending_dir: VecDeque::new(),
                 pending_fsop: VecDeque::new(),
                 pending_file_fetch: VecDeque::new(),
+                history_tasks: Vec::new(),
+                history_reported: false,
+                pending_session_fetch: VecDeque::new(),
+                session_fetch_results: HashMap::new(),
                 file_fetch_results: HashMap::new(),
                 fsop_results: HashMap::new(),
                 file_results: HashMap::new(),
@@ -3607,6 +3920,12 @@ async fn report(
         .new_session_pending
         .retain(|_, (since, _)| since.elapsed().as_secs() < 10 * 60);
     entry.tasks = tasks;
+    // 历史会话列表：只有本轮带了才刷新（客户端 30 秒一次）。None = 没带，沿用上一份 ——
+    // 当成空表会让历史列表每 30 秒闪空一次。
+    if let Some(h) = payload.history_tasks.clone() {
+        entry.history_tasks = h;
+        entry.history_reported = true;
+    }
     // 会话历史（需要 &state，故在释放 machines 锁之后写 —— 见函数末尾）
     let pending_history = history_records;
     // 缓存 agent 回传的 git 对比结果
@@ -3649,6 +3968,15 @@ async fn report(
     entry
         .file_fetch_results
         .retain(|_, (_, at)| at.elapsed().as_secs() < crate::state::FETCH_RESULT_TTL_SECS);
+    // 现读正文的结果：同上，交给等着的那个网页请求即删，没人领的过期清掉。
+    for r in payload.session_fetch_results {
+        entry
+            .session_fetch_results
+            .insert(r.fetch_id.clone(), (r, std::time::Instant::now()));
+    }
+    entry
+        .session_fetch_results
+        .retain(|_, (_, at)| at.elapsed().as_secs() < crate::state::FETCH_RESULT_TTL_SECS);
     // 下发文件的落盘回报：等在 attach_pending_file 里的那一侧按 transfer_id 来认领。
     // 同样带 TTL —— 等的人可能已经超时走了，没人来领的不留。
     for r in payload.file_results {
@@ -3687,6 +4015,11 @@ async fn report(
     let dir_queries: Vec<am_core::model::DirQuery> = entry.pending_dir.drain(..).collect();
     let fs_ops: Vec<am_core::model::FsOp> = entry.pending_fsop.drain(..).collect();
     let file_fetches: Vec<am_core::model::FileFetch> = entry.pending_file_fetch.drain(..).collect();
+    let session_fetches: Vec<am_core::model::SessionFetch> =
+        entry.pending_session_fetch.drain(..).collect();
+    // 还没收到过这台机器的历史列表（hub 刚重启 / 这台机器刚上线）→ 让它下一轮就补发，
+    // 别干等客户端那 30 秒的定时器。见 MachineEntry::history_reported。
+    let want_history = !entry.history_reported;
     drop(machines);
 
     // 配置同步：锁已释放再算 —— 里面要拿 registry 与 configs 两把锁，
@@ -3731,6 +4064,8 @@ async fn report(
         "dirQueries": dir_queries,
         "fsOps": fs_ops,
         "fileFetches": file_fetches,
+        "sessionFetches": session_fetches,
+        "wantHistory": want_history,
         // 配置同步：向源机索要的路径 / 向镜像机下发的内容（两者互斥，见 sync_configs）
         "configPulls": config_pulls,
         "configPushes": config_pushes,
@@ -4084,6 +4419,8 @@ mod selecting_tests {
             content: String::new(),
             timestamp: String::new(),
             is_error: false,
+            tools: Vec::new(),
+            tool_use_id: String::new(),
         }
     }
     fn msgs(roles: &[&str]) -> Vec<MessageBrief> {
@@ -4099,7 +4436,7 @@ mod selecting_tests {
     fn hook_report_wins_over_stale_messages() {
         let card = json!({ "questions": [{ "question": "选哪个?" }] });
         // 消息还停在「工具跑完」的样子，一条 select 都没有
-        let stale = msgs(&["assistant", "tool", "tool_result", "bgtasks"]);
+        let stale = msgs(&["assistant", "tool", "tool_result"]);
         assert!(task_is_selecting(Some(&card), Some(&stale)));
         // 连消息都还没上报上来的会话同样算
         assert!(task_is_selecting(Some(&card), None));
@@ -4129,10 +4466,7 @@ mod selecting_tests {
             Some(&msgs(&["select", "assistant"]))
         ));
         // 状态快照追加在末尾，要跳过
-        assert!(task_is_selecting(
-            None,
-            Some(&msgs(&["select", "todos", "bgtasks"]))
-        ));
+        assert!(task_is_selecting(None, Some(&msgs(&["select", "todos"]))));
         // 已被应答 → 不算
         assert!(!task_is_selecting(
             None,

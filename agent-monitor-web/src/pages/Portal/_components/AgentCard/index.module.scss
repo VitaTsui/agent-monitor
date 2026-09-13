@@ -1,0 +1,253 @@
+/* 智能体卡是执行链上的**一格**，不是一张独立卡片。
+ *
+ * 形态照 VitaAgent 的任务卡（`web/src/pages/chat/_components/TaskCard/index.module.scss`）：
+ * 整格落在一块浅底上（比画布略浮起、大圆角、**无描边**），头一行是目标 ＋ 状态，
+ * 下面是子代理小卡网格；而贯穿整条链的那根竖线**从这块底上连续穿过去**，不被它打断。
+ *
+ * 左右各外扩 8：底比内容宽出一圈，而**内容仍与其它链节点的图标列对齐**
+ * （-8 的外边距 ＋ 8 的内边距，净位移为 0）。不这么做的话，这一格的图标会比上下两格
+ * 往右缩一截，那根竖线就穿不过它的图标中线了。
+ *
+ * 三个几何数必须与 `TerminalFeed/index.module.scss` 保持同源，那边改了这里要一起改：
+ *   图标列 20px（$tile）｜图标到文字 8px（$tile-gap）｜竖线画在 10px（$tile-mid）
+ * 本项目的图标列是 20＋8，VitaAgent 是 18＋10 —— **文字列都落在 28**，
+ * 所以 VitaAgent 那份 28px 的网格缩进可以原样照抄，不用换算。 */
+$tile: 20px;
+$tile-gap: 8px;
+/** 网格缩进到文字列：图标列 20 ＋ 间距 8 = 28，与标题、元信息那两行的左边缘齐平 */
+$text-col: $tile + $tile-gap;
+
+.AgentCard {
+  margin: 6px -8px;
+  padding: 8px;
+  border-radius: var(--radius-lg);
+  background: var(--muted);
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  gap: $tile-gap;
+  width: 100%;
+  min-height: 36px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* 头一行左边那枚方形图标。规格与链上其它节点的图标槽一致（20×20），
+   四类节点在同一列里必须是同一副大小，否则扫下来像四种东西。
+   **底色不透明**：它正是用来遮断身后那根贯穿竖线的（不遮的话线从图标中间穿过去）。
+   取这一屏的地色（--card）而不是这块组底那支浅灰（--muted）—— 同色的话
+   图标块化进背景里，等于什么都没遮。
+   色块与图标分两层：跑动时转的是图标，色块得钉住不动。 */
+.headTile {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  z-index: 2;
+  flex: none;
+  width: $tile;
+  height: $tile;
+  border-radius: var(--radius-xs);
+  background: var(--card);
+}
+
+.headIcon {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* 执行中走 --primary（墨黑 / 暗色下近白），与链上的 .stepIconLive 同一口径 ——
+   绿留给「成功」，一屏之内不出现两种「执行中」 */
+.headIconLive {
+  color: var(--primary);
+}
+
+.headText {
+  flex: 1;
+  min-width: 0;
+}
+
+.goal {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--foreground);
+  font-weight: 500;
+  line-height: 1.6;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 2px;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+  /* 行高写死倍数，不留 normal：normal 由实际落到的字体决定（中文走 CJK 兜底
+     17px、数字走 Arial 14px），同一行会差出 3px */
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+
+.status {
+  color: var(--muted-foreground);
+}
+
+.running {
+  color: var(--primary);
+}
+
+.completed {
+  color: var(--success);
+}
+
+.failed {
+  color: var(--destructive);
+}
+
+/* 被父会话连带终止不是失败：走中性色，不走 destructive 红 */
+.interrupted {
+  color: var(--muted-foreground);
+}
+
+.caret {
+  flex: none;
+  margin-top: 8px;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+  transition: transform 0.15s;
+}
+
+.caretOpen {
+  transform: rotate(180deg);
+}
+
+/* 子代理自己跑砸时的原因。摆在卡片头下方、展开区之外 */
+.cardError {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 0 0 $text-col;
+  color: var(--destructive);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.cardErrorIcon {
+  flex: none;
+  margin-top: 2px;
+}
+
+/* 顶部 8 对齐网格自己的 gap：状态行到第一行小卡的距离 ＝ 小卡行与行之间的距离，
+   整片网格上下是同一个节奏，而不是上面挤下面松 */
+.body {
+  padding: 8px 2px 4px $text-col;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+}
+
+/* 一张子代理小卡。白底（画布色）落在那块浅底上 —— 透明的话一排卡与背景连成一片，
+   读不出「一张一张」 */
+.cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--background);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+
+  &:hover {
+    background: var(--accent);
+  }
+}
+
+/* 选中那张：走主题色，不写死十六进制 —— 暗色模式下才跟得动 */
+.cellOn {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+
+  &:hover {
+    background: color-mix(in srgb, var(--primary) 14%, transparent);
+  }
+}
+
+.cellDisabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+
+  &:hover {
+    background: var(--background);
+  }
+}
+
+.cellHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+/* 收场的勾/叉/圈给语义色：一排卡里「这几个成了、那一个还在跑」要一眼分得出，
+   全是灰的就只能逐个读字 */
+.cellIcon {
+  flex: none;
+  display: inline-flex;
+  color: var(--muted-foreground);
+  font-size: 14px;
+}
+
+.cell.completed .cellIcon {
+  color: var(--success);
+}
+
+.cell.failed .cellIcon {
+  color: var(--destructive);
+}
+
+.cell.running .cellIcon {
+  color: var(--primary);
+}
+
+.cellNm {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  // 12px ＋ 次级色：小卡是过程的一部分，不该和正文抢重量
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+}
+
+/* 第二行的「量」做成一枚胶囊，不是一行裸字：裸字与标题同处一张小卡里会连成一片 */
+.cellMeta {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}

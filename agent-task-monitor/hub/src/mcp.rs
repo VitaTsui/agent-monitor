@@ -432,7 +432,8 @@ async fn session_detail(
             };
             out.push(format!(
                 "  [{who}] {}",
-                m.content.chars().take(200).collect::<String>()
+                // 同 bot::render_monitor_push：工具调用的正文在 tools 里，走 text()
+                m.text().chars().take(200).collect::<String>()
             ));
         }
     }

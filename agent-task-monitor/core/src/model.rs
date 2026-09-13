@@ -71,6 +71,43 @@ pub struct ProcessInfo {
     pub shared_host: bool,
 }
 
+/// 一次工具调用。
+///
+/// 此前一条 assistant 记录里的多次工具调用被 `" | "` 拼成一个字符串塞进
+/// [`MessageBrief::content`] —— 一条消息对多个调用，谁也认不出哪一段对应哪一次。
+/// 于是执行链上那次派子代理的 `Task` 调用，和它派出来的 [`SubTask`]，
+/// 除了「展示名长得像」之外没有任何可靠的对应关系（而且两边截断长度还不一样：
+/// 120 vs 80）。要在正文里就地画出子代理卡片，就必须一次调用一个元素、各带自己的 id。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCall {
+    /// 这次调用的 `tool_use_id`（Codex 那边是 `call_id`）。
+    ///
+    /// 它就是 [`SubTask::tool_use_id`] 要对上的那个值。老记录里可能没有，那就是空串 ——
+    /// **不要猜**，配不上就当作「这次调用没派出子代理」。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    /// 工具名（Read / Bash / Agent …）
+    pub name: String,
+    /// 入参摘要（命令 / 文件路径 / 描述，截到 120 字）。没有可展示的入参时是空串。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hint: String,
+}
+
+impl ToolCall {
+    /// 一行人读的说法：`名字: 摘要`。
+    ///
+    /// 钉钉推送、MCP 会话摘要这类纯文本出口用它 —— 渲染只此一处，
+    /// 不在各消费方各拼一遍（那正是当初 `" | "` 拼接扩散开的原因）。
+    pub fn line(&self) -> String {
+        if self.hint.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{}: {}", self.name, self.hint)
+        }
+    }
+}
+
 /// 会话内一条简要消息（用于详情展示）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,6 +127,130 @@ pub struct MessageBrief {
     /// 前端按「有这个键且为真 = 失败」判，缺失即不失败，老客户端上报的数据不受影响。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_error: bool,
+    /// **这条记录里的每一次工具调用**，一次一个元素（只有 `role == "tool"` 才有）。
+    ///
+    /// 取代了原先把多次调用 `" | "` 拼进 [`Self::content`] 的做法 —— 那样拼出来的
+    /// 字符串没法反查是哪几次调用，执行链上也就画不出「这一次派了哪个子代理」。
+    /// `role == "tool"` 时 `content` 不再下发，纯文本出口走 [`ToolCall::line`]。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolCall>,
+    /// **它回应的是哪一次调用**（只有 `role == "tool_result"` 才有）：那次调用的
+    /// `tool_use_id`。前端据此把结果贴回执行链上对应的那一步，不必按顺序猜。
+    /// 老记录拿不到就是空串。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tool_use_id: String,
+}
+
+impl MessageBrief {
+    /// 这条消息的**纯文本形态**：给钉钉推送、MCP 摘要这类只能出文字的出口用。
+    ///
+    /// `role == "tool"` 的消息正文在 [`Self::tools`] 里而不在 `content` 上，
+    /// 直接读 `content` 会拿到空串（那正是「钉钉推送里工具调用变成一行空白」的来源）。
+    /// 所有纯文本出口都走这里，渲染只此一处。
+    pub fn text(&self) -> String {
+        if self.tools.is_empty() {
+            self.content.clone()
+        } else {
+            self.tools
+                .iter()
+                .map(ToolCall::line)
+                .collect::<Vec<_>>()
+                .join(" | ")
+        }
+    }
+}
+
+/// 子任务的**结构化收尾归类**。
+///
+/// 为什么不让前端直接看 [`SubTask::status`]：那是上游 Claude Code 写在
+/// `<task-notification>` 里的原文（`completed` / `failed` / `killed` / `stopped`），
+/// 语义并不是「成/败」——实测 `killed` 是**父会话被中断或退出时，一次性给当时所有
+/// 在跑子代理统一发的收尾通知**（同一时刻三条同状态），子代理自己一点毛病没有；
+/// `stopped` 则是有人主动 `TaskStop`。前端若按字面量把这两种一并画成红色失败，
+/// 用户看到的就是「我按了 Esc，结果一排子代理全爆红」。
+///
+/// 归类的判据是**磁盘事实**而不是文案：子会话自己那份 `subagents/agent-<id>.jsonl`
+/// 的收尾形态说明它到底有没有把结果交回去（见 scanner 的 `SubAgentTail`）。
+/// 上游改文案不会让这个归类失灵。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubTaskOutcome {
+    /// 还在跑
+    Running,
+    /// 正常收尾（交回了结果）
+    Completed,
+    /// **它自己跑砸了**：卡死、API 报错、退出码非零，原因在 `summary` 里
+    Failed,
+    /// **被连带终止**：父会话退出/被打断（`killed`），或有人主动停掉（`stopped`）。
+    /// 不是这个子任务的错，前端不该画成失败色。
+    Interrupted,
+}
+
+/// 一个会话名下「在后台跑着（或跑过）的东西」：异步子代理，或后台命令。
+///
+/// 此前这份清单是序列化成一条 `role:"bgtasks"` 的消息塞在消息流末尾的 —— 前端得先
+/// 从对话里把它摘出来再 `JSON.parse`，还得自己滤掉这条不让它出现在聊天记录里。
+/// 现在它是 [`Task`] 上的结构化字段，消息流里不再有这条伪消息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubTask {
+    /// 任务号。`kind == "agent"` 时就是父会话记录里的 `agentId`，也是拉取正文
+    /// （`/monitor/tasks/:id/subagents/:agentId/messages`）要用的那个 id；
+    /// `kind == "bg"` 时是 `backgroundTaskId`。
+    pub id: String,
+    /// `agent`（异步子代理，有独立会话记录）| `bg`（后台命令，没有）
+    pub kind: String,
+    /// 展示名（派活时的 description，截断到 80 字）
+    pub label: String,
+    /// **上游原文**：running / completed / failed / killed / stopped。
+    /// 保留它只为可追溯（排障时要能对上会话记录里那句通知），
+    /// 前端配色一律看 [`Self::outcome`]。
+    pub status: String,
+    /// 结构化归类，见 [`SubTaskOutcome`]
+    pub outcome: SubTaskOutcome,
+    /// 起跑时刻（会话记录里的 ISO8601 时间戳），拿不到就空串
+    pub started_at: String,
+    /// 收尾时刻（epoch 毫秒）。0 = 还没结束。
+    ///
+    /// 此前这个字段是 `#[serde(skip)]` 的纯内部值，于是前端算不出耗时，
+    /// 更要命的是**没有任何东西能据以淘汰旧条目**（见 scanner 的保留窗口）。
+    pub ended_ms: u64,
+    /// 完成通知里的 `<summary>` 原文 —— 唯一说得出「为什么是这个收场」的字段。
+    /// 按磁盘改判状态时会清掉（那句话描述的已不是当前状态）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// 磁盘上有它自己的会话记录，可以按需拉正文。
+    /// 后台命令（`kind == "bg"`）恒为 false —— 它没有独立记录。
+    pub has_body: bool,
+    /// **起跑那次工具调用的 `tool_use_id`** —— 与 [`ToolCall::id`] 相等即为同一次。
+    ///
+    /// 前端靠它把执行链上那次 `Agent`/`Bash` 调用，精确对应到这个子任务，
+    /// 从而在正文里就地画出子代理卡片。此前两边唯一的交集是展示名字符串，而
+    /// 一条消息可能对应多次调用，按名字配根本不可靠。
+    ///
+    /// 拿不到就是空串（老记录、或起跑记录落在重放窗口之外）。
+    /// **空就是空，不要猜** —— 配不上时前端不把这次调用显示成子代理卡。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tool_use_id: String,
+    /// **这是第几次派活**（1 起）。同一个子代理可以被反复叫起来干活：实测本机
+    /// `a7f78026084ce8753` 在父记录里有 8 条时刻各不相同的收尾通知
+    /// （20:28、21:06、21:10…），每一条都是一次真的重新派活。
+    ///
+    /// 这个字段存在的理由是**让「它又跑起来了」与「刚才那次判错了」区分得开**：
+    /// 本条记录描述的永远是**最近一次**运行（`status` / `ended_ms` / `tool_use_id`
+    /// 都跟着换），所以光看 `outcome` 从终态翻回 `running` 是分不清两者的。
+    /// `runs` 变了 = 新的一次派活（合法）；`runs` 没变却翻回 `running` = 有 bug。
+    ///
+    /// 后者现在不该再发生：磁盘推断出来的终态是**吸收态**，只有新的一次派活
+    /// （新的 `tool_use_id`）才能把它重新打开，见 scanner 的 `BgTracker::settled`。
+    #[serde(default = "one")]
+    pub runs: u32,
+}
+
+/// `SubTask::runs` 的默认值：老客户端上报的数据里没有这个字段，
+/// 按「跑过一次」算 —— 默认 0 会让前端把每条已有记录都当成「还没派过」。
+fn one() -> u32 {
+    1
 }
 
 /// 聚合后的「任务」：一个代理会话 + 可能匹配到的进程
@@ -127,8 +288,21 @@ pub struct Task {
     pub status: TaskStatus,
     /// 状态中文描述（前端表格直接展示）
     pub status_dsr: String,
-    /// 代理中文/展示名
+    /// 代理中文/展示名。由 `(provider, desktop)` 这一对经 [`provider_dsr`] /
+    /// [`provider_dsr_desktop`] 算出来，**不是客户端自由上报的字符串**。
     pub provider_dsr: String,
+    /// **这条会话来自桌面客户端而不是终端 CLI**（Claude 桌面版的本地代理、
+    /// ChatGPT 桌面版的 Codex）。
+    ///
+    /// 同一台机器上，`provider == "codex"` 既可能是 Codex CLI，也可能是
+    /// ChatGPT 桌面版 —— 它们是**两个不同的客户端**，只是会话文件格式一样。
+    /// 此前这个事实只体现在 `provider_dsr` 那个展示字符串上（scanner 里按它选展示名，
+    /// 见 `build_tasks`），Task 本身不带 —— 于是上层要区分「哪个客户端」时手里只有
+    /// 一个中文串可抓，按 provider 聚合就会把两个客户端糊成一组（实测本机 33 条 codex
+    /// 里 32 条是 CLI、1 条是桌面版，糊在一起后 32 条 CLI 会话被挂在「ChatGPT 桌面版」
+    /// 这个组名下）。判据本来就在扫描那一层是个布尔量，带上来即可，不必去猜字符串。
+    #[serde(default)]
+    pub desktop: bool,
     /// 宿主 IDE 展示名（无进程为 "—"）
     pub ide_dsr: String,
     /// 进程 pid（无进程为 null）
@@ -171,6 +345,13 @@ pub struct Task {
     /// 最近若干条消息摘要（agent 上报时携带，供 hub 缓存）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_messages: Vec<MessageBrief>,
+    /// 该会话名下的后台子任务（异步子代理 + 后台命令），agent 上报时携带。
+    ///
+    /// 只带「近期」的：见 scanner 的 `BG_RETAIN_MS` / `BG_MAX_ITEMS` —— 此前这张表
+    /// 从会话开头全量重放且**没有任何淘汰**，实测本机单个会话能累到 147 条、
+    /// 里头最老的已经是 11 天前的事，且永远不会消失。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_tasks: Vec<SubTask>,
     /// 终端里 claude 原生排队、尚未被接受执行的输入（按入队顺序，供前端底部挂载显示）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued_inputs: Vec<String>,
@@ -214,6 +395,32 @@ pub struct ControlReq {
     pub pid: Option<u32>,
 }
 
+/// 一台设备上「有哪一类终端、各有多少条会话」。
+///
+/// 侧栏要按「设备 × 终端类型」分组，而在此之前没有任何接口能直接回答这个问题 ——
+/// 前端只能拉 `/monitor/sessions/history?limit=200`（接口上限）去数最近 200 条倒推。
+/// 那是个将就：某个终端最近一条会话一旦排在 200 条之外，这一轮就数不出来，
+/// 对应的分组会凭空消失。所以由服务端直接给。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderStat {
+    /// claude / codex …（与会话上的 `Task::provider` 同一个取值）
+    pub provider: String,
+    /// 终端 CLI 还是桌面客户端，见 [`Task::desktop`]。
+    ///
+    /// **同一个 `provider` 会出现两项**（如 `codex/false` 与 `codex/true`）——
+    /// 它们是同一台机器上两个不同的客户端，用户要的是「单独显示每个客户端的会话」，
+    /// 糊成一项就不满足。分组键是 `(provider, desktop)` 这一对。
+    pub desktop: bool,
+    /// 展示名：由 `(provider, desktop)` 算出的**规范名**，不是某一条会话上的值。
+    /// 取某条会话的值会让组名随最近那条漂（1 条桌面版会话能把 32 条 CLI 会话的组
+    /// 改名成「ChatGPT 桌面版」）。
+    pub provider_dsr: String,
+    /// 该设备该 `(provider, desktop)` 下的会话总数，**含已结束**。
+    /// 与 `/monitor/sessions/history?machineId=&provider=&desktop=` 的 `total` 同口径。
+    pub session_count: usize,
+}
+
 /// 一台被监控的电脑
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -239,6 +446,12 @@ pub struct MachineInfo {
     /// 本设备是否是「他人通过协助码共享给我」的（非本人设备）
     #[serde(default)]
     pub shared: bool,
+    /// 这台设备上有哪几类终端、各有多少条会话（见 [`ProviderStat`]）。
+    ///
+    /// 没有任何会话时是**空数组而不是省略字段** —— 前端要区分「这台机器确实没会话」
+    /// 和「老版本 hub 不给这个字段」。
+    #[serde(default)]
+    pub providers: Vec<ProviderStat>,
 }
 
 /// agent → hub 的快照上报
@@ -252,7 +465,19 @@ pub struct ReportPayload {
     /// 认领该设备的用户名（agent 侧 AM_USER）
     #[serde(default)]
     pub owner: Option<String>,
+    /// **热列表**：近期（见 scanner 的 `LIVE_WINDOW_MS`）有活动的会话，每轮全量重报。
     pub tasks: Vec<Task>,
+    /// **历史会话**：比热列表更老、但仍在回溯窗口（`AM_HISTORY_DAYS`，默认 30 天）内的会话。
+    ///
+    /// 为什么单开一条而不是并进 `tasks`：客户端 1.5s 一轮全量重报，实测 30 天窗口下
+    /// 一轮 94 条、序列化 92 KB —— 每天 5 GB 的上行，只为一批一动不动的已结束会话。
+    /// 所以它每 30 秒才带一次（见 client 的 `HISTORY_REPORT_INTERVAL_SECS`），
+    /// 而热列表那条路径的开销一点没变（仍是 8 条、11 KB）。
+    ///
+    /// `None` = 本轮没带（沿用 hub 上一次收到的那份），`Some(空表)` = 确实一条历史都没有。
+    /// 两者必须分开：当成空表处理的话，历史列表会每 30 秒闪空一次。
+    #[serde(default)]
+    pub history_tasks: Option<Vec<Task>>,
     #[serde(default)]
     pub dir_results: Vec<DirResult>,
     /// 上一轮 hub 请求的文件夹操作结果（回传）。旧客户端不带 → 空。
@@ -261,6 +486,9 @@ pub struct ReportPayload {
     /// 上一轮 hub 点名现取的文件内容（回传）。旧客户端不带 → 空。
     #[serde(default)]
     pub file_fetch_results: Vec<FileFetchResult>,
+    /// 上一轮 hub 点名现读的会话数据（回传）。旧客户端不带 → 空。
+    #[serde(default)]
+    pub session_fetch_results: Vec<SessionFetchResult>,
     /// 上一轮下发文件的实际落盘路径（回传）。旧客户端不带 → 空，hub 退回自己算的名字。
     #[serde(default)]
     pub file_results: Vec<FileTransferResult>,
@@ -403,6 +631,65 @@ pub struct FileFetchResult {
     pub mime: String,
     #[serde(default)]
     pub content_b64: String,
+}
+
+/// hub → agent 要的是会话的哪一份数据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionWant {
+    /// 会话本身的正文
+    Messages,
+    /// 某个子会话的正文（要 `agent_id`）
+    Subagent,
+    /// 该会话的**全部**子任务清单（不套保留窗口）
+    Subtasks,
+}
+
+/// hub → agent：**现读一份会话数据**（历史会话正文 / 子会话正文 / 全量子任务清单）。
+///
+/// 为什么必须有这条通路：agent 每轮上报只给「活跃会话」（有进程，或 10 分钟内有写入）
+/// 带最近 80 条消息与近 24 小时的子任务，hub 的 `/messages` 读的就是这份上报缓存 ——
+/// 于是所有已结束的历史会话点开必然是空白；子会话正文更是从来没有被报上来过
+/// （本机实测 422 份 `subagents/agent-*.jsonl`，一个字节都没上去过）。
+///
+/// 全量推是不可行的，所以走「点名现取」：网页要看哪一份，hub 就排一条这个请求，
+/// agent 下一轮上报把结果带回来。与 [`FileFetch`] 同一套节奏。
+///
+/// 三种要求共用一条通路、一个 `want` 判别，不各开各的队列 —— 排队、去重、TTL、
+/// 等待窗口这些全是同一套，复制三份只会三处各错一次。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFetch {
+    /// 本次取件的标识，结果按它认领
+    pub fetch_id: String,
+    /// 会话 id（jsonl 文件名）
+    pub task_id: String,
+    pub want: SessionWant,
+    /// 子会话号（= 父记录里的 `agentId`），只有 `want == Subagent` 时有意义
+    #[serde(default)]
+    pub agent_id: String,
+    /// 正文最多返回多少条（agent 侧会再夹一道上限）；子任务清单忽略它
+    pub limit: usize,
+    /// 这条会话**已经没有进程在跑了**。
+    ///
+    /// 只有 hub 手里有聚合后的进程状态，解析器没有。据此给会话名下仍挂在「执行中」
+    /// 的后台命令收尾 —— 父会话都结束了，它派生的后台命令不可能还在跑。
+    #[serde(default)]
+    pub parent_ended: bool,
+}
+
+/// agent → hub：现读会话数据的结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFetchResult {
+    pub fetch_id: String,
+    /// 失败原因（会话记录不存在 / 读不动）。非空即失败，此时两份内容都为空。
+    #[serde(default)]
+    pub err: String,
+    #[serde(default)]
+    pub messages: Vec<MessageBrief>,
+    #[serde(default)]
+    pub sub_tasks: Vec<SubTask>,
 }
 
 /// hub → agent：会话目录内的文件夹操作（上传选目录弹窗里新建/删除/重命名）

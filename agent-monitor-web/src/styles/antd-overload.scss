@@ -1,6 +1,123 @@
 @use "@hsu-react/ui/es/styles/responsive" as r;
 // 项目特有的 antd 覆盖增量（组件库级覆盖由 @hsu-react/ui/es/styles/antd-overload.scss 提供，
-// 在 src/index.tsx 中先于本文件引入）；当前无增量
+// 在 src/index.tsx 中先于本文件引入）
+
+/* ============================================================
+   下拉菜单的形态（`.va-menu`）
+   ============================================================
+   前台的浮层菜单（侧栏用户菜单、会话/项目的 `⋮`、输入框上的各类选择）
+   统一走这一份。**只改几何** —— 圆角、行高、图标位、分组线；配色仍走令牌。
+
+   为什么不做成全局无差别覆盖：组件库的 `Operate`、`Copy`、`Search` 的筛选
+   面板也是 `ant-dropdown`，后台整套列表页都在用。把行高从 antd 的紧凑档
+   抬上来，后台一列七八个操作的菜单会变得很长。所以挂一个类，由用到的地方
+   自己带上：`<Dropdown rootClassName="va-menu" placement="topLeft" …>`。
+
+   几何全部来自参照实现（claude.ai `getComputedStyle` 实测，与 VitaAgent 同源）：
+     容器  圆角 12、列表内边距 4、无边框、一层强投影
+     行    高 32、内边距 6/10、图标槽 20（字形 18）、图标与文字间距 8
+     分组  发丝线，左右各内缩 10
+   ============================================================ */
+.va-menu {
+  // 每条规则都比 antd 自己那条多一层 —— antd v6 走 CSS-in-JS，样式表是运行时
+  // 注入的、永远排在这份静态表**后面**。同权重（`.ant-dropdown-menu .ant-…-item`
+  // 是 0,2,0）的情况下后写的赢，所以要写到 0,3,0 才生效。
+  .ant-dropdown-menu {
+    // 128：参照的会话菜单与项目菜单都是 `min-width: 128px`，宽度由内容决定。
+    // antd 默认按内容收紧，「重命名 / 置顶 / 删除」三个两字词会把菜单挤到
+    // 110px 宽，看着像个误触
+    min-width: 128px;
+    padding: 4px;
+    border-radius: calc(var(--radius) + 4px); // 8 + 4 = 12
+    box-shadow: var(--vita-shadow-3);
+
+    .ant-dropdown-menu-item,
+    .ant-dropdown-menu-submenu-title {
+      min-height: 32px;
+      padding: 6px 10px;
+      border-radius: var(--radius);
+      line-height: 20px;
+      /* 图标与文字**居中对齐**。antd 给 `.anticon` 挂的是
+         `vertical-align: -0.125em`（排版基线的做法），但这一行是 flex 容器
+         —— `vertical-align` 在 flex 项上不生效，图标会按 stretch 摆，
+         实测比行中心高 1px；两行的菜单项差得更明显 */
+      align-items: center;
+    }
+
+    // 子菜单标题右边要给箭头留位置。antd 本来留了，被上面那条统一的
+    // `padding` 覆盖掉之后，箭头（absolute, right:12）会直接压在文字上
+    .ant-dropdown-menu-submenu-title {
+      padding-inline-end: 32px;
+    }
+
+    /* 图标占 20 宽、与文字间距 8、字形 18。
+       参照那个图标 span 的 `font-size` 是 20，但**不能照抄** —— 它用的是
+       图标字体，20px 字身里画出来的墨迹只有十六七；我们用 SVG 图标，
+       `font-size` 多少就画多少，照抄 20 会比参照大一整圈。 */
+    .ant-dropdown-menu-item-icon {
+      min-width: 20px;
+      margin-inline-end: 8px;
+      font-size: 18px;
+      align-self: center;
+      line-height: 1;
+      vertical-align: middle;
+    }
+
+    // 子菜单箭头独立成右侧附属列
+    .ant-dropdown-menu-submenu-expand-icon {
+      inset-inline-end: 12px;
+      color: var(--muted-foreground);
+    }
+
+    /* 分组线要**看得见**。antd 的 `colorSplit` 推导自 border-weak，
+       实测压在白面上约 1.06:1，等于没有 —— 两组条目会连成一片 */
+    .ant-dropdown-menu-item-divider {
+      margin: 4px 10px;
+      background: var(--border);
+    }
+
+    // 分组标题：一行小灰字，无底色无缩进
+    .ant-dropdown-menu-item-group-title {
+      padding: 6px 10px 2px;
+      line-height: 1.4;
+    }
+  }
+
+  /* 危险项的红。参照是 `rgb(142, 38, 38)` —— 比令牌里的 red-600（#dc2626）
+     暗一档也闷一档。菜单里那条「删除」本来就靠位置说明它危险（永远在最后
+     一组、分隔线下面），红得刺眼反而让整张菜单的重心跑到它身上。
+     **只在菜单里改，不动全局令牌**：表单里的危险按钮要的还是那个亮红。
+
+     两个坑：
+     1. 要写到 0,6,0 才压得住 antd —— 它那条是 0,5,0，而且注入在这份静态表
+        之后，同权重也是它赢；
+     2. 这条**必须写在 `.ant-dropdown-menu` 那个嵌套块之外**：`.va-menu` 与
+        `.ant-dropdown` 是同一个元素（rootClassName 落在 dropdown 根节点上），
+        写在里面会拼成 `.ant-dropdown-menu.ant-dropdown`，什么都选不中。 */
+  &.ant-dropdown
+    .ant-dropdown-menu
+    .ant-dropdown-menu-item.ant-dropdown-menu-item-danger:not(
+      .ant-dropdown-menu-item-disabled
+    ) {
+    color: #8e2626;
+
+    .ant-dropdown-menu-item-icon {
+      color: inherit;
+    }
+
+    /* 悬停时整行翻成实心红、字与图标转白 —— 实测参照就是这样。
+       不是「浅红底 ＋ 红字」那种轻处理：这一项是删除，鼠标停在它上面的
+       那一刻应该有明确的「你正对着危险操作」的信号。 */
+    &:hover {
+      background: #d03b3b;
+      color: #fff;
+
+      .ant-dropdown-menu-item-icon {
+        color: #fff;
+      }
+    }
+  }
+}
 
 // ============================================================
 // 移动端弹窗统一改「底部抽屉」：从下往上滑出，占约 3/4 屏（内容多则

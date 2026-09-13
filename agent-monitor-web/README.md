@@ -2,7 +2,7 @@
 
 一套开箱即用的**中后台管理脚手架**。
 UI 主要基于 [`@hsu-react/ui`](https://www.npmjs.com/package/@hsu-react/ui) 组件库构建，
-配合 React 18 + TypeScript + MobX，使用 webpack 5 打包。
+配合 React 18 + TypeScript + MobX，使用 Vite 8 打包。
 （`@hsu-react/ui` 在 Ant Design 5 之上做了二次封装，antd 作为底层依赖少量场景直接使用。）
 
 内置动态路由（后端菜单驱动）、权限控制、多标签页、主题切换、国际化、服务层封装、
@@ -23,10 +23,10 @@ MobX store 基类（列表 / 表单 / CRUD）、通用组件库，以及页面�
 | 富文本 / 编辑器 | TipTap、wangEditor、react-markdown、CodeMirror |
 | 表格 | x-data-spreadsheet、xlsx |
 | 网络 | axios、@microsoft/fetch-event-source（SSE 流式） |
-| 构建 | webpack 5、ts-loader、babel、less |
+| 构建 | Vite 8、@vitejs/plugin-react、sass、terser |
 | 加密 | crypto-js、node-forge、@noble/ciphers（登录 RSA + AES） |
 
-路径别名：`@/*` → `src/*`（见 `tsconfig.json` 与 `config/webpack.config.common.cjs`）。
+路径别名：`@/*` → `src/*`（见 `tsconfig.json` 与 `vite.config.ts`）。
 组件统一**直接从 `@hsu-react/ui` 引入**。
 
 ## UI 组件库
@@ -74,8 +74,8 @@ yarn start
 
 | 命令 | 说明 |
 | --- | --- |
-| `yarn start` | 启动开发服务器（webpack-dev-server，HMR） |
-| `yarn build` | 生产构建（输出到 `dist/`） |
+| `yarn start` | 启动开发服务器（Vite，HMR） |
+| `yarn build` | 生产构建（先 `tsc --noEmit` 过类型，再 `vite build` 输出到 `dist/`） |
 | `yarn lint` | ESLint 检查（`--max-warnings 0`） |
 | `yarn crt:lp` | 生成列表页面（List Panel） |
 | `yarn crt:fp` | 生成表单页面（Form Panel） |
@@ -88,7 +88,7 @@ yarn start
 
 ## 环境变量
 
-环境配置集中在 `.env/` 目录，由 webpack 在构建时注入：
+环境配置集中在 `.env/` 目录，由 `vite.config.ts` 用 dotenv 读出来、在构建时 `define` 成 `process.env.X` 内联进产物：
 
 | 文件 | 用途 |
 | --- | --- |
@@ -109,7 +109,7 @@ CI 里这两个值取自仓库变量 `WEB_CRYPTO_KEY` / `WEB_RSA_PUB_KEY`。
 
 `.env.dev` 关键项：
 
-- `SERVER_PROT` — dev-server 端口（3003）
+- `SERVER_PROT` — dev server 端口（3003，被占用会自动顺延）
 - `API_BASE` / `API_PROXY` — `/api` 反向代理到你的后端
 - `CRYPTO_KEY` / `RSA_PUB_KEY` — 登录加密密钥，需与后端配置一一对应（**请替换为你自己的密钥**）
 
@@ -118,7 +118,7 @@ CI 里这两个值取自仓库变量 `WEB_CRYPTO_KEY` / `WEB_RSA_PUB_KEY`。
 ```
 vita-admin-starter/
 ├─ .env/                 # 环境变量（common / dev / prod）
-├─ config/               # webpack 配置（common / dev / prod 三段 merge）
+├─ vite.config.ts        # Vite 配置（env 注入 / CSS Modules 类名 / 代理 / 分包）
 ├─ scripts/              # 页面脚手架生成器（crt:* 对应脚本与模板）
 ├─ public/               # 静态资源（config.js 含站点标题等运行时配置）
 └─ src/

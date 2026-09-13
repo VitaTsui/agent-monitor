@@ -1,7 +1,7 @@
 import { gcm } from "@noble/ciphers/aes";
 import forge from "node-forge";
 
-// 必须使用「process.env.XXX」这种成员表达式，webpack DefinePlugin 才会在构建时把值内联进来；
+// 必须使用「process.env.XXX」这种成员表达式，Vite 的 define 才会在构建时把值内联进来；
 // 写成 const e = process.env; e.CRYPTO_KEY 不会被替换，浏览器里 process 未定义会得到 undefined。
 const DEF_KEY = process.env.CRYPTO_KEY as string;
 const PUB_KEY = process.env.RSA_PUB_KEY as string;

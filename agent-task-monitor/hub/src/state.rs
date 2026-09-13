@@ -31,7 +31,24 @@ pub struct MachineEntry {
     pub platform: String,
     pub version: String,
     pub is_hub: bool,
+    /// 热列表：近期有活动的会话，每轮上报全量刷新。**所有既有逻辑只看它**
+    /// （号位、钉钉推送、会话开始/结束判定、`/monitor/tasks`），语义与改动前一致。
     pub tasks: Vec<Task>,
+    /// 历史会话：比热列表更老、仍在回溯窗口内的已结束会话。客户端每 30 秒随上报刷新
+    /// 一次，服务 `/monitor/sessions/history` 与「按 id 找这条会话在哪台机器」——
+    /// `/messages`、`/subtasks`、`/subagents/:id/messages` 解析 `:id` 都要用到它。
+    ///
+    /// 不落盘：客户端随时能重报一份全的。但**不能干等它那 30 秒的定时器**：hub 一重启
+    /// 这里就空了，而客户端并不知道，于是最长半分钟内所有历史会话按 id 取数全是 404
+    /// （实测重启后 13 秒：历史列表只剩 8 条热会话，`/subtasks` 报「任务不存在」）。
+    /// 所以由 hub 主动索要，见 [`Self::history_reported`]。
+    pub history_tasks: Vec<Task>,
+    /// **本 hub 生命周期内收到过这台机器的历史列表没有**。
+    ///
+    /// 为假时每轮上报的响应里带 `wantHistory: true`，让客户端下一轮立刻补发，不必等它
+    /// 自己那 30 秒的定时器 —— 只有 hub 知道自己的快照是空的，客户端无从察觉。
+    /// 收到一次（哪怕是空表，那说明这台机器确实没有历史会话）就置真，不再反复索要。
+    pub history_reported: bool,
     pub last_report: Instant,
     /// 待下发给该 agent 的控制命令
     pub pending: VecDeque<ControlCmd>,
@@ -45,11 +62,20 @@ pub struct MachineEntry {
     pub pending_fsop: VecDeque<am_core::model::FsOp>,
     /// 待下发的「现取文件」请求（网页要看 agent 输出里引用的截图）
     pub pending_file_fetch: VecDeque<am_core::model::FileFetch>,
+    /// 待下发的「现读正文」请求（历史会话点开、子会话展开）。
+    ///
+    /// 为什么需要它：agent 只给「活跃会话」（有进程，或 10 分钟内有写入）捎带消息，
+    /// 所以 `messages` 那张表对已结束的历史会话恒为空；子会话正文更是从来没上报过。
+    /// 全量推不现实（本机实测 422 份子会话记录），于是改为点名现取。
+    pub pending_session_fetch: VecDeque<am_core::model::SessionFetch>,
     /// 现取结果：fetch_id → (结果, 到达时刻)。
     ///
     /// **只在内存里放一会儿**：交给等着的那个网页请求即删，没人来领的也会过期清掉
     /// （见 FETCH_RESULT_TTL_SECS）。会话内容不落我方存储是既定原则，截图同样算会话内容。
     pub file_fetch_results: HashMap<String, (am_core::model::FileFetchResult, Instant)>,
+    /// 现读正文的结果：fetch_id → (结果, 到达时刻)。与 `file_fetch_results` 同一套
+    /// 「交给等着的那个请求即删、没人领的过期清掉」—— 会话正文不落我方存储。
+    pub session_fetch_results: HashMap<String, (am_core::model::SessionFetchResult, Instant)>,
     /// 文件夹操作结果缓存：op_id → 结果（网页轮询后即读走）
     pub fsop_results: HashMap<String, am_core::model::FsOpResult>,
     /// 下发文件的落盘回报：transfer_id → (结果, 到达时刻)。
@@ -460,6 +486,55 @@ pub struct BotMonitor {
     pub last_ts: String,
 }
 
+/// 一台设备上「有哪几个客户端、各有多少条会话」。
+///
+/// **分组键是 `(provider, desktop)` 这一对，不是 `provider` 一个值**：同一台机器上
+/// `provider == "codex"` 既可能是 Codex CLI，也可能是 ChatGPT 桌面版 —— 它们是两个
+/// 不同的客户端，只是会话文件格式一样。只按 provider 聚合会把两者糊成一组，而组名
+/// 若再取「最近一条会话的展示名」，1 条桌面版会话就能把 32 条 CLI 会话的组改名成
+/// 「ChatGPT 桌面版」（实测本机就是这个比例）。用户要的是「单独显示每个客户端的会话」。
+///
+/// 展示名取 `(provider, desktop)` 算出的**规范名**（[`am_core::model::provider_dsr`] /
+/// [`am_core::model::provider_dsr_desktop`]，两个固定枚举），不取某一条会话上的值 ——
+/// 组名不该随最近那条漂。
+///
+/// 计数口径必须与 `/monitor/sessions/history?machineId=&provider=&desktop=` 的 `total`
+/// 一致，所以：① 热列表与历史列表都要数（会话总数含已结束，不是只数活跃的）；
+/// ② 排除进程占位任务（会话记录还没生成，它不是一条会话）——判据复用
+/// [`crate::server::is_proc_placeholder`]，不在这里另写一份。
+///
+/// 排序：会话数多的在前，同数按 provider 名、CLI 在桌面版之前 —— 侧栏的顺序得是
+/// 确定的，不能每轮抖。
+fn providers_of<'a>(tasks: impl Iterator<Item = &'a Task>) -> Vec<am_core::model::ProviderStat> {
+    let mut agg: HashMap<(&str, bool), usize> = HashMap::new();
+    for t in tasks {
+        if crate::server::is_proc_placeholder(t) {
+            continue;
+        }
+        *agg.entry((t.provider.as_str(), t.desktop)).or_insert(0) += 1;
+    }
+    let mut out: Vec<am_core::model::ProviderStat> = agg
+        .into_iter()
+        .map(|((provider, desktop), n)| am_core::model::ProviderStat {
+            provider_dsr: if desktop {
+                am_core::model::provider_dsr_desktop(provider)
+            } else {
+                am_core::model::provider_dsr(provider)
+            },
+            provider: provider.to_string(),
+            desktop,
+            session_count: n,
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.session_count
+            .cmp(&a.session_count)
+            .then(a.provider.cmp(&b.provider))
+            .then(a.desktop.cmp(&b.desktop))
+    });
+    out
+}
+
 pub type SharedState = Arc<AppState>;
 
 impl AppState {
@@ -547,6 +622,34 @@ impl AppState {
         out
     }
 
+    /// 热列表 + 历史会话。只给「历史会话列表」和「按会话 id 找机器」用 ——
+    /// 别拿它替换 [`Self::tasks_for`]：那条路径上的消费方（号位、钉钉推送、前台列表）
+    /// 都默认自己看到的是活跃会话，塞进历史会话会让每个消费方都得再加一层过滤。
+    /// （不要在这里嵌套调用 `tasks_for`：两者都取 `machines` 读锁，中间若排进一个写者，
+    /// tokio 的 RwLock 是写优先的，第二次读会等在写者后面而写者又等着第一次读 —— 死锁。）
+    pub async fn all_tasks_for(&self, username: &str) -> Vec<Task> {
+        let machines = self.machines.read().await;
+        let registry = self.registry.read().await;
+        let mut out = Vec::new();
+        for (id, entry) in machines.iter() {
+            if !registry.can_view(id, username) {
+                continue;
+            }
+            let online = entry.last_report.elapsed().as_secs() < OFFLINE_AFTER_SECS;
+            for t in entry.tasks.iter().chain(entry.history_tasks.iter()) {
+                let mut t = t.clone();
+                if !online {
+                    t.status = TaskStatus::Finished;
+                    t.status_dsr = "已离线".into();
+                    t.process = None;
+                    t.pid = None;
+                }
+                out.push(t);
+            }
+        }
+        out
+    }
+
     /// 设备管理列表：该用户名下的全部设备（含未信任的 pending）
     pub async fn devices_for(&self, username: &str) -> Vec<MachineInfo> {
         let machines = self.machines.read().await;
@@ -581,6 +684,7 @@ impl AppState {
                     owner: meta.owner,
                     trusted: meta.trusted,
                     shared: false,
+                    providers: providers_of(e.tasks.iter().chain(e.history_tasks.iter())),
                 }
             })
             .collect();
@@ -617,6 +721,9 @@ impl AppState {
                 owner: meta.owner.clone(),
                 trusted: meta.trusted,
                 shared: false,
+                // 本 hub 生命周期内它一次都没上报过（关机 / 客户端没开），
+                // 手里没有任何会话可数 —— 空数组，不是「没有会话」而是「还不知道」。
+                providers: Vec::new(),
                 id,
             });
         }
@@ -661,6 +768,10 @@ impl AppState {
                 owner: meta.owner.clone(),
                 trusted: true,
                 shared: true,
+                // 协助码共享给我的设备：它没上报到我这边时同样只能给空数组
+                providers: live
+                    .map(|e| providers_of(e.tasks.iter().chain(e.history_tasks.iter())))
+                    .unwrap_or_default(),
                 id,
             });
         }

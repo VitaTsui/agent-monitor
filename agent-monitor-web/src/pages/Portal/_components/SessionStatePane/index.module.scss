@@ -1,5 +1,11 @@
-// 右栏内容：一行头 + 一列按会话分节的状态卡。
-// 卡片本身的规格在 SessionPanels 里，这里只管栏内的排布。
+// 一格右栏的内容：一行头 + 一列状态卡。卡片本身的规格在 SessionPanels 里，
+// 这里只管栏内的排布。
+//
+// 数值照 VitaAgent 的 ActivityPanel
+// （`web/src/pages/chat/_components/ActivityPanel/index.module.scss:1-70`）：
+//   头 padding 12、标题 14/400、收起钮 24×24；
+//   内容区 padding 8/8/16。
+// 头下面**不画整条分隔线** —— 外层已经是一张带描边环的浮卡，再切一刀就多一层框。
 
 .SessionStatePane {
   display: flex;
@@ -13,37 +19,33 @@
   flex: none;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  // 与对话格头部同高：两栏的头顶在一条线上，右栏才不像是硬贴上去的
-  padding: 10px 12px 10px 16px;
-  border-bottom: 1px solid var(--overlay-2);
+  gap: 4px;
+  padding: 12px;
 }
 
+// 14/400：它不是标题，是「你在看哪个东西」，跟 VitaAgent 栏顶那行同一个量级
 .title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
   color: var(--foreground);
   font-size: var(--text-md);
-  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.close {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
 }
 
 .body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px;
-}
-
-.group + .group {
-  margin-top: 16px;
-}
-
-// 会话名：只在并排多格时出现，用来分清这几张卡是哪一格的
-.groupTitle {
-  margin-bottom: 8px;
-  overflow: hidden;
-  color: var(--muted-foreground);
-  font-size: var(--text-sm);
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  padding: 0 8px 16px;
 }
 
 // 抹掉「接在对话流末尾」才需要的上边距：栏里它是第一块内容

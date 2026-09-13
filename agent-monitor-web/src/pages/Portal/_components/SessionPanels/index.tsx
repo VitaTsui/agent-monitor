@@ -3,24 +3,29 @@ import React, { useEffect, useState } from "react";
 import { Tooltip } from "antd";
 import {
   CheckSquareOutlined,
-  PartitionOutlined,
   ThunderboltOutlined,
   WarningFilled,
 } from "@ant-design/icons";
 
-import { PortalMessage } from "@/services/apis/portal";
+import { PortalMessage, SubTask } from "@/services/apis/portal";
 import {
-  BG_LABEL,
-  BgTask,
-  fmtElapsed,
-  isBgFailed,
+  SUB_OUTCOME_LABEL,
+  fmtSubTaskElapsed,
   isEmptySessionState,
+  isSubTaskFailed,
   sessionStateOf,
 } from "../../_utils/sessionState";
 import styles from "./index.module.scss";
 
 interface SessionPanelsProps {
   messages: PortalMessage[];
+  /**
+   * 这条会话名下的子任务。取自 `PortalTaskData.subTasks`。
+   *
+   * **只用其中的后台命令**：子代理有自己的执行链节点（正文里的智能体卡），
+   * 状态区再列一遍就是同一件事说两遍。筛选口径在 `aliveBgCommands` 里，只有一份。
+   */
+  subTasks?: SubTask[];
   /** 会话是否正在运行：非运行时清单里的「进行中」降级为「未完成」，
       不再显示会动的进行态（会话都停了就没有正在做的任务）。 */
   running?: boolean;
@@ -58,7 +63,7 @@ const StateCard: React.FC<CardProps> = ({ icon, title, meta, children }) => (
 );
 
 /**
- * 后台任务 / 子代理的一行。
+ * 后台命令的一行。
  *
  * 三种收场分色（与 VitaAgent 一致，见 `TaskCard/index.module.scss:94-104`）：
  * 执行中走主色（墨黑）+ 脉冲，异常收场走 destructive，其余中性。
@@ -72,9 +77,9 @@ const StateCard: React.FC<CardProps> = ({ icon, title, meta, children }) => (
  * `aliveBgTasks`），所以不必再判一次状态 —— 后端给完成条目也带 `summary`
  * （`Agent "X" finished`），那句话和上面的名字是重复的，正好一条都进不来。
  */
-const TaskRow: React.FC<{ task: BgTask; now: number }> = ({ task, now }) => {
-  const failed = isBgFailed(task.status);
-  const elapsed = fmtElapsed(task.startedAt, now);
+const TaskRow: React.FC<{ task: SubTask; now: number }> = ({ task, now }) => {
+  const failed = isSubTaskFailed(task);
+  const elapsed = fmtSubTaskElapsed(task, now);
   const reason = task.summary?.trim();
   return (
     <li className={`${styles.item} ${failed ? styles.failed : ""}`}>
@@ -82,13 +87,13 @@ const TaskRow: React.FC<{ task: BgTask; now: number }> = ({ task, now }) => {
         {failed ? (
           <WarningFilled className={styles.itemIcon} />
         ) : (
-          <span className={`${styles.dot} ${styles[task.status] ?? ""}`} />
+          <span className={`${styles.dot} ${styles[task.outcome] ?? ""}`} />
         )}
         <Tooltip title={task.label}>
           <span className={styles.itemName}>{task.label}</span>
         </Tooltip>
         <span className={styles.itemStatus}>
-          {BG_LABEL[task.status] ?? task.status}
+          {SUB_OUTCOME_LABEL[task.outcome] ?? task.status}
         </span>
         {/* 耗时做成胶囊而不是裸字：与名字同处一行，裸字会连成一片
             （VitaAgent `TaskCard/index.module.scss:376-388` 的 `.cellMeta`） */}
@@ -106,7 +111,10 @@ const TaskRow: React.FC<{ task: BgTask; now: number }> = ({ task, now }) => {
 };
 
 /**
- * 会话的「当前状态」：任务清单、后台任务、子代理三块。
+ * 会话的「当前状态」：任务清单、后台命令两块。
+ *
+ * **子代理不在这儿**：它是执行链上的一步，就地画在正文里（见 `AgentCard`）。
+ * 后台命令留下来是因为它**没有对应的执行链节点** —— 删了就没地方看了。
  *
  * **宽屏在右栏**（`SessionStatePane`）：与正文并排、不滚走、不挡任何东西。
  * **窄屏排在对话流末尾**：手机上摆不下第三栏，它跟着对话一起滚。
@@ -116,14 +124,14 @@ const TaskRow: React.FC<{ task: BgTask; now: number }> = ({ task, now }) => {
  * 这件最该被看到的事，反倒需要先点一下才看得见。
  */
 const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
-  const { messages, running, className } = props;
+  const { messages, subTasks, running, className } = props;
 
   // 「有哪些东西要展示」只有一处定义（见 sessionStateOf）：右栏要先问同一个问题
   // 才知道该不该给这条会话一个标题，两边各写一遍筛选条件迟早会对不上。
-  const { todos, bgTasks, subAgents } = sessionStateOf(messages);
+  const { todos, bgTasks } = sessionStateOf(messages, subTasks);
 
   // 耗时要走字：只在真有后台任务时上表，且 tick 只驱动本组件重渲染。
-  const ticking = bgTasks.length > 0 || subAgents.length > 0;
+  const ticking = bgTasks.length > 0;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!ticking) {
@@ -133,19 +141,30 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
     return () => window.clearInterval(timer);
   }, [ticking]);
 
-  if (isEmptySessionState({ todos, bgTasks, subAgents })) {
+  if (isEmptySessionState({ todos, bgTasks })) {
     return null;
   }
 
-  const countMeta = (list: BgTask[]) => {
-    const bad = list.filter((t) => isBgFailed(t.status)).length;
-    const alive = list.length - bad;
+  /**
+   * 一行计数。**三种收场分开数，不许把「被中断」并进「未跑成」** ——
+   * 被父会话连带终止和自己跑砸是两回事，合成一句话就是在冤枉前者
+   * （用户原话：「实际结束了却显示失败」）。
+   */
+  const countMeta = (list: SubTask[]) => {
     const parts: string[] = [];
-    if (alive) {
-      parts.push(`${alive} 个进行中`);
+    const count = (o: SubTask["outcome"]) =>
+      list.filter((t) => t.outcome === o).length;
+    const running_ = count("running");
+    const failed = count("failed");
+    const interrupted = count("interrupted");
+    if (running_) {
+      parts.push(`${running_} 个进行中`);
     }
-    if (bad) {
-      parts.push(`${bad} 个未跑成`);
+    if (failed) {
+      parts.push(`${failed} 个失败`);
+    }
+    if (interrupted) {
+      parts.push(`${interrupted} 个已中断`);
     }
     return parts.join(" · ");
   };
@@ -183,18 +202,6 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
           meta={countMeta(bgTasks)}
         >
           {bgTasks.map((t) => (
-            <TaskRow key={t.id} task={t} now={now} />
-          ))}
-        </StateCard>
-      )}
-
-      {subAgents.length > 0 && (
-        <StateCard
-          icon={<PartitionOutlined />}
-          title="子代理"
-          meta={countMeta(subAgents)}
-        >
-          {subAgents.map((t) => (
             <TaskRow key={t.id} task={t} now={now} />
           ))}
         </StateCard>

@@ -1,4 +1,4 @@
-use crate::model::{MessageBrief, ProcessInfo, Task, TaskStatus};
+use crate::model::{MessageBrief, ProcessInfo, SubTask, SubTaskOutcome, Task, TaskStatus};
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
@@ -76,6 +76,18 @@ pub struct SessionSummary {
     pub select_answered_ms: Option<u64>,
 }
 
+/// 一个会话的「当前全貌」：对话消息 + 后台子任务。
+///
+/// 两者来源不同（前者读尾部窗口，后者从会话开头增量重放），但调用方每次都要一起拿 ——
+/// 分成两个方法会让同一份文件被解析两遍。
+#[derive(Debug, Clone, Default)]
+pub struct SessionView {
+    /// 最近若干条消息，末尾可能附一条 `role:"todos"` 的任务清单快照
+    pub messages: Vec<MessageBrief>,
+    /// 该会话名下的后台子任务（已按磁盘纠正状态、已淘汰过期条目）
+    pub sub_tasks: Vec<SubTask>,
+}
+
 #[derive(Debug, Clone)]
 struct CacheEntry {
     size: u64,
@@ -121,8 +133,49 @@ struct SessionState {
     bg: BgTracker,
 }
 
-/// 会话列表最多回溯的时长（毫秒）：7 天
-const HISTORY_WINDOW_MS: u64 = 7 * 24 * 3600 * 1000;
+/// 会话列表回溯天数的默认值。
+///
+/// 原本写死 7 天，代价是「上周那条会话」在界面上根本不存在 —— 不是列出来标成已结束，
+/// 是连扫都不扫。放宽到 30 天：本机实测 7 天窗口只有 7 份 jsonl，30 天窗口 61 份
+/// （Codex 另有 33 份），一个月足够覆盖「上次那个需求是怎么改的」这类回看。
+pub const HISTORY_DAYS_DEFAULT: u64 = 30;
+
+/// 环境变量名：会话列表回溯天数。
+///
+/// 沿用本项目既有的配置方式 —— `AM_*` 环境变量，客户端启动时还会把 `config.txt`
+/// 里的同名键补进环境（见 client/src/main.rs 的配置加载），所以桌面版用户改配置文件
+/// 即可，不必设系统环境变量。不另起第四套配置。
+pub const HISTORY_DAYS_ENV: &str = "AM_HISTORY_DAYS";
+
+/// 会话列表最多回溯的时长（毫秒）。
+///
+/// 只读一次环境变量并记住：这个值每轮扫描的每个文件都要用一次，本机 30 天窗口下
+/// 一轮就是近百次；而进程生命周期内它不会变（改配置要重启客户端）。
+/// 取值非法（非数字 / 0）时回落到默认值，不 panic —— 配置写错不该让客户端起不来。
+fn history_window_ms() -> u64 {
+    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let days = std::env::var(HISTORY_DAYS_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|d| *d > 0)
+            .unwrap_or(HISTORY_DAYS_DEFAULT);
+        days.saturating_mul(24 * 3600 * 1000)
+    })
+}
+
+/// 「这条会话还可能活着」的窗口（毫秒）。两处在用，是同一个判断：
+///
+/// 1. **会话 ↔ 进程配对**：比这更老的会话不参与配对 —— 它不可能还连着一个活着的终端，
+///    放进候选只会去抢别人的进程（配对按最近活动排序 + zip 截断，多出来的纯属干扰）。
+/// 2. **每轮上报的热列表**：客户端 1.5s 一轮全量重报一次会话快照，比这更老的会话
+///    改走低频的历史列表（见 client 的 `HISTORY_REPORT_INTERVAL_SECS`）。
+///    实测：7 天窗口一轮 8 条、11 KB；30 天窗口 94 条、92 KB —— 后者按 1.5s 一轮
+///    算是每天 5 GB 的上行，不能每轮都发。
+///
+/// **与 [`history_window_ms`] 是两回事，故不跟着一起放宽**：那个宽是为了「看得见历史」，
+/// 这个宽只会让判断变差。7 天的理由见配对处的注释（挂一夜/过周末的会话仍要配得上进程）。
+pub const LIVE_WINDOW_MS: u64 = 7 * 24 * 3600 * 1000;
 /// 摘要解析时读取的文件尾部大小
 const TAIL_BYTES: u64 = 4 * 1024 * 1024;
 /// 头部读取大小（拿初始 cwd / 提示词 / 开始时间）
@@ -245,7 +298,7 @@ impl SessionScanner {
         &self.projects_dir
     }
 
-    /// 扫描全部项目目录，返回近 7 天内有活动的会话摘要
+    /// 扫描全部项目目录，返回回溯窗口内（见 [`history_window_ms`]）有活动的会话摘要
     pub fn scan(&mut self) -> Vec<SessionSummary> {
         let now_ms = now_ms();
         let mut out = Vec::new();
@@ -297,7 +350,7 @@ impl SessionScanner {
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                if now_ms.saturating_sub(mtime_ms) > HISTORY_WINDOW_MS {
+                if now_ms.saturating_sub(mtime_ms) > history_window_ms() {
                     continue;
                 }
                 let created_ms = meta
@@ -326,7 +379,7 @@ impl SessionScanner {
         claude_desktop_roots(&self.claude_desktop_dir)
     }
 
-    /// 递归收集 Codex 会话摘要（7 天窗口，带同一套 mtime/size 缓存）
+    /// 递归收集 Codex 会话摘要（同一个回溯窗口，带同一套 mtime/size 缓存）
     fn scan_codex_into(&mut self, out: &mut Vec<SessionSummary>, now_ms: u64) {
         fn walk(dir: &Path, files: &mut Vec<PathBuf>, depth: usize) {
             if depth > 4 {
@@ -357,7 +410,7 @@ impl SessionScanner {
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            if now_ms.saturating_sub(mtime_ms) > HISTORY_WINDOW_MS {
+            if now_ms.saturating_sub(mtime_ms) > history_window_ms() {
                 continue;
             }
             let created_ms = meta
@@ -610,9 +663,24 @@ impl SessionScanner {
         Some(summary)
     }
 
-    /// 解析一个会话的对话消息（供前台对话流展示），返回最后 limit 条。
-    /// 末尾附带两条「当前状态」快照：任务清单（todos）与后台任务（bgtasks）。
-    pub fn messages(&mut self, session_id: &str, limit: usize) -> Result<Vec<MessageBrief>> {
+    /// 解析一个会话的对话消息 + 该会话名下的后台子任务。
+    ///
+    /// 消息取最后 `limit` 条；任务清单（todos）仍作为一条 `role:"todos"` 的状态快照
+    /// 追加在末尾（它是一段 Markdown，本就按消息渲染）。
+    ///
+    /// **后台子任务不再混进消息流**：此前它被序列化成一条 `role:"bgtasks"` 的伪消息
+    /// 塞在末尾，消费方得先把它从对话里摘出来、`JSON.parse`、再记得别把它渲染成聊天
+    /// 气泡 —— 一份结构化数据伪装成一条消息，每个消费方都要复述一遍同样的绕法。
+    /// 现在它单独返回，挂在 `Task::sub_tasks` 上。
+    ///
+    /// `parent_ended` = 这条会话已经没有进程在跑了。据此给它名下仍挂在「执行中」的
+    /// 后台命令收尾（见 [`ORPHANED_STATUS`]）—— 调用方知道进程状态，解析器不知道。
+    pub fn session_view(
+        &mut self,
+        session_id: &str,
+        limit: usize,
+        parent_ended: bool,
+    ) -> Result<SessionView> {
         let path = self.find_session_file(session_id)?;
         let is_codex = path.starts_with(&self.codex_dir);
 
@@ -632,35 +700,99 @@ impl SessionScanner {
                 msgs.push(m);
             }
         }
-        if is_codex {
-            // Codex 没有任务清单/后台任务语义，直接裁剪返回
-            let skip = msgs.len().saturating_sub(limit);
-            return Ok(msgs.into_iter().skip(skip).collect());
-        }
         let skip = msgs.len().saturating_sub(limit);
-        let mut out: Vec<MessageBrief> = msgs.into_iter().skip(skip).collect();
-
-        // 状态快照：从会话开头增量重放得来，不受上面 limit 窗口影响，
-        // 一律追加在末尾（前端会把它们摘出去单独渲染，位置无所谓）。
-        let ts = out.last().map(|m| m.timestamp.clone()).unwrap_or_default();
-        let (todos, bgtasks) = self.replay_state(&path)?;
-        if let Some(m) = todos {
-            out.push(MessageBrief {
-                role: "todos".into(),
-                content: m,
-                timestamp: ts.clone(),
-                is_error: false,
+        let mut messages: Vec<MessageBrief> = msgs.into_iter().skip(skip).collect();
+        if is_codex {
+            // Codex 没有任务清单/后台任务语义，直接返回
+            return Ok(SessionView {
+                messages,
+                sub_tasks: Vec::new(),
             });
         }
-        if let Some(m) = bgtasks {
-            out.push(MessageBrief {
-                role: "bgtasks".into(),
+
+        // 状态快照：从会话开头增量重放得来，不受上面 limit 窗口影响。
+        let ts = messages
+            .last()
+            .map(|m| m.timestamp.clone())
+            .unwrap_or_default();
+        let (todos, sub_tasks) = self.replay_state(&path, parent_ended, false)?;
+        if let Some(m) = todos {
+            messages.push(MessageBrief {
+                role: "todos".into(),
                 content: m,
                 timestamp: ts,
                 is_error: false,
+                tools: Vec::new(),
+                tool_use_id: String::new(),
             });
         }
-        Ok(out)
+        Ok(SessionView {
+            messages,
+            sub_tasks,
+        })
+    }
+
+    /// 一条会话名下的**全部**子任务（不套保留窗口）。
+    ///
+    /// 与 `Task::sub_tasks` 的区别只在口径，不是另一套数据：
+    /// - `Task::sub_tasks` 是**当前状态面板**——随快照每轮下发，只留近 24 小时、
+    ///   最多 50 条终态，好让面板不被上周的东西淹掉；
+    /// - 这个是**全量视角**——按需读盘，给「从历史列表点开一条五天前的会话，
+    ///   把它的子会话展开来看」用。活跃会话调它同样成立，结果是前者的超集。
+    ///
+    /// 还会补上父记录漏掉的那些：阻塞式派活不写 `agentId`，只重放父记录会少一批，
+    /// 而 `subagents/` 目录是全的（展示名从旁边的 `.meta.json` 取）。
+    ///
+    /// `parent_ended` 语义同 [`Self::session_view`]。
+    pub fn sub_tasks_all(&mut self, session_id: &str, parent_ended: bool) -> Result<Vec<SubTask>> {
+        let path = self.find_session_file(session_id)?;
+        if path.starts_with(&self.codex_dir) {
+            // Codex 没有子代理/后台任务语义
+            return Ok(Vec::new());
+        }
+        Ok(self.replay_state(&path, parent_ended, true)?.1)
+    }
+
+    /// 解析**一个子会话**（异步子代理）的对话消息，返回最后 `limit` 条。
+    ///
+    /// 路径是 `<父会话 jsonl 同级>/<父会话号>/subagents/agent-<agentId>.jsonl`，格式与
+    /// 父会话记录完全一致，所以复用同一个 [`entry_to_brief`] —— 消费方拿到的结构与
+    /// `/messages` 一模一样，渲染逻辑不必分叉。
+    ///
+    /// 这是**按需**读盘：本机实测 422 份子会话记录，全量推上去是不可能的。
+    pub fn subagent_messages(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        limit: usize,
+    ) -> Result<Vec<MessageBrief>> {
+        // 防路径穿越：子会话号与会话号同一套字符集约束
+        if agent_id.is_empty()
+            || !agent_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            anyhow::bail!("非法子会话 ID");
+        }
+        let path = self.find_session_file(session_id)?;
+        let dir = SubAgentDir::scan(&path);
+        let file = dir.file_of(agent_id);
+        if !file.is_file() {
+            anyhow::bail!("子会话记录不存在");
+        }
+        let tail = read_tail(&file, 8 * 1024 * 1024)?;
+        let mut msgs = Vec::new();
+        for line in tail.lines() {
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            // 子会话记录里每一条都是 sidechain，这里不能跳
+            if let Some(m) = parse_entry(&v, false) {
+                msgs.push(m);
+            }
+        }
+        let skip = msgs.len().saturating_sub(limit);
+        Ok(msgs.into_iter().skip(skip).collect())
     }
 
     /// 该会话的子会话记录最近一次被写入的时刻（epoch 毫秒，没有子会话就 0）。
@@ -677,9 +809,18 @@ impl SessionScanner {
             .unwrap_or(0)
     }
 
-    /// 增量重放任务清单与后台任务，返回两者的 JSON 快照。
+    /// 增量重放任务清单与后台子任务：前者是一段 Markdown 快照，后者是结构化清单。
     /// 只解析上次之后新增的字节；文件被截断/轮转时从头重来。
-    fn replay_state(&mut self, path: &Path) -> Result<(Option<String>, Option<String>)> {
+    ///
+    /// `parent_ended` = 父会话已经结束（没有进程在跑它）。为真时会给它名下仍挂在
+    /// 「执行中」的后台命令收尾 —— 父会话都没了，它派生的后台命令不可能还在跑。
+    /// `full` = 全量视角（不套保留窗口，且补上父记录漏掉的子会话）。
+    fn replay_state(
+        &mut self,
+        path: &Path,
+        parent_ended: bool,
+        full: bool,
+    ) -> Result<(Option<String>, Vec<SubTask>)> {
         let size = fs::metadata(path)?.len();
         let st = self.state_cache.entry(path.to_path_buf()).or_default();
         // 文件变小 = 被截断或换了内容，之前的重放结果作废
@@ -715,14 +856,39 @@ impl SessionScanner {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let subs = SubAgentDir::scan(path);
-        let bg = st
-            .bg
-            .reconciled(&subs.last_write, now_ms, &|id| subs.tail(id));
-        let bg = if bg.is_empty() {
-            None
+        let parent_ended_ms = parent_ended.then(|| file_mtime_ms(path)).filter(|m| *m > 0);
+        // 全量视角才把目录里那些父记录漏掉的子会话补进来：阻塞式派活不写 agentId，
+        // 只看父记录会少一批。热路径那份维持原样，不多传一个字节。
+        let extra = if full {
+            subs.last_write
+                .keys()
+                .map(|id| {
+                    new_sub_task(
+                        id.clone(),
+                        "agent",
+                        subs.meta_label(id).unwrap_or_else(|| "子会话".to_string()),
+                        "running".to_string(),
+                        String::new(),
+                        None,
+                        0,
+                        // 上游把起跑那次调用的 id 写在 sidecar 里，直接取，不必猜
+                        subs.meta_str(id, "toolUseId").unwrap_or_default(),
+                    )
+                })
+                .collect()
         } else {
-            serde_json::to_string(&bg).ok()
+            Vec::new()
         };
+        let bg = st.bg.reconciled(
+            &subs.last_write,
+            now_ms,
+            &|id| subs.tail(id),
+            ReconcileOpts {
+                parent_ended_ms,
+                full,
+                extra,
+            },
+        );
         Ok((st.todos.take_snapshot("").map(|m| m.content), bg))
     }
 
@@ -816,7 +982,7 @@ pub fn build_tasks(
     // 配对时按最近活动排序 + zip 截断，也不会把真正的死会话捞回来。
     let now = now_ms();
     for s in sessions {
-        if now.saturating_sub(s.mtime_ms) < 7 * 24 * 3600 * 1000 {
+        if now.saturating_sub(s.mtime_ms) < LIVE_WINDOW_MS {
             sess_by_key
                 .entry((s.provider.clone(), s.project_key.clone()))
                 .or_default()
@@ -1036,7 +1202,7 @@ pub fn build_tasks(
             //
             // 不再额外卡「最近 30min 活跃」窗口：闲置的会话 mtime 会冻结，30min 一到它就掉出
             // ④、进程沦为空白占位、会话被判 Finished（表现为「闲太久被当关闭、又冒出空白终端」）。
-            // 安全性完全由上面的 mtime>=启动 约束保证，与活跃间隔无关；会话集合本身已卡 7 天窗口。
+            // 安全性完全由上面的 mtime>=启动 约束保证，与活跃间隔无关；会话集合本身已卡回溯窗口。
             let mut free_sess: Vec<&SessionSummary> = free_sess.into_iter().collect();
             // 新进程优先认领新会话：按启动时间降序，避免老进程抢走更晚的会话文件
             free_procs.sort_by_key(|b| std::cmp::Reverse(b.start_time));
@@ -1069,7 +1235,7 @@ pub fn build_tasks(
                 sid_index
                     .get(sid.as_str())
                     .copied()
-                    .filter(|s| now.saturating_sub(s.mtime_ms) < 7 * 24 * 3600 * 1000),
+                    .filter(|s| now.saturating_sub(s.mtime_ms) < LIVE_WINDOW_MS),
             ) {
                 pid_of_session.insert(s.session_id.as_str(), *p);
                 paired_pids.insert(*pid);
@@ -1138,6 +1304,8 @@ pub fn build_tasks(
             } else {
                 crate::model::provider_dsr(&s.provider)
             },
+            // 「哪个客户端」在这一层是个布尔量，带上去 —— 上层才不必去抠展示字符串
+            desktop: s.desktop,
             title: if s.title.is_empty() {
                 s.prompt.clone()
             } else {
@@ -1168,6 +1336,7 @@ pub fn build_tasks(
             git_branch: s.git_branch.clone(),
             process: proc_info,
             recent_messages: Vec::new(),
+            sub_tasks: Vec::new(),
             queued_inputs: s.queued_inputs.clone(),
             // hook 侧的实时信号，扫描器看不到；由客户端在配对后回填（见 client/state.rs）
             pending_select: None,
@@ -1210,6 +1379,8 @@ pub fn build_tasks(
             platform_dsr: String::new(),
             provider: p.agent.clone(),
             provider_dsr: crate::model::provider_dsr(&p.agent),
+            // 进程占位任务只从进程表来，没有会话文件可判来源，一律按终端 CLI 算
+            desktop: false,
             title,
             used_tokens_5h: 0,
             token_limit: 0,
@@ -1233,6 +1404,7 @@ pub fn build_tasks(
             git_branch: None,
             process: Some(p.clone()),
             recent_messages: Vec::new(),
+            sub_tasks: Vec::new(),
             queued_inputs: Vec::new(),
             // 这是「只有进程、没配上会话」的占位任务，压根谈不上等你选
             pending_select: None,
@@ -1702,6 +1874,8 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 content: t,
                 timestamp: ts,
                 is_error: false,
+                tools: Vec::new(),
+                tool_use_id: String::new(),
             }),
             "assistant" => {
                 let mut buf = String::new();
@@ -1718,6 +1892,8 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     content: truncate(t, FLOW_TEXT_MAX),
                     timestamp: ts,
                     is_error: false,
+                    tools: Vec::new(),
+                    tool_use_id: String::new(),
                 })
             }
             _ => None, // developer 等注入角色不进对话流
@@ -1730,16 +1906,23 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 .or_else(|| p.get("input"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            let content = if args.is_empty() {
-                name.to_string()
-            } else {
-                format!("{name}: {}", truncate(args, 120))
-            };
             Some(MessageBrief {
                 role: "tool".into(),
-                content,
+                content: String::new(),
                 timestamp: ts,
                 is_error: false,
+                // Codex 一条记录就是一次调用，但形状要与 Claude 那边一致 ——
+                // 前端只认一套结构，不为来源分叉。它的 id 叫 call_id。
+                tools: vec![crate::model::ToolCall {
+                    id: p
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    name: name.to_string(),
+                    hint: truncate(args, 120),
+                }],
+                tool_use_id: String::new(),
             })
         }
         "function_call_output" | "custom_tool_call_output" => {
@@ -1749,6 +1932,12 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 content: truncate(out.trim(), 400),
                 timestamp: ts,
                 is_error: false,
+                tools: Vec::new(),
+                tool_use_id: p
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
             })
         }
         _ => None,
@@ -1761,16 +1950,31 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
 /// 文件），避免每次轮询都把 MB 级文本反复搬运。
 const FLOW_TEXT_MAX: usize = 16_000;
 
+/// 解析父会话记录里的一条 —— 子会话（sidechain）记录一律跳过。
+///
+/// 父会话 jsonl 里混着子代理自己的那些记录（`isSidechain: true`），它们不属于
+/// 「我和主会话的对话」，摊进对话流会让一次派活变成几十条噪音。
 fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
+    parse_entry(v, true)
+}
+
+/// 解析一条会话记录。
+///
+/// `skip_sidechain` 决定要不要跳过子会话记录：读父会话时要跳（见 [`entry_to_brief`]），
+/// **读子会话记录本身时绝不能跳** —— `subagents/agent-*.jsonl` 里每一条都是
+/// `isSidechain: true`，跳完就一条不剩。实测本机
+/// `agent-a9e86999bc2536847.jsonl` 172 行，按父会话那套口径解析出 0 条。
+fn parse_entry(v: &Value, skip_sidechain: bool) -> Option<MessageBrief> {
     let ts = v
         .get("timestamp")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
     let ty = v.get("type").and_then(Value::as_str)?;
-    if v.get("isSidechain")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    if skip_sidechain
+        && v.get("isSidechain")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     {
         return None;
     }
@@ -1786,6 +1990,8 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     content: text,
                     timestamp: ts,
                     is_error: false,
+                    tools: Vec::new(),
+                    tool_use_id: String::new(),
                 });
             }
             // tool_result：展示简要执行结果
@@ -1797,6 +2003,14 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                             role: "tool_result".into(),
                             content: truncate(&text, 400),
                             timestamp: ts,
+                            tools: Vec::new(),
+                            // 它回应的是哪一次调用 —— 记录里本来就有，前端据此把结果
+                            // 贴回执行链上对应那一步，不必按先后顺序猜。
+                            tool_use_id: item
+                                .get("tool_use_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
                             // 这一步是不是跑砸了 —— 记录里本来就有，别再丢一次。
                             // 缺这个键（老记录 / 别的形态）按「没出错」算，与改前一致。
                             is_error: item
@@ -1817,7 +2031,7 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
         "assistant" => {
             let items = v.pointer("/message/content")?.as_array()?;
             let mut text_buf = String::new();
-            let mut tools = Vec::new();
+            let mut tools: Vec<crate::model::ToolCall> = Vec::new();
             let mut plan: Option<&str> = None;
             // 交互式选择/权限确认（AskUserQuestion）：把问题与选项整份同步给前端渲染成卡片
             let mut select_input: Option<&Value> = None;
@@ -1844,11 +2058,17 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                             select_input = item.get("input");
                             continue;
                         }
-                        let hint = tool_input_hint(item.get("input"));
-                        tools.push(if hint.is_empty() {
-                            name.to_string()
-                        } else {
-                            format!("{name}: {hint}")
+                        // 一次调用一个元素、各带自己的 tool_use_id。此前是
+                        // `format!("{name}: {hint}")` 推进 Vec<String> 再 `" | "` 拼成
+                        // 一个字符串 —— 拼完就再也认不出哪一段是哪一次调用了。
+                        tools.push(crate::model::ToolCall {
+                            id: item
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            name: name.to_string(),
+                            hint: tool_input_hint(item.get("input")),
                         });
                     }
                     _ => {}
@@ -1861,6 +2081,8 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     content: truncate(p.trim(), FLOW_TEXT_MAX),
                     timestamp: ts,
                     is_error: false,
+                    tools: Vec::new(),
+                    tool_use_id: String::new(),
                 });
             }
             // 交互式选择卡片：整份 input（questions/options）序列化给前端
@@ -1870,6 +2092,8 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     content: truncate(&inp.to_string(), 4000),
                     timestamp: ts,
                     is_error: false,
+                    tools: Vec::new(),
+                    tool_use_id: String::new(),
                 });
             }
             if !text_buf.trim().is_empty() {
@@ -1878,13 +2102,19 @@ fn entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     content: truncate(text_buf.trim(), FLOW_TEXT_MAX),
                     timestamp: ts,
                     is_error: false,
+                    tools: Vec::new(),
+                    tool_use_id: String::new(),
                 })
             } else if !tools.is_empty() {
                 Some(MessageBrief {
                     role: "tool".into(),
-                    content: truncate(&tools.join(" | "), 400),
+                    // 正文在 tools 里，不再另拼一份字符串：两份并存必然漂移，
+                    // 纯文本出口统一走 MessageBrief::text()。
+                    content: String::new(),
                     timestamp: ts,
                     is_error: false,
+                    tools,
+                    tool_use_id: String::new(),
                 })
             } else {
                 None
@@ -1935,41 +2165,40 @@ struct TodoItem {
     status: String,
 }
 
-/// 后台运行的任务（后台命令 / 异步子代理）
-#[derive(Debug, Clone, Serialize)]
-struct BgTask {
+/// 后台运行的任务（后台命令 / 异步子代理）。
+///
+/// 结构与对外形状统一用 [`SubTask`]（`am_core::model`）——此前这里另有一份只在
+/// scanner 内部可见的 `BgTask`，序列化成一条 `role:"bgtasks"` 的伪消息塞进消息流；
+/// 现在它是 `Task::sub_tasks`，两处不再各写一份。
+///
+/// 字段语义见 [`SubTask`] 本身；下面这个构造器只是省掉每处都写全 `outcome` / `has_body`
+/// 这两个「产出时才定得下来」的字段。
+#[allow(clippy::too_many_arguments)]
+fn new_sub_task(
     id: String,
+    kind: &str,
     label: String,
-    /// running | completed | failed | killed | stopped
     status: String,
-    /// "agent"（异步子代理）| "bg"（后台命令）—— 前端据此拆成独立的子代理列表
-    kind: String,
-    /// 起跑时刻（会话记录里的 ISO8601 时间戳），前端据此算耗时；拿不到就空串
-    #[serde(rename = "startedAt")]
     started_at: String,
-    /// 完成通知里的 `<summary>` 原文 —— 这是**唯一**说得出「为什么是这个收场」的字段。
-    ///
-    /// 实测本机 466 份会话记录、1431 条去重后的 `<task-notification>`：
-    /// `<summary>` 出现 1412 次，非 completed 的 141 条里 138 条有它，缺的 3 条
-    /// 全是 `__orphan_summary__` 那种合成通知（本就没有单条任务的收尾信息）。
-    /// 形态固定为一行，长度中位数 75、p90 243、最长 926 字符，例如：
-    /// - `Background command "…" failed with exit code 137`
-    /// - `Agent "…" failed: Agent stalled: no progress for 600s (stream watchdog did not recover)`
-    /// - `Agent "…" failed: Agent terminated early due to an API error: …（error type rate_limit, HTTP 429, request id …）`
-    /// - `Agent "…" was stopped by Claude` / `Background command "…" was stopped`
-    ///
-    /// **原样下发，不做任何解析**：退出码、限流原因、卡死时长都嵌在这句话里，
-    /// 而这句话是上游随时会改的英文文案。去里面抠 `exit code (\d+)` 就是拿字面量
-    /// 当接口用，上游改一版就整条哑掉；下发原文则最多是措辞变了，信息不会丢。
-    ///
-    /// 只有通知带过来才有值；[`Self::reconciled`] 靠磁盘改判状态时会清掉它 ——
-    /// 那时这句话描述的已经不是当前状态了。
-    #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<String>,
-    /// 最近一条完成通知的时刻（epoch 毫秒，0 = 还没收到）。只用于与磁盘对齐时
-    /// 判「这条通知是不是已经过期」（子会话被唤醒续跑了），不外发。
-    #[serde(skip)]
     ended_ms: u64,
+    tool_use_id: String,
+) -> SubTask {
+    SubTask {
+        id,
+        kind: kind.to_string(),
+        label,
+        status,
+        // 占位：真正的归类在 [`BgTracker::reconciled`] 出快照那一刻按磁盘事实定，
+        // `items` 里这份只是重放中间态，不会外发。
+        outcome: SubTaskOutcome::Running,
+        started_at,
+        ended_ms,
+        summary,
+        has_body: false,
+        tool_use_id,
+        runs: 1,
+    }
 }
 
 /// 追踪会话里「在后台跑着」的任务。
@@ -1998,7 +2227,40 @@ struct BgTracker {
     /// [`Self::on_notification`] 找不到条目就把它丢了，条目随后建出来永远停在「执行中」。
     /// 故先按 `<tool-use-id>` 存着，等配对的 `tool_result` 到达时补上。
     early: HashMap<String, EarlyDone>,
-    items: Vec<BgTask>,
+    items: Vec<SubTask>,
+    /// **磁盘已经判定过的终态**：子会话号 → (终态, 收尾时刻)。
+    ///
+    /// 父记录没写下收尾通知时，终态只能由 [`Self::reconciled`] 从磁盘推断
+    /// （尾形态已收尾 + 静置够久）。此前这个推断**每轮现算、绝不记住**，而判据里
+    /// 有个 `now_ms - 文件最后写入`——于是子会话文件只要再被写一下，静置时间就归零，
+    /// 同一条记录当场从 `completed` 翻回 `running`，`ended_ms` 也跟着换一个新值。
+    /// 确定性复现：静置 10 分钟 → completed(endedMs=T1)；touch 一下 → running(endedMs=0)；
+    /// 再静置 10 分钟 → completed(endedMs=T2)。全程 `tool_use_id` 没变，也就是说
+    /// **根本没有新的一次派活**——状态在骗人。
+    ///
+    /// 所以推断一旦落定就记在这里，**终态是吸收态**。要重新打开它只有一条路：
+    /// 父记录里出现新的一次派活（新的 `tool_use_id`，见 [`Self::on_tool_result`]），
+    /// 或父记录自己发话（收尾通知，见 [`Self::on_notification`]）——那两处都会把这里清掉。
+    /// 「文件又被写了一下」不是证据。
+    settled: HashMap<String, SettledEnd>,
+    /// 已经数过的收尾通知：(子会话号, 通知正文的指纹)。
+    ///
+    /// **同一条收尾通知会落两次盘**：一条 `queue-operation`（通知挂在顶层 content 上）、
+    /// 一条 `user`（挂在 message.content 上），正文逐字节相同，时间戳只差 10~19 毫秒
+    /// （实测 a7f78026084ce8753 的 4 次运行全是这个形态：行 369/377、458/460、
+    /// 548/550、567/569）。两条都要解析（只认其一会漏收尾，见 [`Self::observe`]），
+    /// 但 [`SubTask::runs`] 只能数一次 —— 按时间戳去重会因为那十几毫秒失效，
+    /// 所以按**正文指纹**去重：同一份正文就是同一条通知。
+    ///
+    /// 极端情况下两轮运行的通知正文可能逐字节相同（那样会少数一轮）；正文里嵌着这一轮
+    /// 的完整报告（实测 2172~6545 字节），撞上的概率远低于「每轮都数成两次」的代价。
+    seen_notif: HashSet<(String, u64)>,
+}
+
+/// 磁盘推断出来、已经落定的终态。
+struct SettledEnd {
+    status: String,
+    ended_ms: u64,
 }
 
 /// 早到的完成通知：等配对的 `tool_result` 到达时回填给条目。
@@ -2070,6 +2332,8 @@ impl BgTracker {
         let started = self.pending.remove(use_id);
         // 主动停止（TaskStop）不发完成通知，收尾信号只有这条结果本身
         if let Some(id) = stopped_task_id(meta) {
+            // 父记录亲口说的，盖过磁盘推断
+            self.settled.remove(&id);
             if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
                 t.status = "stopped".into();
                 // TaskStop 的结果里只有 "Successfully stopped task: <id> (<命令>)"，
@@ -2108,22 +2372,35 @@ impl BgTracker {
         let (status, summary, ended_ms) = done.unwrap_or_else(|| ("running".to_string(), None, 0));
         // 同一个子代理被唤醒续跑时会再来一条结果：原地复活，别堆重复条目
         if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
+            // **这是新的一次派活**：同一个子代理被重新叫起来干活（实测本机
+            // a7f78026084ce8753 在父记录里有 8 条时刻各不相同的收尾通知）。
+            // 本条记录只描述最近一次运行，所以 status/ended_ms/tool_use_id 全换 ——
+            // 但 runs 要累加，前端才分得清「它又跑起来了」和「刚才那次判错了」。
+            t.runs = t.runs.saturating_add(1);
             t.label = label;
             t.status = status;
             t.summary = summary;
             t.started_at = started_at;
             t.ended_ms = ended_ms;
+            // 续跑是新的一次调用，配对键跟着换 —— 留着上一轮的 id 会让执行链把卡片
+            // 挂回上一次那一步
+            t.tool_use_id = use_id.to_string();
+            // 唯一能把磁盘定案的终态重新打开的事实：真的又派了一次活
+            self.settled.remove(&id);
             return;
         }
-        self.items.push(BgTask {
+        self.settled.remove(&id);
+        self.items.push(new_sub_task(
             id,
+            kind,
             label,
             status,
-            kind: kind.to_string(),
             started_at,
             summary,
             ended_ms,
-        });
+            // 这条结果的 tool_use_id 就是起跑那次调用的 id，执行链靠它精确配对
+            use_id.to_string(),
+        ));
     }
 
     /// 解析 <task-notification>：一条通知可能带多个 task-id，共用一个 status
@@ -2175,10 +2452,27 @@ impl BgTracker {
         while let Some(id) = tag_value(rest, "task-id") {
             // "__orphan_summary__:*" 是内部扫描标记，不是真任务
             if !id.starts_with("__") {
-                if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
+                // 同一条通知落两次盘，按正文指纹去重，别把一轮数成两轮
+                let fresh = self.seen_notif.insert((id.clone(), text_fingerprint(text)));
+                if let Some(t) = self.items.iter_mut().find(|t| t.id == id).filter(|_| fresh) {
+                    // 同一条通知的第二次落盘直接跳过（上面 `fresh` 判的）：内容逐字节相同，
+                    // 应用一遍只会把 ended_ms 挪十几毫秒 —— 白白让下游看到一次值变化。
+                    //
+                    // **同一个子代理被反复叫起来干活**：每跑完一次就来一条收尾通知。
+                    // 实测本机 aad0fb121cab8a31d 有 8 个时刻各不相同的通知 = 跑了 8 次
+                    // （a3ac5a59… 3 次、a7f78026… 4 次）。而**重新派活不写新的
+                    // tool_result**（实测该 agentId 的 toolUseResult 记录全文只有 1 条），
+                    // 所以「第几次运行」只能在这里数：又收到一条更晚的收尾通知，
+                    // 就说明刚才那是新的一轮。同一时刻的重复通知（queue-operation 与
+                    // user 各落一条）时间戳相同，不会重复计数。
+                    if t.status != "running" && ended_ms > t.ended_ms && t.ended_ms > 0 {
+                        t.runs = t.runs.saturating_add(1);
+                    }
                     t.status = status.clone();
                     t.summary = summary.clone();
                     t.ended_ms = ended_ms;
+                    // 父记录亲口说的是最权威的，盖过磁盘那份推断
+                    self.settled.remove(&id);
                 } else if let Some(u) = &use_id {
                     self.early.insert(
                         u.clone(),
@@ -2207,71 +2501,283 @@ impl BgTracker {
         }
     }
 
-    /// 把父会话记录重放出的清单与磁盘上的子会话记录对齐，得到当前真实状态。
+    /// 把父会话记录重放出的清单与磁盘上的子会话记录对齐，**并淘汰过期条目**，
+    /// 得到这一刻真正该展示的那份清单。
     ///
-    /// 父记录里的 `<task-notification>` 是唯一的收尾信号，可它并不保证写得下来
-    /// （父进程被打断/退出、机器重启时就没了）——一旦缺席，条目会永远停在「执行中」。
-    /// 而子会话自己那份记录是硬事实，收尾形态还是固定的，见 [`SubAgentTail`]。
+    /// # 为什么要淘汰（`永不消失` 那个 bug 的根）
     ///
-    /// 两种对齐，都只针对子代理（`kind == "agent"`），后台命令没有这份记录 ——
-    /// 也不需要：后台命令的两条收尾信号（完成通知、`TaskStop` 结果）都在父记录里，
-    /// 只要两条都认全就没有无上界的条目（实测详见 [`BgTracker`] 与 [`stopped_task_id`]）。
-    /// - 清单说在跑、它自己却早已收尾 → 落终态（父记录漏了那条通知）；
-    /// - 清单说已结束、它却在通知很久之后还在写 → 那条通知过期了（子会话被唤醒续跑，
-    ///   通知正文自己写着 "the same task-id may notify more than once"），改按记录判。
+    /// `items` 是从会话开头全量重放累积出来的，此前**只有状态变更、没有任何淘汰**：
+    /// 一条子代理只要出现过就永远在快照里。实测本机
+    /// `3603f576-…jsonl` 一条会话累到 **147 条**、最老的是 11 天前的事；
+    /// `3df6b1a7-…jsonl` 累到 **122 条**，里头两条 6 天前 failed 的至今还在。
+    /// 界面上的表现就是「后台任务」面板永远挂着一堆上周的东西。
     ///
-    /// 「很久」不能取小：实测本机 340 个子会话，「最后一条通知 → 记录最后写入」的间隔
-    /// p99 = 0.1 秒（被 kill 的那几个也只差 0.0~0.1 秒，纯写入竞争），唯一的例外
-    /// `a7bca81f9e85bfd33` 是 +1042 秒 —— 正是一个被唤醒续跑的。取
-    /// [`SUBAGENT_SETTLE_MS`]（5 分钟）作界，比那个写入竞争大三个数量级。
-    /// 第一版按「晚于通知即算复活」判，把 30 小时前 failed 的 `aa8f4211d424433a4`
-    /// 重新点亮成执行中，就是栽在这 0.1 秒上。
+    /// 按 [`SubTask::ended_ms`] 设保留窗口 [`BG_RETAIN_MS`]，再加一道条数上限
+    /// [`BG_MAX_ITEMS`]（防一天之内爆量）。**只淘汰终态条目** —— 还在跑的必须留着，
+    /// 不管它跑了多久（长命的 dev server 就是这样）。
     ///
-    /// 不改 `self.items`：对齐结果每轮现算，父记录后来补上真状态时以父记录为准。
+    /// # 为什么终态条目也要回看磁盘
     ///
-    /// `last_write` 为空（没派过子会话、或旧版 Claude Code 不建这个目录）时原样返回。
-    /// `tail_of` 只在真需要时才调用（它要读文件尾），绝大多数条目走不到。
+    /// 父记录里的 `<task-notification>` 并不保证写得下来（父进程被打断/退出、机器重启
+    /// 时就没了），也不保证说得对。旧实现有一条 early-continue：`status != "running"`
+    /// 就直接跳过、不再读磁盘 —— 于是一旦落了终态就再也纠不回来，哪怕子会话自己那份
+    /// 记录明明白白收在「已交回结果」的形态上。这条 early-continue 是**要推翻的旧设计**，
+    /// 现在终态条目也过一遍磁盘。
+    ///
+    /// 但方向是**单向的**：磁盘只能把条目往「跑完了」纠，不能反过来把父记录说死的条目
+    /// 改判成别的死法 —— [`SUBAGENT_ABANDON_MS`] 那条「停在半路太久 ⇒ 被 kill 了」的
+    /// 兜底只对父记录还说在跑的条目生效。否则本机那两条 `failed: Agent stalled`
+    /// （`aa8f4211d424433a4` / `a08b04e8a92c83c7c`，父记录给了确切原因）会被这道兜底
+    /// 抹成 `stopped`，连 summary 里的原因一起丢掉。
+    ///
+    /// # 终态是吸收态（`outcome 来回抖` 那个 bug 的根）
+    ///
+    /// 上面那条「静置够久 ⇒ 跑完了」的推断里有个 `now_ms - 文件最后写入`。此前推断
+    /// **每轮现算、绝不记住**（原注释写着「误判可自愈…状态自己翻回 running，
+    /// 误判最多让胶囊闪一下」）—— 于是子会话文件只要再被写一下，静置时间就归零，
+    /// 同一条记录当场从 `completed` 翻回 `running`，`ended_ms` 还换一个新值。
+    /// 确定性复现：静置 10 分钟 → `completed(endedMs=T1)`；touch 一下 →
+    /// `running(endedMs=0)`；再静置 10 分钟 → `completed(endedMs=T2)`，
+    /// 全程 `tool_use_id` 没变 = **根本没有新的一次派活**。那不是「自愈」，是状态在骗人。
+    ///
+    /// 所以推断一旦落定就记进 [`Self::settled`]，此后只认两种翻案事实，都在父记录里：
+    /// 真的又派了一次活（[`Self::on_tool_result`]，`runs` 跟着 +1），
+    /// 或父记录自己发话（[`Self::on_notification`] / `TaskStop`）。
+    /// 「文件又被写了一下」不算证据 —— 它既可能是续跑，也可能只是上一次的收尾还在刷盘，
+    /// 二者无从区分，而把两种都当成「又跑起来了」就是现在这个抖动。
+    ///
+    /// 这**不是**退回旧的 early-continue（`status != "running"` 就不读磁盘）：
+    /// 落定之前每一轮照样读磁盘、照样能把父记录说错的 `killed` 纠成 `completed`。
+    /// 区别只在于「纠完之后记不记得住」。
+    ///
+    /// 对齐只针对子代理（`kind == "agent"`），后台命令没有这份记录 —— 也不需要：
+    /// 它的两条收尾信号（完成通知、`TaskStop` 结果）都在父记录里。
+    ///
+    /// `tail_of` 只在真需要时才调用（它要读文件尾）。
     fn reconciled(
-        &self,
+        &mut self,
         last_write: &HashMap<String, u64>,
         now_ms: u64,
         tail_of: &dyn Fn(&str) -> Option<SubAgentTail>,
-    ) -> Vec<BgTask> {
+        opts: ReconcileOpts,
+    ) -> Vec<SubTask> {
         let mut items = self.items.clone();
-        if last_write.is_empty() {
-            return items;
+        // 本轮新落定的磁盘终态（循环里不能同时改 self.settled，攒着出来再写）
+        let mut newly_settled: Vec<(String, SettledEnd)> = Vec::new();
+        // 父记录漏掉的子会话（阻塞式派活不写 agentId，见 BgTracker 的说明）：
+        // 只有全量视角才补进来，热路径那份维持原样、一个字节不多传。
+        for extra in opts.extra {
+            if !items.iter().any(|t| t.id == extra.id) {
+                items.push(extra);
+            }
         }
         for t in items.iter_mut().filter(|t| t.kind == "agent") {
+            t.has_body = last_write.contains_key(&t.id);
+            // 磁盘早就判过它收尾了 → 认定案，不再看文件此刻写没写。
+            // 能把它重新打开的只有父记录里的新一次派活 / 新通知，那两处会清掉这份定案。
+            if let Some(done) = self.settled.get(&t.id) {
+                t.status = done.status.clone();
+                t.summary = None;
+                t.ended_ms = done.ended_ms;
+                continue;
+            }
             let Some(&wrote_ms) = last_write.get(&t.id) else {
                 continue;
             };
-            // 已是终态、且通知之后没再动过 → 通知说了算，不必读文件
-            let resumed = wrote_ms > t.ended_ms.saturating_add(SUBAGENT_SETTLE_MS);
-            if t.status != "running" && !resumed {
-                continue;
-            }
+            let terminal = t.status != "running";
+            // **通知之后很久还在写 ⇒ 它被重新派活了，正在跑新的一轮。**
+            //
+            // 这是唯一能观测到「新一轮开始」的信号：重新派活不写新的 tool_result
+            // （实测 aad0fb121cab8a31d 的 toolUseResult 全文只有 1 条，收尾通知却有 8 条）。
+            // 只对**父记录给出的**终态成立 —— 那种 `ended_ms` 是通知里的真实时刻，
+            // 「比它晚 5 分钟还在写」确实只能是新一轮。
+            // 磁盘自己推断出来的终态没有这种可信时刻（见 `settled`，上面已 continue），
+            // 对它来说「文件又被写了一下」跟「刚才那一猜太早了」根本分不开。
+            let resumed = terminal && wrote_ms > t.ended_ms.saturating_add(SUBAGENT_SETTLE_MS);
             let idle_ms = now_ms.saturating_sub(wrote_ms);
             match tail_of(&t.id) {
-                // 结果已经交回去了，静置够久就是真跑完了 —— 父记录漏了那条通知而已
+                // 结果已经交回去了，静置够久就是真跑完了 —— 父记录那句话说错了（或压根没写）
                 Some(SubAgentTail::Finished) if idle_ms > SUBAGENT_SETTLE_MS => {
                     t.status = "completed".into();
                     t.summary = None;
+                    // 通知缺席时 ended_ms 是 0，拿记录最后写入时刻补上 ——
+                    // 没有它，这条就永远过不了下面的保留窗口。
+                    if t.ended_ms == 0 {
+                        t.ended_ms = wrote_ms;
+                    }
+                    newly_settled.push((
+                        t.id.clone(),
+                        SettledEnd {
+                            status: t.status.clone(),
+                            ended_ms: t.ended_ms,
+                        },
+                    ));
                 }
-                // 停在半路：正常是在等一个慢工具，久到不像话就是被 kill 在半路了
-                Some(SubAgentTail::Midflight) if idle_ms > SUBAGENT_ABANDON_MS => {
+                // 停在半路太久：被 kill 在半路了。只兜底父记录还说在跑的条目，
+                // 已有确切死因的终态条目不碰（见上面的方向说明）。
+                Some(SubAgentTail::Midflight) if !terminal && idle_ms > SUBAGENT_ABANDON_MS => {
                     t.status = "stopped".into();
                     t.summary = None;
+                    t.ended_ms = wrote_ms;
+                    newly_settled.push((
+                        t.id.clone(),
+                        SettledEnd {
+                            status: t.status.clone(),
+                            ended_ms: t.ended_ms,
+                        },
+                    ));
                 }
-                // 还在写：在跑（对续跑的条目就是从终态翻回来）
-                Some(_) => {
+                // 还在写 → 在跑。终态条目只有「通知之后很久还在写」才翻回来（= 新的一轮），
+                // 此时 runs 先记上这一轮：它的收尾通知还没到，on_notification 还没数过它。
+                Some(_) if !terminal || resumed => {
+                    if resumed {
+                        t.runs = t.runs.saturating_add(1);
+                    }
                     t.status = "running".into();
                     t.summary = None;
+                    t.ended_ms = 0;
                 }
-                None => {}
+                _ => {}
             }
         }
-        items
+        self.settled.extend(newly_settled);
+        // 后台命令没有独立记录可纠，收尾信号全在父记录里 —— 父记录要是没写下来
+        // （父进程被打断/退出、机器重启），这条就永远停在「执行中」。
+        // 但有一个**硬事实**能给它收尾：父会话都结束了，它派生的后台命令不可能还在跑。
+        // 判据是「父会话是否已结束」这个事实，不是「挂了超过 N 小时」那种时间阈值。
+        if let Some(ended_ms) = opts.parent_ended_ms {
+            for t in items
+                .iter_mut()
+                .filter(|t| t.kind == "bg" && t.status == "running")
+            {
+                t.status = ORPHANED_STATUS.into();
+                t.summary = None;
+                // 收尾时刻取父会话最后一次写入 —— 它至迟在那一刻就不在了。
+                // 用「此刻」的话年龄恒为 0，保留窗口永远淘汰不掉它。
+                t.ended_ms = ended_ms;
+            }
+        }
+        // 归类：判据是磁盘事实（有没有把结果交回去），不是上游那句英文文案
+        for t in items.iter_mut() {
+            t.outcome = outcome_of(&t.status);
+        }
+        if opts.full {
+            // 全量视角（历史会话展开）：保留窗口是「当前状态面板」的口径，这里不适用
+            items
+        } else {
+            retain_recent(items, now_ms)
+        }
     }
+}
+
+/// [`BgTracker::reconciled`] 的可选项。默认值 = 热路径那份口径（带保留窗口、
+/// 不补目录、不知道父会话是否结束），既有调用点与测试都用它。
+#[derive(Default)]
+struct ReconcileOpts {
+    /// 父会话已结束，值是它最后一次写入的时刻（epoch 毫秒）。
+    /// `None` = 父会话还活着（或调用方不知道），此时不给后台命令收尾。
+    parent_ended_ms: Option<u64>,
+    /// 全量视角：不套保留窗口。给「展开一条历史会话的全部子会话」用。
+    full: bool,
+    /// 父记录里没有、但 `subagents/` 目录里确实存在的子会话（全量视角才补）
+    extra: Vec<SubTask>,
+}
+
+/// 「父会话都结束了，它还挂着」—— 由我们合成的收尾状态，上游不会写出这个词。
+///
+/// 不复用 `killed` / `stopped`：那两个是上游真写过的原文，混进来就分不清
+/// 「上游说它被停了」和「我们据事实推断它不可能还在跑」。归类同样是
+/// [`SubTaskOutcome::Interrupted`] —— 它不是自己跑砸的。
+const ORPHANED_STATUS: &str = "orphaned";
+
+/// 由上游原文状态归出 [`SubTaskOutcome`]。
+///
+/// 到这一步 `status` 已经被 [`BgTracker::reconciled`] 按磁盘纠过了：凡是把结果交回去的
+/// 都已经是 `completed`，所以这里剩下的 `killed` / `stopped` 必然是**没交回结果就被
+/// 掐断的** —— 父会话退出连带（`killed`，实测是父会话被中断时一次性发给当时所有在跑
+/// 子代理的统一通知，同一时刻三条同状态）或有人主动 `TaskStop`（`stopped`）。
+/// 这两种都不是「它自己跑砸了」，归 [`SubTaskOutcome::Interrupted`]。
+///
+/// 只有 `failed` 才是真跑砸（卡死、API 报错、退出码非零），`summary` 里带着原因。
+///
+/// 认不出来的新状态一律当 `Failed`：这是保守方向 —— 宁可让用户多看一眼，
+/// 也别把真出的错悄悄画成灰色。
+fn outcome_of(status: &str) -> SubTaskOutcome {
+    match status {
+        "running" => SubTaskOutcome::Running,
+        "completed" => SubTaskOutcome::Completed,
+        "killed" | "stopped" | ORPHANED_STATUS => SubTaskOutcome::Interrupted,
+        _ => SubTaskOutcome::Failed,
+    }
+}
+
+/// 终态条目的保留窗口：结束超过这么久就不再出现在会话的子任务清单里。
+///
+/// 取 24 小时。这份清单是**「这个会话当下在忙什么」的状态面板**，不是归档：
+/// 一天之内跑过的还可能被回看（改完隔夜回来看昨天那批子代理的结论），
+/// 再往前就属于历史 —— 真要翻，从子会话正文接口按 id 拉。
+///
+/// 不取更短是因为一次大活动辄跨越午休/过夜；不取更长是因为本机实测单会话
+/// 11 天能累 147 条，窗口越宽越接近「没有窗口」。
+const BG_RETAIN_MS: u64 = 24 * 3600 * 1000;
+
+/// 终态条目的条数上限：一天之内也可能爆量（实测单会话最多 234 份子会话记录），
+/// 光有时间窗兜不住。超出时按结束时刻**留最近的**。
+const BG_MAX_ITEMS: usize = 50;
+
+/// 按 [`BG_RETAIN_MS`] + [`BG_MAX_ITEMS`] 淘汰终态条目，保持原有顺序。
+///
+/// **在跑的一条都不淘汰**：跑了多久都得看得见（长命 dev server 就是这样）。
+/// 终态但 `ended_ms == 0`（父记录给了终态却没带时间戳，且磁盘也没纠出时刻）的，
+/// 退回用起跑时刻算年龄 —— 总比无限期挂着强；两个时刻都拿不到才保留。
+fn retain_recent(items: Vec<SubTask>, now_ms: u64) -> Vec<SubTask> {
+    let age_of = |t: &SubTask| -> Option<u64> {
+        let at = if t.ended_ms > 0 {
+            t.ended_ms
+        } else {
+            iso_to_ms(&t.started_at)?
+        };
+        Some(now_ms.saturating_sub(at))
+    };
+    let mut kept: Vec<SubTask> = items
+        .into_iter()
+        .filter(|t| {
+            t.outcome == SubTaskOutcome::Running || age_of(t).is_none_or(|age| age <= BG_RETAIN_MS)
+        })
+        .collect();
+    let over = kept
+        .iter()
+        .filter(|t| t.outcome != SubTaskOutcome::Running)
+        .count()
+        .saturating_sub(BG_MAX_ITEMS);
+    if over > 0 {
+        // 只淘汰终态条目里最老的 `over` 条：先挑出它们的下标，再按下标剔除，
+        // 这样剩下的仍是原始顺序（面板是按派活先后读的）。
+        let mut idx: Vec<usize> = kept
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.outcome != SubTaskOutcome::Running)
+            .map(|(i, _)| i)
+            .collect();
+        idx.sort_by_key(|&i| (kept[i].ended_ms, i));
+        let drop: std::collections::HashSet<usize> = idx.into_iter().take(over).collect();
+        kept = kept
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !drop.contains(i))
+            .map(|(_, t)| t)
+            .collect();
+    }
+    kept
+}
+
+/// 通知正文的指纹，用于「同一条通知落了两次盘」的去重（见 [`BgTracker::seen_notif`]）。
+/// 只求区分同一个子会话名下的不同通知，不求抗碰撞，标准库的 hasher 足够。
+fn text_fingerprint(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
 }
 
 /// 取出 <tag>值</tag> 里的值
@@ -2421,6 +2927,36 @@ impl SubAgentDir {
         Self { dir, last_write }
     }
 
+    /// 某个子会话记录的路径（不保证存在）
+    fn file_of(&self, id: &str) -> PathBuf {
+        self.dir.join(format!("agent-{id}.jsonl"))
+    }
+
+    /// 子会话的展示名，取自它旁边那份 `agent-<id>.meta.json`。
+    ///
+    /// 父记录漏掉的子会话（阻塞式派活不写 `agentId`）在父记录里没有任何展示名，
+    /// 全量清单里只剩一个 id 没法看。上游自己把派活说明写在这份 sidecar 里
+    /// （实测形如 `{"agentType":"Explore","description":"Extract VitaAgent UI reference",…}`），
+    /// 直接取 `description`，没有就退回 `agentType`。读不到就返回 None。
+    fn meta_label(&self, id: &str) -> Option<String> {
+        for key in ["description", "agentType"] {
+            if let Some(t) = self.meta_str(id, key) {
+                return Some(truncate(&t, 80));
+            }
+        }
+        None
+    }
+
+    /// 读 `agent-<id>.meta.json` 里的一个字符串字段（空串当没有）。
+    /// 实测内容形如
+    /// `{"agentType":"Explore","description":"…","toolUseId":"toolu_016u29…","model":"opus"}`。
+    fn meta_str(&self, id: &str, key: &str) -> Option<String> {
+        let txt = fs::read_to_string(self.dir.join(format!("agent-{id}.meta.json"))).ok()?;
+        let v: Value = serde_json::from_str(&txt).ok()?;
+        let t = v.get(key).and_then(Value::as_str)?;
+        (!t.trim().is_empty()).then(|| t.to_string())
+    }
+
     /// 目录里所有子会话记录的最新写入时刻（没有就 0）。供上层做缓存键。
     fn newest_ms(&self) -> u64 {
         self.last_write.values().copied().max().unwrap_or(0)
@@ -2431,7 +2967,7 @@ impl SubAgentDir {
     /// 只读尾部 256KB：一条记录再大也进得来，而整份记录可达数 MB，每轮全读吃不消。
     /// 末尾那行可能正被写入（只有半截）——解析不了就说明它此刻正在写，算半路。
     fn tail(&self, id: &str) -> Option<SubAgentTail> {
-        let text = read_tail(&self.dir.join(format!("agent-{id}.jsonl")), 256 * 1024).ok()?;
+        let text = read_tail(&self.file_of(id), 256 * 1024).ok()?;
         let mut lines = text.lines().rev();
         let last = lines.next()?;
         let v: Value = match serde_json::from_str(last) {
@@ -2562,6 +3098,8 @@ impl TodoTracker {
             content: serde_json::to_string(&self.items).ok()?,
             timestamp: ts.to_string(),
             is_error: false,
+            tools: Vec::new(),
+            tool_use_id: String::new(),
         })
     }
 }
@@ -2680,6 +3218,16 @@ impl SessionScanner {
     pub fn session_cwd_now(&self, session_id: &str) -> Option<String> {
         current_cwd_of_session(&self.session_path(session_id)?)
     }
+}
+
+/// 文件最后修改时刻（epoch 毫秒）；取不到就 0
+fn file_mtime_ms(path: &Path) -> u64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn read_tail(path: &Path, max_bytes: u64) -> Result<String> {
@@ -3366,16 +3914,17 @@ mod subagent_tests {
 
     const HOUR: u64 = 3600 * 1000;
 
-    fn agent(id: &str, status: &str, ended_ms: u64) -> BgTask {
-        BgTask {
-            id: id.into(),
-            label: "子会话".into(),
-            status: status.into(),
-            kind: "agent".into(),
-            started_at: "2026-09-08T02:55:52.284Z".into(),
-            summary: Some("Agent \"子会话\" failed: Agent stalled".into()),
+    fn agent(id: &str, status: &str, ended_ms: u64) -> SubTask {
+        new_sub_task(
+            id.into(),
+            "agent",
+            "子会话".into(),
+            status.into(),
+            "2026-09-08T02:55:52.284Z".into(),
+            Some("Agent \"子会话\" failed: Agent stalled".into()),
             ended_ms,
-        }
+            "toolu_test_agent".into(),
+        )
     }
 
     fn writes(id: &str, ms: u64) -> HashMap<String, u64> {
@@ -3390,9 +3939,12 @@ mod subagent_tests {
         let mut t = BgTracker::default();
         t.items.push(agent("a320f1242950d09d0", "running", 0));
         let now = 12 * HOUR;
-        let out = t.reconciled(&writes("a320f1242950d09d0", now - 8 * HOUR), now, &|_| {
-            Some(SubAgentTail::Finished)
-        });
+        let out = t.reconciled(
+            &writes("a320f1242950d09d0", now - 8 * HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "completed", "交回结果了就是跑完了，别再挂着");
         assert_eq!(
             t.items[0].status, "running",
@@ -3408,10 +3960,18 @@ mod subagent_tests {
         // agent() 造出来就带一句 failed 的原因
         t.items.push(agent("a1", "failed", 0));
         let now = 12 * HOUR;
-        // 通知之后很久还在写 → 是被唤醒续跑了，终态与原因都作废
-        let out = t.reconciled(&writes("a1", now - 60_000), now, &|_| {
-            Some(SubAgentTail::Midflight)
-        });
+        // 重新派了一次活 → 上一轮的终态与原因都作废
+        t.on_tool_result(
+            &serde_json::json!({"type":"tool_result","tool_use_id":"toolu_RUN2","content":"ok"}),
+            Some(&serde_json::json!({"agentId":"a1"})),
+            "2026-09-13T00:00:00.000Z",
+        );
+        let out = t.reconciled(
+            &writes("a1", now - 60_000),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "running");
         assert_eq!(out[0].summary, None, "翻回执行中就不该再挂着失败原因");
 
@@ -3419,9 +3979,12 @@ mod subagent_tests {
         let mut t = BgTracker::default();
         t.items.push(agent("a2", "running", 0));
         t.items[0].summary = Some("Agent \"x\" failed: 过期的原因".into());
-        let out = t.reconciled(&writes("a2", now - 8 * HOUR), now, &|_| {
-            Some(SubAgentTail::Finished)
-        });
+        let out = t.reconciled(
+            &writes("a2", now - 8 * HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "completed");
         assert_eq!(out[0].summary, None);
     }
@@ -3435,9 +3998,12 @@ mod subagent_tests {
         t.items.push(agent("a1", "running", 0));
         let now = 12 * HOUR;
         // 才静了 1 分钟：可能只是下一个内容块还没落盘
-        let out = t.reconciled(&writes("a1", now - 60_000), now, &|_| {
-            Some(SubAgentTail::Finished)
-        });
+        let out = t.reconciled(
+            &writes("a1", now - 60_000),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "running", "回合内空窗不该判死");
     }
 
@@ -3450,9 +4016,12 @@ mod subagent_tests {
         t.items.push(agent("a1", "running", 0));
         let now = 12 * HOUR;
         // 空窗 30 分钟，远超原先那个 5 分钟阈值
-        let out = t.reconciled(&writes("a1", now - 30 * 60 * 1000), now, &|_| {
-            Some(SubAgentTail::Midflight)
-        });
+        let out = t.reconciled(
+            &writes("a1", now - 30 * 60 * 1000),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "running", "慢工具的合法空窗不该判死");
     }
 
@@ -3462,50 +4031,386 @@ mod subagent_tests {
         let mut t = BgTracker::default();
         t.items.push(agent("a1", "running", 0));
         let now = 12 * HOUR;
-        let out = t.reconciled(&writes("a1", now - 3 * HOUR), now, &|_| {
-            Some(SubAgentTail::Midflight)
-        });
+        let out = t.reconciled(
+            &writes("a1", now - 3 * HOUR),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "stopped");
     }
 
     /// 被 kill 的子会话，最后一笔落盘比通知晚 0.0~0.1 秒（纯写入竞争）。据此判「复活」
     /// 会把 30 小时前 failed 的 `aa8f4211d424433a4` 重新点亮成执行中 —— 实测 340 个
     /// 子会话里，这个间隔的 p99 只有 0.1 秒。
+    ///
+    /// 注意现在**会**去读文件（终态条目也回看磁盘），但读到「停在半路」不构成翻案：
+    /// 它没把结果交回去，父记录那句 `failed` 仍然是唯一说得出死因的证词。
     #[test]
     fn write_race_after_notification_is_not_a_resume() {
         let mut t = BgTracker::default();
         let now = 12 * HOUR;
         // 通知在 10 小时前，记录最后写入只比它晚 100 毫秒
         t.items.push(agent("a1", "failed", now - 10 * HOUR));
-        let out = t.reconciled(&writes("a1", now - 10 * HOUR + 100), now, &|_| {
-            unreachable!("通知之后没动静就不该去读文件")
-        });
+        let out = t.reconciled(
+            &writes("a1", now - 10 * HOUR + 100),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "failed");
+        assert_eq!(out[0].outcome, SubTaskOutcome::Failed);
+        assert!(out[0].summary.is_some(), "死因不能被兜底逻辑抹掉");
     }
 
-    /// 子会话可以在「完成通知」之后被唤醒续跑（通知正文自己写着可能通知多次）。
-    /// 实测本机 `a7bca81f9e85bfd33` 就是这样：通知之后记录又长了 1042 秒。
-    /// 不认这一条的话，正干着活的子会话在清单里是 completed，头部一个胶囊都不显示。
+    /// **B1 的正主**：父会话被打断时给所有在跑子代理统一发 `killed`，可子会话自己那份
+    /// 记录明明收在「已交回结果」的形态上 —— 旧实现有一条 early-continue，落了终态就
+    /// 再也不读磁盘，于是这条永远显示失败。现在终态条目也回看一次。
     #[test]
-    fn resumed_after_notification_comes_back_to_running() {
+    fn killed_but_delivered_is_corrected_to_completed() {
+        let mut t = BgTracker::default();
+        let now = 200 * HOUR;
+        t.items.push(agent("a1", "killed", now - HOUR));
+        let out = t.reconciled(
+            &writes("a1", now - HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
+        assert_eq!(out[0].status, "completed");
+        assert_eq!(out[0].outcome, SubTaskOutcome::Completed);
+    }
+
+    /// 真被掐断的（没交回结果）保留 `killed` 原文，但归类是「被连带终止」而不是失败 ——
+    /// 前端据此分开配色，不必自己去猜 `killed` 这个词是什么意思。
+    #[test]
+    fn killed_without_delivery_is_interrupted_not_failed() {
         let mut t = BgTracker::default();
         let now = 12 * HOUR;
-        t.items.push(agent("a1", "completed", now - HOUR));
-        let out = t.reconciled(&writes("a1", now - 5_000), now, &|_| {
-            Some(SubAgentTail::Midflight)
-        });
+        t.items.push(agent("a1", "killed", now - HOUR));
+        let out = t.reconciled(
+            &writes("a1", now - HOUR),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
+        assert_eq!(out[0].status, "killed");
+        assert_eq!(out[0].outcome, SubTaskOutcome::Interrupted);
+    }
+
+    /// **B1 的另一半**：终态条目过了保留窗口就该消失。实测本机一条会话累到 147 条，
+    /// 最老的是 11 天前的事，旧实现永远不淘汰。
+    #[test]
+    fn stale_terminal_items_are_evicted() {
+        let mut t = BgTracker::default();
+        let now = 300 * HOUR;
+        // 209 小时前收尾（就是那 3 条 killed 的年纪）
+        t.items.push(agent("old", "killed", now - 209 * HOUR));
+        // 1 小时前收尾
+        t.items.push(agent("fresh", "killed", now - HOUR));
+        // 还在跑的：多久都不淘汰
+        t.items.push(agent("live", "running", 0));
+        let out = t.reconciled(&HashMap::new(), now, &|_| None, ReconcileOpts::default());
+        let ids: Vec<&str> = out.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["fresh", "live"]);
+    }
+
+    /// 通知缺席（`ended_ms == 0`）的条目，按磁盘纠成 completed 时要把记录最后写入时刻
+    /// 补成收尾时刻 —— 否则它没有年龄，永远过不了保留窗口。
+    #[test]
+    fn disk_corrected_item_gets_an_end_time() {
+        let mut t = BgTracker::default();
+        let now = 300 * HOUR;
+        // 1 小时前交回结果、父记录没写通知 → 纠成 completed，收尾时刻用记录最后写入
+        let mut fresh = BgTracker::default();
+        fresh.items.push(agent("a1", "running", 0));
+        let out = fresh.reconciled(
+            &writes("a1", now - HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
+        assert_eq!(out[0].status, "completed");
+        assert_eq!(out[0].ended_ms, now - HOUR);
+        // 209 小时前交回的：补上收尾时刻后当场就过了保留窗口，同一轮即消失
+        t.items.push(agent("a1", "running", 0));
+        assert!(t
+            .reconciled(
+                &writes("a1", now - 209 * HOUR),
+                now,
+                &|_| Some(SubAgentTail::Finished),
+                ReconcileOpts::default()
+            )
+            .is_empty());
+    }
+
+    fn bg(id: &str, status: &str) -> SubTask {
+        new_sub_task(
+            id.into(),
+            "bg",
+            "npm run dev".into(),
+            status.into(),
+            "2026-09-08T02:55:52.284Z".into(),
+            None,
+            0,
+            "toolu_test_bg".into(),
+        )
+    }
+
+    /// **后台命令永远停在「执行中」**：它没有独立记录可纠，两条收尾信号都在父记录里，
+    /// 父记录没写下来（父进程被打断/退出/机器重启）就永远挂着。
+    ///
+    /// 收尾判据是一个硬事实 —— 父会话都结束了，它派生的后台命令不可能还在跑。
+    /// 不是「挂了超过 N 小时」那种时间阈值（那是在症状处打补丁）。
+    #[test]
+    fn running_bg_is_closed_when_parent_session_ended() {
+        let now = 300 * HOUR;
+        let parent_ms = now - 200 * HOUR;
+        let mut t = BgTracker::default();
+        t.items.push(bg("b1", "running"));
+        // 父会话还活着 → 不动它，跑多久都算在跑
+        let alive = t.reconciled(&HashMap::new(), now, &|_| None, ReconcileOpts::default());
+        assert_eq!(alive[0].status, "running");
+        assert_eq!(alive[0].outcome, SubTaskOutcome::Running);
+        // 父会话已结束 → 合成终态，归「被连带终止」而不是失败，收尾时刻取父会话最后写入
+        let full = t.reconciled(
+            &HashMap::new(),
+            now,
+            &|_| None,
+            ReconcileOpts {
+                parent_ended_ms: Some(parent_ms),
+                full: true,
+                extra: Vec::new(),
+            },
+        );
+        assert_eq!(full[0].status, ORPHANED_STATUS);
+        assert_eq!(full[0].outcome, SubTaskOutcome::Interrupted);
+        assert_eq!(full[0].ended_ms, parent_ms);
+        // 落了终态就吃保留窗口：200 小时前的这条在热路径那份里直接消失
+        let hot = t.reconciled(
+            &HashMap::new(),
+            now,
+            &|_| None,
+            ReconcileOpts {
+                parent_ended_ms: Some(parent_ms),
+                ..Default::default()
+            },
+        );
+        assert!(hot.is_empty(), "收尾后应被保留窗口淘汰");
+    }
+
+    /// 子代理有磁盘记录可纠，不该被「父会话结束」这条兜底碰到
+    #[test]
+    fn parent_ended_does_not_touch_subagents() {
+        let now = 12 * HOUR;
+        let mut t = BgTracker::default();
+        t.items.push(agent("a1", "running", 0));
+        let out = t.reconciled(
+            &writes("a1", now - 60_000),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts {
+                parent_ended_ms: Some(now - HOUR),
+                ..Default::default()
+            },
+        );
         assert_eq!(out[0].status, "running");
     }
 
-    /// 续跑之后又跑完了：还是按记录判，落回终态
+    /// 全量视角：父记录漏掉的子会话（阻塞式派活不写 agentId）要从目录补进来，
+    /// 且不受保留窗口限制 —— 历史会话展开靠的就是它。
     #[test]
-    fn resumed_then_finished_settles_back() {
+    fn full_view_adds_missing_subagents_and_keeps_old_ones() {
+        let now = 300 * HOUR;
+        let mut t = BgTracker::default();
+        t.items.push(agent("known", "completed", now - 209 * HOUR));
+        let extra = vec![new_sub_task(
+            "missing".into(),
+            "agent",
+            "阻塞式子会话".into(),
+            "running".into(),
+            String::new(),
+            None,
+            0,
+            String::new(),
+        )];
+        let wrote = HashMap::from([
+            ("known".to_string(), now - 209 * HOUR),
+            ("missing".to_string(), now - 208 * HOUR),
+        ]);
+        let out = t.reconciled(
+            &wrote,
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts {
+                full: true,
+                extra,
+                ..Default::default()
+            },
+        );
+        let ids: Vec<&str> = out.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["known", "missing"],
+            "两条都要在，且不被保留窗口淘汰"
+        );
+        assert!(out.iter().all(|t| t.outcome == SubTaskOutcome::Completed));
+        assert!(out.iter().all(|t| t.has_body));
+        // 配不上起跑调用的（sidecar 里没有 toolUseId 的老数据）：字段整个不下发，
+        // 不报错、也不拿 label 去凑 —— 前端据此不把它画成执行链上的智能体卡。
+        let wire: Value = serde_json::from_str(&serde_json::to_string(&out[1]).unwrap()).unwrap();
+        assert!(
+            wire.get("toolUseId").is_none(),
+            "拿不到起跑调用 id 时不该下发这个键"
+        );
+        assert!(wire.get("label").is_some(), "其余字段照常");
+    }
+
+    /// 一天之内也能爆量，光有时间窗兜不住：超过上限时按收尾时刻留最近的，顺序不乱。
+    #[test]
+    fn terminal_items_are_capped_by_count() {
+        let mut t = BgTracker::default();
+        let now = 100 * HOUR;
+        for i in 0..(BG_MAX_ITEMS + 10) {
+            t.items.push(agent(
+                &format!("a{i}"),
+                "completed",
+                now - (60 - i as u64) * 1000,
+            ));
+        }
+        let out = t.reconciled(&HashMap::new(), now, &|_| None, ReconcileOpts::default());
+        assert_eq!(out.len(), BG_MAX_ITEMS);
+        // 留下的是最近的那批，且保持原始先后
+        assert_eq!(out[0].id, "a10");
+        assert_eq!(out[BG_MAX_ITEMS - 1].id, format!("a{}", BG_MAX_ITEMS + 9));
+    }
+
+    /// **父记录给出的终态**之后很久还在写 ⇒ 它被重新派活了，正在跑新的一轮。
+    ///
+    /// 这是唯一能观测到「新一轮开始」的信号：重新派活**不写**新的 tool_result
+    /// （实测 aad0fb121cab8a31d 的 toolUseResult 记录全文只有 1 条，收尾通知却有 8 条）。
+    /// 那种 ended_ms 是通知里的真实时刻，「比它晚 5 分钟还在写」只能是新一轮。
+    /// 同时 runs 要 +1，前端才分得清「它又跑起来了」和「刚才那次判错了」。
+    #[test]
+    fn notified_terminal_reopens_as_a_new_run() {
+        let mut t = BgTracker::default();
+        let now = 12 * HOUR;
+        t.items.push(agent("a1", "completed", now - HOUR));
+        let out = t.reconciled(
+            &writes("a1", now - 5_000),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
+        assert_eq!(out[0].status, "running");
+        assert_eq!(out[0].runs, 2, "这是第二轮");
+    }
+
+    /// 同一个子代理跑完多次：每来一条**更晚**的收尾通知就是又跑完了一轮。
+    /// 同一时刻的重复通知（queue-operation 与 user 各落一条）不重复计数。
+    #[test]
+    fn each_later_notification_counts_as_another_run() {
+        let mut t = BgTracker::default();
+        t.items.push(agent("a1", "running", 0));
+        let notif = |body: &str| {
+            format!(
+                "<task-notification><task-id>a1</task-id><status>completed</status>\
+                 <summary>{body}</summary></task-notification>"
+            )
+        };
+        t.on_notification(&notif("第一轮的报告"), "2026-09-12T17:45:02.754Z");
+        assert_eq!(t.items[0].runs, 1, "第一条通知只是第一轮跑完");
+        // **同一条通知落两次盘**：queue-operation 与 user 各一条，正文逐字节相同、
+        // 时间戳差十几毫秒（实测 a7f78026084ce8753 就是这形态）。按时间戳去重会失效。
+        let ended_after_first = t.items[0].ended_ms;
+        t.on_notification(&notif("第一轮的报告"), "2026-09-12T17:45:02.764Z");
+        assert_eq!(t.items[0].runs, 1, "同一条通知的第二次落盘不算新一轮");
+        assert_eq!(
+            t.items[0].ended_ms, ended_after_first,
+            "重复落盘的同一条通知不该把收尾时刻挪十几毫秒 —— 下游会看到一次无谓的值变化"
+        );
+        t.on_notification(&notif("第二轮的报告"), "2026-09-12T17:59:02.100Z");
+        t.on_notification(&notif("第二轮的报告"), "2026-09-12T17:59:02.119Z");
+        assert_eq!(t.items[0].runs, 2);
+        t.on_notification(&notif("第三轮的报告"), "2026-09-12T18:24:10.000Z");
+        assert_eq!(t.items[0].runs, 3);
+    }
+
+    /// **磁盘推断出来的终态同样是吸收态** —— 这条是 `outcome 来回抖` 的正主。
+    ///
+    /// 父记录没写下收尾通知时，终态只能靠「尾形态已收尾 + 静置够久」推断，而判据里有个
+    /// `now - 文件最后写入`。旧实现每轮现算、不记住：文件被再写一下，静置归零，当场从
+    /// completed 翻回 running，`ended_ms` 还换一个新值 —— 全程没有任何新派活。
+    #[test]
+    fn disk_inferred_terminal_survives_a_later_write() {
+        let mut t = BgTracker::default();
+        let now = 12 * HOUR;
+        t.items.push(agent("a1", "running", 0));
+        // 第一轮：静置够久 + 已交回结果 → 推断 completed
+        let first = t.reconciled(
+            &writes("a1", now - 8 * HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
+        assert_eq!(first[0].status, "completed");
+        let ended = first[0].ended_ms;
+        assert!(ended > 0);
+        // 第二轮：文件刚被写过（静置归零）——旧实现在这里翻回 running
+        let second = t.reconciled(
+            &writes("a1", now - 1_000),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
+        assert_eq!(second[0].status, "completed", "定案之后不因一次写入翻案");
+        assert_eq!(
+            second[0].ended_ms, ended,
+            "收尾时刻必须稳定，不能每轮换一个"
+        );
+        assert_eq!(second[0].runs, 1, "没有新派活，runs 不该动");
+    }
+
+    /// 父记录亲口发话盖过磁盘那份推断：定案之后收到通知，以通知为准。
+    #[test]
+    fn notification_overrides_a_settled_guess() {
+        let mut t = BgTracker::default();
+        let now = 12 * HOUR;
+        t.items.push(agent("a1", "running", 0));
+        t.reconciled(
+            &writes("a1", now - 8 * HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
+        // 通知晚到，说它其实是 failed
+        t.on_notification(
+            "<task-notification><task-id>a1</task-id><status>failed</status>\
+             <summary>Agent \"x\" failed: 卡死了</summary></task-notification>",
+            "2026-09-13T00:00:00.000Z",
+        );
+        let out = t.reconciled(
+            &writes("a1", now - 8 * HOUR),
+            now,
+            &|_| Some(SubAgentTail::Midflight),
+            ReconcileOpts::default(),
+        );
+        assert_eq!(out[0].status, "failed", "父记录说的盖过磁盘推断");
+        assert!(out[0].summary.is_some(), "死因要留着");
+    }
+
+    /// 已经是终态、磁盘也说收尾了 → 保持终态（两边一致的平凡情形，别被改坏）
+    #[test]
+    fn terminal_and_finished_tail_stays_terminal() {
         let mut t = BgTracker::default();
         let now = 12 * HOUR;
         t.items.push(agent("a1", "completed", now - 2 * HOUR));
-        let out = t.reconciled(&writes("a1", now - HOUR), now, &|_| {
-            Some(SubAgentTail::Finished)
-        });
+        let out = t.reconciled(
+            &writes("a1", now - HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "completed");
     }
 
@@ -3516,9 +4421,14 @@ mod subagent_tests {
         let run = |idle: u64, tail: SubAgentTail| {
             let mut t = BgTracker::default();
             t.items.push(agent("a1", "running", 0));
-            t.reconciled(&writes("a1", now - idle), now, &|_| Some(tail))[0]
-                .status
-                .clone()
+            t.reconciled(
+                &writes("a1", now - idle),
+                now,
+                &|_| Some(tail),
+                ReconcileOpts::default(),
+            )[0]
+            .status
+            .clone()
         };
         // 静置窗口：正好 300s 还不收尾，多 1ms 才收
         assert_eq!(run(SUBAGENT_SETTLE_MS, SubAgentTail::Finished), "running");
@@ -3534,40 +4444,32 @@ mod subagent_tests {
         );
     }
 
-    /// 续跑判定同样是严格大于：只比通知晚 SETTLE 那一刻不算续跑
+    /// 终态被换成**另一个**终态：跑砸过的条目被重新派活、这回跑完了 → completed
+    /// （光测 completed→completed 覆盖不到这条路）
     #[test]
-    fn resume_threshold_is_exclusive_at_the_boundary() {
-        let now = 12 * HOUR;
-        let ended = now - HOUR;
-        let run = |wrote: u64| {
-            let mut t = BgTracker::default();
-            t.items.push(agent("a1", "failed", ended));
-            t.reconciled(&writes("a1", wrote), now, &|_| {
-                Some(SubAgentTail::Midflight)
-            })[0]
-                .status
-                .clone()
-        };
-        assert_eq!(
-            run(ended + SUBAGENT_SETTLE_MS),
-            "failed",
-            "边界上还不算续跑"
-        );
-        assert_eq!(run(ended + SUBAGENT_SETTLE_MS + 1), "running");
-    }
-
-    /// 终态覆盖：failed 的条目被唤醒续跑、这回跑完了 → 改写成 completed
-    /// （光测 completed→completed 覆盖不到「终态被换成另一个终态」这条路）
-    #[test]
-    fn resumed_failed_item_settles_to_completed() {
+    fn redispatched_failed_item_settles_to_completed() {
         let mut t = BgTracker::default();
         let now = 12 * HOUR;
         t.items.push(agent("a1", "failed", now - 3 * HOUR));
-        // 通知之后又写了两小时，且已静置够久
-        let out = t.reconciled(&writes("a1", now - HOUR), now, &|_| {
-            Some(SubAgentTail::Finished)
-        });
-        assert_eq!(out[0].status, "completed", "续跑跑完了就不该还挂着 failed");
+        // 重新派一次活（新的 tool_use_id），这才是翻案的硬证据
+        t.on_tool_result(
+            &serde_json::json!({"type":"tool_result","tool_use_id":"toolu_RUN2","content":"ok"}),
+            Some(&serde_json::json!({"agentId":"a1"})),
+            "2026-09-13T00:00:00.000Z",
+        );
+        // 这一轮已交回结果且静置够久
+        let out = t.reconciled(
+            &writes("a1", now - HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
+        assert_eq!(
+            out[0].status, "completed",
+            "重新派活跑完了就不该还挂着 failed"
+        );
+        assert_eq!(out[0].runs, 2);
+        assert_eq!(out[0].tool_use_id, "toolu_RUN2");
     }
 
     /// 后台命令（kind=bg）没有子会话记录，不参与对齐
@@ -3578,9 +4480,12 @@ mod subagent_tests {
         cmd.kind = "bg".into();
         t.items.push(cmd);
         let now = 12 * HOUR;
-        let out = t.reconciled(&writes("b1", now - 8 * HOUR), now, &|_| {
-            Some(SubAgentTail::Finished)
-        });
+        let out = t.reconciled(
+            &writes("b1", now - 8 * HOUR),
+            now,
+            &|_| Some(SubAgentTail::Finished),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out[0].status, "running");
     }
 
@@ -3589,7 +4494,12 @@ mod subagent_tests {
     fn without_subagent_dir_nothing_changes() {
         let mut t = BgTracker::default();
         t.items.push(agent("a1", "running", 0));
-        let out = t.reconciled(&HashMap::new(), 12 * HOUR, &|_| unreachable!());
+        let out = t.reconciled(
+            &HashMap::new(),
+            12 * HOUR,
+            &|_| unreachable!(),
+            ReconcileOpts::default(),
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].status, "running");
     }
@@ -3718,7 +4628,7 @@ mod replay_state_tests {
         );
 
         let mut sc = SessionScanner::new(dir.clone());
-        let (todos, _) = sc.replay_state(&path).unwrap();
+        let (todos, _) = sc.replay_state(&path, false, false).unwrap();
         let todos = todos.expect("尾部窗口读不到的 TaskCreate 也必须被重放到");
         assert!(todos.contains("\"id\":\"1\""));
         assert!(todos.contains("甲"));
@@ -3735,7 +4645,7 @@ mod replay_state_tests {
         fs::write(&path, create("u1", "甲") + &created("u1", 1, "甲")).unwrap();
 
         let mut sc = SessionScanner::new(dir.clone());
-        let (todos, _) = sc.replay_state(&path).unwrap();
+        let (todos, _) = sc.replay_state(&path, false, false).unwrap();
         assert!(todos.unwrap().contains("甲"));
         let after_first = sc.state_cache.get(&path).unwrap().offset;
         assert!(after_first > 0);
@@ -3746,7 +4656,7 @@ mod replay_state_tests {
             .unwrap();
         f.flush().unwrap();
 
-        let (todos, _) = sc.replay_state(&path).unwrap();
+        let (todos, _) = sc.replay_state(&path, false, false).unwrap();
         let todos = todos.unwrap();
         assert!(todos.contains("甲"), "旧状态应保留");
         assert!(todos.contains("乙"), "新增应被解析");
@@ -3767,7 +4677,7 @@ mod replay_state_tests {
         fs::write(&path, create("u1", "甲") + &created("u1", 1, "甲") + half).unwrap();
 
         let mut sc = SessionScanner::new(dir.clone());
-        let (todos, _) = sc.replay_state(&path).unwrap();
+        let (todos, _) = sc.replay_state(&path, false, false).unwrap();
         assert!(todos.unwrap().contains("甲"));
         let off = sc.state_cache.get(&path).unwrap().offset;
 
@@ -3779,7 +4689,7 @@ mod replay_state_tests {
         f.write_all(created("u2", 2, "乙").as_bytes()).unwrap();
         f.flush().unwrap();
 
-        let (todos, _) = sc.replay_state(&path).unwrap();
+        let (todos, _) = sc.replay_state(&path, false, false).unwrap();
         assert!(
             todos.unwrap().contains("乙"),
             "补全后该行必须被完整解析（偏移没有停在行中间）"
@@ -3812,6 +4722,67 @@ mod brief_tests {
         let b = entry_to_brief(&v).expect("应产出一条简报");
         assert_eq!(b.role, "select", "AskUserQuestion 必须解析成 select 角色");
         assert!(b.content.contains("questions"), "select 内容应含 questions");
+    }
+
+    /// 一条 assistant 记录里的多次 `tool_use` 必须拆成多个元素、各带自己的 id。
+    ///
+    /// 旧实现把它们 `format!("{name}: {hint}")` 后 `" | "` 拼成一个字符串 —— 拼完就
+    /// 再也认不出哪一段对应哪一次调用，执行链上那次派子代理的调用便无法与它派出的
+    /// [`SubTask`] 对应（两边唯一的交集是展示名，截断长度还不一样：120 vs 80）。
+    ///
+    /// **本机 67 份会话记录里一条这样的样本都没有**（上游目前一条记录只写一次
+    /// `tool_use`），所以这是个没被触发过的隐患而不是现行 bug —— 正因为触发不到，
+    /// 更要用构造样本把行为钉住，别等上游哪天改了批量下发才发现链全乱了。
+    #[test]
+    fn multiple_tool_uses_in_one_record_stay_separate() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{
+              "type":"assistant",
+              "message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"toolu_A","name":"Read","input":{"file_path":"/a.rs"}},
+                {"type":"tool_use","id":"toolu_B","name":"Bash","input":{"command":"cargo test"}},
+                {"type":"tool_use","id":"toolu_C","name":"Agent","input":{"description":"查一下根因"}}
+              ]},
+              "timestamp":"2026-09-12T17:05:07.934Z"
+            }"#,
+        )
+        .unwrap();
+        let m = entry_to_brief(&v).expect("应产出一条 tool 简报");
+        assert_eq!(m.role, "tool");
+        assert_eq!(m.tools.len(), 3, "三次调用必须是三个元素");
+        let ids: Vec<&str> = m.tools.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["toolu_A", "toolu_B", "toolu_C"], "各带自己的 id");
+        assert_eq!(m.tools[2].hint, "查一下根因");
+        assert!(
+            m.content.is_empty(),
+            "正文在 tools 里，content 不再另存一份"
+        );
+        // 纯文本出口（钉钉推送 / MCP 摘要）的能力不能丢
+        assert_eq!(
+            m.text(),
+            "Read: /a.rs | Bash: cargo test | Agent: 查一下根因"
+        );
+    }
+
+    /// 子会话记录里**每一条**都是 `isSidechain: true`。读父会话时要跳过它们
+    /// （否则一次派活变成几十条噪音），读子会话记录本身时跳完就一条不剩 ——
+    /// 实测 `agent-a9e86999bc2536847.jsonl` 172 行按父会话口径解析出 0 条。
+    #[test]
+    fn sidechain_entry_is_readable_when_reading_the_subagent_itself() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{
+              "type":"user",
+              "isSidechain":true,
+              "agentId":"a9e86999bc2536847",
+              "message":{"role":"user","content":"去查一下这个"},
+              "timestamp":"2026-09-12T17:05:07.934Z"
+            }"#,
+        )
+        .unwrap();
+        assert!(entry_to_brief(&v).is_none(), "父会话流里不该出现子会话记录");
+        let b = parse_entry(&v, false).expect("读子会话正文时必须解析得出");
+        assert_eq!(b.role, "user");
+        assert_eq!(b.content, "去查一下这个");
     }
 }
 
@@ -4607,17 +5578,24 @@ mod codex_tests {
         assert_eq!(codex_entry_to_brief(&a).unwrap().role, "assistant");
 
         let f = line(serde_json::json!({
-            "type": "function_call", "name": "spawn_agent",
+            "type": "function_call", "name": "spawn_agent", "call_id": "call_7",
             "arguments": "{\"task\":\"x\"}"
         }));
         let m = codex_entry_to_brief(&f).unwrap();
         assert_eq!(m.role, "tool");
-        assert!(m.content.starts_with("spawn_agent"));
+        // 结构化：一次调用一个元素、带自己的 id；纯文本出口走 text()
+        assert_eq!(m.tools.len(), 1);
+        assert_eq!(m.tools[0].id, "call_7");
+        assert_eq!(m.tools[0].name, "spawn_agent");
+        assert!(m.text().starts_with("spawn_agent"));
 
         let o = line(serde_json::json!({
-            "type": "custom_tool_call_output", "output": "done"
+            "type": "custom_tool_call_output", "call_id": "call_7", "output": "done"
         }));
-        assert_eq!(codex_entry_to_brief(&o).unwrap().role, "tool_result");
+        let ob = codex_entry_to_brief(&o).unwrap();
+        assert_eq!(ob.role, "tool_result");
+        // 结果认得回它对应的那次调用
+        assert_eq!(ob.tool_use_id, "call_7");
 
         let r = line(serde_json::json!({ "type": "reasoning", "summary": [] }));
         assert!(codex_entry_to_brief(&r).is_none(), "思考过程不进流");
@@ -5052,6 +6030,9 @@ mod desktop_session_tests {
         assert_eq!(tasks[0].pid, Some(700));
         assert_eq!(tasks[0].status, TaskStatus::Idle);
         assert_eq!(tasks[0].provider_dsr, "Claude 桌面版");
+        // 「哪个客户端」是结构化事实，热路径的 Task 上必须带着它 —— 前端按
+        // (provider, desktop) 分组，只给展示名的话它就得去抠中文串
+        assert!(tasks[0].desktop, "桌面客户端会话的 desktop 必须为真");
         assert_eq!(tasks[0].ide_dsr, "Claude");
     }
 
@@ -5072,6 +6053,7 @@ mod desktop_session_tests {
             assert_eq!(t.pid, Some(900), "{} 该配到桌面宿主", t.id);
             assert_eq!(t.status, TaskStatus::Idle);
             assert_eq!(t.provider_dsr, "ChatGPT 桌面版");
+            assert!(t.desktop, "ChatGPT 桌面版的会话 desktop 必须为真");
         }
     }
 
@@ -5103,6 +6085,10 @@ mod desktop_session_tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].pid, None, "CLI 会话不能被桌面宿主认领");
         assert_eq!(tasks[0].provider_dsr, "Codex");
+        assert!(
+            !tasks[0].desktop,
+            "终端 CLI 的 desktop 必须为假 —— 同机两个客户端靠它分开"
+        );
     }
 
     /// 桌面宿主只认自己那个 provider 的桌面会话。

@@ -41,7 +41,7 @@ jobs:
         run: pnpm lint
 
       # .env.prod 不入库（见 .env/.env.prod.example）；生产构建必须先把它生成出来，
-      # 否则 webpack.config.prod.cjs 读不到文件、直接报缺文件退出。
+      # 否则 vite.config.ts 读不到文件、直接报缺文件退出。
       - name: 生成 .env.prod
         env:
           CRYPTO_KEY: ${{ vars.WEB_CRYPTO_KEY }}
@@ -58,10 +58,11 @@ jobs:
           name: web-dist
           path: agent-monitor-web/dist
           retention-days: 1
-          # dist 里 175 个 vendor chunk 的文件名以点开头（.pnpm-xxx.chunk.js —— 名字取自
-          # pnpm 的 node_modules/.pnpm 路径），而 upload-artifact 默认丢掉所有隐藏文件：
-          # 不开这个开关，传上去的 dist 只剩 main.js，index.html 引的 chunk 全 404，
-          # 而且上传步骤一声不吭地成功。
+          # upload-artifact 默认丢掉所有隐藏文件，而且丢完仍报成功 —— 桌面客户端
+          # 因此拿到过引用 404 的残缺 dist。产物侧已经在 vite.config.ts 的
+          # chunkFileNames 里削掉了前导点（rolldown 的 CJS 互操作模块本名就叫
+          # `.esm-wrapper`），这个开关留着当第二道保险：将来任何一个点开头的产物
+          # 都不会再被静默吞掉。
           include-hidden-files: true
 
   rust:
@@ -97,7 +98,12 @@ jobs:
         with:
           workspaces: agent-task-monitor
 
-      # Tauri 在 Linux 上要 webkit2gtk 才编得动。
+      # Tauri 在 Linux 上要 webkit2gtk 才编得动，而 webkit2gtk 只来自 Ubuntu 官方源。
+      # runner 镜像里还预置了 Google Chrome / Docker / 微软等第三方源，无差别
+      # `apt-get update` 会把它们全拉一遍，其中任何一个坏掉都会让这一步整体退 100
+      # （实测就是 Chrome 源的 Packages.gz 哈希对不上）。所以 update 之前先把所有
+      # 不指向 ubuntu.com 的源摘掉——只留这个 job 真正需要的。
+      # 注意这不是「忽略失败」：Ubuntu 官方源自己出问题照样报错，装不上包也照样红。
       # `-y` 只回答「要不要装」，回答不了 dpkg 装到一半弹出的配置问题——
       # 那些问题在没有终端的 runner 上永远等不到答案，noninteractive 让它们走默认值。
       - name: Linux 构建依赖
@@ -106,6 +112,7 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          sudo grep -rLE 'ubuntu\.com' /etc/apt/sources.list.d | sudo xargs -r rm -f
           sudo -E apt-get update
           sudo -E apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \

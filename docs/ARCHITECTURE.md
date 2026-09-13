@@ -98,7 +98,7 @@ graph TB
 
 ### 3.2 前端 `agent-monitor-web/`
 
-React 18 + TypeScript + MobX + webpack 5，组件优先用私有库 `@hsu-react/ui`，antd 兜底。
+React 18 + TypeScript + MobX + Vite 8，组件优先用私有库 `@hsu-react/ui`，antd 兜底。
 
 - `pages/Portal/` —— 主界面（对话式监控 + 遥控），核心组件：`ChatPane`（会话正文）、`TerminalFeed`（终端消息流 + 交互式选择卡）、`Composer`（发布任务 + 文件上传 + slash 命令）、`SessionPanels`（清单/后台任务）、`SettingsModal`（账户/设备/机器人/安全/关于）。
 - `pages/{Login,Home,PwdChange,permit,sysmgmt}/` —— 登录、官网、改密、后台管理。
@@ -122,7 +122,7 @@ React 18 + TypeScript + MobX + webpack 5，组件优先用私有库 `@hsu-react/
 | 实时/长连接 | WebSocket（前端快照推送）· tokio-tungstenite（钉钉 Stream，rustls） |
 | 进程/系统 | sysinfo（跨平台进程 + 环境变量）· Windows Console API · ConPTY · caffeinate / SetThreadExecutionState |
 | 桌面客户端 | Tauri v2（Rust + WebView）· 系统托盘 · 自更新 |
-| 前端 | React 18 · TypeScript · MobX · webpack 5 · scss · @hsu-react/ui |
+| 前端 | React 18 · TypeScript · MobX · Vite 8 · scss · @hsu-react/ui |
 | 移动端 | Capacitor（Android/iOS 壳） |
 | 交叉编译 | cargo-zigbuild（Linux musl）· cargo-xwin（Windows MSVC 目标，mac 上编 win） |
 | 部署 | systemd · Caddy（自动 HTTPS）· Vultr Ubuntu 24.04 |

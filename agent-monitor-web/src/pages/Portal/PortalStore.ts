@@ -2,13 +2,18 @@ import {
   getQueuedInputs,
   recallPortalInput,
   termKeyTask,
+  HistorySession,
   PortalControlAction,
   PortalDevice,
   PortalMessage,
   PortalTaskData,
+  SubTask,
   controlPortalTask,
   deletePortalDevice,
+  getHistorySessionList,
   getPortalDevices,
+  getPortalSubAgentMessages,
+  getPortalSubTasks,
   getPortalTaskList,
   getPortalTaskMessages,
   sendPortalInput,
@@ -17,7 +22,6 @@ import {
   untrustPortalDevice,
 } from "@/services/apis/portal";
 
-import { sessionTitle } from "./_utils/sessionNote";
 import { isSlashCommand } from "./_utils/slashCommand";
 import { isStateSnapshot } from "./_utils/sessionState";
 
@@ -28,8 +32,40 @@ import { getAccessToken } from "@/utils/auth";
 /** 拆分视图最多同时打开的会话数 */
 const MAX_PANES = 4;
 
-/** 右栏开合记在这个键上：关过一次就一直关着，不必每次进来再收一遍 */
-const RIGHT_PANE_KEY = "am.portal.rightPane.open";
+/**
+ * 右栏（会话状态）**按格**记一份：`{ 会话 id: { open, ratio } }`。
+ *
+ * 从前是全局一个布尔（`am.portal.rightPane.open`）＋ 全局一个比例
+ * （`am.portal.rightPane.ratio`）：拆分成 2~4 格时，任何一格的开关都在拨同一个值，
+ * 拖宽也是几格连动 —— 那不是「一格的右栏」，是「整页一条右栏」。这两个旧键已废弃，
+ * 加载时顺手删掉，不留第二套状态在磁盘上。
+ */
+const RIGHT_PANE_KEY = "am.portal.rightPane.byId";
+
+/** 上一版的两个全局键。只在加载时清一次，不再有任何代码读它们 */
+const RIGHT_PANE_LEGACY_KEYS = [
+  "am.portal.rightPane.open",
+  "am.portal.rightPane.ratio",
+];
+
+/**
+ * 右栏占本格的宽度比例：下限 / 上限 / 默认。
+ *
+ * 上下限照 VitaAgent 的 ViewerPane（0.3 ~ 0.7）。默认取 0.36 而不是它那边的 0.5 ——
+ * 那栏装的是**产物预览**（要看文件，越宽越好），这里装的是一张状态清单：
+ * 单格 1440 宽下 0.36 约 518px，够摆下卡片，正文还剩约 920px 的正常阅读宽度。
+ */
+export const RIGHT_PANE_MIN_RATIO = 0.3;
+export const RIGHT_PANE_MAX_RATIO = 0.7;
+export const RIGHT_PANE_DEFAULT_RATIO = 0.36;
+
+/** 一格右栏的状态 */
+interface RightPaneState {
+  /** 开着没有 */
+  open: boolean;
+  /** 占本格宽度的比例 */
+  ratio: number;
+}
 
 /** WS 断开后的重连退避（毫秒），逐次递增，封顶 10s */
 const WS_RETRY_MS = [1000, 2000, 5000, 10000];
@@ -41,24 +77,107 @@ const WS_RETRY_MS = [1000, 2000, 5000, 10000];
  */
 const POLL_MS = 2000;
 
-/** 一个设备下的终端类型分组 */
-export interface TermGroup {
-  /** 分组键：proj-<项目路径>（按项目名分组） */
-  key: string;
-  /** 组标题 = 项目目录名 */
-  title: string;
-  tasks: PortalTaskData[];
+/**
+ * 一个「客户端」= 一台机器上的一个终端程序。
+ *
+ * **`provider` 一个字段不够**：Codex CLI 与 ChatGPT 桌面版同属 `provider === "codex"`，
+ * 但它们是两个各跑各的客户端，会话也分别存在两处。只按 provider 分的话两边的会话
+ * 糊成一组，组名还只能二选一。所以键是 `(machineId, provider, desktop)` 这一组。
+ */
+export interface ClientKey {
+  machineId: string;
+  provider: string;
+  /** 终端 CLI（false）还是桌面客户端（true） */
+  desktop: boolean;
 }
 
-/** 侧栏一台设备 */
-export interface DeviceGroup {
-  machineId: string;
-  hostname: string;
-  platform: string;
-  platformDsr: string;
-  online: boolean;
-  groups: TermGroup[];
+/** 侧栏里一个客户端分组下的一个时间桶 */
+export interface SessionBucket {
+  label: string;
+  items: PortalTaskData[];
 }
+
+/** 侧栏里的一个客户端分组（可折叠，内含该客户端的全部会话） */
+export interface ClientSection extends ClientKey {
+  /**
+   * `machineId|provider|desktop`，折叠态与历史分页都按它记。
+   *
+   * **第三段是 `desktop` 这个布尔量，不是展示名**：展示名是中文串，既不能当契约级的键，
+   * 也不能当筛选参数回传给 `/monitor/sessions/history`。
+   */
+  key: string;
+  hostname: string;
+  providerDsr: string;
+  platformDsr: string;
+  /** 此刻有几条在执行 */
+  running: number;
+  /** 服务端说的历史总条数（不受分页影响）；还没拉过是 0 */
+  total: number;
+  buckets: SessionBucket[];
+  /** 历史正在拉 */
+  loading: boolean;
+  /** 拉过至少一页了 */
+  loaded: boolean;
+  /** 还有更旧的可以翻 */
+  hasMore: boolean;
+}
+
+/** 一个客户端的历史分页状态 */
+interface ClientHistoryState {
+  list: HistorySession[];
+  total: number;
+  /** 下一页的时间游标；null = 到底了 */
+  nextCursor: number | null;
+  loading: boolean;
+  loaded: boolean;
+  /** 这份列表是按哪个关键字拉的 —— 关键字一变就整份作废重拉 */
+  keyword: string;
+}
+
+/** 每页历史条数。50 是后端默认值，够铺满一屏又不至于一次拉太多 */
+const HISTORY_PAGE = 50;
+
+/**
+ * 正文「读取中」的重试节奏。
+ *
+ * 历史会话与子会话的正文都不在上报缓存里 —— hub 要点名让那台机器现读磁盘再送回来，
+ * 一次往返两轮上报（客户端约 1.5s 一轮），hub 最多等 8 秒就先回一个 `pending: true`。
+ * 那**不是空会话**，过一会儿再问一次就有了；不重试的话界面会一直停在「暂无内容」。
+ */
+const PENDING_RETRY_MS = 2500;
+/** 最多再问几次。问到第 6 次（约 15 秒）还没有，多半是那台机器离线了 */
+const PENDING_RETRY_MAX = 6;
+
+/**
+ * 「现读磁盘」这类请求没拿到东西的**原因**。三种要分开说，别合成一句兜底。
+ *
+ * - `offline` 设备离线 —— 历史会话的正文与子任务都在**那台机器的磁盘上**，hub 手里
+ *   没有。机器一离线就取不到，但这是**可恢复**的：机器回来点一下重试就有了。
+ * - `missing` 会话/子会话真的不存在（记录被删了、id 不对）。重试也不会变。
+ * - `network` 请求压根没发出去 / 没回来。
+ */
+export type FetchFailKind = "offline" | "missing" | "network";
+
+/** 时间桶的标签与顺序（照 VitaAgent 侧栏：今天 / 昨天 / 过去 7 天 / 过去 30 天 / 更早） */
+const BUCKET_ORDER = ["今天", "昨天", "过去 7 天", "过去 30 天", "更早"];
+
+/** 这条会话的最近活动时刻落在哪个桶里 */
+const bucketOf = (ms: number, now = Date.now()): string => {
+  const day = (t: number) => {
+    const d = new Date(t);
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  };
+  if (!ms) {
+    return "更早";
+  }
+  const days = Math.round((day(now) - day(ms)) / 86400000);
+  if (days <= 0) return "今天";
+  if (days === 1) return "昨天";
+  if (days <= 7) return "过去 7 天";
+  if (days <= 30) return "过去 30 天";
+  return "更早";
+};
 
 /** 单会话在前端保留的最大消息数（合并是只增不减的，须有上限） */
 const MAX_MESSAGES_PER_TASK = 500;
@@ -73,12 +192,40 @@ const EMPTY_MESSAGES: PortalMessage[] = [];
 /** 同 EMPTY_MESSAGES：无队列时统一返回这一个空数组，别每次新建 */
 const EMPTY_HUB_QUEUED: { cmdId: string; text: string }[] = [];
 
-/** 上次把右栏关掉了吗。读不到（隐私模式 / 头一回来）一律按开着算 */
-const readRightPaneOpen = (): boolean => {
+/** 同 EMPTY_MESSAGES：没有子任务时统一返回这一个空数组 */
+const EMPTY_SUB_TASKS: SubTask[] = [];
+
+/**
+ * 读出每一格右栏的开合与宽度。读不到（隐私模式 / 头一回来 / 存的是脏数据）
+ * 就返回空表 —— 没记过的格一律按「开着、默认宽度」算。
+ *
+ * 顺手删掉上一版的两个全局键：它们已经没有任何读取方，留着只会让人以为还有人用。
+ */
+const readRightPaneState = (): Record<string, RightPaneState> => {
   try {
-    return localStorage.getItem(RIGHT_PANE_KEY) !== "0";
+    RIGHT_PANE_LEGACY_KEYS.forEach((k) => localStorage.removeItem(k));
+    const raw = localStorage.getItem(RIGHT_PANE_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as Record<string, Partial<RightPaneState>>;
+    const out: Record<string, RightPaneState> = {};
+    Object.entries(parsed ?? {}).forEach(([id, v]) => {
+      if (!id || typeof v !== "object" || v === null) {
+        return;
+      }
+      const ratio = Number(v.ratio);
+      out[id] = {
+        open: v.open !== false,
+        ratio:
+          ratio >= RIGHT_PANE_MIN_RATIO && ratio <= RIGHT_PANE_MAX_RATIO
+            ? ratio
+            : RIGHT_PANE_DEFAULT_RATIO,
+      };
+    });
+    return out;
   } catch {
-    return true;
+    return {};
   }
 };
 
@@ -97,13 +244,15 @@ class PortalStore {
    */
   private _focusedId = "";
   /**
-   * 右栏（会话状态）开着没有。**默认开**。
+   * 每一格右栏（会话状态）的开合与宽度，按会话 id 各记一份。**默认开**。
    *
    * 这块内容原先钉在每一格对话流的末尾、一直看得见；搬进右栏后若默认收起，
    * 「这个会话正在办什么」就退回到「先点一下才看得见」—— 那正是把它从悬浮胶囊
    * 里挪出来时要解决的问题。默认开着、用户关掉才记一笔，才是不丢东西的换法。
+   *
+   * 表里没有的会话＝没动过，走默认值；所以这张表只装「用户真的改过的那几格」。
    */
-  private _rightPaneOpen = readRightPaneOpen();
+  private _rightPaneById: Record<string, RightPaneState> = readRightPaneState();
   private _messagesById: Record<string, PortalMessage[]> = {};
   /**
    * hub 队列里待下发的输入（会话 id → 条目）。
@@ -112,8 +261,68 @@ class PortalStore {
    * 手机上发一条任务，桌面客户端得靠这份数据才看得见「有条任务正排着队」，
    * 而不是干等到终端执行完、真实消息回来才突然冒出来。
    */
-  private _hubQueuedById: Record<string, { cmdId: string; text: string }[]> = {};
+  private _hubQueuedById: Record<string, { cmdId: string; text: string }[]> =
+    {};
   private _loadingIds: string[] = [];
+  /**
+   * 正文**还没送回来**的会话（含子会话）。不是空会话、也不是出错。
+   *
+   * 历史会话与子会话的正文都要 hub 点名让那台机器现读磁盘，一次往返两轮上报。
+   * 把这个状态单独记一份，界面才说得出「读取中」而不是「暂无可展示的对话内容」。
+   */
+  private _pendingIds: string[] = [];
+  /** 每条会话已经为「读取中」重试过几次（到 PENDING_RETRY_MAX 就不再问） */
+  private _pendingTries: Record<string, number> = {};
+  /** 正文没取到的原因（会话 id / 子会话复合 id → 原因）。取到了就清掉 */
+  private _bodyFailById: Record<string, FetchFailKind> = {};
+  /** 子任务清单没取到的原因（会话 id → 原因）。取到了就清掉 */
+  private _subTasksFailById: Record<string, FetchFailKind> = {};
+  /**
+   * 历史会话：按客户端（`machineId|provider`）各存一份分页状态。
+   *
+   * 不做成一张大列表再前端分组 —— 翻页游标是**按查询**的，每个客户端各翻各的页，
+   * 混在一起就没法说清「这一页是哪一组的下一页」。
+   */
+  private _historyByClient: Record<string, ClientHistoryState> = {};
+  /** 已知会话的静态资料（历史接口回来的那些），供 taskOf 在 `_tasks` 里找不到时兜底 */
+  private _histById: Record<string, HistorySession> = {};
+  /** 侧栏搜索框里的关键字。既筛活跃会话，也作为历史接口的 keyword 参数 */
+  private _keyword = "";
+  /**
+   * 按需拉回来的**全量**子任务清单（会话 id → 清单）。
+   *
+   * `Task.subTasks` 只覆盖活跃会话的近 24 小时 / 50 条，历史会话压根没有这个字段 ——
+   * 侧栏要把任意一条会话展开成子会话树，就得有这条按需通路（见 getPortalSubTasks）。
+   */
+  private _subTasksById: Record<string, SubTask[]> = {};
+  /** 正在拉子任务清单的会话 */
+  private _subTasksLoading: string[] = [];
+  /**
+   * 已经问过 `/subtasks` 的会话（无论成没成）。
+   *
+   * 与 `_subTasksById` 分开记，是为了让**失败**也算「问过」，却不覆盖已有数据：
+   * 那个接口 404 的正常情形是「这条会话不在 hub 的清单里」，而活跃会话手上
+   * 本来就有一份 `Task.subTasks`。失败时往 `_subTasksById` 写个空数组，等于用
+   * 一次失败把已经拿到的子任务擦掉。
+   */
+  private _subTasksTried: string[] = [];
+  /**
+   * **子代理正文**（`父会话 id|agentId` → 消息列表）。
+   *
+   * 这一份只喂执行链里的智能体卡：点开一张子代理小卡，它自己走过的链就地接在
+   * 卡片下面。从前是把子会话合成一条只读会话塞进 `_messagesById` 与 `openIds`，
+   * 于是「子代理」在拆分视图、右栏、备注、号位每一处都要被当成会话特判一次 ——
+   * 那套连同复合 id 一并撤了，这里只保留「按 agentId 拉一份正文」这一个能力。
+   */
+  private _subMsgsById: Record<string, PortalMessage[]> = {};
+  /** 正在拉正文的子代理（同一个 key） */
+  private _subMsgsLoading: string[] = [];
+  /** 正文还没送回来的子代理：显示「读取中」并自动重试，**不是空** */
+  private _subMsgsPending: string[] = [];
+  /** 已经为「读取中」重试过几次 */
+  private _subMsgsTries: Record<string, number> = {};
+  /** 正文没取到的原因（离线 / 不存在 / 网络）。取到了就清掉 */
+  private _subMsgsFail: Record<string, FetchFailKind> = {};
   /**
    * 撤回后把原文回填给对应会话的对话框：Composer 用 reaction 监听，命中自己的
    * taskId 就把 text 填进输入框再消费掉。带 nonce 是为了「撤回同一段文本」也能
@@ -187,10 +396,16 @@ class PortalStore {
     // 非本机端（浏览器/远程）进来不自动选任何设备 —— 展示设备列表让用户自己挑，
     // 不再回退到「第一个设备」。
     const list = this.deviceList;
-    if (this._selectedMachineId && list.some((d) => d.machineId === this._selectedMachineId)) {
+    if (
+      this._selectedMachineId &&
+      list.some((d) => d.machineId === this._selectedMachineId)
+    ) {
       return this._selectedMachineId;
     }
-    if (this._localMachineId && list.some((d) => d.machineId === this._localMachineId)) {
+    if (
+      this._localMachineId &&
+      list.some((d) => d.machineId === this._localMachineId)
+    ) {
       return this._localMachineId;
     }
     return "";
@@ -207,62 +422,166 @@ class PortalStore {
   };
 
   /**
-   * 所选设备的会话按「项目名」分组：同一项目下的会话（无论跑在 Cursor、
-   * VSCode 还是外部终端）归在一起，组标题就是项目目录名。
-   * Map 保持插入序 —— 列表本身按活跃度排序，最活跃的项目自然靠前。
+   * 侧栏的**客户端分组**：一台机器上的一种终端（Claude / Codex 各算一个）一组。
+   *
+   * 每组里铺的是该客户端的**全部会话**，按时间分桶（今天 / 昨天 / 过去 7 天 /
+   * 过去 30 天 / 更早）。两份数据合成一列：
+   *
+   *   - **活跃会话**来自 `_tasks`（WS 秒级推送）—— 它带 `status`、`lastAction`、
+   *     `slot`、`subTasks` 这些「此刻在干什么」的字段；
+   *   - **历史会话**来自 `/monitor/sessions/history`（按需翻页）—— 它不过滤已结束的，
+   *     但只有静态字段。
+   *
+   * 同一条会话两边都有时**以活跃那份为准**：反过来的话，一条正在跑的会话会因为
+   * 历史快照里写着 `finished` 而显示成已结束。
+   *
+   * **组从哪来**：`/monitor/devices` 每台设备下发的 `providers`（这台机器上有哪几类
+   * 终端）。从前是「客户端集合取自 `_tasks`」—— `_tasks` 只含**此刻有活进程**的会话，
+   * 于是「这台机器上有哪些终端」被偷换成了「此刻有哪些终端在跑」：本机 33 条 Codex
+   * 历史会话因为没有一条活着，Codex 组压根建不出来，那一组的历史请求也就永远不会
+   * 发出（历史那一侧只能往**已存在**的组里填，建不出新组）。中间过渡过一版「数最近
+   * 200 条历史倒推」，也一并删掉了 —— 某个终端最近一条会话排到 200 条之外就会凭空
+   * 消失，那是将就不是答案。两套来源不并存。
+   *
+   * **组的顺序就是这里的建组顺序**（Map 保序），末尾不再排一次：
+   *   设备（本机优先、其次主机名）× 该设备的 `providers`（后端已按会话数降序给好）。
+   * 前端再排一遍就是两套排序并存，每轮还可能抖。
+   *
+   * `_tasks` 与历史仍然参与，但只负责**补**：一种终端第一次跑起来时它的会话会先出现在
+   * 热路径上，不必等设备列表下一轮（5 秒）才在侧栏冒出来。
+   *
+   * 设备离线时后端照常返回上次已知的那份 `providers`，所以离线设备的分组继续显示 ——
+   * 笔记本一合盖侧栏就空掉是更糟的那一种；组内点开会走已有的「设备离线」提示。
    */
-  get selectedGroups(): TermGroup[] {
-    const mid = this.selectedMachineId;
-    const list = this._tasks.filter(
-      (t) =>
-        (t.machineId || t.hostname || "unknown") === mid &&
-        // 隐藏已结束会话，避免旧会话堆积；但只隐藏「很久没活动」的 ——
-        // 配对偶有误判时，最近活动过的会话即使被判 finished 也保留显示，
-        // 免得把正在用的终端会话误藏掉。
-        (t.status !== "finished" ||
-          Date.now() - (t.mtimeMs ?? 0) < 2 * 3600 * 1000)
-    );
-    // 归一化目录键：与后端 encode_path（core/scanner）逐字对齐 —— 去尾随分隔符后，
-    // 把每个非字母数字字符一律替换成 '-'，再小写。同一目录下的空会话（占位任务用进程
-    // cwd）与真实会话（用 jsonl 里的 cwd），以及 cursor / 非 cursor 终端，其 cwd 字符串
-    // 常在分隔符、盘符冒号、标点等处有细微差异；只做「斜杠/大小写」归一挡不住，必须与
-    // 配对键同规则，才能保证「后端认作同一目录、就分进同一个分组」。
-    const normProj = (p: string | undefined) =>
-      (p ?? "")
-        .replace(/[/\\]+$/, "")
-        .replace(/[^a-zA-Z0-9]/g, "-")
-        .toLowerCase();
-    const byProject = new Map<string, TermGroup>();
-    for (const t of list) {
-      // 组标题只显示文件夹名，不要完整路径
-      const dirName = (t.project ?? "").split(/[\\/]/).filter(Boolean).pop() ?? "";
-      const title = t.projectName || dirName || "未知项目";
-      const key = `proj-${normProj(t.project) || title.toLowerCase()}`;
-      const group = byProject.get(key);
-      if (group) {
-        group.tasks.push(t);
-      } else {
-        byProject.set(key, { key, title, tasks: [t] });
+  get clientSections(): ClientSection[] {
+    const kw = this._keyword.trim().toLowerCase();
+    const hit = (...vals: (string | null | undefined)[]) =>
+      !kw || vals.some((v) => (v ?? "").toLowerCase().includes(kw));
+
+    const byClient = new Map<string, ClientSection>();
+    const rowsByClient = new Map<string, Map<string, PortalTaskData>>();
+    const ensure = (
+      machineId: string,
+      provider: string,
+      desktop: boolean,
+      meta: { hostname?: string; providerDsr?: string; platformDsr?: string },
+    ): string => {
+      const key = `${machineId}|${provider}|${desktop}`;
+      if (!byClient.has(key)) {
+        byClient.set(key, {
+          key,
+          machineId,
+          provider,
+          desktop,
+          hostname: meta.hostname || machineId,
+          providerDsr: meta.providerDsr || provider,
+          platformDsr: meta.platformDsr || "",
+          running: 0,
+          total: 0,
+          buckets: [],
+          loading: false,
+          loaded: false,
+          hasMore: false,
+        });
+        rowsByClient.set(key, new Map());
+      }
+      return key;
+    };
+    /** 会话（活跃的 / 历史的）那一侧的入口：字段名一样，缺省口径也一样 */
+    const ensureOf = (t: PortalTaskData | HistorySession): string =>
+      ensure(
+        t.machineId || t.hostname || "unknown",
+        t.provider || "unknown",
+        // `desktop` 是契约的一部分，热路径与历史两边都下发。**不给兜底** ——
+        // 缺了就是后端的 bug，该暴露出来，不该在这儿遮成「按 CLI 算」
+        !!t.desktop,
+        t,
+      );
+
+    /* 先按设备把全集建出来：**有没有会话可铺是另一回事**，组本身必须先在。
+       设备顺序在这儿定死（本机优先、其次主机名），组内顺序照后端给的 `providers`
+       原样来 —— 末尾因此不需要再 sort 一次。 */
+    const devices = [...this._devices].sort((a, b) => {
+      const local =
+        Number(b.id === this._localMachineId) -
+        Number(a.id === this._localMachineId);
+      if (local !== 0) {
+        return local;
+      }
+      return (a.hostname || a.id).localeCompare(b.hostname || b.id, "zh");
+    });
+    for (const d of devices) {
+      for (const p of d.providers) {
+        ensure(d.id, p.provider, p.desktop, {
+          hostname: d.hostname,
+          providerDsr: p.providerDsr,
+          platformDsr: d.platformDsr,
+        });
       }
     }
-    // 固定字母序：分组按标题、组内会话按标题(再退 id)稳定排序 —— 之前顺序跟随
-    // 拉取顺序的活跃度，活跃会话一变就整列上下跳；改成字母序后位置钉死不乱跳。
-    const groups = [...byProject.values()];
-    // 排序按**显示出来的那个名字**：起了备注就按备注排，否则列表里看着是 A 在 B 前，
-    // 排序却还照着被盖掉的旧标题走
-    const taskKey = (t: PortalTaskData) => sessionTitle(t, t.id ?? "");
-    // 有真实内容（备注/标题/提示词）= 真正在用的会话，排在「刚开还没输入的空占位」前
-    const hasContent = (t: PortalTaskData) => !!(t.note || t.title || t.prompt);
-    groups.sort((a, b) => a.title.localeCompare(b.title, "zh"));
-    for (const g of groups) {
-      g.tasks.sort((a, b) => {
-        const hc = Number(hasContent(b)) - Number(hasContent(a));
-        if (hc !== 0) return hc; // 有内容的在前
-        const c = taskKey(a).localeCompare(taskKey(b), "zh");
-        return c !== 0 ? c : (a.id ?? "").localeCompare(b.id ?? "");
-      });
+
+    // 再铺活跃会话：它们优先级最高，后面历史里的同 id 不覆盖它
+    for (const t of this._tasks) {
+      const key = ensureOf(t);
+      if (t.status === "running") {
+        byClient.get(key)!.running += 1;
+      }
+      if (!t.id || !hit(t.note, t.title, t.prompt, t.projectName, t.hostname)) {
+        continue;
+      }
+      rowsByClient.get(key)!.set(t.id, t);
     }
-    return groups;
+
+    // 再铺历史。关键字已经由服务端过滤过（keyword 参数），这里不再筛一遍 ——
+    // 两处各筛一遍就会出现「服务端说 30 条、列表只显示 12 条」。
+    for (const state of Object.values(this._historyByClient)) {
+      for (const h of state.list) {
+        const key = ensureOf(h);
+        const sec = byClient.get(key)!;
+        sec.total = Math.max(sec.total, state.total);
+        sec.loading = state.loading;
+        sec.loaded = state.loaded;
+        sec.hasMore = state.nextCursor !== null;
+        if (h.id && !rowsByClient.get(key)!.has(h.id)) {
+          rowsByClient.get(key)!.set(h.id, h);
+        }
+      }
+    }
+    // 分页状态也要落到「历史一条都没返回」的那些组上（空结果同样是结果）
+    Object.entries(this._historyByClient).forEach(([key, state]) => {
+      const sec = byClient.get(key);
+      if (sec) {
+        sec.total = Math.max(sec.total, state.total);
+        sec.loading = state.loading;
+        sec.loaded = state.loaded;
+        sec.hasMore = state.nextCursor !== null;
+      }
+    });
+
+    const sections = [...byClient.values()];
+    for (const sec of sections) {
+      const rows = [...rowsByClient.get(sec.key)!.values()];
+      // 最近活动倒序：侧栏回答的是「我最近在弄什么」，字母序在这儿没有意义
+      rows.sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0));
+      const buckets = new Map<string, PortalTaskData[]>();
+      for (const r of rows) {
+        const label = bucketOf(r.mtimeMs ?? 0);
+        const arr = buckets.get(label);
+        if (arr) {
+          arr.push(r);
+        } else {
+          buckets.set(label, [r]);
+        }
+      }
+      sec.buckets = BUCKET_ORDER.filter((l) => buckets.has(l)).map((label) => ({
+        label,
+        items: buckets.get(label)!,
+      }));
+    }
+    /* **这里不再排序**：顺序就是上面的建组顺序（Map 保序）——
+       设备（本机优先、其次主机名）× 后端给好的 `providers`（会话数降序）。
+       再排一遍就是两套排序并存，后端调了口径这边不跟，每轮还可能抖。 */
+    return sections;
   }
 
   get devices() {
@@ -299,29 +618,422 @@ class PortalStore {
     this._focusedId = this._focusedId === id ? "" : id;
   };
 
-  get rightPaneOpen() {
-    return this._rightPaneOpen;
-  }
+  /** 这一格的右栏开着吗。没记过＝开着 */
+  public isRightPaneOpen = (taskId: string): boolean =>
+    this._rightPaneById[taskId]?.open ?? true;
 
-  /** 开/收右栏。开合是**全局**一份：右栏本身就按会话分节，一次列出所有打开的格 */
-  public toggleRightPane = () => {
-    this._rightPaneOpen = !this._rightPaneOpen;
-    try {
-      localStorage.setItem(RIGHT_PANE_KEY, this._rightPaneOpen ? "1" : "0");
-    } catch {
-      // 隐私模式下写不进去也无妨，下次回到默认（开着）
+  /** 这一格右栏占本格的宽度比例。没记过＝默认 */
+  public rightPaneRatio = (taskId: string): number =>
+    this._rightPaneById[taskId]?.ratio ?? RIGHT_PANE_DEFAULT_RATIO;
+
+  /** 开/收某一格的右栏。**每格一份**：A 格开着、B 格关着是合法状态 */
+  public toggleRightPane = (taskId: string) => {
+    if (!taskId) {
+      return;
     }
+    this._rightPaneById = {
+      ...this._rightPaneById,
+      [taskId]: {
+        open: !this.isRightPaneOpen(taskId),
+        ratio: this.rightPaneRatio(taskId),
+      },
+    };
+    this.saveRightPaneState();
+  };
+
+  /**
+   * 改某一格右栏的宽度比例。
+   *
+   * 拖动过程中每帧都在调，所以只有松手那一下（`commit`）才落盘 ——
+   * 每帧写一次 localStorage 是同步 IO，拖起来会发涩。
+   */
+  public setRightPaneRatio = (
+    taskId: string,
+    ratio: number,
+    commit = false,
+  ) => {
+    if (!taskId) {
+      return;
+    }
+    const clamped = Math.min(
+      RIGHT_PANE_MAX_RATIO,
+      Math.max(RIGHT_PANE_MIN_RATIO, ratio),
+    );
+    this._rightPaneById = {
+      ...this._rightPaneById,
+      [taskId]: { open: this.isRightPaneOpen(taskId), ratio: clamped },
+    };
+    if (commit) {
+      this.saveRightPaneState();
+    }
+  };
+
+  /**
+   * 落盘，顺带清死键。
+   *
+   * 键是会话 id，会话是会被删掉的：不清的话这张表只增不减，攒上几个月就是一堆
+   * 指向不存在会话的记录。判据取「服务端还认这个会话吗」（`_tasks`）—— 已关掉但
+   * 还在列表里的格要留着（下次再打开仍是上次的宽度），彻底消失的才丢。
+   */
+  private saveRightPaneState = () => {
+    const live = new Set<string>([
+      ...this._tasks.map((t) => t.id ?? ""),
+      ...this._openIds,
+    ]);
+    const next: Record<string, RightPaneState> = {};
+    Object.entries(this._rightPaneById).forEach(([id, v]) => {
+      if (live.has(id)) {
+        next[id] = v;
+      }
+    });
+    this._rightPaneById = next;
+    try {
+      localStorage.setItem(RIGHT_PANE_KEY, JSON.stringify(next));
+    } catch {
+      // 隐私模式下写不进去也无妨，下次回到默认（开着、默认宽度）
+    }
+  };
+
+  /**
+   * 按 id 取一条会话。两种来源都认：
+   *
+   *   1. 活跃会话 —— `_tasks`（最新，带 status / lastAction / subTasks）
+   *   2. 历史会话 —— `_histById`（侧栏翻页时攒下的静态资料）
+   *
+   * 从前还有第三种：把子会话合成一条只读会话，好让它复用整套会话 UI（复合 id
+   * `父::agentId`）。那套连同侧栏的子会话树一并推翻了 —— 子代理是**执行链上的
+   * 一步**，不是一条会话：它没有自己的进程、队列、备注、号位，把它塞进会话通道
+   * 之后每一处都要现场把这些字段清空，而用户真正要问的「谁派的、派在哪一步」
+   * 反倒在会话列表里丢掉了。现在它就地画在链上（见 `_components/AgentCard`）。
+   */
+  public taskOf = (id: string): PortalTaskData | undefined => {
+    if (!id) {
+      return undefined;
+    }
+    return this._tasks.find((t) => t.id === id) ?? this._histById[id];
   };
 
   get openTasks() {
     return this._openIds
-      .map((id) => this._tasks.find((t) => t.id === id))
+      .map((id) => this.taskOf(id))
       .filter(Boolean) as PortalTaskData[];
   }
 
-  messagesOf = (id: string): PortalMessage[] => this._messagesById[id] ?? EMPTY_MESSAGES;
+  messagesOf = (id: string): PortalMessage[] =>
+    this._messagesById[id] ?? EMPTY_MESSAGES;
 
   isLoadingMessages = (id: string): boolean => this._loadingIds.includes(id);
+
+  /**
+   * 正文还在路上（hub 正让那台机器现读磁盘）。
+   * 界面据此显示「读取中」——**不要**把它当成空会话，那是两回事。
+   */
+  isMessagesPending = (id: string): boolean => this._pendingIds.includes(id);
+
+  /** 这条会话（或子会话）的正文为什么没取到。取到了 / 还没问过就是 undefined */
+  public messagesFailOf = (id: string): FetchFailKind | undefined =>
+    this._bodyFailById[id];
+
+  /** 这条会话的子任务清单为什么没取到 */
+  public subTasksFailOf = (id: string): FetchFailKind | undefined =>
+    this._subTasksFailById[id];
+
+  /**
+   * 这次失败该归到哪一类。
+   *
+   * **判据全是结构化的**：后端信封里的 `code`（见 hub `admin.rs` 的 `err()`：
+   * HTTP 恒 200，真正的状态码在 body 的 `code` 上）＋ 设备列表里的 `online`。
+   * 一个中文文案都不匹配 —— 那是上游随时会改的措辞，拿它当接口用改一版就失灵。
+   *
+   * 为什么 404 还要再判一次设备在不在线：机器掉线超过 10 秒，hub 会把**它名下的
+   * 任务一起丢掉**，于是「设备离线」从第 8 秒起就以 `404 任务不存在` 的形式出现
+   * （实测：离线 4s 是 500，8s 起变 404）。只看 code 的话，用户会被告知
+   * 「这条会话已经被删了」—— 而它其实好好躺在那台关着的机器上。
+   */
+  private failKindOf = (id: string, code?: number): FetchFailKind => {
+    if (code === 500) {
+      return "offline";
+    }
+    const machineId =
+      this._tasks.find((t) => t.id === id)?.machineId ??
+      this._histById[id]?.machineId ??
+      "";
+    if (
+      machineId &&
+      this._devices.some((d) => d.id === machineId && !d.online)
+    ) {
+      return "offline";
+    }
+    return "missing";
+  };
+
+  /** 记一笔 / 清掉某条会话正文的失败原因 */
+  private setBodyFail = (id: string, kind?: FetchFailKind) => {
+    if (this._bodyFailById[id] === kind) {
+      return;
+    }
+    const next = { ...this._bodyFailById };
+    if (kind) {
+      next[id] = kind;
+    } else {
+      delete next[id];
+    }
+    this._bodyFailById = next;
+  };
+
+  /** 同 setBodyFail，作用在子任务清单上 */
+  private setSubTasksFail = (id: string, kind?: FetchFailKind) => {
+    if (this._subTasksFailById[id] === kind) {
+      return;
+    }
+    const next = { ...this._subTasksFailById };
+    if (kind) {
+      next[id] = kind;
+    } else {
+      delete next[id];
+    }
+    this._subTasksFailById = next;
+  };
+
+  // ---------- 子任务（子会话树）----------
+
+  /**
+   * 一条会话的子任务清单：全量快照为底，**同 id 以更新的那份为准**。
+   *
+   *   - 按需拉回来的那份（`getPortalSubTasks`）**全**，但它是一次读盘的快照；
+   *   - 上报捎带的 `Task.subTasks`（只有会话还在 `_tasks` 里时才有，且只覆盖近 24 小时
+   *     / 50 条）**新**，WS 每轮推送。
+   *
+   * **快照的活性由 `hasRunningSubAgent` ＋ ChatPane 的定时重拉负责**，不是靠 WS 兜底。
+   * 曾经是靠 WS 兜的，那是个错的假设：会话一旦不在 `_tasks` 里（历史会话、进程已退出
+   * 没配上），WS 那一路压根不存在，`outcome` 就永远冻结在打开那一刻 —— 子代理明明
+   * 跑完了，卡片还写着「执行中 · 13分42秒」，链上那条 5 秒轮询的停止条件也因此
+   * 永远不成立。那个假设整条推翻，见 `loadSubTasks` 与 `hasRunningSubAgent`。
+   *
+   * WS 那一份**仍然保留**：会话还活着时它是秒级的，比定时重拉快一个量级，白拿的新鲜度
+   * 没有理由丢掉。两者不是两套刷新 —— 刷新只有一处（定时重拉），这里只是「同一条子任务
+   * 谁的版本更新就用谁的」这一条读取规则。
+   */
+  public subTasksOf = (id: string): SubTask[] => {
+    const full = this._subTasksById[id];
+    const live = this._tasks.find((t) => t.id === id)?.subTasks;
+    if (!full) {
+      return live ?? EMPTY_SUB_TASKS;
+    }
+    if (!live?.length) {
+      return full;
+    }
+    const byId = new Map(live.map((t) => [t.id, t]));
+    const merged = full.map((t) => byId.get(t.id) ?? t);
+    const seen = new Set(full.map((t) => t.id));
+    live.forEach((t) => {
+      if (!seen.has(t.id)) {
+        merged.push(t);
+      }
+    });
+    return merged;
+  };
+
+  /**
+   * 这条会话名下**还有子代理在跑**吗 —— 定时重拉子任务清单的唯一开关。
+   *
+   * 「还在跑」这件事只有清单自己说得出来，所以它既是刷新的条件、也是刷新的结果：
+   * 最后一个子代理翻成终态的那一轮，这里跟着翻假，定时器当场停 —— 不靠超时上限、
+   * 不靠次数封顶那类「让它自己累死」的补丁。
+   */
+  public hasRunningSubAgent = (id: string): boolean =>
+    this.subTasksOf(id).some((t) => t.kind === "agent" && t.outcome === "running");
+
+  public isSubTasksLoading = (id: string): boolean =>
+    this._subTasksLoading.includes(id);
+
+  /**
+   * 这条会话的全量子任务清单拉过了没有。
+   *
+   * 侧栏靠它区分「确定没有子会话」（拉过、空的 → 那一行不给展开箭头）与
+   * 「还不知道」（没拉过 → 给箭头，点了才去拉）。活跃会话的 `Task.subTasks`
+   * 不算「拉过」：那份只覆盖近 24 小时 / 50 条，空不代表真的没有。
+   */
+  public isSubTasksLoaded = (id: string): boolean =>
+    this._subTasksTried.includes(id);
+
+  /**
+   * 按需拉一条会话的全量子任务清单（侧栏展开那一下调）。
+   *
+   * **一条会话只拉一次**（除非 `force`）。这个接口是现读磁盘的，实测一条 149 条子任务的
+   * 会话要 0.8~2 秒 —— 收起再展开重拉一遍，每次都要再等两秒，而清单本身几乎不动。
+   *
+   * 所以它**不进那条 5 秒轮询**：跟着正文一起刷等于让客户端每 5 秒重开一遍 jsonl。
+   * 要活性的只有一种情形 —— 这条会话名下还有子代理在跑（`hasRunningSubAgent`），
+   * 那时由 ChatPane 以明显更慢的节律带 `force` 重拉，跑完即停。
+   *
+   * `pending` 同样要重试：这份也是现读磁盘的。404（会话不存在 / 机器离线）就落一份
+   * 空清单，不再重试 —— 那条会话确实没有子会话可展，重试也只是白问。
+   */
+  public loadSubTasks = (id: string, force = false, tries = 0) => {
+    if (!id || this._subTasksLoading.includes(id)) {
+      return;
+    }
+    // 上一次**失败**过的允许再问一次（设备离线是可恢复的）；成功拿到过的才真正缓存住
+    if (
+      !force &&
+      tries === 0 &&
+      this._subTasksTried.includes(id) &&
+      !this._subTasksFailById[id]
+    ) {
+      return;
+    }
+    this._subTasksLoading = [...this._subTasksLoading, id];
+    if (force) {
+      this.setSubTasksFail(id, undefined);
+    }
+    getPortalSubTasks(id)
+      .then((res) => {
+        this._subTasksLoading = this._subTasksLoading.filter((x) => x !== id);
+        if (res.code !== 0) {
+          // 设备离线（code 500）与会话不存在（code 404）是两回事：前者点一下重试
+          // 就好，后者重试多少次都一样。判的是结构化的 code，不是 msg 里那句话。
+          this.setSubTasksFail(id, this.failKindOf(id, res.code));
+          if (!this._subTasksTried.includes(id)) {
+            this._subTasksTried = [...this._subTasksTried, id];
+          }
+          return;
+        }
+        const list = res.data?.list ?? [];
+        // pending 且一条都没有 = 那台机器还没把清单送回来，过一会儿再问
+        if (res.data?.pending && !list.length && tries < PENDING_RETRY_MAX) {
+          setTimeout(
+            () => this.loadSubTasks(id, force, tries + 1),
+            PENDING_RETRY_MS,
+          );
+          return;
+        }
+        this._subTasksById = { ...this._subTasksById, [id]: list };
+        this.setSubTasksFail(id, undefined);
+        if (!this._subTasksTried.includes(id)) {
+          this._subTasksTried = [...this._subTasksTried, id];
+        }
+      })
+      .catch(() => {
+        this._subTasksLoading = this._subTasksLoading.filter((x) => x !== id);
+        // **不写空清单**：活跃会话手上还有一份随上报捎带的 `Task.subTasks`，
+        // 写空等于用一次失败把已经拿到的子任务擦掉
+        this.setSubTasksFail(id, "network");
+        if (!this._subTasksTried.includes(id)) {
+          this._subTasksTried = [...this._subTasksTried, id];
+        }
+      });
+  };
+
+  // ---------- 侧栏搜索 + 历史会话分页 ----------
+
+  get keyword() {
+    return this._keyword;
+  }
+
+  /**
+   * 改侧栏搜索关键字。
+   *
+   * 关键字变了，各客户端已经翻过的历史页就整份作废 —— 那些页是按旧关键字、旧游标
+   * 取回来的，留着会和新结果混在一起（表现为「搜出来的列表里混着不匹配的旧条目」）。
+   * 已经展开过的组当场重拉第一页。
+   */
+  public setKeyword = (kw: string) => {
+    if (kw === this._keyword) {
+      return;
+    }
+    this._keyword = kw;
+    // 只作废，不在这儿重拉 —— 重拉由侧栏那个「展开的组就把第一页拉上」的副作用统一负责，
+    // 两处都发请求就会出现同一组被打两遍。
+    this._historyByClient = {};
+  };
+
+  /**
+   * 拉某个客户端的历史会话。
+   *
+   * @param key `machineId|provider`
+   * @param more 翻下一页（用上一次返回的 `nextCursor` 作时间游标）。
+   *   **不用页码**：这份列表的底料是每轮上报刷新的内存快照，翻页期间新会话会插进头部，
+   *   用 offset 会让某条被跳过或看两遍。
+   */
+  public loadClientHistory = (key: string, more = false) => {
+    /* key 是 `machineId|provider|desktop`，**三件套一起传**。
+       只传 provider 的话，Codex CLI 与 ChatGPT 桌面版会拉到同一份混着的列表，
+       那就等于分组白拆了（接口注释里写明了这一条）。 */
+    const [machineId, provider, desktopFlag] = key.split("|");
+    const desktop = desktopFlag === "true";
+    if (!machineId) {
+      return;
+    }
+    const prev = this._historyByClient[key];
+    if (prev?.loading) {
+      return;
+    }
+    // 已经拉过、且关键字没变、又不是要翻页 —— 没有必要再问一次
+    if (!more && prev?.loaded && prev.keyword === this._keyword) {
+      return;
+    }
+    const before = more ? (prev?.nextCursor ?? undefined) : undefined;
+    if (more && before == null) {
+      return;
+    }
+    this._historyByClient = {
+      ...this._historyByClient,
+      [key]: {
+        list: more ? (prev?.list ?? []) : [],
+        total: prev?.total ?? 0,
+        nextCursor: prev?.nextCursor ?? null,
+        loading: true,
+        loaded: prev?.loaded ?? false,
+        keyword: this._keyword,
+      },
+    };
+    getHistorySessionList({
+      machineId,
+      provider: provider || undefined,
+      desktop,
+      keyword: this._keyword.trim() || undefined,
+      before,
+      limit: HISTORY_PAGE,
+    })
+      .then((res) => {
+        const cur = this._historyByClient[key];
+        // 关键字在请求飞行途中变过 —— 这份结果已经不是用户现在要看的，丢掉
+        if (!cur || cur.keyword !== this._keyword) {
+          return;
+        }
+        const list = res.code === 0 ? (res.data?.list ?? []) : [];
+        const merged = more ? [...(prev?.list ?? []), ...list] : list;
+        this._historyByClient = {
+          ...this._historyByClient,
+          [key]: {
+            list: merged,
+            total: res.data?.total ?? merged.length,
+            nextCursor: res.data?.nextCursor ?? null,
+            loading: false,
+            loaded: true,
+            keyword: this._keyword,
+          },
+        };
+        // 攒一份静态资料：点开一条历史会话时 taskOf 要靠它才认得出这条会话
+        const next = { ...this._histById };
+        merged.forEach((h) => {
+          if (h.id) {
+            next[h.id] = h;
+          }
+        });
+        this._histById = next;
+      })
+      .catch(() => {
+        const cur = this._historyByClient[key];
+        if (cur) {
+          this._historyByClient = {
+            ...this._historyByClient,
+            [key]: { ...cur, loading: false, loaded: true },
+          };
+        }
+      });
+  };
 
   public init = () => {
     this.refresh();
@@ -423,7 +1135,8 @@ class PortalStore {
       }
       // 断线期间先用轮询顶着，别让页面停更
       this.startPolling();
-      const delay = WS_RETRY_MS[Math.min(this._wsRetry, WS_RETRY_MS.length - 1)];
+      const delay =
+        WS_RETRY_MS[Math.min(this._wsRetry, WS_RETRY_MS.length - 1)];
       this._wsRetry += 1;
       this._wsRetryTimer = setTimeout(this.connectWs, delay);
     };
@@ -527,9 +1240,11 @@ class PortalStore {
     }
 
     // 仅做存活清理：已消失的会话从打开列表里剔除。
-    const alive = this._openIds.filter((id) =>
-      this._tasks.some((t) => t.id === id)
-    );
+    //
+    // 判据走 `taskOf` 而不是「在不在 `_tasks` 里」：`_tasks` 只有活跃会话，
+    // 而打开的可能是一条历史会话（资料在 `_histById`）或一条子会话（复合 id，
+    // 靠父会话认人）。按老判据，这两种只要下一次推送一到就被当场关掉。
+    const alive = this._openIds.filter((id) => !!this.taskOf(id));
     if (alive.length !== this._openIds.length) {
       this._openIds = alive;
       this.dropMessageCache();
@@ -563,39 +1278,45 @@ class PortalStore {
   };
 
   public trustDevice = (id: string) => {
-    trustPortalDevice(id).then((res) => {
-      if (res.code === 0) {
-        antdMessage.success("已信任该设备");
-        this.loadDevices();
-        this.refresh();
-      } else {
-        antdMessage.error(res.msg ?? "操作失败");
-      }
-    }).catch(() => antdMessage.error("信任设备失败，请检查网络"));
+    trustPortalDevice(id)
+      .then((res) => {
+        if (res.code === 0) {
+          antdMessage.success("已信任该设备");
+          this.loadDevices();
+          this.refresh();
+        } else {
+          antdMessage.error(res.msg ?? "操作失败");
+        }
+      })
+      .catch(() => antdMessage.error("信任设备失败，请检查网络"));
   };
 
   public untrustDevice = (id: string) => {
-    untrustPortalDevice(id).then((res) => {
-      if (res.code === 0) {
-        antdMessage.success("已撤销信任");
-        this.loadDevices();
-        this.refresh();
-      } else {
-        antdMessage.error(res.msg ?? "操作失败");
-      }
-    }).catch(() => antdMessage.error("撤销信任失败，请检查网络"));
+    untrustPortalDevice(id)
+      .then((res) => {
+        if (res.code === 0) {
+          antdMessage.success("已撤销信任");
+          this.loadDevices();
+          this.refresh();
+        } else {
+          antdMessage.error(res.msg ?? "操作失败");
+        }
+      })
+      .catch(() => antdMessage.error("撤销信任失败，请检查网络"));
   };
 
   public deleteDevice = (id: string) => {
-    deletePortalDevice(id).then((res) => {
-      if (res.code === 0) {
-        antdMessage.success("已删除设备");
-        this.loadDevices();
-        this.refresh();
-      } else {
-        antdMessage.error(res.msg ?? "操作失败");
-      }
-    }).catch(() => antdMessage.error("删除设备失败，请检查网络"));
+    deletePortalDevice(id)
+      .then((res) => {
+        if (res.code === 0) {
+          antdMessage.success("已删除设备");
+          this.loadDevices();
+          this.refresh();
+        } else {
+          antdMessage.error(res.msg ?? "操作失败");
+        }
+      })
+      .catch(() => antdMessage.error("删除设备失败，请检查网络"));
   };
 
   /**
@@ -616,7 +1337,9 @@ class PortalStore {
         return false;
       }
       const saved = res.data?.note ?? null;
-      this._tasks = this._tasks.map((t) => (t.id === id ? { ...t, note: saved } : t));
+      this._tasks = this._tasks.map((t) =>
+        t.id === id ? { ...t, note: saved } : t,
+      );
       antdMessage.success(saved ? "已重命名" : "已清除备注，标题恢复自动生成");
       return true;
     } catch (e) {
@@ -687,11 +1410,18 @@ class PortalStore {
     const next = { ...this._messagesById };
     delete next[id];
     this._messagesById = next;
+    // 重新同步 = 从头来过：重试计数一并归零，否则之前问满 6 次的会话再也不会重试
+    const tries = { ...this._pendingTries };
+    delete tries[id];
+    this._pendingTries = tries;
+    // 重试就是「从头来过」：上一次的失败原因先清掉，不然重试期间还挂着旧提示
+    this.setBodyFail(id, undefined);
     this.fetchMessages(id, true);
   };
 
   /** 会话在 hub 队列里待下发的输入（任何端发的都在这，供跨端显示） */
-  public hubQueuedOf = (id: string) => this._hubQueuedById[id] ?? EMPTY_HUB_QUEUED;
+  public hubQueuedOf = (id: string) =>
+    this._hubQueuedById[id] ?? EMPTY_HUB_QUEUED;
 
   /**
    * 拉取 hub 队列：既用来去掉本地回显的排队标记，也用来同步**别的端**发的任务。
@@ -744,7 +1474,9 @@ class PortalStore {
     termKeyTask(id, key, count)
       .then((res) => {
         if (res.code === 0) {
-          antdMessage.success(key === "up" ? "已撤回终端排队" : "已插入排队到会话");
+          antdMessage.success(
+            key === "up" ? "已撤回终端排队" : "已插入排队到会话",
+          );
           // 撤回后把「已送达终端、尚未执行」的本地回显一并清掉。
           //
           // 不清的话排队条看着像「撤回了却还在」：那一条其实由两份数据接力显示 ——
@@ -837,6 +1569,157 @@ class PortalStore {
       .catch(() => antdMessage.error("撤回失败，请检查网络"));
   };
 
+  /**
+   * 标记 / 撤销「正文还在路上」，并在需要时排下一次重试。
+   *
+   * @returns 是否已经安排了重试（调用方据此知道「这一轮别把它当成空会话」）
+   */
+  private markPending = (
+    id: string,
+    pending: boolean,
+    empty: boolean,
+    retry: () => void,
+  ): boolean => {
+    const tries = this._pendingTries[id] ?? 0;
+    // 只有「说了 pending 且一条都没拿到」才算还在路上：拿到了内容就先显示，
+    // 后续轮询会把剩下的补齐，没必要让人对着「读取中」干等。
+    const waiting = !!pending && empty && tries < PENDING_RETRY_MAX;
+    if (waiting) {
+      if (!this._pendingIds.includes(id)) {
+        this._pendingIds = [...this._pendingIds, id];
+      }
+      this._pendingTries = { ...this._pendingTries, [id]: tries + 1 };
+      setTimeout(() => {
+        // 期间被关掉了就别再问了
+        if (this._openIds.includes(id)) {
+          retry();
+        }
+      }, PENDING_RETRY_MS);
+      return true;
+    }
+    if (this._pendingIds.includes(id)) {
+      this._pendingIds = this._pendingIds.filter((x) => x !== id);
+    }
+    if (!pending && this._pendingTries[id]) {
+      const next = { ...this._pendingTries };
+      delete next[id];
+      this._pendingTries = next;
+    }
+    return false;
+  };
+
+  // ---------- 子代理正文（执行链里的智能体卡）----------
+
+  /** 子代理正文的缓存键。父会话 id 是 uuid、agentId 是 `agent-xxxx`，都不含 `|` */
+  private subKey = (parentId: string, agentId: string) =>
+    `${parentId}|${agentId}`;
+
+  /** 这个子代理走过的那条链的原始消息。结构与主会话完全一致，可直接复用链渲染 */
+  public subAgentMessagesOf = (
+    parentId: string,
+    agentId: string,
+  ): PortalMessage[] =>
+    this._subMsgsById[this.subKey(parentId, agentId)] ?? EMPTY_MESSAGES;
+
+  public isSubAgentLoading = (parentId: string, agentId: string): boolean =>
+    this._subMsgsLoading.includes(this.subKey(parentId, agentId));
+
+  /** 正文还在路上（那台机器正在现读磁盘）。**不要当成空**，那是两回事 */
+  public isSubAgentPending = (parentId: string, agentId: string): boolean =>
+    this._subMsgsPending.includes(this.subKey(parentId, agentId));
+
+  public subAgentFailOf = (
+    parentId: string,
+    agentId: string,
+  ): FetchFailKind | undefined =>
+    this._subMsgsFail[this.subKey(parentId, agentId)];
+
+  /**
+   * 拉一个子代理的正文（点开那张小卡时调）。
+   *
+   * 与主会话正文最大的不同：这份是一次性读盘的快照，**整份替换**即可 ——
+   * 主会话那边的累积合并是为了对付「滑动窗口会丢老消息」的实时流，子代理没有
+   * 这个问题，套上去只会把两次读盘的结果叠成重复内容。
+   *
+   * `pending` 要重试：hub 得点名让那台机器现读磁盘，一次往返两轮上报（最多 8 秒）。
+   * 失败原因走与主会话同一套 `failKindOf`（离线 500 / 不存在 404 + 设备 online
+   * 现场复核），不另写一套判断。
+   */
+  public loadSubAgentMessages = (
+    parentId: string,
+    agentId: string,
+    force = false,
+    tries = 0,
+  ) => {
+    if (!parentId || !agentId) {
+      return;
+    }
+    const key = this.subKey(parentId, agentId);
+    if (this._subMsgsLoading.includes(key)) {
+      return;
+    }
+    /* 拿到过就不再问：读盘代价高，而**跑完之后这份内容不会再变**。
+       还在跑的那些不走这条路 —— 它们由展开着的那条子链每 5 秒带 `force` 刷一次
+       （见 TerminalFeed 的 SubAgentChain）：这是个监控工具，点开一个正在跑的
+       子代理却只看到一张静止快照，等于把「执行中看不到正在执行的内容」又演一遍。 */
+    if (!force && tries === 0 && this._subMsgsById[key]) {
+      return;
+    }
+    this._subMsgsLoading = [...this._subMsgsLoading, key];
+    /* 重试计数归零，但**不提前清失败原因**：跑着的子代理每 5 秒自动刷一次
+       （见 TerminalFeed 的 SubAgentChain），清了又置回去会让「设备离线」那一行
+       一闪一闪。成功路径本来就会清，失败也不会被后台刷新静默吞掉。
+       `tries > 0` 是 pending 重试链自己在往下走，别把它的计数踩回 0。 */
+    if (force && tries === 0) {
+      this._subMsgsTries = { ...this._subMsgsTries, [key]: 0 };
+    }
+    getPortalSubAgentMessages(parentId, agentId, 200)
+      .then((res) => {
+        this._subMsgsLoading = this._subMsgsLoading.filter((x) => x !== key);
+        if (res.code !== 0) {
+          this.setSubMsgsFail(key, this.failKindOf(parentId, res.code));
+          this._subMsgsPending = this._subMsgsPending.filter((x) => x !== key);
+          return;
+        }
+        const list = res.data?.list ?? [];
+        const done = this._subMsgsTries[key] ?? tries;
+        // pending 且一条都没有 = 那台机器还没送回来，过一会儿再问
+        if (res.data?.pending && !list.length && done < PENDING_RETRY_MAX) {
+          if (!this._subMsgsPending.includes(key)) {
+            this._subMsgsPending = [...this._subMsgsPending, key];
+          }
+          this._subMsgsTries = { ...this._subMsgsTries, [key]: done + 1 };
+          setTimeout(
+            () => this.loadSubAgentMessages(parentId, agentId, true, done + 1),
+            PENDING_RETRY_MS,
+          );
+          return;
+        }
+        this._subMsgsPending = this._subMsgsPending.filter((x) => x !== key);
+        this.setSubMsgsFail(key, undefined);
+        this._subMsgsById = { ...this._subMsgsById, [key]: list };
+      })
+      .catch(() => {
+        this._subMsgsLoading = this._subMsgsLoading.filter((x) => x !== key);
+        this._subMsgsPending = this._subMsgsPending.filter((x) => x !== key);
+        this.setSubMsgsFail(key, "network");
+      });
+  };
+
+  /** 记一笔 / 清掉某个子代理正文的失败原因 */
+  private setSubMsgsFail = (key: string, kind?: FetchFailKind) => {
+    if (this._subMsgsFail[key] === kind) {
+      return;
+    }
+    const next = { ...this._subMsgsFail };
+    if (kind) {
+      next[key] = kind;
+    } else {
+      delete next[key];
+    }
+    this._subMsgsFail = next;
+  };
+
   public fetchMessages = (id: string, showLoading: boolean) => {
     if (!id) {
       return;
@@ -851,8 +1734,24 @@ class PortalStore {
         if (!this._openIds.includes(id)) {
           return;
         }
+        if (res.code !== 0) {
+          // 设备离线（500）、会话不存在（404）—— 两条路径的提示不一样，不合并成兜底
+          this.setBodyFail(id, this.failKindOf(id, res.code));
+          this._pendingIds = this._pendingIds.filter((x) => x !== id);
+        }
         if (res.code === 0) {
+          this.setBodyFail(id, undefined);
           const list = res.data?.list ?? [];
+          // 历史会话的正文是 hub 点名让那台机器现读磁盘取回来的，一次往返要两轮上报。
+          // 这一轮还没到 = **不是空会话**，标一下「读取中」、过 2.5 秒再问一次。
+          if (
+            this.markPending(id, !!res.data?.pending, !list.length, () =>
+              this.fetchMessages(id, false),
+            )
+          ) {
+            this._loadingIds = this._loadingIds.filter((x) => x !== id);
+            return;
+          }
           // 「当前状态」快照（todos / bgtasks）**不能走下面那套累积去重**：
           // 它们是每轮重算的当前状态，新的一份必须整个顶掉旧的。
           //
@@ -968,6 +1867,7 @@ class PortalStore {
       })
       .catch(() => {
         this._loadingIds = this._loadingIds.filter((x) => x !== id);
+        this.setBodyFail(id, "network");
       });
   };
 
@@ -977,14 +1877,16 @@ class PortalStore {
       return;
     }
 
-    controlPortalTask(task.id, action, task.pid).then((res) => {
-      if (res.code === 0) {
-        antdMessage.success(res.data?.result ?? "操作成功");
-        this.refresh();
-      } else {
-        antdMessage.error(res.msg ?? "操作失败");
-      }
-    }).catch(() => antdMessage.error("操作失败，请检查网络"));
+    controlPortalTask(task.id, action, task.pid)
+      .then((res) => {
+        if (res.code === 0) {
+          antdMessage.success(res.data?.result ?? "操作成功");
+          this.refresh();
+        } else {
+          antdMessage.error(res.msg ?? "操作失败");
+        }
+      })
+      .catch(() => antdMessage.error("操作失败，请检查网络"));
   };
 
   /** 向会话发布任务（注入一行输入） */
@@ -995,52 +1897,58 @@ class PortalStore {
    * 那类内容对着对话流念出来毫无意义 —— 孤零零一个「1」「2」，看不出在答什么，
    * 问题本身又不在流里（选择卡挂在输入框上方）。标记出来，让它不入流。
    */
-  public sendInput = (id: string, text: string, opts?: { fromSelect?: boolean }) => {
+  public sendInput = (
+    id: string,
+    text: string,
+    opts?: { fromSelect?: boolean },
+  ) => {
     const task = this._tasks.find((t) => t.id === id);
     const content = text.trim();
     if (!task?.id || !content) {
       return Promise.resolve(false);
     }
 
-    return sendPortalInput(task.id, content, task.pid, opts?.fromSelect).then((res) => {
-      if (res.code === 0) {
-        antdMessage.success(res.data?.result ?? "已发送");
-        // 乐观回显：发出的内容立即上屏为 user 气泡，
-        // 不等终端收到再同步回来（那要好几秒，体感像没发出去）。
-        //
-        // 斜杠命令除外，**一条回显都不建**：CLI 自己把它吃掉，既不写 jsonl 的 user
-        // 记录、也不进 queued_inputs，于是回显唯一的退场路径（被同步回来的真实消息
-        // 接管）永远不会发生 —— 留下的就是撤不掉的孤儿气泡（`/clear` 之后新会话里
-        // 那条孤零零的「/clear」）。判据见 _utils/slashCommand。
-        // 反馈不靠回显：上面的 toast 已经确认发出，若排上了 hub 队列，下一轮
-        // getQueuedInputs 就把它铺进底部排队条（带 cmdId，撤回照常可用）。
-        if (!isSlashCommand(content)) {
-          const echo = {
-            role: "user",
-            content,
-            timestamp: new Date().toISOString(),
-            local: true,
-            cmdId: res.data?.cmdId,
-            queued: !!res.data?.cmdId,
-            fromSelect: opts?.fromSelect,
-          };
-          this._messagesById = {
-            ...this._messagesById,
-            [id]: [...(this._messagesById[id] ?? []), echo],
-          };
+    return sendPortalInput(task.id, content, task.pid, opts?.fromSelect)
+      .then((res) => {
+        if (res.code === 0) {
+          antdMessage.success(res.data?.result ?? "已发送");
+          // 乐观回显：发出的内容立即上屏为 user 气泡，
+          // 不等终端收到再同步回来（那要好几秒，体感像没发出去）。
+          //
+          // 斜杠命令除外，**一条回显都不建**：CLI 自己把它吃掉，既不写 jsonl 的 user
+          // 记录、也不进 queued_inputs，于是回显唯一的退场路径（被同步回来的真实消息
+          // 接管）永远不会发生 —— 留下的就是撤不掉的孤儿气泡（`/clear` 之后新会话里
+          // 那条孤零零的「/clear」）。判据见 _utils/slashCommand。
+          // 反馈不靠回显：上面的 toast 已经确认发出，若排上了 hub 队列，下一轮
+          // getQueuedInputs 就把它铺进底部排队条（带 cmdId，撤回照常可用）。
+          if (!isSlashCommand(content)) {
+            const echo = {
+              role: "user",
+              content,
+              timestamp: new Date().toISOString(),
+              local: true,
+              cmdId: res.data?.cmdId,
+              queued: !!res.data?.cmdId,
+              fromSelect: opts?.fromSelect,
+            };
+            this._messagesById = {
+              ...this._messagesById,
+              [id]: [...(this._messagesById[id] ?? []), echo],
+            };
+          }
+          setTimeout(() => this.fetchMessages(id, false), 1200);
+          return true;
         }
-        setTimeout(() => this.fetchMessages(id, false), 1200);
-        return true;
-      }
 
-      antdMessage.error(res.msg ?? "发送失败");
-      return false;
-    }).catch(() => {
-      // 必须吞成 false 返回给调用方：Composer 靠返回值决定要不要把
-      // 输入框内容还给用户，抛出去会让草稿连同报错一起丢掉。
-      antdMessage.error("发送失败，请检查网络");
-      return false;
-    });
+        antdMessage.error(res.msg ?? "发送失败");
+        return false;
+      })
+      .catch(() => {
+        // 必须吞成 false 返回给调用方：Composer 靠返回值决定要不要把
+        // 输入框内容还给用户，抛出去会让草稿连同报错一起丢掉。
+        antdMessage.error("发送失败，请检查网络");
+        return false;
+      });
   };
 }
 

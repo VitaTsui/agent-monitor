@@ -111,6 +111,6 @@ cd agent-monitor-web && yarn start     # http://localhost:3004
 
 ```bash
 pkill -f "while true; do curl"   # 心跳
-pkill -f "webpack server"        # 前端
+pkill -f "vite"                 # 前端
 rm -rf /tmp/am-dev /tmp/report.json   # 数据目录里含首启生成的密钥，一并清掉
 ```

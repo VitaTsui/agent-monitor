@@ -15,17 +15,17 @@
   // 没有标题栏（见 index.tsx 的 title={null}），关闭钮要浮在内容右上角 ——
   // 否则 antd 会按「无 header」把它排进文档流里，把内容顶下去一截
   :global(.ant-modal-close) {
-    top: 10px;
+    top: 12px;
     inset-inline-end: 12px;
-    z-index: 2;
+    z-index: 1;
   }
 }
 
 /* 固定高度而不是随内容伸缩：七个分栏内容长短差得远，跟着变高会让弹窗在
-   切分栏时上下跳。730 在矮屏上会顶出视口，所以与视口高取小。 */
+   切分栏时上下跳。720 在矮屏上会顶出视口，所以与视口高取小。 */
 .body {
   display: flex;
-  height: min(730px, calc(100vh - 120px));
+  height: min(720px, calc(100vh - 160px));
 
   // 移动端二级头部：桌面隐藏
   .mobileHead {
@@ -42,33 +42,49 @@
   }
 }
 
-/* 左侧分类导航（对齐 claude.ai 设置页）。
-   选中态是一层低调的填充，不是浮起来的白色卡片。 */
+/* 左侧分类导航。宽 192、内边距 12、右侧一条 1px 实线（对齐参照实测）。
+   **不给底色**：参照确实有 1% 的色差（#fcfcfb 对 #fff），本项目这套令牌里
+   没有这么淡的一档，硬套 --muted（4%）会让左栏看着像一条灰色侧边栏，
+   比没有更远。分栏交给那条 1px 线。
+   项间距用容器的 gap:2，不再靠每项的 margin-bottom（最后一项会多留 2px）。 */
 .nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   flex: none;
-  width: 190px;
-  padding: 18px 8px;
-  border-right: 1px solid var(--overlay-2);
+  width: 192px;
+  padding: 12px;
+  border-right: 1px solid var(--border);
   overflow-y: auto;
 }
 
+/* 左栏顶上那行「设置」。**12 / 400 / 灰**，不是标题 —— 它的作用是把下面
+   几项收成一组，做成 14/600 的粗标题反而会跟导航项抢注意力。 */
 .navTitle {
-  font-size: var(--text-md);
-  font-weight: 600;
-  color: var(--foreground);
-  padding: 4px 10px 14px;
+  flex: none;
+  padding: 0 4px 12px;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+  line-height: 17px;
 }
 
 .navItem {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
+  // 12：参照实测的图标与文字间距
+  gap: 12px;
+  flex: none;
+  // 高度钉组件库的控件高（32），字号跟正文基准（14），与全站其它导航项同规格。
+  // 原来是 8/10 的 padding 撑出来的 ~35，凭空多出一种行高
+  height: var(--vita-control-height);
+  padding: 0 8px;
   border-radius: var(--radius);
   cursor: pointer;
-  font-size: var(--text-md);
+  font-size: var(--text-base);
+  // 500：导航项是「去哪一页」，比页内正文重一档
+  font-weight: 500;
   color: var(--foreground);
-  margin-bottom: 2px;
+  transition: background 0.15s;
 
   :global(.anticon) {
     font-size: var(--text-lg);
@@ -76,15 +92,18 @@
   }
 
   &:hover {
-    background: var(--overlay-1);
+    background: var(--accent);
   }
 
   &.active {
-    background: var(--overlay-2);
-    font-weight: 500;
+    background: var(--muted);
 
     :global(.anticon) {
       color: var(--foreground);
+    }
+
+    &:hover {
+      background: var(--muted);
     }
   }
 
@@ -223,6 +242,9 @@
     flex: 1;
     width: 100%;
     min-width: 0;
+    // 桌面用 gap:2 拉开导航项，移动端是一张连续的分组卡（项间靠 ::after 画线），
+    // 留着 gap 会在每条分隔线上开一道 2px 的缝
+    gap: 0;
     border-right: none;
     padding: 0 0 8px;
     overflow-y: auto;
@@ -293,8 +315,11 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    // 桌面把行高钉死在 32（控件高），移动端要的是 44 触控高 —— 交还给内边距撑
+    height: auto;
     padding: 12px 14px;
     font-size: 16.5px;
+    font-weight: 400;
     border-radius: 0;
     margin: 0;
 

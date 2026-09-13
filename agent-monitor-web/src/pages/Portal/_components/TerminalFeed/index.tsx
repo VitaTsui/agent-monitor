@@ -1,16 +1,27 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import dayjs from "dayjs";
 import { Icon } from "@hsu-react/ui";
 import SessionMarkdown from "../SessionMarkdown";
 import { SessionImageCtx } from "@/utils/sessionImages";
 
-import { PortalMessage, SelectPayload } from "@/services/apis/portal";
+import { observer } from "mobx-react-lite";
+
+import { PortalMessage, SelectPayload, SubTask } from "@/services/apis/portal";
+import PortalStore from "../../PortalStore";
 import { fmtElapsed } from "../../_utils/sessionState";
+import AgentCard from "../AgentCard";
 import styles from "./index.module.scss";
 
 interface TerminalFeedProps {
+  /** 这一格装的是哪条会话。拉子代理正文要用它 */
+  taskId: string;
   messages: PortalMessage[];
+  /**
+   * 这条会话名下的子任务。执行链靠它把「派子代理那次工具调用」认出来：
+   * `tool.id === subTask.toolUseId` 即为同一次派活（见 buildChain）。
+   */
+  subTasks?: SubTask[];
   /** 会话是否执行中（末尾显示工作指示） */
   running?: boolean;
   /** 终端卡标题：来源代理名（Claude Code / Codex / Gemini CLI …） */
@@ -133,7 +144,9 @@ export const SelectCard: React.FC<{
 
   const toggle = (n: number) =>
     setPicked((p) =>
-      p.includes(n) ? p.filter((x) => x !== n) : [...p, n].sort((a, b) => a - b)
+      p.includes(n)
+        ? p.filter((x) => x !== n)
+        : [...p, n].sort((a, b) => a - b),
     );
 
   /**
@@ -277,7 +290,9 @@ export const SelectCard: React.FC<{
                 }
               }}
             >
-              {picked.length ? `提交所选（${picked.length} 项）` : "请先勾选选项"}
+              {picked.length
+                ? `提交所选（${picked.length} 项）`
+                : "请先勾选选项"}
             </div>
           ) : null}
         </div>
@@ -366,30 +381,6 @@ const ClampBox: React.FC<{
 /* ---------- 执行链：把一轮的过程排成一条竖线时间轴 ---------- */
 
 /**
- * 一条 `role=tool` 的内容拆成「工具名 ＋ 这次拿它干了什么」。
- *
- * 不是猜的格式：后端就是 `format!("{name}: {hint}")` 拼出来的
- * （am-core `scanner.rs:1806-1811` 的 claude 链路、`:1699-1705` 的 codex 链路），
- * 而工具名里不可能出现 `": "` —— 所以按**第一个** `": "` 切一刀就是原样还原。
- *
- * 切不到就整条当工具名（没有入参提示的调用，如 `ListAgents`）。
- *
- * **不按 `" | "` 再切成多次调用**：后端确实用它连接同一条记录里的多次调用
- * （`scanner.rs:1841` 的 `tools.join(" | ")`），但入参提示本身可以带管道
- * （`Bash: ls | grep x`），按字面切会把一条命令劈成两步。实测最近 8 个会话的
- * 891 次调用**全部**是「一条记录一次调用」，所以这里不冒那个险 ——
- * 真要拆开，该由后端出结构化数组（见文件末尾的 TODO）。
- */
-const splitToolLine = (content: string) => {
-  const i = content.indexOf(": ");
-  if (i < 0) return { name: content.trim(), hint: "" };
-  return {
-    name: content.slice(0, i).trim(),
-    hint: content.slice(i + 2).trim(),
-  };
-};
-
-/**
  * `mcp__playwright__browser_click` → `Browser click`。
  *
  * 照 VitaAgent `MessageList/index.tsx:71-79`：链上写的是「一句人话」，
@@ -404,10 +395,12 @@ const humanTool = (name: string) => {
   return words ? words[0].toUpperCase() + words.slice(1) : name;
 };
 
-/** 执行链里的一步：一次工具调用（带它的输出），或模型干活途中说的一段话 */
+/** 执行链里的一步：一次工具调用（带它的输出）、一段旁白，或一批子代理 */
 interface ChainCall {
   kind: "call";
   key: string;
+  /** 这次调用的 `tool_use_id`。老记录可能没有 */
+  id?: string;
   /** 原始工具名，展开后照原样给 */
   name: string;
   /** 入参提示（命令 / 路径 / 描述），后端 `tool_input_hint` 挑出来的那一个 */
@@ -420,7 +413,177 @@ interface ChainNote {
   key: string;
   msg: PortalMessage;
 }
-type ChainItem = ChainCall | ChainNote;
+/**
+ * **一批子代理**：模型在这一步派了活出去。
+ *
+ * 一次派活 ＝ 一次 `Agent` 工具调用，靠 `tool.id === subTask.toolUseId` 认出来。
+ * **相邻**的几次派活（中间没有别的步骤、也没有旁白）归成一格 —— 那就是并行起的
+ * 那一批，界面上是同一张卡里的一片小卡网格。
+ */
+interface ChainAgents {
+  kind: "agents";
+  key: string;
+  agents: SubTask[];
+  /** 各自那次调用的入参提示（比 `SubTask.label` 长一截：120 字 vs 80 字） */
+  hints: string[];
+}
+type ChainItem = ChainCall | ChainNote | ChainAgents;
+
+/** 这一格的标题：一个时写它的派活说明，多个时写「起了 N 个子代理」 */
+const agentsGoal = (it: ChainAgents) =>
+  it.agents.length === 1
+    ? it.hints[0] || it.agents[0].label
+    : `起了 ${it.agents.length} 个子代理`;
+
+/** 链项是不是「一步」（工具调用 / 一批子代理）。旁白不算：它是围着某一步说的话 */
+const isStep = (it: ChainItem) => it.kind === "call" || it.kind === "agents";
+
+/**
+ * 把一段消息排成执行链。
+ *
+ * 主会话与子代理**共用这一份**：后端下发的子代理正文与主会话结构完全一致
+ * （`PortalMessage[]`），所以链的组装只有一套，不存在「子代理那边再写一遍」。
+ *
+ * 三件事在这里定下：
+ *
+ *   1. **工具调用读 `m.tools`，不读 `m.content`。** 后端已把 `role: "tool"` 的
+ *      content 置空、改下发结构化数组（一次调用一个元素）。此前那套「按第一个
+ *      `": "` 切开、多次调用用 `" | "` 拼」的消费方式整条删掉，不留过渡期 ——
+ *      留着的结果是那一行在界面上**完全空白**。
+ *   2. **输出按 `m.toolUseId` 贴回对应那一步**，不再按先后顺序猜。实测顺序猜是
+ *      会错的：AskUserQuestion 的答复没有对应的 tool 记录（它另走 select 卡），
+ *      按顺序会挂到它前面那次 `Agent` 调用上。
+ *   3. **派子代理那一步画成智能体卡**，判据只有 `tool.id === subTask.toolUseId`
+ *      这一条。配不上就照普通工具调用画 —— 不退回按 label / 中文文案匹配：
+ *      两边截断长度不同（120 vs 80），必然错配。
+ */
+const buildChain = (
+  items: { m: PortalMessage; k: string }[],
+  opts: {
+    /** `tool_use_id` → 它派出去的那个子代理。空表 = 这段里不画智能体卡 */
+    subByToolUse: Map<string, SubTask>;
+    /**
+     * 「结论留在链外」的分界线怎么画。跑着的那一轮与跑完的那一轮判据不同，
+     * 见调用处。`flat` = 全都进链，一个字都不留到链外（子代理那条链就是这样：
+     * 它整段都是过程，结论已经由父会话并回主对话了）。
+     */
+    split: { flat: true } | { flat: false; inProgress: boolean };
+  },
+): { chain: ChainItem[]; body: { m: PortalMessage; k: string }[] } => {
+  const { subByToolUse, split } = opts;
+  const chain: ChainItem[] = [];
+  const body: { m: PortalMessage; k: string }[] = [];
+
+  /* 分界线：跑完了 → 最后一段产出（assistant / plan）就是结论，它之前的一切是过程；
+     跑着呢 → 最后一步过程之后的正文才是「正在写的那段」，之前的每段正文都是旁白。
+     沿用跑完那条的话，旁白会被留在链的**下面**、而它引出的那几步却在链里。 */
+  let lastOut = -1;
+  let lastProc = -1;
+  items.forEach(({ m }, i) => {
+    if ((m.role === "assistant" || m.role === "plan") && m.content.trim()) {
+      lastOut = i;
+    }
+    if (m.role === "tool" || m.role === "tool_result") {
+      lastProc = i;
+    }
+  });
+
+  /** 按 tool_use_id 索引已经落到链上的那几步，供 tool_result 精确归位 */
+  const callById = new Map<string, ChainCall>();
+  /** 最后一次调用 —— 老记录没有 toolUseId 时退回「紧挨着的上一步」 */
+  let lastCall: ChainCall | null = null;
+  /** 正在累积的那一批并行子代理。遇到别的链项就收口 */
+  let openAgents: ChainAgents | null = null;
+
+  items.forEach((it, i) => {
+    const { m, k } = it;
+
+    if (m.role === "tool") {
+      (m.tools ?? []).forEach((t, ti) => {
+        const sub = t.id ? subByToolUse.get(t.id) : undefined;
+        if (sub) {
+          if (!openAgents) {
+            openAgents = {
+              kind: "agents",
+              key: `${k}#a${ti}`,
+              agents: [],
+              hints: [],
+            };
+            chain.push(openAgents);
+          }
+          openAgents.agents.push(sub);
+          openAgents.hints.push(t.hint ?? "");
+          return;
+        }
+        openAgents = null;
+        const call: ChainCall = {
+          kind: "call",
+          key: `${k}#${ti}`,
+          id: t.id,
+          name: t.name,
+          hint: t.hint ?? "",
+          results: [],
+        };
+        chain.push(call);
+        lastCall = call;
+        if (t.id) {
+          callById.set(t.id, call);
+        }
+      });
+      return;
+    }
+
+    if (m.role === "tool_result") {
+      /* 派子代理那次调用的返回是一段**内部元数据**（原文 "Async agent launched
+         successfully. (This tool result is internal metadata — never quote…)"），
+         不是子代理交回来的结论 —— 它的结论在它自己那条链的末尾。画成一步只会在
+         智能体卡下面多出一行没有信息量的「命令输出」 */
+      if (m.toolUseId && subByToolUse.has(m.toolUseId)) {
+        return;
+      }
+      const out = { key: k, text: m.content, bad: m.isError };
+      const owner = m.toolUseId ? callById.get(m.toolUseId) : lastCall;
+      if (owner) {
+        owner.results.push(out);
+        return;
+      }
+      // 配不上（历史裁剪把调用那条丢了 / 那次调用另走别的卡）就自成一步，
+      // 内容一条都不丢
+      openAgents = null;
+      const orphan: ChainCall = {
+        kind: "call",
+        key: k,
+        name: "",
+        hint: "",
+        results: [out],
+      };
+      chain.push(orphan);
+      lastCall = orphan;
+      return;
+    }
+
+    if (split.flat) {
+      openAgents = null;
+      chain.push({ kind: "note", key: k, msg: m });
+      return;
+    }
+
+    // 待批准的方案在执行中永远留在正文：它在等你点头，收进链里就等于把要办的事藏了
+    if (split.inProgress && m.role === "plan") {
+      body.push(it);
+      return;
+    }
+    const isBody = split.inProgress ? i > lastProc : i >= lastOut;
+    if (isBody) {
+      body.push(it);
+      return;
+    }
+    openAgents = null;
+    chain.push({ kind: "note", key: k, msg: m });
+  });
+
+  return { chain, body };
+};
 
 /**
  * 这一步跑砸了没有。
@@ -456,7 +619,15 @@ const summarizeChain = (items: ChainItem[]): string => {
   const wrote = rest2.filter((c) => /write|edit|patch/i.test(c.name));
   const others = rest2.filter((c) => !wrote.includes(c));
 
+  /* 子代理单独数一句，放最前：这一行里「它把活派给了谁」比「调了几次工具」
+     更先要回答（照 VitaAgent `MessageList/index.tsx:260-297` 里连接器排最前的那条）。
+     头部那枚「子会话 · N」胶囊撤掉之后，这句话就是计数唯一的去处 */
+  const agents = items
+    .filter((i): i is ChainAgents => i.kind === "agents")
+    .reduce((n, i) => n + i.agents.length, 0);
+
   const clauses: string[] = [];
+  if (agents) clauses.push(`起了 ${agents} 个子代理`);
   if (ran.length) clauses.push(`跑了 ${ran.length} 条命令`);
   if (looked.length) clauses.push(`查了 ${looked.length} 次资料`);
   if (wrote.length) clauses.push(`改了 ${wrote.length} 个文件`);
@@ -508,9 +679,7 @@ const Working: React.FC<{
           className={`${styles.stepIcon} ${styles.stepIconLive}`}
         />
         <span className={styles.stepNameLive}>正在处理…</span>
-        {elapsed ? (
-          <span className={styles.stepStatus}>{elapsed}</span>
-        ) : null}
+        {elapsed ? <span className={styles.stepStatus}>{elapsed}</span> : null}
         {steps > 0 ? (
           <span className={styles.stepStatus}>已 {steps} 步</span>
         ) : null}
@@ -534,9 +703,7 @@ const ResultBlock: React.FC<{
   const lines = text.split("\n");
   const long = lines.length > RESULT_CLAMP_LINES;
   const clamped = long && !open;
-  const shown = clamped
-    ? lines.slice(0, RESULT_CLAMP_LINES).join("\n")
-    : text;
+  const shown = clamped ? lines.slice(0, RESULT_CLAMP_LINES).join("\n") : text;
 
   return (
     <div className={styles.resultLine}>
@@ -613,9 +780,7 @@ const StepRow: React.FC<{
         {/* 工具名挂成一枚淡底小标：一列 `Browser click` / `Bash` 里，
             「这是哪个工具」比它这次的入参更先要回答。
             没有入参提示时它就是这一行的全部内容，不再另摆一枚重复的标 */}
-        {step.hint ? (
-          <span className={styles.stepFrom}>{human}</span>
-        ) : null}
+        {step.hint ? <span className={styles.stepFrom}>{human}</span> : null}
         <span className={styles.stepName}>{step.hint || human}</span>
         {running ? <span className={styles.stepStatus}>执行中…</span> : null}
         {bad ? <span className={styles.stepStatus}>失败</span> : null}
@@ -659,12 +824,285 @@ const StepRow: React.FC<{
 const RECENT_STEPS = 3;
 
 /**
+ * 一个子代理的链默认摊开多少步。
+ *
+ * 一个子代理跑一两百步很常见（本机实测单条会话 149 / 132 条子任务）。全渲染出来是
+ * 几百个节点，这一屏会明显卡。头 40 步足够看清「它是怎么开的头」，其余收在一颗
+ * 「展开全部」后面 —— 分页/虚拟滚动在这儿是杀鸡用牛刀：展开全部是低频动作，
+ * 点了才付那份代价。照 VitaAgent `MessageList/index.tsx:443`。
+ */
+const SUB_STEP_CAP = 40;
+
+/**
+ * 跑着的子代理，展开的那条子链多久自动刷一次。
+ *
+ * 这是个**监控工具**，用户这一轮最主要的抱怨就是「执行中看不到正在执行的内容」——
+ * 点开一个正在跑的子代理却只看到一张静止快照，等于把那个问题又演一遍。
+ *
+ * 但也只刷这一种：正文是**现去那台机器读磁盘**取回来的，跑完的那些内容不会再变，
+ * 跟着刷等于让客户端反复从头读 jsonl。所以三个条件缺一不可 ——
+ * 子代理 `outcome === "running"`、它的子链**正展开着**、5 秒一次。
+ */
+const SUB_REFRESH_MS = 5000;
+
+/** 子代理正文没取到的原因 → 那一行怎么说。与 ChatPane 的空态同一套措辞 */
+const SUB_FAIL_TEXT: Record<string, string> = {
+  offline: "设备离线，读不到这个子代理的内容",
+  missing: "找不到这个子代理的会话记录",
+  network: "读取失败，请检查网络",
+};
+
+/** 链上一串节点的渲染。主链与子代理的链共用这一份 —— 形制必须一模一样 */
+const ChainNodes: React.FC<{
+  items: ChainItem[];
+  /** 这一批节点属于哪条会话（拉子代理正文要用） */
+  taskId: string;
+  /** 还在跑的那一步（只有主链有） */
+  runningKey?: string;
+  /** 点开的那张子代理小卡：链项 key → agentId。**存在链这一层**，理由见 AgentCard */
+  picked: Record<string, string>;
+  onPick: (itemKey: string, agentId: string) => void;
+  expanded: Record<string, boolean>;
+  toggleExpand: (key: string) => void;
+  renderNote: (m: PortalMessage, key: string) => React.ReactNode;
+}> = ({
+  items,
+  taskId,
+  runningKey,
+  picked,
+  onPick,
+  expanded,
+  toggleExpand,
+  renderNote,
+}) => (
+  <>
+    {items.map((it) => {
+      if (it.kind === "note") {
+        return (
+          <div key={it.key} className={styles.chainNote}>
+            {renderNote(it.msg, it.key)}
+          </div>
+        );
+      }
+      if (it.kind === "agents") {
+        const on = picked[it.key] ?? "";
+        /* 卡片那一格与它点开的那条子链是**兄弟节点**（同为链体的直接子元素），
+           那根贯穿的竖线因此一路穿下去不断口 —— 而不是在卡片内部另起一块
+           带内滚的明细面板（VitaAgent 正是从那个形态改过来的，
+           三个毛病记在 `MessageList/index.tsx:451-467`） */
+        return (
+          <React.Fragment key={it.key}>
+            <div className={`${styles.step} ${styles.stepTask}`}>
+              <AgentCard
+                goal={agentsGoal(it)}
+                agents={it.agents}
+                picked={on}
+                onPick={(agentId) => onPick(it.key, agentId)}
+              />
+            </div>
+            {on ? (
+              <SubAgentChain
+                parentId={taskId}
+                agentId={on}
+                live={
+                  it.agents.find((a) => a.id === on)?.outcome === "running"
+                }
+                expanded={expanded}
+                toggleExpand={toggleExpand}
+                renderNote={renderNote}
+              />
+            ) : null}
+          </React.Fragment>
+        );
+      }
+      return (
+        <StepRow
+          key={it.key}
+          step={it}
+          running={it.key === runningKey}
+          open={!!expanded[it.key]}
+          onToggle={() => toggleExpand(it.key)}
+          expanded={expanded}
+          toggleExpand={toggleExpand}
+        />
+      );
+    })}
+  </>
+);
+
+/**
+ * 某个子代理**自己走过的那条链**，作为链上的节点接在智能体卡之后。
+ *
+ * 它渲染出来的就是 `.step`，与卡片那一格同为链体的直接子元素 —— 不是抽屉、
+ * 不是弹层、也不是卡内滚动面板。长内容进正常文档流，跟着整页滚。
+ *
+ * 正文要 hub 点名让那台机器现读磁盘，一次往返两轮上报：`pending` 期间显示
+ * 「读取中」并自动重试，**不许当成空**（见 PortalStore.loadSubAgentMessages）。
+ */
+const SubAgentChain: React.FC<{
+  parentId: string;
+  agentId: string;
+  /** 这个子代理**还在跑**。只有它为真时才自动刷新（见 SUB_REFRESH_MS） */
+  live: boolean;
+  expanded: Record<string, boolean>;
+  toggleExpand: (key: string) => void;
+  renderNote: (m: PortalMessage, key: string) => React.ReactNode;
+}> = observer(({ parentId, agentId, live, expanded, toggleExpand, renderNote }) => {
+  const {
+    subAgentMessagesOf,
+    isSubAgentLoading,
+    isSubAgentPending,
+    subAgentFailOf,
+    loadSubAgentMessages,
+  } = PortalStore;
+  /** 「展开全部」是纯视图态，换一张卡就回到默认（组件随 picked 变化挂载/卸载） */
+  const [all, setAll] = useState(false);
+
+  useEffect(() => {
+    loadSubAgentMessages(parentId, agentId);
+  }, [parentId, agentId, loadSubAgentMessages]);
+
+  /* 跑着的时候自动刷新。
+     **定时器只挂在这个组件上**：子链一收起（`picked` 清空）这个组件就卸载，
+     cleanup 把定时器清掉；换会话、关格子同理。一个展开的子链一个定时器，
+     不会留在后台空转。
+     `live` 翻成 false（子代理收尾了）时 cleanup 先清定时器，然后**再拉最后一次**
+     —— 最后几步与它交回的结论就是在那一刻落盘的，不补这一次会永远停在倒数第二步。 */
+  const wasLive = useRef(false);
+  useEffect(() => {
+    if (!live) {
+      if (wasLive.current) {
+        wasLive.current = false;
+        loadSubAgentMessages(parentId, agentId, true);
+      }
+      return;
+    }
+    wasLive.current = true;
+    const timer = window.setInterval(
+      () => loadSubAgentMessages(parentId, agentId, true),
+      SUB_REFRESH_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [live, parentId, agentId, loadSubAgentMessages]);
+
+  const msgs = subAgentMessagesOf(parentId, agentId);
+  const loading = isSubAgentLoading(parentId, agentId);
+  const pending = isSubAgentPending(parentId, agentId);
+  const fail = subAgentFailOf(parentId, agentId);
+
+  const hint = (icon: React.ReactNode, text: string, retry?: boolean) => (
+    <div className={styles.step}>
+      <div className={styles.stepHead}>
+        <span className={styles.stepIcon}>{icon}</span>
+        <span className={styles.stepName}>{text}</span>
+        {retry ? (
+          <span
+            className={styles.stepRetry}
+            role="button"
+            tabIndex={0}
+            onClick={() => loadSubAgentMessages(parentId, agentId, true)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                loadSubAgentMessages(parentId, agentId, true);
+              }
+            }}
+          >
+            重试
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+
+  if (!msgs.length) {
+    if (loading || pending) {
+      return hint(
+        <Icon
+          icon="LoadingOutlined"
+          className={`${styles.stepIcon} ${styles.stepIconLive}`}
+        />,
+        pending ? "正在从那台机器读取这个子代理的内容…" : "读取中…",
+      );
+    }
+    if (fail) {
+      // 离线是可恢复的，给一条出路；不自动轮询（那台机器可能关了一整晚）
+      return hint(
+        <Icon icon="CloseCircleFilled" className={styles.stepIcon} />,
+        SUB_FAIL_TEXT[fail] ?? "读取失败",
+        true,
+      );
+    }
+    return hint(
+      <Icon icon="ToolOutlined" className={styles.stepIcon} />,
+      "这个子代理没有留下可展示的内容",
+    );
+  }
+
+  /* 子代理的链**整段都是过程**：结论已经由父会话并回主对话了，
+     所以这里不再切「链外的结论」那一刀（flat）。
+     key 前缀带上 agentId：两条链的消息时间戳可能撞，展开态会串到别的行上 */
+  const { chain } = buildChain(
+    msgs.map((m) => ({ m, k: `${agentId}|${msgKey(m)}` })),
+    { subByToolUse: EMPTY_SUB_MAP, split: { flat: true } },
+  );
+
+  // 按「步」截断，不按链项：旁白是围着某一步说的话，跟着它一起留下
+  let steps = 0;
+  let cut = chain.length;
+  if (!all) {
+    for (let i = 0; i < chain.length; i += 1) {
+      if (isStep(chain[i])) {
+        steps += 1;
+        if (steps > SUB_STEP_CAP) {
+          cut = i;
+          break;
+        }
+      }
+    }
+  }
+  const shown = chain.slice(0, cut);
+  const rest = chain.slice(cut).filter(isStep).length;
+
+  return (
+    <>
+      <ChainNodes
+        items={shown}
+        taskId={parentId}
+        picked={EMPTY_PICKED}
+        onPick={noop}
+        expanded={expanded}
+        toggleExpand={toggleExpand}
+        renderNote={renderNote}
+      />
+      {rest > 0 ? (
+        <div className={styles.step}>
+          <button
+            type="button"
+            className={styles.stepHead}
+            onClick={() => setAll(true)}
+          >
+            <Icon icon="EllipsisOutlined" className={styles.stepIcon} />
+            <span className={styles.stepName}>还有 {rest} 步，展开全部</span>
+          </button>
+        </div>
+      ) : null}
+    </>
+  );
+});
+
+/** 子代理那条链里不再画嵌套的智能体卡：子任务清单只覆盖父会话这一层 */
+const EMPTY_SUB_MAP: Map<string, SubTask> = new Map();
+const EMPTY_PICKED: Record<string, string> = {};
+const noop = () => undefined;
+
+/**
  * 一轮的执行链：一条竖线时间轴，**结论不在里面**。
  *
  * 折叠策略照 VitaAgent `MessageList/index.tsx:316-360`：
  *
- *   跑完了 → 整条链收成一行摘要（`跑了 6 条命令，查了 3 次资料`），
- *            默认收起。那时人要读的是结论，过程该让位。
+ *   跑完了 → 整条链收成一行摘要（`起了 3 个子代理，跑了 6 条命令`），默认收起。
+ *            那时人要读的是结论，过程该让位。
  *   跑着呢 → **最近三步摊在外面**、更早的收进摘要行。那会儿用户盯的正是
  *            「现在到哪一步了」，全折起来等于把它在干什么藏了。
  *
@@ -673,6 +1111,7 @@ const RECENT_STEPS = 3;
  */
 const ExecChain: React.FC<{
   items: ChainItem[];
+  taskId: string;
   live?: boolean;
   open: boolean;
   onToggle: () => void;
@@ -681,6 +1120,7 @@ const ExecChain: React.FC<{
   renderNote: (m: PortalMessage, key: string) => React.ReactNode;
 }> = ({
   items,
+  taskId,
   live,
   open,
   onToggle,
@@ -688,18 +1128,30 @@ const ExecChain: React.FC<{
   toggleExpand,
   renderNote,
 }) => {
+  /**
+   * 点开的是哪张子代理小卡：链项 key → agentId。
+   *
+   * **存在链这一层**：卡片与它点开的子链是两个平级的链节点，位置关系在这里才排得出来
+   * （见 `ChainNodes`）。**纯 useState，不落盘** —— 展开态不持久化。
+   */
+  const [picked, setPicked] = useState<Record<string, string>>({});
+  const onPick = (itemKey: string, agentId: string) =>
+    setPicked((prev) => ({ ...prev, [itemKey]: agentId }));
+
   /* 留在外面的按「步」数，不按「链项」数：旁白是围着某一步说的话，
      跟着它一起留在外面。按链项切的话，一段长旁白就能把窗口占满，
      屏幕上只剩一条步骤 —— VitaAgent `:336-341` 记的就是这个实测 */
   const stepAt = items
-    .map((it, i) => (it.kind === "call" ? i : -1))
+    .map((it, i) => (isStep(it) ? i : -1))
     .filter((i) => i >= 0);
   const firstKeep =
     stepAt.length > RECENT_STEPS ? stepAt[stepAt.length - RECENT_STEPS] : 0;
   const hidden = live && !open ? firstKeep : 0;
   const shown = open ? items : live ? items.slice(hidden) : [];
   /** 头一行概括谁：跑的时候是收进去的那些，展开或跑完了是整条链 */
-  const headText = summarizeChain(open || !live ? items : items.slice(0, hidden));
+  const headText = summarizeChain(
+    open || !live ? items : items.slice(0, hidden),
+  );
 
   /* 「还在跑的那一步」：跑着的这一轮里，最后一次调用还没有任何输出。
      判据是结构上的（调用与它的输出成对出现），不是拿时间戳猜的 */
@@ -729,34 +1181,44 @@ const ExecChain: React.FC<{
       {/* 跑的时候「还在外面的那几条」要和上面那句摘要拉开距离：它们是两种东西 ——
           上面那行是「已经收进去的」，下面这几条是「还在外面的」。
           贴着排的话看上去就成了「摘要展开后的内容」，正好是反的 */}
-      <div className={live && headText && !open ? styles.chainLive : undefined}>
-        {shown.map((it) =>
-          it.kind === "note" ? (
-            <div key={it.key} className={styles.chainNote}>
-              {renderNote(it.msg, it.key)}
-            </div>
-          ) : (
-            <StepRow
-              key={it.key}
-              step={it}
-              running={it.key === runningKey}
-              open={!!expanded[it.key]}
-              onToggle={() => toggleExpand(it.key)}
-              expanded={expanded}
-              toggleExpand={toggleExpand}
-            />
-          ),
-        )}
+      <div
+        className={`${styles.chainBody} ${
+          live && headText && !open ? styles.chainLive : ""
+        }`}
+      >
+        <ChainNodes
+          items={shown}
+          taskId={taskId}
+          runningKey={runningKey}
+          picked={picked}
+          onPick={onPick}
+          expanded={expanded}
+          toggleExpand={toggleExpand}
+          renderNote={renderNote}
+        />
       </div>
     </div>
   );
 };
 
 const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
-  const { messages, running, providerDsr, imageCtx } = props;
+  const { taskId, messages, subTasks, running, providerDsr, imageCtx } = props;
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   const turns = toTurns(messages);
+
+  /* 「哪次工具调用派出了哪个子代理」的索引。**只认 `toolUseId`**：
+     拿不到的（老记录、或起跑记录落在重放窗口之外）就配不上，那一步照普通
+     工具调用画 —— 不退回按 label / 中文文案凑，两边截断长度不同必然错配。
+
+     **不套 useMemo**：`subTasksOf` 现在是两份合并出来的新数组（见 PortalStore），
+     引用每次都变，memo 只会每帧重算一遍再多存一份；清单最多一两百条，直接建。 */
+  const subByToolUse = new Map<string, SubTask>();
+  (subTasks ?? []).forEach((t) => {
+    if (t.kind === "agent" && t.toolUseId) {
+      subByToolUse.set(t.toolUseId, t);
+    }
+  });
 
   const toggleExpand = (key: string) => {
     setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -802,53 +1264,55 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
           lastActive--;
         }
         return turns.map((turn, ti) => {
-        // 执行中的活动轮：不铺工具流水，只同步 Q&A（助手文本），
-        // 工具过程收进折叠块，需要时再展开。
-        const inProgress = !!running && ti === lastActive;
-        // 用内容指纹做 key：执行中 → 完成态切换时 key 不变，避免整块重挂载闪烁；
-        // 且不随消息裁剪而漂移（下标会）。
-        const keyed = turn.items.map((m) => ({ m, k: msgKey(m) }));
-        // 执行中也铺，但**过程一律折叠着**（下面的分组逻辑会把它并成一行
-        // 「执行过程 · N 步」）—— 一条条冒出来是噪音、还不停把视图往下推，
-        // 但整段藏掉又会让人不知道它在干什么。折叠着实时长，想看点开即可。
-        //
-        // （清单与后台任务是「当前状态」，已由 ChatPane 抽成单独的状态卡，
-        // 挂在对话流末尾；选择卡同理挂在输入框上方，都不进内容流。）
-        const visibleItems = keyed;
-        // 执行中时报一下已走的步数。「最近动作」不再单列 ——
-        // 链上摊着的最后三步已经把它说得更清楚（见 ExecChain）
-        const runSteps = inProgress
-          ? turn.items.filter((m) => m.role === "tool").length
-          : 0;
+          // 执行中的活动轮：不铺工具流水，只同步 Q&A（助手文本），
+          // 工具过程收进折叠块，需要时再展开。
+          const inProgress = !!running && ti === lastActive;
+          // 用内容指纹做 key：执行中 → 完成态切换时 key 不变，避免整块重挂载闪烁；
+          // 且不随消息裁剪而漂移（下标会）。
+          const keyed = turn.items.map((m) => ({ m, k: msgKey(m) }));
+          // 执行中也铺，但**过程一律折叠着**（下面的分组逻辑会把它并成一行
+          // 「执行过程 · N 步」）—— 一条条冒出来是噪音、还不停把视图往下推，
+          // 但整段藏掉又会让人不知道它在干什么。折叠着实时长，想看点开即可。
+          //
+          // （清单与后台任务是「当前状态」，已由 ChatPane 抽成单独的状态卡，
+          // 挂在对话流末尾；选择卡同理挂在输入框上方，都不进内容流。）
+          const visibleItems = keyed;
+          // 执行中时报一下已走的步数。「最近动作」不再单列 ——
+          // 链上摊着的最后三步已经把它说得更清楚（见 ExecChain）
+          const runSteps = inProgress
+            ? turn.items.filter((m) => m.role === "tool").length
+            : 0;
 
-        return (
-          <div key={turn.key} className={styles.turn}>
-            {/* 对话流只管「我说了什么」。排队状态与撤回一律交给对话流末尾的排队卡 ——
+          return (
+            <div key={turn.key} className={styles.turn}>
+              {/* 对话流只管「我说了什么」。排队状态与撤回一律交给对话流末尾的排队卡 ——
                 两处都摆一份的话，同一条任务在正文和排队卡各显示一遍，还得为了去重
                 把正文里的消息藏起来，于是「我发的内容在对话流里不见了」。
                 职责分开之后，正文永远是完整的对话记录。 */}
-            {turn.user ? (
-              (() => {
-                const uKey = `u|${turn.key}`;
-                return (
-                  <div className={styles.userRow}>
-                    <div className={styles.userBubble}>
-                      <ClampBox
-                        open={!!expanded[uKey]}
-                        onToggle={() => toggleExpand(uKey)}
-                      >
-                        {turn.user.content}
-                      </ClampBox>
-                    </div>
-                    <div className={styles.userTime}>{fmtTime(turn.user.timestamp)}</div>
-                  </div>
-                );
-              })()
-            ) : null}
+              {turn.user
+                ? (() => {
+                    const uKey = `u|${turn.key}`;
+                    return (
+                      <div className={styles.userRow}>
+                        <div className={styles.userBubble}>
+                          <ClampBox
+                            open={!!expanded[uKey]}
+                            onToggle={() => toggleExpand(uKey)}
+                          >
+                            {turn.user.content}
+                          </ClampBox>
+                        </div>
+                        <div className={styles.userTime}>
+                          {fmtTime(turn.user.timestamp)}
+                        </div>
+                      </div>
+                    );
+                  })()
+                : null}
 
-            {(visibleItems.length > 0 || inProgress) && (
-              <div className={styles.agent}>
-                {(() => {
+              {(visibleItems.length > 0 || inProgress) && (
+                <div className={styles.agent}>
+                  {(() => {
                     /* 一轮拆成两半：**过程进链，结论进正文**。
                        这是这一版的全部：工具调用不再是平铺的一行原始文本，
                        而是链上的一步；最终答案不再是链里的一个节点，
@@ -865,72 +1329,15 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                                   之前的每段正文都是旁白，按发生顺序收进链。
                                   沿用跑完那条的话，旁白会被留在链的**下面**、
                                   而它引出的那几步却在链里 —— 顺序整个反了。 */
-                    const isProc = (m: PortalMessage) =>
-                      m.role === "tool" || m.role === "tool_result";
-                    let lastOut = -1;
-                    let lastProc = -1;
-                    visibleItems.forEach(({ m }, i) => {
-                      if (
-                        (m.role === "assistant" || m.role === "plan") &&
-                        m.content.trim()
-                      ) {
-                        lastOut = i;
-                      }
-                      if (isProc(m)) lastProc = i;
+                    const { chain, body } = buildChain(visibleItems, {
+                      subByToolUse,
+                      split: { flat: false, inProgress },
                     });
 
-                    const chain: ChainItem[] = [];
-                    const body: { m: PortalMessage; k: string }[] = [];
-
-                    visibleItems.forEach((it, i) => {
-                      const { m, k } = it;
-                      if (m.role === "tool") {
-                        const { name, hint } = splitToolLine(m.content);
-                        chain.push({
-                          kind: "call",
-                          key: k,
-                          name,
-                          hint,
-                          results: [],
-                        });
-                        return;
-                      }
-                      if (m.role === "tool_result") {
-                        /* 输出挂到**它前面那次调用**上：协议顺序就是先调用后回结果，
-                           所以「紧挨着的上一步」就是它的归属，不用再猜。
-                           一次调用可能跟着多条输出记录，全挂上去。
-                           找不到上一步（历史裁剪把调用那条丢了）就自成一步，
-                           内容一条都不丢。 */
-                        const last = chain[chain.length - 1];
-                        const out = { key: k, text: m.content, bad: m.isError };
-                        if (last && last.kind === "call") {
-                          last.results.push(out);
-                        } else {
-                          chain.push({
-                            kind: "call",
-                            key: k,
-                            name: "",
-                            hint: "",
-                            results: [out],
-                          });
-                        }
-                        return;
-                      }
-                      // 待批准的方案在执行中永远留在正文：它在等你点头，
-                      // 收进链里就等于把要办的事藏了
-                      if (inProgress && m.role === "plan") {
-                        body.push(it);
-                        return;
-                      }
-                      const isBody = inProgress ? i > lastProc : i >= lastOut;
-                      if (isBody) body.push(it);
-                      else chain.push({ kind: "note", key: k, msg: m });
-                    });
-
-                    /* 一次工具都没调：整轮都是正文，不摆链。
+                    /* 一次工具都没调、也没派过子代理：整轮都是正文，不摆链。
                        摆的话摘要行是空字符串、跑完之后 `shown` 又是空数组，
                        这一轮会渲染成一个什么都没有的空块 —— 内容凭空消失。 */
-                    if (!chain.some((c) => c.kind === "call")) {
+                    if (!chain.some(isStep)) {
                       return visibleItems.map(({ m, k }) => renderItem(m, k));
                     }
 
@@ -939,6 +1346,7 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                       <ExecChain
                         key="chain"
                         items={chain}
+                        taskId={taskId}
                         live={inProgress}
                         open={!!expanded[ckey]}
                         onToggle={() => toggleExpand(ckey)}
@@ -948,33 +1356,33 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                       />,
                       ...body.map(({ m, k }) => renderItem(m, k)),
                     ];
-                })()}
-                {inProgress ? (
-                  <Working
-                    // 起点取这一轮的起始时刻：有用户消息就用它，否则退回首条产出
-                    since={turn.user?.timestamp ?? turn.items[0]?.timestamp}
-                    steps={runSteps}
-                  />
-                ) : null}
-                {/* 落款：来源代理 + 时间。原先挂在终端卡的标题栏上，卡片撤掉之后
+                  })()}
+                  {inProgress ? (
+                    <Working
+                      // 起点取这一轮的起始时刻：有用户消息就用它，否则退回首条产出
+                      since={turn.user?.timestamp ?? turn.items[0]?.timestamp}
+                      steps={runSteps}
+                    />
+                  ) : null}
+                  {/* 落款：来源代理 + 时间。原先挂在终端卡的标题栏上，卡片撤掉之后
                     这两样仍要有地方待着 —— 时间是回看时定位用的。 */}
-                {visibleItems.length > 0 ? (
-                  <div className={styles.turnMeta}>
-                    <span className={styles.turnProvider}>
-                      {providerDsr || "终端"}
-                    </span>
-                    <span>
-                      {fmtTime(
-                        turn.items[turn.items.length - 1]?.timestamp ??
-                          turn.user?.timestamp
-                      )}
-                    </span>
-                  </div>
-                ) : null}
-              </div>
-            )}
-          </div>
-        );
+                  {visibleItems.length > 0 ? (
+                    <div className={styles.turnMeta}>
+                      <span className={styles.turnProvider}>
+                        {providerDsr || "终端"}
+                      </span>
+                      <span>
+                        {fmtTime(
+                          turn.items[turn.items.length - 1]?.timestamp ??
+                            turn.user?.timestamp,
+                        )}
+                      </span>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+            </div>
+          );
         });
       })()}
     </div>
