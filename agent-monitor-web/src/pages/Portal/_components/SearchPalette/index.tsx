@@ -1,21 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 
-import { Modal } from "@hsu-react/ui";
-import {
-  BgColorsOutlined,
-  CloseOutlined,
-  CloudSyncOutlined,
-  ControlOutlined,
-  EnterOutlined,
-  InfoCircleOutlined,
-  LaptopOutlined,
-  MessageOutlined,
-  RobotOutlined,
-  SafetyOutlined,
-  SearchOutlined,
-  SettingOutlined,
-  UnorderedListOutlined,
-} from "@ant-design/icons";
+import { Icon, Modal } from "@hsu-react/ui";
 import { observer } from "mobx-react-lite";
 import { useNavigate } from "react-router-dom";
 
@@ -109,7 +94,7 @@ const SearchPalette: React.FC<SearchPaletteProps> = observer((props) => {
     const commands: Hit[] = [
       {
         key: "cmd-history",
-        icon: <UnorderedListOutlined />,
+        icon: <Icon icon="ph:list-bullets" />,
         title: "查看全部会话",
         meta: "跨设备的全量记录",
         alias: "history 历史 远程往来",
@@ -117,13 +102,13 @@ const SearchPalette: React.FC<SearchPaletteProps> = observer((props) => {
       },
       ...(
         [
-          ["account", "账户", <SettingOutlined key="i" />, "account 个人资料 改密码"],
-          ["appearance", "外观", <BgColorsOutlined key="i" />, "appearance 主题 深色 浅色"],
-          ["devices", "设备管理", <LaptopOutlined key="i" />, "devices 电脑 信任 配对"],
-          ["configs", "配置同步", <CloudSyncOutlined key="i" />, "configs 同步"],
-          ["bots", "机器人管理", <RobotOutlined key="i" />, "bots 钉钉 机器人接入"],
-          ["security", "安全防护", <SafetyOutlined key="i" />, "security 安全"],
-          ["about", "关于", <InfoCircleOutlined key="i" />, "about 版本 更新"],
+          ["account", "账户", <Icon icon="ph:gear" key="i" />, "account 个人资料 改密码"],
+          ["appearance", "外观", <Icon icon="ph:palette" key="i" />, "appearance 主题 深色 浅色"],
+          ["devices", "设备管理", <Icon icon="ph:laptop" key="i" />, "devices 电脑 信任 配对"],
+          ["configs", "配置同步", <Icon icon="ph:cloud-arrow-up" key="i" />, "configs 同步"],
+          ["bots", "机器人管理", <Icon icon="ph:robot" key="i" />, "bots 钉钉 机器人接入"],
+          ["security", "安全防护", <Icon icon="ph:shield-check" key="i" />, "security 安全"],
+          ["about", "关于", <Icon icon="ph:info" key="i" />, "about 版本 更新"],
         ] as [SettingsTab, string, React.ReactNode, string][]
       ).map(([tab, label, icon, alias]) => ({
         key: `cmd-set-${tab}`,
@@ -141,7 +126,7 @@ const SearchPalette: React.FC<SearchPaletteProps> = observer((props) => {
         ] as const
       ).map(([value, label]) => ({
         key: `cmd-theme-${value}`,
-        icon: <BgColorsOutlined />,
+        icon: <Icon icon="ph:palette" />,
         title: `外观 · 切换到${label}`,
         meta: ThemeStore.appearance === value ? "当前" : "",
         alias: "theme appearance 主题 明暗",
@@ -153,7 +138,7 @@ const SearchPalette: React.FC<SearchPaletteProps> = observer((props) => {
         ? [
             {
               key: "cmd-admin",
-              icon: <ControlOutlined />,
+              icon: <Icon icon="ph:sliders-horizontal" />,
               title: "后台管理",
               meta: "新标签打开",
               alias: "admin 后管 用户管理",
@@ -168,7 +153,7 @@ const SearchPalette: React.FC<SearchPaletteProps> = observer((props) => {
       .filter((d) => match(d.hostname, d.platformDsr))
       .map((d) => ({
         key: `dev-${d.machineId}`,
-        icon: <LaptopOutlined />,
+        icon: <Icon icon="ph:laptop" />,
         title: d.hostname,
         /* 不印会话数（用户原话：「这里数量不需要」）。它是客户端回溯窗口内的条数，
            与侧栏实际列出多少不是一回事，容易被读成「列表里有这么多」。
@@ -192,7 +177,7 @@ const SearchPalette: React.FC<SearchPaletteProps> = observer((props) => {
       .filter((t) => match(t.note, t.title, t.prompt, t.projectName, t.hostname))
       .map((t) => ({
         key: `task-${t.id}`,
-        icon: <MessageOutlined />,
+        icon: <Icon icon="ph:chat-teardrop-text" />,
         title: sessionTitle(t, "新会话"),
         meta: [t.hostname, STATUS_LABEL[t.status ?? ""] ?? t.statusDsr]
           .filter(Boolean)
@@ -253,7 +238,7 @@ const SearchPalette: React.FC<SearchPaletteProps> = observer((props) => {
       destroyOnHidden
     >
       <div className={styles.head}>
-        <SearchOutlined className={styles.headIcon} />
+        <Icon icon="ph:magnifying-glass" className={styles.headIcon} />
         <input
           ref={inputRef}
           className={styles.input}
@@ -269,7 +254,7 @@ const SearchPalette: React.FC<SearchPaletteProps> = observer((props) => {
           aria-label="关闭"
           title="关闭（Esc）"
         >
-          <CloseOutlined />
+          <Icon icon="ph:x" />
         </button>
       </div>
 
@@ -297,7 +282,7 @@ const SearchPalette: React.FC<SearchPaletteProps> = observer((props) => {
               {/* 选中那行右端提示回车可开 */}
               {i === active && (
                 <span className={styles.rowEnter}>
-                  <EnterOutlined />
+                  <Icon icon="ph:arrow-elbow-down-left" />
                 </span>
               )}
             </button>

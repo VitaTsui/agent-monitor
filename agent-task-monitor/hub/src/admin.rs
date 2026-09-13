@@ -259,6 +259,17 @@ pub async fn verify_admin_token(
 }
 
 /// GET /sys/menu/getMenuATopATopMenu —— 后管只有「用户管理」「版本管理」两页
+///
+/// `icon` 下发的是**语义 key**（`user` / `version`），不是具体图标名。
+///
+/// 早先这里直接写死 `carbon:user-multiple` 这类图标名，前端得靠一张手工登记表把它们
+/// 裁进本地图标子集 —— 谁在这儿改了图标名忘了同步登记，线上就是**空白 + 悄悄走外网 +
+/// 不报错**。图标名只要不在前端源码里，构建期的扫描就管不住它。
+///
+/// 所以这一层只说「这是什么菜单」，长什么样由前端决定：图标名回到前端源码
+/// （`src/router/menuIcons.ts` 的映射表），生成器自然就扫得到，漂移从根上没了。
+/// 新增菜单时这里给一个新 key，前端映射表补一行；映射表查不到时前端有兜底图标，
+/// 不会变成一个看不见的菜单项。
 pub async fn menus(
     State(state): State<SharedState>,
     headers: axum::http::HeaderMap,
@@ -270,12 +281,12 @@ pub async fn menus(
         {
             "id": "1", "nm": "用户管理", "pid": null, "seq": 1, "level": 1, "children": null,
             "path": "permit/user", "url": "permit/User/index", "perm": "permit:user:list",
-            "icon": "carbon:user-multiple", "status": null
+            "icon": "user", "status": null
         },
         {
             "id": "2", "nm": "版本管理", "pid": null, "seq": 2, "level": 1, "children": null,
             "path": "sysmgmt/version", "url": "sysmgmt/Version/index", "perm": "sysmgmt:version:list",
-            "icon": "carbon:upgrade", "status": null
+            "icon": "version", "status": null
         }
     ]);
     ok(json!({ "topMenuList": [], "menuList": menu_list, "topId": null, "topList": null }))

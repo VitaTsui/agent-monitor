@@ -19,9 +19,10 @@ const r = (p: string) => path.resolve(__dirname, p);
  * 读 .env/ 下的自定义环境文件。
  *
  * 这个项目的环境文件不在根目录、也不叫 .env.development —— 是 .env/.env.common 与
- * .env/.env.dev|prod，而且值里放了 JSON（API_PROXY、PASS_CLS）。Vite 自带的 envDir +
- * import.meta.env 那一套对不上，所以照 webpack 原来的做法用 dotenv 读，再 define 成
- * process.env.X。好处是 src 里那十来处 process.env.* 一行都不用改。
+ * .env/.env.dev|prod，而且值里放了 JSON（API_PROXY、PASS_CLS）、变量名也没有 VITE_
+ * 前缀。Vite 自带的 envDir + envPrefix 那一套对不上（envPrefix 还不允许为空，否则
+ * 等于把整个 process.env 全公开），所以仍然自己用 dotenv 读，再把**白名单内**的几个
+ * 交给 Vite 的 config.env，src 里统一用 import.meta.env.X 取。见 injectClientEnv。
  *
  * （`.env` 在本项目是**目录**不是文件。Vite 自己找 .env 时会先 stat 一遍、只认
  *  isFile()，所以这个目录不会把 Vite 的 env 加载绊倒。）
@@ -192,9 +193,59 @@ const stubSpreadsheetLess = (): Plugin => {
 };
 
 /**
+ * **允许进入前端产物的环境变量白名单**，src 里通过 `import.meta.env.X` 读。
+ *
+ * 这是一道安全边界，不是图省事的清单：`config.env` 里的每一个键都会被**整体序列化**
+ * 进 `import.meta.env`（dev 是模块头部的一行赋值，生产是内联字面量），所以只要写进去
+ * 就等于公开。`.env` 里另外那几个是**纯构建期**用的，绝不能进来：
+ *   - `API_PROXY` —— dev 代理目标（内网地址）；
+ *   - `PASS_CLS`  —— CSS Modules 类名直通表；
+ *   - `SERVER_PROT` —— dev 端口。
+ *
+ * `CRYPTO_KEY` / `RSA_PUB_KEY` 进来是**本来就该进**：前端要拿它们加密登录报文，
+ * webpack 时期也一样打在产物里，不是这次新增的暴露。
+ */
+const CLIENT_ENV_KEYS = [
+  "CRYPTO_KEY",
+  "RSA_PUB_KEY",
+  "API_BASE",
+  "DEFAULT_PATH",
+] as const;
+
+/**
+ * 把白名单里的值塞进 `config.env`，src 里就能用 `import.meta.env.X` 读到。
+ *
+ * **为什么不用 `define`（这次要修的就是它）**：Vite 8 里 `define` 对浏览器端**只在
+ * 生产构建生效**。`vite:define` 插件的 `applyToEnvironment` 只有在环境
+ * `isBundled` 时才把用户 define 交给打包器；dev 的 client 环境不打包，走的是插件
+ * 本体的 transform，而那个 handler 第一行就是
+ * `if (this.environment.config.consumer === "client") return;` —— 直接跳过。
+ * 结果是 dev 下用户 define 一条都不替换（Vite 内置的 `process.env.NODE_ENV` 走的是
+ * 另一条路，所以它看着是好的，很容易误判成「define 生效了」）。
+ * 实测 8.2.2 与最新的 8.3.0 这段代码**一模一样**，是设计如此、不是某个版本的 bug，
+ * 升版本解决不了。
+ *
+ * `import.meta.env` 则两边都通：dev 由 client 运行时注入成真对象，生产由打包器内联成
+ * 字面量。两边同一个来源（`config.env`），不存在「dev 一套 prod 一套」。
+ */
+const injectClientEnv = (
+  env: Record<string, string>,
+  buildId: string
+): Plugin => ({
+  name: "inject-client-env",
+  configResolved(config) {
+    const clientEnv = config.env as Record<string, string>;
+    for (const key of CLIENT_ENV_KEYS) {
+      clientEnv[key] = env[key] ?? "";
+    }
+    clientEnv.BUILD_ID = buildId;
+  },
+});
+
+/**
  * 产出 dist/build-id.txt。
  *
- * 页面运行时拿内嵌的 process.env.BUILD_ID 跟这个文件比，不一致就强刷 ——
+ * 页面运行时拿内嵌的 import.meta.env.BUILD_ID 跟这个文件比，不一致就强刷 ——
  * 根治 WKWebView（iOS 壳/客户端）拿旧缓存页的顽疾，见 src/utils/freshness.ts。
  */
 const emitBuildId = (buildId: string): Plugin => ({
@@ -234,21 +285,12 @@ export default defineConfig(({ mode }): UserConfig => {
 
   const env = { ...commonEnv, ...modeEnv };
 
-  // 与 webpack 的 DefinePlugin 等价：把每个键注入成 process.env.X 的字面量
-  const define: Record<string, string> = {};
-  for (const [k, v] of Object.entries(env)) {
-    define[`process.env.${k}`] = JSON.stringify(v);
-  }
-
-  // 构建号只在生产注入 —— dev 下浏览器里没有 `process`，freshness.ts 靠
-  // `typeof process !== "undefined"` 守卫自动跳过检查，与 webpack 时期一致。
-  const BUILD_ID = Date.now().toString(36);
-  if (isProd) {
-    define["process.env.BUILD_ID"] = JSON.stringify(BUILD_ID);
-  }
+  // 构建号只在生产有意义（dev 没有产物可比对），dev 一律给空串让检查自己跳过。
+  const BUILD_ID = isProd ? Date.now().toString(36) : "";
 
   return {
     plugins: [
+      injectClientEnv(env, BUILD_ID),
       lowerDecorators(),
       stubSpreadsheetLess(),
       react(),
@@ -258,8 +300,6 @@ export default defineConfig(({ mode }): UserConfig => {
       checker({ typescript: true, enableBuild: false }),
       ...(isProd ? [emitBuildId(BUILD_ID)] : []),
     ],
-
-    define,
 
     resolve: {
       alias: [

@@ -145,9 +145,14 @@ $text-col: $tile + $tile-gap;
   word-break: break-word;
 }
 
+/* 失败原因前那枚警告。**给死字号并补一档**：原来它不写字号、跟着这一行的
+   `--text-sm`(12) 走，而 antd 的 `WarningFilled` 墨迹占满 em 框（1.000）、
+   `ph:warning-circle-fill` 只占 .813 —— 12×.813 = 9.8 比原来的 12.0 轻两成。
+   14×.813 = 11.4，与原来最接近。 */
 .cardErrorIcon {
   flex: none;
   margin-top: 2px;
+  font-size: 14px;
 }
 
 /* 顶部 8 对齐网格自己的 gap：状态行到第一行小卡的距离 ＝ 小卡行与行之间的距离，

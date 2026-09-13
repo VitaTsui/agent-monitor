@@ -70,7 +70,11 @@
   border-radius: var(--radius);
   background: var(--background);
   color: var(--muted-foreground);
-  font-size: 16px;
+  /* 18 而不是 16：`ph:list-checks` 的墨迹占 .75、`ph:lightning` 占 .937，
+     而原来那两枚 antd 是 check-square .893 / thunderbolt .928。
+     清单那枚 16×.75 = 12.0 比原来的 14.3 轻一成六，18×.75 = 13.5 补回来；
+     闪电那枚本来就基本持平（.937 对 .928），跟着 18 只是随槽走，不单调。 */
+  font-size: 18px;
 }
 
 .headText {

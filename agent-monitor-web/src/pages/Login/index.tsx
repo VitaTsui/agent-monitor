@@ -20,7 +20,7 @@ import styles from "./index.module.scss";
 import { useDebounceEffect } from "ahooks";
 import { useNavigate } from "react-router-dom";
 
-const DEFAULT_PATH = process.env.DEFAULT_PATH ?? "/portal";
+const DEFAULT_PATH = import.meta.env.DEFAULT_PATH || "/portal";
 const DINGTALK_STATE_KEY = "dingtalk_oauth_state";
 const OAUTH_STATE_KEY = "oauth_state";
 const OAUTH_PROVIDER_KEY = "oauth_provider";

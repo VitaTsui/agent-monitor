@@ -1333,7 +1333,7 @@ class PortalStore {
     // 本条连接的世代号：所有回调里比对，认出自己是不是已经被拆卸/替换掉的旧连接
     const gen = ++this._wsGen;
     // 与 API 同源同前缀：开发走 /api 代理（已开 ws:true），生产 API_BASE 为空即同源
-    const base = process.env.API_BASE ?? "";
+    const base = import.meta.env.API_BASE;
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${proto}//${window.location.host}${base}/monitor/ws?token=${encodeURIComponent(
       token,

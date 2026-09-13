@@ -1,8 +1,7 @@
 import React from "react";
 
-import { Button } from "@hsu-react/ui";
+import { Button, Icon } from "@hsu-react/ui";
 import { Tooltip } from "antd";
-import { CloseOutlined } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
 import { PortalTaskData } from "@/services/apis/portal";
@@ -67,7 +66,7 @@ const SessionStatePane: React.FC<SessionStatePaneProps> = observer((props) => {
             size="small"
             type="text"
             className={styles.close}
-            icon={<CloseOutlined />}
+            icon={<Icon icon="ph:x" className={styles.closeIcon} />}
             aria-label="收起这一格的会话状态栏"
             onClick={() => PortalStore.toggleRightPane(id)}
           />

@@ -1,7 +1,6 @@
 import React from "react";
 
 import { Dropdown, Tooltip } from "antd";
-import { CheckOutlined, LaptopOutlined } from "@ant-design/icons";
 import { Icon } from "@hsu-react/ui";
 import { observer } from "mobx-react-lite";
 
@@ -43,7 +42,7 @@ const DeviceSelect: React.FC = observer(() => {
   /** 行内那一枚：主机名 ＋「本机」＋ 在线点。选择器与菜单项共用，两处必须长一样 */
   const face = (
     <>
-      <LaptopOutlined className={styles.icon} />
+      <Icon icon="ph:laptop" className={styles.icon} />
       <span className={styles.name}>{current.hostname}</span>
       {current.isLocal ? <span className={styles.localTag}>本机</span> : null}
       {/* 离线设备照样能选：它的历史会话仍然看得到，只是正文取不回来
@@ -77,7 +76,7 @@ const DeviceSelect: React.FC = observer(() => {
      压在上面全看不见。一枚勾在深浅两套主题下都读得出来。 */
   const items = deviceList.map((d) => ({
     key: d.machineId,
-    icon: <LaptopOutlined />,
+    icon: <Icon icon="ph:laptop" />,
     label: (
       <span className={styles.menuRow}>
         <span className={styles.menuName}>{d.hostname}</span>
@@ -89,7 +88,7 @@ const DeviceSelect: React.FC = observer(() => {
             : ""}
         </span>
         {d.machineId === current.machineId ? (
-          <CheckOutlined className={styles.menuCheck} />
+          <Icon icon="ph:check" className={styles.menuCheck} />
         ) : null}
       </span>
     ),

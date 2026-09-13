@@ -23,8 +23,8 @@ import RouterService from "@/router/RouterService";
 import { notification } from "@hsu-react/ui";
 import Cookies from "js-cookie";
 
-const dev = process.env.NODE_ENV === "development";
-const apiBase = process.env.API_BASE;
+const dev = import.meta.env.DEV;
+const apiBase = import.meta.env.API_BASE;
 
 class LoginStore {
   get captchaImg() {

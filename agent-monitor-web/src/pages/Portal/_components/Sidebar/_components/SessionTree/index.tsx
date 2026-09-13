@@ -1,12 +1,6 @@
 import React, { useEffect, useState } from "react";
 
 import { Tooltip } from "antd";
-import {
-  CaretDownOutlined,
-  CaretRightOutlined,
-  LaptopOutlined,
-  SplitCellsOutlined,
-} from "@ant-design/icons";
 import { Icon } from "@hsu-react/ui";
 import { observer } from "mobx-react-lite";
 
@@ -257,7 +251,8 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
         {/* 移动端窄屏不支持拆分并排，去掉拆分按钮，只单会话查看 */}
         {!isMobile && (
           <Tooltip title="拆分显示">
-            <SplitCellsOutlined
+            <Icon
+              icon="ph:columns"
               className={styles.splitBtn}
               onClick={(e) => {
                 e.stopPropagation();
@@ -303,7 +298,11 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
         >
           <span className={`${styles.lead} ${styles.leadToggle}`}>
             <span className={styles.caret} aria-hidden>
-              {open ? <CaretDownOutlined /> : <CaretRightOutlined />}
+              {open ? (
+                <Icon icon="ph:caret-down" />
+              ) : (
+                <Icon icon="ph:caret-right" />
+              )}
             </span>
             <span className={`${styles.leadSlot} ${styles.projectIcon}`}>
               {/* 文件夹取 Phosphor 的 `ph:folder-simple`，与旁边那一列状态图标同一套
@@ -322,7 +321,11 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                 <Icon icon="ph:folder-simple" />
               </span>
               <span className={styles.leadHover} aria-hidden>
-                {open ? <CaretDownOutlined /> : <CaretRightOutlined />}
+                {open ? (
+                <Icon icon="ph:caret-down" />
+              ) : (
+                <Icon icon="ph:caret-right" />
+              )}
               </span>
             </span>
           </span>
@@ -350,7 +353,7 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                 aria-expanded={!collapsed}
                 onClick={() => toggleClient(sec.key)}
               >
-                <LaptopOutlined className={styles.groupIcon} />
+                <Icon icon="ph:laptop" className={styles.groupIcon} />
                 {/* **组名只写客户端名**（`Claude Code` / `Codex` / `ChatGPT 桌面版`）。
                     主机名与「本机」徽标都搬到了顶部的设备选择器上 ——
                     这一列铺的就是那台机器的会话，每一行组标题再重复一遍机器名

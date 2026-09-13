@@ -1,8 +1,7 @@
 import React, { useEffect, useState } from "react";
 
-import { Button, Input } from "@hsu-react/ui";
+import { Button, Icon, Input } from "@hsu-react/ui";
 import { Popover } from "antd";
-import { EditOutlined } from "@ant-design/icons";
 
 import PortalStore from "../../PortalStore";
 import { NOTE_MAX_CHARS, noteLength } from "../../_utils/sessionNote";
@@ -130,7 +129,7 @@ const SessionRename: React.FC<SessionRenameProps> = (props) => {
         }}
       >
         {children}
-        <EditOutlined className={styles.renameIcon} />
+        <Icon icon="ph:pencil-simple" className={styles.renameIcon} />
       </span>
     </Popover>
   );
