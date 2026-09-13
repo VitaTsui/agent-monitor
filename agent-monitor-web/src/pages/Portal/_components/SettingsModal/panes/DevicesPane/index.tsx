@@ -3,11 +3,13 @@ import React, { useEffect, useState } from "react";
 import { Button, Input, Modal, Switch, message } from "@hsu-react/ui";
 import {
   Badge,
+  ConfigProvider,
   Empty,
   Modal as AntModal,
   Popconfirm,
   Progress,
   Tag,
+  type ThemeConfig,
 } from "antd";
 import { LinkOutlined, RightOutlined } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
@@ -28,6 +30,67 @@ const PLATFORM_COLOR: Record<string, string> = {
   windows: "cyan",
   linux: "orange",
 };
+
+/**
+ * 描边按钮的配色一律走 antd 的 Button 组件令牌，**不要**用 CSS 模块去覆盖。
+ *
+ * 根因（见 22a13ce）：antd 6 自己的
+ * `.ant-btn:not(:disabled):not(.ant-btn-disabled):hover` 特异度是 (0,4,0)，
+ * 模块里的 `.xxxBtn:hover` 只有 (0,2,0)，hover 态必输 —— 底色会被刷回 antd 的
+ * 默认值，而前景若钉在内层 span 上又压得住，字就落在自己看不见的底上。
+ * 多包几层选择器打平 (0,4,0) 只是运气，谁把嵌套拍平就立刻复现。
+ *
+ * 令牌值直接给 `var(--primary)` 这类 CSS 变量：antd 在 cssVar 模式下把它们原样
+ * 写进 `--ant-button-*`，明暗切换由变量自己完成，不需要第二份 JS 字面量。
+ */
+const OUTLINE_FILL_THEME: ThemeConfig = {
+  components: {
+    Button: {
+      defaultBg: "transparent",
+      defaultColor: "var(--primary)",
+      defaultBorderColor: "color-mix(in srgb, var(--primary) 45%, transparent)",
+      defaultHoverBg: "var(--primary)",
+      defaultHoverColor: "var(--primary-foreground)",
+      defaultHoverBorderColor: "var(--primary)",
+      defaultActiveBg: "var(--primary-active)",
+      defaultActiveColor: "var(--primary-foreground)",
+      defaultActiveBorderColor: "var(--primary-active)",
+    },
+  },
+};
+
+/** 中性描边、hover 才转警示（撤销信任 / 断开接入）。同上，走令牌不走 CSS。 */
+const OUTLINE_WARN_THEME: ThemeConfig = {
+  components: {
+    Button: {
+      defaultBg: "transparent",
+      defaultColor: "var(--muted-foreground)",
+      defaultBorderColor: "var(--overlay-2)",
+      defaultHoverBg: "var(--destructive-subtle)",
+      defaultHoverColor: "var(--destructive)",
+      defaultHoverBorderColor: "var(--destructive-subtle)",
+      defaultActiveBg: "var(--destructive-subtle)",
+      defaultActiveColor: "var(--destructive)",
+      defaultActiveBorderColor: "var(--destructive)",
+    },
+  },
+};
+
+type ThemedButtonProps = React.ComponentProps<typeof Button>;
+
+/** 主题色描边、hover 填成实心主色。 */
+const OutlineFillButton: React.FC<ThemedButtonProps> = (props) => (
+  <ConfigProvider theme={OUTLINE_FILL_THEME}>
+    <Button {...props} />
+  </ConfigProvider>
+);
+
+/** 中性描边、hover 转警示色。 */
+const OutlineWarnButton: React.FC<ThemedButtonProps> = (props) => (
+  <ConfigProvider theme={OUTLINE_WARN_THEME}>
+    <Button {...props} />
+  </ConfigProvider>
+);
 
 interface UpdateProgress {
   phase: "downloading" | "installing" | "restarting";
@@ -283,7 +346,7 @@ const DevicesPane: React.FC = observer(() => {
       </div>
       <div className={st.rowActions}>
         {d.shared ? (
-          <Button
+          <OutlineWarnButton
             size="small"
             className={st.actBtn}
             onClick={() => {
@@ -296,26 +359,26 @@ const DevicesPane: React.FC = observer(() => {
             }}
           >
             断开接入
-          </Button>
+          </OutlineWarnButton>
         ) : (
           <>
             {d.trusted ? (
               <>
-                <Button
+                <OutlineFillButton
                   size="small"
                   className={st.shareBtn}
                   onClick={() => setShareDevice(d)}
                 >
                   协助共享
-                </Button>
+                </OutlineFillButton>
                 {!d.isHub && (
-                  <Button
+                  <OutlineWarnButton
                     size="small"
                     className={st.actBtn}
                     onClick={() => untrustDevice(d.id)}
                   >
                     撤销信任
-                  </Button>
+                  </OutlineWarnButton>
                 )}
               </>
             ) : (
@@ -422,6 +485,7 @@ const DevicesPane: React.FC = observer(() => {
               // 「更新中」+进度（updating 已排除了「已是最新却有遗留进度」的误判）。
               <Button
                 size="small"
+                type="primary"
                 className={styles.updateNowBtn}
                 onClick={() =>
                   tauriInvoke?.("update_start").catch(() =>
@@ -432,7 +496,7 @@ const DevicesPane: React.FC = observer(() => {
                 更新到 v{clientVer.latest}
               </Button>
             ) : (
-              <Button
+              <OutlineFillButton
                 size="small"
                 className={styles.checkUpdateBtn}
                 loading={checkingUpdate || updating}
@@ -440,7 +504,7 @@ const DevicesPane: React.FC = observer(() => {
                 onClick={checkUpdate}
               >
                 {updating ? "更新中" : "检查更新"}
-              </Button>
+              </OutlineFillButton>
             )}
           </div>
           {/* 插件版本（Cursor/VSCode 桥接扩展）：旧客户端无 plugin_status IPC → pluginVer 为 null，整行不渲染 */}
@@ -468,6 +532,7 @@ const DevicesPane: React.FC = observer(() => {
               {pluginVer.installed !== pluginVer.latest ? (
                 <Button
                   size="small"
+                  type="primary"
                   className={styles.updateNowBtn}
                   loading={checkingPlugin}
                   onClick={updatePlugin}
@@ -477,14 +542,14 @@ const DevicesPane: React.FC = observer(() => {
                     : "安装插件"}
                 </Button>
               ) : (
-                <Button
+                <OutlineFillButton
                   size="small"
                   className={styles.checkUpdateBtn}
                   loading={checkingPlugin}
                   onClick={checkPluginUpdate}
                 >
                   检查更新
-                </Button>
+                </OutlineFillButton>
               )}
             </div>
           ) : null}

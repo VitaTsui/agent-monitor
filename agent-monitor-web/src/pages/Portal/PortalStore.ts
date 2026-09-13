@@ -33,12 +33,16 @@ import { getAccessToken } from "@/utils/auth";
 const MAX_PANES = 4;
 
 /**
- * 右栏（会话状态）**按格**记一份：`{ 会话 id: { open, ratio } }`。
+ * 右栏（会话状态）**按格**记一份：`{ 会话 id: { open } }`。
  *
  * 从前是全局一个布尔（`am.portal.rightPane.open`）＋ 全局一个比例
- * （`am.portal.rightPane.ratio`）：拆分成 2~4 格时，任何一格的开关都在拨同一个值，
- * 拖宽也是几格连动 —— 那不是「一格的右栏」，是「整页一条右栏」。这两个旧键已废弃，
+ * （`am.portal.rightPane.ratio`）：拆分成 2~4 格时，任何一格的开关都在拨同一个值
+ * —— 那不是「一格的右栏」，是「整页一条右栏」。这两个旧键已废弃，
  * 加载时顺手删掉，不留第二套状态在磁盘上。
+ *
+ * **只剩「开/关」这一个维度**：右栏宽度已改为固定 320（见 `RightPane`），
+ * 比例不再是可调项。存量记录里带着的 `ratio` 字段读的时候直接忽略 —— 多出来的
+ * 字段不影响 `open`，不必为它留第二套解析。
  */
 const RIGHT_PANE_KEY = "am.portal.rightPane.byId";
 
@@ -51,23 +55,10 @@ const RIGHT_PANE_LEGACY_KEYS = [
   "am.portal.rightPane.ratio",
 ];
 
-/**
- * 右栏占本格的宽度比例：下限 / 上限 / 默认。
- *
- * 上下限照 VitaAgent 的 ViewerPane（0.3 ~ 0.7）。默认取 0.36 而不是它那边的 0.5 ——
- * 那栏装的是**产物预览**（要看文件，越宽越好），这里装的是一张状态清单：
- * 单格 1440 宽下 0.36 约 518px，够摆下卡片，正文还剩约 920px 的正常阅读宽度。
- */
-export const RIGHT_PANE_MIN_RATIO = 0.3;
-export const RIGHT_PANE_MAX_RATIO = 0.7;
-export const RIGHT_PANE_DEFAULT_RATIO = 0.36;
-
-/** 一格右栏的状态 */
+/** 一格右栏的状态。**只有开关**，宽度是固定的（见 `RightPane`） */
 interface RightPaneState {
   /** 开着没有 */
   open: boolean;
-  /** 占本格宽度的比例 */
-  ratio: number;
 }
 
 /** WS 断开后的重连退避（毫秒），逐次递增，封顶 10s */
@@ -199,8 +190,12 @@ const EMPTY_HUB_QUEUED: { cmdId: string; text: string }[] = [];
 const EMPTY_SUB_TASKS: SubTask[] = [];
 
 /**
- * 读出每一格右栏的开合与宽度。读不到（隐私模式 / 头一回来 / 存的是脏数据）
- * 就返回空表 —— 没记过的格一律按「开着、默认宽度」算。
+ * 读出每一格右栏的开合。读不到（隐私模式 / 头一回来 / 存的是脏数据）
+ * 就返回空表 —— 没记过的格一律按「开着」算。
+ *
+ * **只认 `open` 一个字段**：上一版每条还存着 `ratio`（可拖调的宽度比例），
+ * 那个设计已经整条撤销。存量记录原样读得进来，多出来的 `ratio` 在这里被丢掉，
+ * 下一次落盘就没了 —— 不为它留兼容分支。
  *
  * 顺手删掉上一版的两个全局键：它们已经没有任何读取方，留着只会让人以为还有人用。
  */
@@ -217,14 +212,7 @@ const readRightPaneState = (): Record<string, RightPaneState> => {
       if (!id || typeof v !== "object" || v === null) {
         return;
       }
-      const ratio = Number(v.ratio);
-      out[id] = {
-        open: v.open !== false,
-        ratio:
-          ratio >= RIGHT_PANE_MIN_RATIO && ratio <= RIGHT_PANE_MAX_RATIO
-            ? ratio
-            : RIGHT_PANE_DEFAULT_RATIO,
-      };
+      out[id] = { open: v.open !== false };
     });
     return out;
   } catch {
@@ -260,7 +248,7 @@ class PortalStore {
    */
   private _focusedId = "";
   /**
-   * 每一格右栏（会话状态）的开合与宽度，按会话 id 各记一份。**默认开**。
+   * 每一格右栏（会话状态）的开合，按会话 id 各记一份。**默认开**。
    *
    * 这块内容原先钉在每一格对话流的末尾、一直看得见；搬进右栏后若默认收起，
    * 「这个会话正在办什么」就退回到「先点一下才看得见」—— 那正是把它从悬浮胶囊
@@ -749,10 +737,6 @@ class PortalStore {
   public isRightPaneOpen = (taskId: string): boolean =>
     this._rightPaneById[taskId]?.open ?? true;
 
-  /** 这一格右栏占本格的宽度比例。没记过＝默认 */
-  public rightPaneRatio = (taskId: string): number =>
-    this._rightPaneById[taskId]?.ratio ?? RIGHT_PANE_DEFAULT_RATIO;
-
   /** 开/收某一格的右栏。**每格一份**：A 格开着、B 格关着是合法状态 */
   public toggleRightPane = (taskId: string) => {
     if (!taskId) {
@@ -760,39 +744,9 @@ class PortalStore {
     }
     this._rightPaneById = {
       ...this._rightPaneById,
-      [taskId]: {
-        open: !this.isRightPaneOpen(taskId),
-        ratio: this.rightPaneRatio(taskId),
-      },
+      [taskId]: { open: !this.isRightPaneOpen(taskId) },
     };
     this.saveRightPaneState();
-  };
-
-  /**
-   * 改某一格右栏的宽度比例。
-   *
-   * 拖动过程中每帧都在调，所以只有松手那一下（`commit`）才落盘 ——
-   * 每帧写一次 localStorage 是同步 IO，拖起来会发涩。
-   */
-  public setRightPaneRatio = (
-    taskId: string,
-    ratio: number,
-    commit = false,
-  ) => {
-    if (!taskId) {
-      return;
-    }
-    const clamped = Math.min(
-      RIGHT_PANE_MAX_RATIO,
-      Math.max(RIGHT_PANE_MIN_RATIO, ratio),
-    );
-    this._rightPaneById = {
-      ...this._rightPaneById,
-      [taskId]: { open: this.isRightPaneOpen(taskId), ratio: clamped },
-    };
-    if (commit) {
-      this.saveRightPaneState();
-    }
   };
 
   /**
@@ -800,7 +754,7 @@ class PortalStore {
    *
    * 键是会话 id，会话是会被删掉的：不清的话这张表只增不减，攒上几个月就是一堆
    * 指向不存在会话的记录。判据取「服务端还认这个会话吗」（`_tasks`）—— 已关掉但
-   * 还在列表里的格要留着（下次再打开仍是上次的宽度），彻底消失的才丢。
+   * 还在列表里的格要留着（下次再打开仍是上次的开合），彻底消失的才丢。
    */
   private saveRightPaneState = () => {
     const live = new Set<string>([
@@ -817,7 +771,7 @@ class PortalStore {
     try {
       localStorage.setItem(RIGHT_PANE_KEY, JSON.stringify(next));
     } catch {
-      // 隐私模式下写不进去也无妨，下次回到默认（开着、默认宽度）
+      // 隐私模式下写不进去也无妨，下次回到默认（开着）
     }
   };
 

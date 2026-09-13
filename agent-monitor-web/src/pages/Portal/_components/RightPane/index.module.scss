@@ -1,59 +1,30 @@
-// 一格内的右栏 = 把手 ＋ **一条透明的、露底的滚动列**。
+// 一格内的右栏 = **一条固定 320 宽、白底的滚动列**。
 //
 // 几何照 VitaAgent 的 `ActivityPanel`
-// （`web/src/pages/chat/_components/ActivityPanel/index.module.scss:1-21`）：
-// 外层 `padding: 8 8 16`、**不画任何底与边**，浮起来的那张卡在它**里面**
-// （本项目对应 `SessionStatePane` 的 `.card`：圆角 8 ＋ 描边环 ＋ 投影、高度随内容）。
-// 左边那 8 由把手 `.sep` 自己占掉，所以这里 padding-left 是 0。
+// （`web/src/pages/chat/_components/ActivityPanel/index.module.scss:1-11`）：
+// `flex-shrink: 0` ＋ 320 定宽 ＋ 内容自己滚。
 //
-// **两层不许都画卡。** 上一版这一层画了圆角 10 ＋ 描边环 ＋ 投影，等于把参照里
-// 那张 312 宽的内卡换成了一根撑满高度的外框；再往里放一张带环的卡就是两圈框
-// 套着。取舍很清楚：参照的观感来自「露底 ＋ 内卡浮起」，外框那一圈不是它。
-// 拖拽把手与宽度算法一点没动，动的只是「谁来画那张卡」。
+// **底色画在这一层，用 `--card`（亮色=白，暗色跟着翻）**。上一版这里是透明的、
+// 露出 `.paneRow` 的 `--primary-subtle`，卡片浮在里面；用户要的是一整条白栏，
+// 所以底色上移到这一层，里面那张卡的圆角/描边环/投影随之撤掉
+// （见 `SessionStatePane`）—— 白底上再压一张白卡只会多一圈看不见的框。
 //
-// 滚动条也跟着挪到这一层：卡的高度必须随内容（参照如此），所以撑不满时
-// 下面就是露底，而不是一张空着的长卡。
-
-.sep {
-  display: flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  width: 8px;
-  cursor: col-resize;
-  // 触屏上别让浏览器把拖动当成滚页
-  touch-action: none;
-
-  &:hover .handle,
-  &:active .handle {
-    opacity: 1;
-  }
-}
-
-.handle {
-  width: 3px;
-  height: 48px;
-  border-radius: 2px;
-  background: var(--muted-foreground);
-  opacity: 0;
-  transition: opacity 0.15s;
-}
+// 与正文之间靠一条 1px 的 `--border` 分开：两块都是实底，不再有露底的缝可依。
+//
+// 宽度**不可调**：上一版那条把手、它的指针事件、占比上下限与落盘的那份占比
+// 已整条删除，不留死代码。
 
 .RightPane {
   display: flex;
-  // 宽度只由 flex-basis 一处说了算（组件按 ratio 算好塞进来），grow/shrink 都是 0
-  flex: 0 0 auto;
+  // 固定 320，既不涨也不缩（照参照）
+  flex: none;
   flex-direction: column;
+  width: 320px;
   // 不写这两行，栏里一段长内容就能把正文挤没
   min-width: 0;
   min-height: 0;
-  padding: 8px 8px 16px 0;
+  border-left: 1px solid var(--border);
+  background: var(--card);
   overflow-x: hidden;
   overflow-y: auto;
-  transition: flex-basis 0.2s ease;
-}
-
-// 拖的时候不要过渡，否则把手跟不上指针
-.dragging {
-  transition: none;
 }

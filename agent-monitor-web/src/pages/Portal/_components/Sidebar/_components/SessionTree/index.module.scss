@@ -1,8 +1,17 @@
 // 侧栏会话树。几何全部照参照实现（VitaAgent web 的 chat/_components/Sidebar）：
 //   行      高 32、gap 8、padding `0 4px 0 10px`、圆角 8、字号 14
-//   引导槽  20×20（状态图标、子代理图标、展开箭头都在这个槽里居中，一列对齐）
-//   子级缩进 **给行自己加 padding-left: 30**，不是把容器推窄 —— 容器加 padding
-//           会把子行的右边缘也左移，一列扫下去右端参差不齐
+//   行首列   会话行 `[箭头 14][状态槽 20]`，子代理行 `[状态槽 20]`
+//   引导槽  20×20（状态图标、子代理图标都在这个槽里居中，一列对齐）
+//   子级缩进 **给行自己加 padding-left: 44**（= 10 行内边距 ＋ 14 箭头 ＋ 20 状态槽），
+//           不是把容器推窄 —— 容器加 padding 会把子行的右边缘也左移，
+//           一列扫下去右端参差不齐。
+//
+// **层级只看文字列的起点**：会话 +38（10 ＋ 14 ＋ 20 ─ 等一下，见下）… 实际是
+//   会话行文字  = 10(pad) + 14(箭头) + 20(状态槽) + 8(gap) = +52
+//   子代理文字  = 44(pad) + 20(状态槽) + 8(gap)            = +72
+// 差 20，且**与这一行有没有号位徽标无关** —— 徽标从前插在状态槽与标题之间，
+// 把会话行的文字又往右推 26，于是父的字比子的字还靠右，整棵树看着是平的。
+// 徽标现在挪到标题行末尾（见 tsx 里的说明）。
 //   分组头  高 24、左内边距 4、13/400 灰字
 //   二级标签 padding `8px 10px 2px`、12/16、更淡一档
 //
@@ -209,9 +218,41 @@
   mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
 }
 
-/* **每一行都用同一个引导槽**：会话的状态图标、子代理的收场图标、展开箭头都放进
-   一个 20 宽的方块里居中，于是几种行的记号落在同一根竖轴上、标题也从同一个 x 起。
-   槽是**侧栏这一列的对齐位**（30px 子级缩进与 19.5px 导引线都按它算），
+/* 会话行的行首块：`[箭头 14][状态槽 20]`。整块就是展开/收起的点击区
+   —— 34×20 比原来那个 20×20 的槽好瞄，而且行的其余部分仍然是「打开会话」。 */
+.lead {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+/* 展开箭头。**常驻**，不是 hover 才换出来的（理由见 tsx 里的说明）。
+   不能展开的行仍然占这 14px 的空位，所有会话行的文字才从同一个 x 起。 */
+.caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 14px;
+  height: 20px;
+  color: var(--subtle-foreground);
+  font-size: 10px;
+  transition: color 0.15s;
+}
+
+.leadToggle {
+  cursor: pointer;
+
+  @media (hover: hover) {
+    &:hover .caret {
+      color: var(--foreground);
+    }
+  }
+}
+
+/* **每一行都用同一个引导槽**：会话的状态图标、子代理的收场图标都放进一个 20 宽的
+   方块里居中，于是几种行的记号落在同一根竖轴上、标题也从同一个 x 起。
+   槽是**侧栏这一列的对齐位**（44px 子级缩进与 33.5px 导引线都按它算），
    与执行链上那枚 18×18 的色块不是一回事；对齐的是里面那个 **12px 字形**。 */
 .leadSlot {
   position: relative;
@@ -224,37 +265,6 @@
   color: var(--muted-foreground);
   // 字形 12：与执行链的 .stepIcon、智能体卡的 .headIcon 同一档，一屏之内只有一种大小
   font-size: 12px;
-}
-
-/* 能展开的行：**静止显示状态图标，鼠标移到槽上换成箭头**。
-   为什么不是常驻箭头 —— 「这条会话现在什么情况」才是那一眼要分辨的事；
-   而箭头是只有「能展开」这一个含义的记号，一移上去就说清楚了。 */
-.leadToggle {
-  cursor: pointer;
-
-  &:hover {
-    color: var(--foreground);
-
-    .leadRest {
-      display: none;
-    }
-
-    .leadHover {
-      display: inline-flex;
-    }
-  }
-}
-
-.leadRest {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.leadHover {
-  display: none;
-  align-items: center;
-  justify-content: center;
 }
 
 // ---------- 会话行 ----------
@@ -364,8 +374,9 @@
 /**
  * 展开之后左边有一条**竖导引线**，把这一组子代理拢在会话底下。
  *
- * 线要正对会话行那个引导槽的中心：行左内边距 10 ＋ 槽宽 20 的一半 = 20，
- * 所以线放 19.5（1px 的线从 19.5 铺到 20.5，正好压住 20）。
+ * 线要正对会话行那个**状态槽**的中心：行左内边距 10 ＋ 箭头 14 ＋ 槽宽 20 的一半
+ * = 34，所以线放 33.5（1px 的线从 33.5 铺到 34.5，正好压住 34）。
+ * 子行的状态槽从 44 起，线在它左边 10px —— 标准的树导引线位置。
  * 底部收 4 —— 不收的话线会顶到下一条会话上。
  * 少了这条线，缩进的子行看着只是「几条更靠右的会话」，不像是这条会话里的。
  */
@@ -377,16 +388,18 @@
     position: absolute;
     top: 0;
     bottom: 4px;
-    left: 19.5px;
+    left: 33.5px;
     width: 1px;
     background: var(--border);
     pointer-events: none;
   }
 }
 
-// 缩进给行自己，不给容器（理由见文件头）
+/* 缩进给行自己，不给容器（理由见文件头）。
+   44 ＝ 会话行的 10 内边距 ＋ 14 箭头 ＋ 20 状态槽：子行的状态槽正好从会话行
+   状态槽的右边缘起，文字列因此比会话行右移整整 20。 */
 .subItem {
-  padding-left: 30px;
+  padding-left: 44px;
 }
 
 /**
@@ -428,15 +441,20 @@
   white-space: nowrap;
 }
 
-/* 子代理截断行「展开全部（共 N 条）」/「收起」。
-   几何照参照的 `.viewAll`（32 高 / 14px / muted）：它是这串子代理的最后一行，
-   不是一颗按钮。左内边距跟着子行的 30，与上面那串对齐。
-   **纯渲染层截断** —— 点它不会再发一次 `/subtasks`，清单早就一次拉全缓存住了。 */
+/* 子代理列表末尾那几行：「展开全部（共 N 条）」/「收起」/「已结束 N 个」。
+   几何照参照的 `.viewAll`（32 高 / 14px / muted）：它们是这串子代理的最后一行，
+   不是按钮。**纯渲染层** —— 点它们不会再发一次 `/subtasks`，清单早就一次拉全缓存住了。
+
+   左内边距 72 ＝ 子行缩进 44 ＋ 图标槽 20 ＋ gap 8，**对齐的是子代理的文字列**，
+   不是子行的左边缘。整棵树的层级就靠这一列文字的起点读出来：
+   会话 +52 → 子代理 +72 → 这几行也 +72。跟着子行左缘的话，这行字会落在
+   会话与子代理两列之间，既不属于上一层也不属于下一层。 */
 .subMore {
   display: flex;
   align-items: center;
+  gap: 6px;
   height: 32px;
-  padding: 0 10px 0 30px;
+  padding: 0 10px 0 72px;
   border-radius: var(--radius);
   color: var(--muted-foreground);
   font-size: var(--text-base);
@@ -450,6 +468,19 @@
   &:focus-visible {
     outline: 2px solid var(--primary);
     outline-offset: 2px;
+  }
+}
+
+/* 折叠行里跑砸的那一笔。**不跟着「已结束」一起变灰** —— 「其中有几个失败」
+   恰恰是折起来之后最该被看见的事，与它同色就等于把它藏进那句话里。
+   前面加一个分隔点，与执行链步骤行的「·」同一种写法。 */
+.subMoreBad {
+  color: var(--destructive);
+
+  &::before {
+    content: "·";
+    margin-right: 6px;
+    color: var(--muted-foreground);
   }
 }
 

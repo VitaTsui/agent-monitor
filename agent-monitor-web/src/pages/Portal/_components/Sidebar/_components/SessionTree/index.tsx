@@ -169,6 +169,15 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
    * 只显示 20 条 —— 持久化的话，一条 149 项的会话下次进来仍旧把侧栏撑爆。
    */
   const [fullSubs, setFullSubs] = useState<string[]>([]);
+  /**
+   * 把**已结束的子代理**也铺出来的那几条会话。
+   *
+   * 树回答的是「这条会话现在在发生什么」，所以默认只列还在跑的；跑完的收进
+   * 最后一行。但**只是折叠，不是删除** —— 「回头找某个跑完的子代理」仍要有入口。
+   *
+   * 与 `fullSubs` 一样是**纯视图态，不落盘**：子树整条收起再展开就回到默认。
+   */
+  const [openDone, setOpenDone] = useState<string[]>([]);
 
   /* 这一列铺的就是 `selectedMachineId` 那台机器（见 PortalStore.clientSections），
      所以命令面板里「跳到某台设备」= 换这一列，不必再在这儿把那台机器的分组
@@ -231,9 +240,10 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
       : expandedSessions.filter((x) => x !== id);
     setExpandedSessions(next);
     writeIds(EXPANDED_SESSIONS_KEY, next);
-    // 子树一收起，「展开全部」就跟着还原
+    // 子树一收起，「展开全部」与「已结束」两个视图态都跟着还原
     if (!opening) {
       setFullSubs((prev) => prev.filter((x) => x !== id));
+      setOpenDone((prev) => prev.filter((x) => x !== id));
     }
     // **必须在 setState 的更新函数之外调**：那个函数跑在 React 的渲染阶段，
     // 在里面写 store 就是「渲染 A 组件时更新了 B 组件」，React 会直接报错。
@@ -245,6 +255,11 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
 
   const toggleFullSubs = (id: string) =>
     setFullSubs((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+
+  const toggleDone = (id: string) =>
+    setOpenDone((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
 
@@ -354,13 +369,32 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
      * 于是「执行中」永远只有那三个字。用户为此提了三次。
      */
     const lastAction = status === "running" ? (t.lastAction ?? "").trim() : "";
+    /**
+     * **默认只列还在跑的**。跑完的收进最后一行「已结束 N 个」，点开才铺。
+     *
+     * 侧栏树回答的是「这条会话现在在发生什么」——一屏全是跑完的子代理，
+     * 等于一屏没有信息（用户原话：「完成了的子会话，为什么还会显示」）。
+     * 收起来而不是删掉：回头找某个跑完的子代理仍然要有入口。
+     *
+     * **执行链不受这条影响**：链要的是完整的「它派过谁」，一条都不能少
+     * （那条「只留未完成」的过滤早就撤销过，不要在这儿借尸还魂）。
+     */
+    const running = subs.filter((st) => st.outcome === "running");
+    const done = subs.filter((st) => st.outcome !== "running");
+    /** 跑砸的那几个单独报一笔：把失败并进「已结束」不算说谎，但也不该被淹掉 */
+    const failedCount = done.filter((st) => st.outcome === "failed").length;
+    const doneOpen = openDone.includes(id);
+    /* **过滤决定列表里有谁，截断决定铺出来几条**，两件事分开、互不打架：
+       未完成的自己就超过 20 条时（实测单条会话挂到过 149 个子代理），
+       截断照样在这份列表上生效，「展开全部」仍然只是渲染层的事、不发请求。 */
+    const visible = doneOpen ? subs : running;
     /* 默认只铺最近 20 条。后端给的是时间顺序（旧 → 新），所以「最近的那一端」
        是数组末尾 —— 用 slice(-N) 取，顺序保持不变。 */
     const showAll = fullSubs.includes(id);
     const shownSubs =
-      showAll || subs.length <= SUBTASK_PREVIEW
-        ? subs
-        : subs.slice(-SUBTASK_PREVIEW);
+      showAll || visible.length <= SUBTASK_PREVIEW
+        ? visible
+        : visible.slice(-SUBTASK_PREVIEW);
 
     return (
       <div key={id}>
@@ -379,19 +413,28 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
             }
           }}
         >
-          {/* 图标槽：**静止是状态图标，鼠标移到槽上换成箭头**（照 VitaAgent 的项目行）。
-              点它只展开、不打开会话 —— 两个动作各有各的落点。
-              不能展开的行不换箭头，也不接点击。
+          {/* 行首那一块：**常驻的展开箭头 ＋ 状态图标**，两个记号各占一列。
+              点它展开/收起，点行的其余部分打开会话 —— 两个动作各有各的落点。
+
+              箭头从前是**只在鼠标悬到那 20×20 的槽上时才换出来**的（静止显示状态
+              图标）。那等于「能不能展开」这件事在界面上没有任何痕迹：扫一眼侧栏
+              看不出有下一层，触屏上压根没有 hover、这个功能就是不存在
+              （用户原话：「子会话的显示…还没有展开收起功能」）。
+              现在箭头常驻，不能展开的行留一个同宽的空位，让所有会话行的文字
+              仍旧从同一个 x 起。
+
               状态不再另印一个文字胶囊：图标已经把四态说清楚了，语义由
-              `aria-label` / `title` 承担（见 ② 那条「去掉冗余文字」）。 */}
+              `aria-label` / `title` 承担（见「去掉冗余文字」那条）。 */}
           <span
-            className={`${styles.leadSlot} ${styles.statusIcon} ${
-              styles[status] ?? ""
-            } ${expandable ? styles.leadToggle : ""}`}
+            className={`${styles.lead} ${expandable ? styles.leadToggle : ""}`}
             role={expandable ? "button" : undefined}
             tabIndex={expandable ? -1 : undefined}
             aria-expanded={expandable ? expanded : undefined}
-            aria-label={statusLabel}
+            aria-label={
+              expandable
+                ? `${statusLabel} · ${expanded ? "收起子代理" : "展开子代理"}`
+                : statusLabel
+            }
             title={
               expandable
                 ? `${statusLabel} · ${expanded ? "收起子代理" : "展开子代理"}`
@@ -406,20 +449,23 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                 : undefined
             }
           >
-            <span className={styles.leadRest}>{STATUS_ICON[status]}</span>
-            {expandable ? (
-              <span className={styles.leadHover}>
-                {expanded ? <CaretDownOutlined /> : <CaretRightOutlined />}
-              </span>
-            ) : null}
+            <span className={styles.caret} aria-hidden>
+              {expandable ? (
+                expanded ? (
+                  <CaretDownOutlined />
+                ) : (
+                  <CaretRightOutlined />
+                )
+              ) : null}
+            </span>
+            <span
+              className={`${styles.leadSlot} ${styles.statusIcon} ${
+                styles[status] ?? ""
+              }`}
+            >
+              {STATUS_ICON[status]}
+            </span>
           </span>
-
-          {/* 号位：与钉钉「#N」同一个编号，在手机上照着这个号下发 */}
-          {t.slot != null && (
-            <Tooltip title={`钉钉里发「#${t.slot} 内容」即下发到这个终端`}>
-              <span className={styles.sessSlot}>{t.slot}</span>
-            </Tooltip>
-          )}
 
           <div className={styles.sessBody}>
             <div className={styles.sessRow}>
@@ -429,6 +475,20 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                 plain={sessionTitle(t, "新会话")}
                 text={sessionTitle(t, "新会话")}
               />
+              {/* 号位：与钉钉「#N」同一个编号，在手机上照着这个号下发。
+                  **放在标题行的末尾，不放在标题前面** —— 它从前插在图标槽与标题
+                  之间，把会话行的文字列往右推了 26px（徽标 18 ＋ gap 8），比子行
+                  30px 缩进带来的 20px 还多。于是「父的字比子的字更靠右」，一列扫
+                  下去父子完全分不出层级（用户原话：「子会话，为什么是都堆在和主
+                  会话同一层级」）。而且这 26px 只有**带号位的会话**才有 ——
+                  同一棵树里，有号位的看着是平的、没号位的又是缩进的。
+                  现在文字列上只剩 `[缩进][图标槽 20][标题]`，每一行都一样，
+                  父子差就恒等于那 20px 的缩进。 */}
+              {t.slot != null && (
+                <Tooltip title={`钉钉里发「#${t.slot} 内容」即下发到这个终端`}>
+                  <span className={styles.sessSlot}>{t.slot}</span>
+                </Tooltip>
+              )}
             </div>
             {/* 正在干什么。单行截断 —— 它是一眼扫过去的补充信息，
                 不该把一行会话撑成三行 */}
@@ -495,9 +555,11 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
               <>
                 {shownSubs.map((st) => renderSubTask(id, st))}
                 {/* 截断提示行。样式与「查看全部会话」同一档（32 高 / 14 / muted）：
-                    它是列表的最后一行，不是一颗按钮。
-                    **纯渲染层截断，不发请求** —— 清单早就一次拉全缓存在 store 里了 */}
-                {subs.length > SUBTASK_PREVIEW ? (
+                    它是当前这份列表的最后一行，不是一颗按钮。
+                    **纯渲染层截断，不发请求** —— 清单早就一次拉全缓存在 store 里了。
+                    数的是 `visible`（当前列表）不是 `subs`（全部）：折叠着已结束的
+                    时候写「共 25 条」而眼前只有 3 条在跑，那句话就对不上眼前的列表。 */}
+                {visible.length > SUBTASK_PREVIEW ? (
                   <div
                     className={styles.subMore}
                     role="button"
@@ -510,7 +572,39 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                       }
                     }}
                   >
-                    {showAll ? "收起" : `展开全部（共 ${subs.length} 条）`}
+                    {showAll ? "收起" : `展开全部（共 ${visible.length} 条）`}
+                  </div>
+                ) : null}
+                {/* 已结束的那些收在这一行后面。
+                    **文案不说「已完成」** —— 失败与被中断的也在这堆里，
+                    管它们叫完成就是说假话。「已结束」对三种收场都成立；
+                    真有跑砸的就单报一笔，别让它被这行字淹掉。 */}
+                {done.length ? (
+                  <div
+                    className={styles.subMore}
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={doneOpen}
+                    onClick={() => toggleDone(id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        toggleDone(id);
+                      }
+                    }}
+                  >
+                    {doneOpen ? (
+                      `收起已结束的 ${done.length} 个`
+                    ) : (
+                      <>
+                        {`已结束 ${done.length} 个`}
+                        {failedCount ? (
+                          <span className={styles.subMoreBad}>
+                            {`${failedCount} 个失败`}
+                          </span>
+                        ) : null}
+                      </>
+                    )}
                   </div>
                 ) : null}
               </>

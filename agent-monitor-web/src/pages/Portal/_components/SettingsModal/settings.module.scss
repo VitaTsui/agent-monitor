@@ -158,38 +158,23 @@
       transition: all 0.18s;
     }
 
-    // 撤销信任 / 断开：中性描边，hover 转警示
-    .actBtn {
-      color: var(--muted-foreground);
-      border-color: var(--overlay-2);
-      background: transparent;
-
-      &:hover {
-        color: var(--destructive);
-        border-color: var(--destructive-subtle);
-        background: var(--destructive-subtle);
-      }
-    }
-
-    // 协助共享：主题色描边，hover 填充
-    .shareBtn {
-      color: var(--primary);
-      border-color: color-mix(in srgb, var(--primary) 45%, transparent);
-      background: transparent;
-
-      &:hover {
-        color: var(--primary-foreground);
-        border-color: var(--primary);
-        background: var(--primary);
-      }
-    }
+    // 撤销信任 / 断开（中性描边 hover 转警示）与协助共享（主题色描边 hover 填充）
+    // 的配色，都由 DevicesPane/index.tsx 的 OutlineWarnButton / OutlineFillButton
+    // 用 antd 的 Button 组件令牌给 —— 这里只管形状。
+    // 别把颜色搬回来：antd 6 的 hover 规则特异度 (0,4,0)，这段靠嵌套凑到 (0,4,0)
+    // 打平、再靠源码顺序侥幸赢，谁拍平嵌套谁就踩回 hover 底色被刷掉的坑。
 
     // 信任：主色实心
     .trustBtn {
       box-shadow: 0 2px 6px color-mix(in srgb, var(--primary) 25%, transparent);
     }
 
-    // 删除：极低调，hover 才显红
+    // 删除：极低调，hover 才显红。
+    // TODO(本项目令牌层): 这条 hover 跟 antd 的 (0,4,0) 只是打平、靠源码顺序赢，
+    // 不稳。想彻底拆掉它得把 `--destructive` 接进 Routes.tsx 那个 ConfigProvider 的
+    // `colorError`/`colorErrorHover`——那是全站令牌改动，先不在这一次里做。
+    // 实测：删掉这条改吃 antd 自带的 danger 红，浅色下 hover 会从 #dc2626(4.42:1)
+    // 退成 #e8524d(3.34:1)，更糟，所以保留。
     .delBtn {
       color: var(--muted-foreground);
 
