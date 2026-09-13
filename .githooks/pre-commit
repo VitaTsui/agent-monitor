@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# 提交前把 `cargo fmt` 的漂移挡住。
+#
+# 为什么有这个钩子：CI 里 `cargo fmt --all -- --check` 是硬门槛（见
+# .github/workflows/ci.yml 的「格式检查」一步），但本地连着写完一批提交、
+# 中途不推分支的话，这条失败要等到发版合 main 时才现形 —— 0.12.0 和 0.12.4
+# 两次都是发版当场才发现、临时补一刀格式提交。把它挪到提交那一刻。
+#
+# 这里**只查格式**，不跑 clippy / test：那两个动辄几十秒到几分钟，挂在
+# 每次提交上必然被 `--no-verify` 绕过去，绕过去就等于没装。clippy 与 test
+# 仍由 CI 兜底。
+#
+# 要临时跳过：`git commit --no-verify`（本钩子不做硬卡死）。
+
+set -uo pipefail
+
+# 只有真的暂存了 .rs 才跑 —— 改前端也等 cargo 启动的话，人会嫌烦然后绕过去。
+# --diff-filter=ACMR：只看新增/复制/修改/改名，删掉的文件没什么好格式化的。
+staged_rs=$(git diff --cached --name-only --diff-filter=ACMR -z \
+  | tr '\0' '\n' | grep -E '\.rs$' || true)
+
+if [ -z "$staged_rs" ]; then
+  exit 0
+fi
+
+# 工作区在子目录里，钩子的 cwd 是仓库根。
+ws="agent-task-monitor"
+if [ ! -f "$ws/Cargo.toml" ]; then
+  echo "pre-commit: 找不到 $ws/Cargo.toml，跳过格式检查" >&2
+  exit 0
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-commit: 没有 cargo，跳过格式检查（CI 仍会拦）" >&2
+  exit 0
+fi
+
+if (cd "$ws" && cargo fmt --all -- --check >/dev/null 2>&1); then
+  exit 0
+fi
+
+# 到这里说明没过。把不合格的文件列出来，并给一条能直接照做的命令。
+echo >&2
+echo "✗ cargo fmt 没过 —— 这次提交里有 Rust 文件，CI 的格式检查会因此变红。" >&2
+echo >&2
+echo "  不合规的文件：" >&2
+# rustfmt 的行长这样：`Diff in /abs/path/foo.rs:824:` —— 末尾那个冒号也要去掉，
+# 再把仓库根前缀削掉，列出来才是一眼能认的相对路径。
+root="$(pwd)"
+(cd "$ws" && cargo fmt --all -- --check 2>/dev/null \
+  | grep '^Diff in ' | sed 's/^Diff in //; s/:[0-9]*:*$//' | sort -u \
+  | sed "s|^$root/||" | sed 's|^|    |') >&2
+echo >&2
+echo "  修好再提交（纯格式化，不改语义）：" >&2
+echo >&2
+echo "      cd $ws && cargo fmt --all" >&2
+echo "      git add -u && git commit ..." >&2
+echo >&2
+echo "  确实要先提交、稍后再整：git commit --no-verify" >&2
+echo >&2
+
+exit 1
