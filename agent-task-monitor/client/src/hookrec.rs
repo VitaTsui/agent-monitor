@@ -37,10 +37,10 @@ pub struct HookReport {
     pub session_id: String,
     /// 这条记录的落盘时刻（epoch 毫秒）。
     ///
-    /// 用来判断 `pending_select` 是否**已经作答**：拿它跟 jsonl 里那次 AskUserQuestion 的
-    /// tool_result 时间戳比，结果更晚就说明卡片已被了结（见 client::state 的回填处）。
-    /// 毫秒精度是必须的 —— 秒精度会在「同一秒内答完上一张、又弹出新一张」上判错。
+    /// 「有没有作答」不看它，看 [`Self::select_at_ms`] —— 这条记录可能只是某个无关工具
+    /// 触发的 hook，它的落盘时刻与那张卡什么时候弹出来没有关系。
     /// （TTL 用的秒级 `at` 在 [`read_reports`] 内部消化，不必带出来。）
+    #[allow(dead_code)]
     pub at_ms: u64,
     /// 终端**此刻正等着你选**：AskUserQuestion 的整份 input（questions/options）。
     ///
@@ -48,6 +48,13 @@ pub struct HookReport {
     /// 人在终端上选完了远端才亮出选项，等于没用。而 PreToolUse 在工具**执行前**触发，
     /// 拿到的就是即将弹给用户的那些选项，这才是「远程替终端做决定」需要的时机。
     pub pending_select: Option<serde_json::Value>,
+    /// 这张待选卡**弹出**的时刻（epoch 毫秒），不是本条记录的落盘时刻。
+    ///
+    /// 与 jsonl 里那次 AskUserQuestion 的 tool_result 时刻比大小，就知道它有没有被答过。
+    /// 必须是「弹出时刻」而不是「落盘时刻」：卡片会被后续无关的 hook 事件一路继承下去，
+    /// 每继承一次就重盖一次落盘时刻的话，「作答时刻 ≥ 弹出时刻」永远不可能成立，
+    /// 答完的卡片就永久挂在界面上（见 `record` 里的说明）。
+    pub select_at_ms: u64,
 }
 
 fn now_secs() -> u64 {
@@ -110,11 +117,24 @@ pub fn run_hook_cli(data_dir: &Path) {
         .and_then(|x| x.as_str())
         .unwrap_or("");
     let tool = v.get("tool_name").and_then(|x| x.as_str()).unwrap_or("");
-    let pending_select = match (event, tool) {
-        ("PreToolUse", "AskUserQuestion") => v.get("tool_input").cloned(),
-        ("PostToolUse", "AskUserQuestion") => None,
-        // 与选择卡无关的事件：把上一条记录里的待选原样带过来，别动它
-        _ => prev_pending_select(&dir, claude_pid),
+    //
+    // **继承时连它的弹出时刻一起继承**，不要重新盖上「此刻」的时间戳。
+    // 那个时间戳是「这张卡是什么时候弹出来的」，唯一的用途是与 jsonl 里那次
+    // AskUserQuestion 的 tool_result 时刻比大小，判断它有没有被答过
+    // （见 client::state 的回填处）。而 PostToolUse(AskUserQuestion) 这条 hook 缺席的
+    // 情形不少（旧版没写这条配置、拿不到 CLAUDE_PID、用户按 Esc 打断），
+    // 那时全靠这个比较把答完的卡撤下来。
+    //
+    // 早先继承只带过 pending_select、时间戳照写「此刻」：人在终端答完之后，会话继续跑，
+    // 随便哪个别的工具触发一次 hook，这张陈旧卡片的时刻就被重新盖成「现在」——
+    // 于是「作答时刻 ≥ 弹出时刻」这个判据**永远再也不可能成立**，卡片就此永久挂在界面上。
+    // 实测会话 9168ec90：4 次 AskUserQuestion 全部有配对的 tool_result（即全答过了），
+    // 界面上那张卡却还在。
+    let (pending_select, select_at_ms) = match (event, tool) {
+        ("PreToolUse", "AskUserQuestion") => (v.get("tool_input").cloned(), now_ms()),
+        ("PostToolUse", "AskUserQuestion") => (None, 0),
+        // 与选择卡无关的事件：把上一条记录里的待选**连同它的弹出时刻**原样带过来
+        _ => prev_pending(&dir, claude_pid),
     };
     let rec = serde_json::json!({
         "claude_pid": claude_pid,
@@ -123,6 +143,7 @@ pub fn run_hook_cli(data_dir: &Path) {
         "at": now_secs(),
         "at_ms": now_ms(),
         "pending_select": pending_select,
+        "select_at_ms": select_at_ms,
     });
     let Ok(txt) = serde_json::to_string(&rec) else {
         return;
@@ -134,14 +155,34 @@ pub fn run_hook_cli(data_dir: &Path) {
     }
 }
 
-/// 读上一条记录里的待选状态，供与选择卡无关的 hook 事件原样继承。
+/// 读上一条记录里的待选状态**与它的弹出时刻**，供与选择卡无关的 hook 事件原样继承。
+///
+/// 时刻必须一起继承：它是「这张卡什么时候弹出来的」，重新盖成「此刻」会让
+/// 「已作答」的判据永远失效（见上面写记录处的说明）。
+/// 旧客户端写的记录没有 `select_at_ms`，此时**弹出时刻按「未知」（0）算**，而不是退回
+/// 那条记录的落盘时刻 —— 后者已经被旧逻辑一路重盖成「此刻」，是个错得离谱的晚值，
+/// 继承过来只会把卡片继续钉在界面上。
+///
+/// 「未知」是安全的：撤卡的判据是「jsonl 里那次 AskUserQuestion 已经有 tool_result」，
+/// 而这个事实只在**真的答过**时才成立 —— 卡片还开着时 `select_answered_ms` 是 None
+/// （见 scanner 的 `open_ask`），拿不到就不会撤。于是升级之后，残留的旧卡当轮即撤，
+/// 正开着的卡照常显示。
 ///
 /// hook 必须极快，这里只读一个几百字节的小文件、任何异常都当「没有」——
 /// 丢一次待选顶多是远端少显示一张卡，而拖慢 hook 会直接卡住用户的会话。
-fn prev_pending_select(dir: &Path, claude_pid: u32) -> Option<serde_json::Value> {
-    let txt = std::fs::read_to_string(dir.join(format!("{claude_pid}.json"))).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
-    v.get("pending_select").filter(|x| !x.is_null()).cloned()
+fn prev_pending(dir: &Path, claude_pid: u32) -> (Option<serde_json::Value>, u64) {
+    let Ok(txt) = std::fs::read_to_string(dir.join(format!("{claude_pid}.json"))) else {
+        return (None, 0);
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else {
+        return (None, 0);
+    };
+    let sel = v.get("pending_select").filter(|x| !x.is_null()).cloned();
+    if sel.is_none() {
+        return (None, 0);
+    }
+    let at = v.get("select_at_ms").and_then(|x| x.as_u64()).unwrap_or(0);
+    (sel, at)
 }
 
 /// 取当前进程的父进程 pid（CLAUDE_PID 缺失时的兜底）
@@ -201,6 +242,9 @@ pub fn read_reports(data_dir: &Path, max_age_secs: u64) -> Vec<HookReport> {
                 .and_then(|x| x.as_u64())
                 .unwrap_or(at.saturating_mul(1000)),
             pending_select: v.get("pending_select").filter(|x| !x.is_null()).cloned(),
+            // 这张卡**弹出**的时刻。缺失（旧客户端写的记录）按「未知」算 0 ——
+            // 见 prev_pending 的说明：残留的旧卡当轮即撤，正开着的卡照常显示。
+            select_at_ms: v.get("select_at_ms").and_then(|x| x.as_u64()).unwrap_or(0),
         });
     }
     out
@@ -450,5 +494,68 @@ mod tests {
         assert!(root["hooks"]["SessionStart"].is_array());
         assert!(root["hooks"]["PreToolUse"].is_array());
         assert_eq!(root["hooks"]["PreToolUse"][0]["matcher"], "*");
+    }
+
+    /// **答完的选项卡必须撤得下来**：卡片被后续无关的 hook 事件一路继承时，
+    /// 「弹出时刻」不能跟着重盖成「此刻」——否则「作答时刻 ≥ 弹出时刻」这个判据
+    /// 永远不可能成立，卡片就永久挂在界面上（实测会话 9168ec90：4 次
+    /// AskUserQuestion 全都有配对的 tool_result，界面上那张卡却还在）。
+    #[test]
+    fn inherited_card_keeps_its_original_popup_time() {
+        let dir = std::env::temp_dir().join(format!("am-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid = 4242u32;
+        let card = serde_json::json!({ "questions": [{ "question": "选哪个?" }] });
+        let popup = 1_000_000u64;
+
+        // ① 卡片弹出：PreToolUse(AskUserQuestion) 记下它与弹出时刻
+        std::fs::write(
+            dir.join(format!("{pid}.json")),
+            serde_json::json!({
+                "claude_pid": pid, "session_id": "s1", "cwd": "/p",
+                "at": popup / 1000, "at_ms": popup,
+                "pending_select": card, "select_at_ms": popup,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // ② 人在终端答完了，会话继续跑：别的工具触发 hook，卡片被原样继承
+        let (inherited, at) = prev_pending(&dir, pid);
+        assert_eq!(inherited.as_ref(), Some(&card), "待选要继承下来");
+        assert_eq!(at, popup, "弹出时刻必须一起继承，不能盖成「此刻」");
+
+        // ③ 旧客户端写的记录没有 select_at_ms → 弹出时刻按「未知」(0) 算。
+        // 那条记录的 at_ms 早被旧逻辑一路重盖成「此刻」，继承过来只会把卡继续钉住；
+        // 给 0 则「已答过」的判据当轮成立，残留卡片立刻撤下（正开着的卡因为
+        // select_answered_ms 为 None，照样不受影响）。
+        std::fs::write(
+            dir.join(format!("{pid}.json")),
+            serde_json::json!({
+                "claude_pid": pid, "session_id": "s1", "cwd": "/p",
+                "at": popup / 1000, "at_ms": popup, "pending_select": card,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            prev_pending(&dir, pid).1,
+            0,
+            "缺字段时按未知算，不退回 at_ms"
+        );
+
+        // ④ 没有待选时不该凭空造出一个时刻
+        std::fs::write(
+            dir.join(format!("{pid}.json")),
+            serde_json::json!({
+                "claude_pid": pid, "session_id": "s1", "cwd": "/p",
+                "at": popup / 1000, "at_ms": popup, "pending_select": serde_json::Value::Null,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(prev_pending(&dir, pid), (None, 0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
