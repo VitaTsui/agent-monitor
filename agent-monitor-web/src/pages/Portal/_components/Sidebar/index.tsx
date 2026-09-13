@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 
-import { Input } from "@hsu-react/ui";
+import { Icon, Input } from "@hsu-react/ui";
 import { Badge, Dropdown, Tooltip } from "antd";
 import {
   ControlOutlined,
@@ -10,7 +10,6 @@ import {
   SearchOutlined,
   SettingOutlined,
   UnorderedListOutlined,
-  UpOutlined,
 } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 import { useNavigate } from "react-router-dom";
@@ -292,7 +291,14 @@ const Sidebar: React.FC<SidebarProps> = observer((props) => {
               <>
                 <span className={styles.accountName}>{nickname}</span>
                 <Badge count={pendingCount} size="small">
-                  <UpOutlined className={styles.accountCaret} />
+                  {/* 账号行右侧那枚记号：换成参照用的 `ph:caret-up-down`
+                      （VitaAgent `Sidebar/index.tsx:1172`，配 14px ＋ muted 实测）。
+                      **双向箭头比单向的「^」更准**：点它弹出的是一个菜单，
+                      不是「收起」——单向箭头在说一件它不做的事。 */}
+                  <Icon
+                    icon="ph:caret-up-down"
+                    className={styles.accountCaret}
+                  />
                 </Badge>
               </>
             )}

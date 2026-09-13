@@ -130,11 +130,7 @@ $text-col: $tile + $tile-gap;
   margin-top: 8px;
   color: var(--muted-foreground);
   font-size: var(--text-sm);
-  transition: transform 0.15s;
-}
-
-.caretOpen {
-  transform: rotate(180deg);
+  transition: color 0.15s;
 }
 
 /* 子代理自己跑砸时的原因。摆在卡片头下方、展开区之外 */

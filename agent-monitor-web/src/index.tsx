@@ -30,7 +30,7 @@ import { SingleRouter } from "@hsu-react/single-router";
 import { addCollection, type IconifyJSON } from "@iconify/react";
 import phSubset from "./assets/iconify/ph.subset.json";
 
-/* Phosphor 图标子集，**构建期打进产物**（3.9 KB，12 枚）。
+/* Phosphor 图标子集，**构建期打进产物**（4.5 KB，15 枚）。
  *
  * 状态图标（执行中 / 成功 / 失败 / 中断…）一律走 Phosphor，与 VitaAgent 逐字相同
  * （见 `pages/Portal/_components/StatusIcon`）；此前在 antd 图标里挑「语义最近的

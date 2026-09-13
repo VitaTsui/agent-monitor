@@ -1,7 +1,8 @@
 import React from "react";
 
 import { Dropdown, Tooltip } from "antd";
-import { CheckOutlined, DownOutlined, LaptopOutlined } from "@ant-design/icons";
+import { CheckOutlined, LaptopOutlined } from "@ant-design/icons";
+import { Icon } from "@hsu-react/ui";
 import { observer } from "mobx-react-lite";
 
 import PortalStore from "../../../../PortalStore";
@@ -52,26 +53,13 @@ const DeviceSelect: React.FC = observer(() => {
     </>
   );
 
-  /**
-   * 会话数**必须带上口径**：它是客户端回溯窗口（`AM_HISTORY_DAYS`，默认 30 天）
-   * 内的条数，不是「列表里有这么多条」。
-   *
-   * 不带限定词的那句「64 会话」是在说假话：CLI 那一列现在只列**当前打开的**终端
-   * （见 PortalStore.clientSections），点开往往只有两三条；桌面那一列也要翻页
-   * 才铺得出来。用户原话：「会话数量不对」。
-   *
-   * 为什么不改成「实际会列出的条数」：那个数对**没选中的设备**根本不存在 ——
-   * 桌面客户端列的是历史，而历史只有点开那一组才会去拉；这里要给列表里每一台
-   * 设备都印一个数，只能用随 `/monitor/devices` 一起下发的这个。
-   * 与其印一个算不准的，不如把印的这个说清楚是什么。
-   */
-  const countDsr = (n: number) => `近 30 天 ${n} 条`;
-
+  /* 会话数不印了（用户原话：「这里数量不需要」）。它是客户端回溯窗口内的条数，
+     与侧栏实际列出多少本来就不是一回事 —— 之前靠加「近 30 天」这个限定词把话说圆，
+     现在整段去掉，那个容易被误读的数字**从根上没有了**。
+     「离线」留着：那是状态不是数量，去掉就看不出这台机器还在不在了。 */
   const title = `${current.hostname} · ${current.platformDsr}${
     current.online ? "" : " · 离线"
-  } · ${countDsr(current.count)}${
-    current.running > 0 ? ` · ${current.running} 执行中` : ""
-  }`;
+  }${current.running > 0 ? ` · ${current.running} 执行中` : ""}`;
 
   if (single) {
     return (
@@ -95,8 +83,10 @@ const DeviceSelect: React.FC = observer(() => {
         <span className={styles.menuName}>{d.hostname}</span>
         {d.isLocal ? <span className={styles.localTag}>本机</span> : null}
         <span className={styles.menuMeta}>
-          {d.online ? countDsr(d.count) : "离线"}
-          {d.running > 0 ? ` · ${d.running} 执行中` : ""}
+          {d.online ? null : "离线"}
+          {d.running > 0
+            ? `${d.online ? "" : " · "}${d.running} 执行中`
+            : ""}
         </span>
         {d.machineId === current.machineId ? (
           <CheckOutlined className={styles.menuCheck} />
@@ -121,7 +111,9 @@ const DeviceSelect: React.FC = observer(() => {
           title={title}
         >
           {face}
-          <DownOutlined className={styles.caret} />
+          {/* 「这一行可以展开成一个下拉」的记号。`ph:caret-down` 与侧栏里客户端组
+              那枚折叠箭头是同一枚字形、同一个尺寸 —— 一列之内不该有两种箭头。 */}
+          <Icon icon="ph:caret-down" className={styles.caret} />
         </button>
       </Dropdown>
     </div>

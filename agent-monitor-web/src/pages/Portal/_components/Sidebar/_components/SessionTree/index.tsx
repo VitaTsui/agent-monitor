@@ -4,7 +4,6 @@ import { Tooltip } from "antd";
 import {
   CaretDownOutlined,
   CaretRightOutlined,
-  DownOutlined,
   LaptopOutlined,
   SplitCellsOutlined,
 } from "@ant-design/icons";
@@ -357,7 +356,13 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                     这一列铺的就是那台机器的会话，每一行组标题再重复一遍机器名
                     纯属占地方，机器一多还会让同一个客户端名出现好几遍。 */}
                 <span className={styles.groupLabel}>{sec.providerDsr}</span>
-                <DownOutlined
+                {/* 折叠箭头换 Phosphor。**尺寸本来就是 12px**（与参照
+                    `Sidebar/index.module.scss:659-663` 实测一致），看着大是因为
+                    antd 的 `DownOutlined` 字形把 em 框填得更满 —— 同样 12px，
+                    它画出来的实体比 `ph:caret-down` 大一圈。和文件夹那次是同一类
+                    问题：不是把数字调小，是把字形换成同一套。 */}
+                <Icon
+                  icon="ph:caret-down"
                   className={`${styles.groupCaret} ${
                     collapsed ? styles.groupCaretUp : ""
                   }`}

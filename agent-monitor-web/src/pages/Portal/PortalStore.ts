@@ -476,20 +476,15 @@ class PortalStore {
    *
    * 顺序 = `_sortedDevices`：本机优先、其次主机名。选择器与分组同一个顺序。
    */
+  /* **不带会话数**：两个消费方（设备选择器、命令面板）都不印了 ——
+     `providers[].sessionCount` 是客户端回溯窗口内的条数，与侧栏实际列出多少
+     不是一回事，不带限定词就会被读成「列表里有这么多」。字段连同那次求和
+     一并去掉，不留着白算。 */
   get deviceList(): {
     machineId: string;
     hostname: string;
     platform: string;
     platformDsr: string;
-    /**
-     * 这台机器**近 30 天**有多少条会话（取自 `providers[].sessionCount` 之和）。
-     *
-     * **不是「列表里会列出这么多条」**：那个窗口是客户端的 `AM_HISTORY_DAYS`
-     * （默认 30 天），而侧栏 CLI 那一列只列当前打开的终端、桌面那一列要翻页。
-     * 消费方印它的时候必须带上「近 30 天」这个限定词（见 `DeviceSelect`），
-     * 否则就是一个没有限定词的数字对着一列三条的列表。
-     */
-    count: number;
     /** 此刻有几条在执行 */
     running: number;
     /** 此刻在不在线。离线设备**照样列出来**（历史会话仍然看得到） */
@@ -502,9 +497,6 @@ class PortalStore {
       hostname: d.hostname || d.id,
       platform: d.platform,
       platformDsr: d.platformDsr,
-      count:
-        d.providers.reduce((n, p) => n + (p.sessionCount ?? 0), 0) ||
-        d.sessionCount,
       running: d.runningCount,
       online: d.online,
       isLocal: !!this._localMachineId && d.id === this._localMachineId,
