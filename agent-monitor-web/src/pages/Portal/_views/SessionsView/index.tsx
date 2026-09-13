@@ -2,7 +2,6 @@ import { Icon } from "@hsu-react/ui";
 import React from "react";
 
 import { Empty } from "antd";
-import { CodeOutlined } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 import { useNavigate } from "react-router-dom";
 
@@ -113,7 +112,7 @@ const SessionsView: React.FC = observer(() => {
                           DOT_CLASS[t.status ?? ""] ?? styles.finished
                         }`}
                       />
-                      <CodeOutlined className={styles.rowIcon} />
+                      <Icon icon="ph:terminal-window" className={styles.rowIcon} />
                       <span className={styles.rowTitle}>
                         {sessionTitle(t, "新会话")}
                       </span>

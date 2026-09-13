@@ -2,12 +2,12 @@ import React, { useCallback, useEffect, useState } from "react";
 
 import { Popconfirm, Tag } from "antd";
 import { message } from "@hsu-react/ui";
-import { PlusOutlined } from "@ant-design/icons";
 
 import {
   Button,
   ColumnsType,
   Descriptions,
+  Icon,
   Input,
   Modal,
   Panel,
@@ -191,7 +191,7 @@ const Version: React.FC = () => {
           <div className={styles.sectionTitle}>更新日志</div>
           <Button
             type="primary"
-            icon={<PlusOutlined />}
+            icon={<Icon icon="ph:plus" />}
             onClick={() => setAddOpen(true)}
             hasPermi={["sysmgmt:version:upd"]}
           >

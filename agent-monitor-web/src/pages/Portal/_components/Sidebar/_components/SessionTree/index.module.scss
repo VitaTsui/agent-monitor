@@ -201,14 +201,6 @@
   }
 }
 
-/* 带第二行（正在干什么）的会话行：高度交给内容，上下各留 4 */
-.itemTall {
-  height: auto;
-  min-height: 32px;
-  padding-top: 4px;
-  padding-bottom: 4px;
-}
-
 /* 标题铺满整行，右端**渐隐**而不是省略号：省略号方案要给右侧按钮留一块死宽度，
    渐隐则让文字一直用到行边，长标题因此能多显出三四个字 */
 .itemTitle {
@@ -353,39 +345,11 @@
   padding-left: calc(10px + var(--level-indent) + var(--caret-col));
 }
 
-.sessBody {
-  flex: 1;
-  min-width: 0;
-}
-
-.sessRow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 /* 状态图标的配色与转圈**不在这儿** —— 四处共用 `_components/StatusIcon`，
    那一份自带颜色与动画。这里只给尺寸（`.leadSlot` 的 font-size: 12px）。
    从前这两块（`.statusIcon` / `.subIcon`）各配一遍色，是「同一个执行中长出好几个
    样子」的来源之一。 */
 
-
-/**
- * 「正在干什么」那一行（lastAction）。
- *
- * 这条数据后端一直在下发，但此前全前端一处都没渲染 —— 于是「执行中」永远只有
- * 那三个字，看不出它在跑哪一步。单行截断：它是一眼扫过去的补充信息，
- * 不该把一行会话撑成三行。
- */
-.sessAction {
-  margin-top: 1px;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: var(--text-sm);
-  line-height: 16px;
-  color: var(--muted-foreground);
-}
 
 // 悬停才出现且才占位：常态 display:none，状态徽标右侧不再留白
 .sessionItem:hover .splitBtn {

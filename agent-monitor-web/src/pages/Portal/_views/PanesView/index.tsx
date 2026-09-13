@@ -1,7 +1,6 @@
 import { Icon } from "@hsu-react/ui";
 import React from "react";
 
-import { CodeOutlined } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
 import PortalStore from "../../PortalStore";
@@ -47,7 +46,7 @@ const PanesView: React.FC = observer(() => {
       <div className={styles.mainEmpty}>
         <div className={styles.greeting}>
           <span className={styles.greetLogo}>
-            <CodeOutlined />
+            <Icon icon="ph:terminal-window" />
           </span>
           你好，{nickname}
         </div>

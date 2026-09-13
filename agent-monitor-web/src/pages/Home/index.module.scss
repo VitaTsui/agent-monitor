@@ -125,7 +125,12 @@
   .featureIcon {
     display: inline-flex; align-items: center; justify-content: center;
     width: 44px; height: 44px; border-radius: var(--radius-lg);
-    background: color-mix(in srgb, var(--primary) 10%, transparent); color: var(--primary); font-size: 20px;
+    background: color-mix(in srgb, var(--primary) 10%, transparent); color: var(--primary);
+    // 23 而不是 20：这组图标从 antd 迁到 Phosphor，Phosphor 的墨迹统一只占画布 75%，
+    // antd 那批是 89%~103%。实测 getBBox（同字号量墨迹边长占画布比例）：
+    // eye -3.7% / sliders -16% / hard-drives -25% / lock -5.5% / shield-check -24% / desktop -18.7%，
+    // 中位数约 -17%。按 +15% 把这一组整体补回来，组内相对关系不动。
+    font-size: 23px;
     margin-bottom: 16px;
   }
   .featureTitle { font-size: var(--text-lg); font-weight: 700; margin-bottom: 8px; }
@@ -173,7 +178,8 @@
     display: inline-block; margin-top: 14px; padding: 6px 18px;
     border-radius: var(--radius-full); background: var(--primary); color: var(--primary-foreground); font-size: var(--text-base); font-weight: 600;
   }
-  .clientIcon { font-size: 40px; color: var(--foreground); margin-bottom: 14px; }
+  // 45 而不是 40：同上，Apple -5.8% / Windows -14.5% / Android -12.5%，中位数 -12.5%
+  .clientIcon { font-size: 45px; color: var(--foreground); margin-bottom: 14px; }
   .clientName { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
   .clientDesc { font-size: var(--text-base); color: color-mix(in srgb, var(--foreground) 62%, transparent); line-height: 1.6; }
 }

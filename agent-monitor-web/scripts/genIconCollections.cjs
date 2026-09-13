@@ -38,7 +38,7 @@ const path = require("path");
  * 用到新图标集时在这儿加一行即可，不用改 `src/index.tsx`：生成物是「集合数组」，
  * 注册那头是遍历。
  */
-const PREFIXES = ["ph", "fa-regular", "ep"];
+const PREFIXES = ["ph", "fa-regular", "ep", "ri"];
 
 const ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(ROOT, "src");

@@ -3,7 +3,6 @@ import React, { useCallback, useEffect, useState } from "react";
 // Modal.confirm 这类命令式弹窗 hsu-ui 未提供，按约定用 antd 兜底（组件式仍用 hsu-ui 的 Modal）
 import { Modal as AntdModal, QRCode, Spin } from "antd";
 import { Icon, message } from "@hsu-react/ui";
-import { DingtalkOutlined } from "@ant-design/icons";
 
 import { Button, Copy, Input, Modal } from "@hsu-react/ui";
 
@@ -302,7 +301,7 @@ const IntegrationsPanel: React.FC = () => {
       <div className={styles.groupTitle}>钉钉</div>
       <div className={styles.boundCard}>
         <div className={styles.boundTitle}>
-          <DingtalkOutlined className={styles.boundTitleIcon} />
+          <Icon icon="ri:dingding-line" className={styles.boundTitleIcon} />
           钉钉机器人
           {hasSecret ? (
             <span
@@ -366,7 +365,7 @@ const IntegrationsPanel: React.FC = () => {
       {hasSecret || globalAvailable ? (
         <div className={styles.boundCard}>
           <div className={styles.boundTitle}>
-            <DingtalkOutlined className={styles.boundTitleIcon} />
+            <Icon icon="ri:dingding-line" className={styles.boundTitleIcon} />
             绑定钉钉号
             <span
               className={`${styles.botState} ${boundIds.length ? styles.botOk : ""}`}
@@ -412,7 +411,7 @@ const IntegrationsPanel: React.FC = () => {
             <div className={styles.idList}>
               {boundIds.map((b) => (
                 <div key={b.staffId} className={styles.idRow}>
-                  <DingtalkOutlined className={styles.idIcon} />
+                  <Icon icon="ri:dingding-line" className={styles.idIcon} />
                   <div className={styles.idName}>
                     <div className={styles.idNick}>
                       {b.nick || "（未取到昵称）"}

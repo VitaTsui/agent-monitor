@@ -1,17 +1,8 @@
 // antd Form 仅作表单容器（hsu-ui Form 只含 Modal/Drawer/Import/useForm，无普通容器）
 import { Divider, Form, Segmented } from "antd";
 import { message } from "@hsu-react/ui";
-import {
-  AppleFilled,
-  CodeOutlined,
-  DingtalkOutlined,
-  GoogleOutlined,
-  LockOutlined,
-  SmileOutlined,
-  UserOutlined,
-} from "@ant-design/icons";
 
-import { Button, FormItem } from "@hsu-react/ui";
+import { Button, FormItem, Icon } from "@hsu-react/ui";
 import LoginStore from "./LoginStore";
 import type { OAuthProvider } from "@/services/apis/login";
 import React, { useEffect, useState } from "react";
@@ -226,7 +217,7 @@ const Login: React.FC = observer(() => {
       <div className={styles.card}>
         <div className={styles.brand}>
           <div className={styles.logo}>
-            <CodeOutlined />
+            <Icon icon="ph:terminal-window" />
           </div>
           <div className={styles.brandName}>终端任务监控</div>
           <div className={styles.brandSub}>
@@ -255,7 +246,7 @@ const Login: React.FC = observer(() => {
             inputHeight={48}
             componentProps={{
               placeholder: "用户名",
-              prefix: <UserOutlined />,
+              prefix: <Icon icon="ph:user" />,
               className: styles.input,
               onKeyDown: onEnter,
             }}
@@ -269,7 +260,7 @@ const Login: React.FC = observer(() => {
               inputHeight={48}
               componentProps={{
                 placeholder: "昵称（选填）",
-                prefix: <SmileOutlined />,
+                prefix: <Icon icon="ph:smiley" />,
                 className: styles.input,
                 onKeyDown: onEnter,
               }}
@@ -285,7 +276,7 @@ const Login: React.FC = observer(() => {
             inputHeight={48}
             componentProps={{
               placeholder: mode === "register" ? "设置密码（6~30 位）" : "密码",
-              prefix: <LockOutlined />,
+              prefix: <Icon icon="ph:lock" />,
               className: styles.input,
               onKeyDown: onEnter,
             }}
@@ -301,7 +292,7 @@ const Login: React.FC = observer(() => {
               inputHeight={48}
               componentProps={{
                 placeholder: "确认密码",
-                prefix: <LockOutlined />,
+                prefix: <Icon icon="ph:lock" />,
                 className: styles.input,
                 onKeyDown: onEnter,
               }}
@@ -354,7 +345,7 @@ const Login: React.FC = observer(() => {
           {googleEnabled !== false && (
             <Button
               className={styles.socialBtn}
-              icon={<GoogleOutlined />}
+              icon={<Icon icon="ph:google-logo" />}
               loading={googleEnabled === undefined}
               onClick={() => onOAuth("google", !!googleEnabled)}
             >
@@ -364,7 +355,7 @@ const Login: React.FC = observer(() => {
           {appleEnabled !== false && (
             <Button
               className={styles.socialBtn}
-              icon={<AppleFilled />}
+              icon={<Icon icon="ph:apple-logo-fill" />}
               loading={appleEnabled === undefined}
               onClick={() => onOAuth("apple", !!appleEnabled)}
             >
@@ -374,7 +365,7 @@ const Login: React.FC = observer(() => {
           {dingtalkEnabled && (
             <Button
               className={styles.socialBtn}
-              icon={<DingtalkOutlined />}
+              icon={<Icon icon="ri:dingding-line" />}
               onClick={onDingtalk}
             >
               钉钉
