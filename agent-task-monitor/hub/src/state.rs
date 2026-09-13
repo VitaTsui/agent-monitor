@@ -496,10 +496,14 @@ pub struct BotMonitor {
 /// 被重新打开后立刻进热列表，而 hub 手里那份历史快照还带着它 —— 最长 30 秒内两边都有。
 /// 此前直接 chain、同一个 id 出两条，全靠网页那头用 Map 压着才没发作；
 /// **靠消费方兜着的不算修好**，在产出侧收口。
-fn dedup_by_id(
-    tasks: impl Iterator<Item = Task>,
+///
+/// **凡是把这两张表 chain 起来的地方都必须过这里**，一处都不能漏 —— 第一次收口时就漏了
+/// [`providers_of`]，结果设备选择器里的「N 会话」把跨表重复的那条数了两遍
+/// （构造 `tasks=[dup-1,dup-2]` + `historyTasks=[dup-2,dup-3]`，唯一会话 3 条却报 4）。
+fn dedup_by_id<'a>(
+    tasks: impl Iterator<Item = &'a Task>,
     seen: &mut std::collections::HashSet<String>,
-) -> Vec<Task> {
+) -> Vec<&'a Task> {
     tasks.filter(|t| seen.insert(t.id.clone())).collect()
 }
 
@@ -523,8 +527,12 @@ fn dedup_by_id(
 /// 排序：会话数多的在前，同数按 provider 名、CLI 在桌面版之前 —— 侧栏的顺序得是
 /// 确定的，不能每轮抖。
 fn providers_of<'a>(tasks: impl Iterator<Item = &'a Task>) -> Vec<am_core::model::ProviderStat> {
+    // 同一条会话可能同时落在热列表与历史列表里（见 dedup_by_id），不去重就会被数两遍 ——
+    // 设备选择器上那个「N 会话」正是这么虚高的。去重收口在这里而不是在两个调用点，
+    // 免得下次又漏一处。
+    let mut seen = std::collections::HashSet::new();
     let mut agg: HashMap<(&str, bool), usize> = HashMap::new();
-    for t in tasks {
+    for t in dedup_by_id(tasks, &mut seen) {
         if crate::server::is_proc_placeholder(t) {
             continue;
         }
@@ -662,14 +670,11 @@ impl AppState {
             // 此前直接 chain、同一个 id 出两条，全靠网页用 Map 压着才没发作 ——
             // 靠消费方兜着的不算修好，在产出侧收口。
             // 冲突取热列表那份：它每轮刷新，带着进程、子任务这些只有活跃会话才有的东西。
-            for mut t in dedup_by_id(
-                entry
-                    .tasks
-                    .iter()
-                    .chain(entry.history_tasks.iter())
-                    .cloned(),
+            for t in dedup_by_id(
+                entry.tasks.iter().chain(entry.history_tasks.iter()),
                 &mut seen,
             ) {
+                let mut t = t.clone();
                 if !online {
                     t.status = TaskStatus::Finished;
                     t.status_dsr = "已离线".into();
@@ -921,18 +926,31 @@ mod dedup_tests {
         let hot = [task("s1", Some(123)), task("s2", None)];
         let history = [task("s1", None), task("s3", None)];
         let mut seen = std::collections::HashSet::new();
-        let out = dedup_by_id(hot.iter().chain(history.iter()).cloned(), &mut seen);
+        let out = dedup_by_id(hot.iter().chain(history.iter()), &mut seen);
         let ids: Vec<&str> = out.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, vec!["s1", "s2", "s3"], "同一个 id 只出一条");
         assert_eq!(out[0].pid, Some(123), "冲突取热列表那份");
+    }
+
+    /// **设备选择器的「N 会话」也必须去重**：第一次收口漏了 providers_of，
+    /// 于是跨表重复的那条被数了两遍。构造与前端复现同一个场景：
+    /// 热列表 [dup-1, dup-2] + 历史列表 [dup-2, dup-3]，唯一会话 3 条 → 必须报 3。
+    #[test]
+    fn provider_session_count_does_not_double_count() {
+        let hot = [task("dup-1", None), task("dup-2", None)];
+        let history = [task("dup-2", None), task("dup-3", None)];
+        let out = providers_of(hot.iter().chain(history.iter()));
+        assert_eq!(out.len(), 1, "都是 claude CLI，一组");
+        assert_eq!(out[0].session_count, 3, "dup-2 同时在两张表里，只能算一条");
     }
 
     /// 跨机器同样去重：同一个会话号不该在两台机器上各出一条
     #[test]
     fn dedup_carries_across_machines() {
         let mut seen = std::collections::HashSet::new();
-        let a = dedup_by_id(vec![task("s1", None)].into_iter(), &mut seen);
-        let b = dedup_by_id(vec![task("s1", None)].into_iter(), &mut seen);
+        let (m1, m2) = ([task("s1", None)], [task("s1", None)]);
+        let a = dedup_by_id(m1.iter(), &mut seen);
+        let b = dedup_by_id(m2.iter(), &mut seen);
         assert_eq!(a.len(), 1);
         assert!(b.is_empty(), "第二台机器上的同号会话不再出一条");
     }

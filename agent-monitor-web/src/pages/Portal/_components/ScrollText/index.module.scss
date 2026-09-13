@@ -22,10 +22,14 @@
   .track {
     display: inline-flex;
     white-space: nowrap;
-    animation: scroll-text 10s linear infinite;
+    // 时长由组件按「距离 ÷ 速度」算出来后内联下发（见 SPEED_PX_PER_SEC），
+    // 这里只定型：匀速、无限循环。写死的 10s 那版是**按时长**不是按速度，
+    // 标题越长滚得越快。
+    animation: scroll-text linear infinite;
 
     .copy {
       flex: none;
+      // 与组件里的 COPY_GAP 必须同值：一圈的距离按它算
       padding-right: 40px;
     }
   }

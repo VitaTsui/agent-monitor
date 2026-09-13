@@ -597,7 +597,7 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                 continue;
             };
             if let Some(sel) = r.pending_select {
-                pending_selects.insert(r.session_id.clone(), (sel, r.at_ms));
+                pending_selects.insert(r.session_id.clone(), (sel, r.select_at_ms));
             }
             if acc.insert(r.claude_pid, (r.session_id, start)).is_none() {
                 added += 1;
@@ -743,9 +743,13 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
                 // 但那条 hook 缺席的情形不少（客户端旧版没写这条配置、hook 拿不到 CLAUDE_PID、
                 // 用户按 Esc 打断），一缺席卡片就在网页/钉钉上永远挂着 —— 终端早就选完了。
                 //
-                // 判据取自 jsonl：那次 AskUserQuestion 的 **tool_result 落盘时间**晚于本条
-                // hook 记录，就说明这张卡已经被了结（作答或中断）。它按 tool_use_id 对上号，
-                // 与下面说的 mtime 启发式是两回事。
+                // 判据取自 jsonl：那次 AskUserQuestion 的 **tool_result 落盘时间**晚于
+                // 这张卡**弹出**的时刻，就说明它已经被了结（作答或中断）。按 tool_use_id
+                // 对上号，与下面说的 mtime 启发式是两回事。
+                //
+                // 比的必须是「弹出时刻」（hookrec 的 select_at_ms）而不是「记录落盘时刻」：
+                // 卡片会被后续无关的 hook 事件一路继承，每继承一次就重盖一次落盘时刻的话，
+                // 这个比较永远不可能成立 —— 那正是「答完的选项卡永久残留」的根因。
                 if answered_at
                     .get(t.id.as_str())
                     .is_some_and(|&ms| ms >= at_ms)
