@@ -42,6 +42,9 @@ const MAX_PANES = 4;
  */
 const RIGHT_PANE_KEY = "am.portal.rightPane.byId";
 
+/** 侧栏顶部选中的那台设备。刷新后要停在同一台上，否则每次进来都跳回本机 */
+const SELECTED_MACHINE_KEY = "am.portal.sidebar.machine";
+
 /** 上一版的两个全局键。只在加载时清一次，不再有任何代码读它们 */
 const RIGHT_PANE_LEGACY_KEYS = [
   "am.portal.rightPane.open",
@@ -232,8 +235,21 @@ const readRightPaneState = (): Record<string, RightPaneState> => {
 class PortalStore {
   private _tasks: PortalTaskData[] = [];
   private _devices: PortalDevice[] = [];
-  /** 顶部选中的设备 */
-  private _selectedMachineId = "";
+  /**
+   * 侧栏顶部选中的设备（手动选过才有值）。
+   *
+   * 初值从 localStorage 读：刷新后要停在同一台机器上 —— 否则远程看另一台机器的
+   * 人每刷一次页面就被扔回本机。存的是 machineId，那台机器暂时不在列表里时
+   * 这个值仍然留着（见 `selectedMachineId` 的兜底），机器回来就自动选回去。
+   */
+  private _selectedMachineId = ((): string => {
+    try {
+      return localStorage.getItem(SELECTED_MACHINE_KEY) ?? "";
+    } catch {
+      // 隐私模式读不到就当没选过，退回默认（本机优先）
+      return "";
+    }
+  })();
   /** 拆分视图中打开的会话（有序，全局跨设备） */
   private _openIds: string[] = [];
   /**
@@ -356,32 +372,61 @@ class PortalStore {
     });
   }
 
-  /** 顶部设备选择器的设备列表（有会话的设备，去重） */
+  /**
+   * 侧栏顶部那个设备选择器的列表，**数据源只有 `/monitor/devices` 一处**。
+   *
+   * 从前这份是拿 `_tasks` 去重现拼的 —— `_tasks` 只含**此刻有活进程**的会话，
+   * 于是「我有哪几台机器」被偷换成「哪几台机器此刻有东西在跑」：一台合上盖的
+   * 笔记本、一台只剩历史会话的机器，都会从选择器里整台消失，而它们的会话在
+   * 下面的分组里明明还列着。分组（`clientSections`）用的就是 `_devices`，
+   * 两处必须同源，否则「选不到但列得出」这种自相矛盾的状态一定会再出现。
+   *
+   * 顺序 = `_sortedDevices`：本机优先、其次主机名。选择器与分组同一个顺序。
+   */
   get deviceList(): {
     machineId: string;
     hostname: string;
     platform: string;
     platformDsr: string;
+    /** 这台机器上一共有多少条会话（含历史，取自 `providers[].sessionCount`） */
     count: number;
+    /** 此刻有几条在执行 */
     running: number;
+    /** 此刻在不在线。离线设备**照样列出来**（历史会话仍然看得到） */
+    online: boolean;
+    /** 是不是客户端窗口所在的这台机器 */
+    isLocal: boolean;
   }[] {
-    const byDevice = new Map<string, PortalTaskData[]>();
-    this._tasks.forEach((t) => {
-      const key = t.machineId || t.hostname || "unknown";
-      const list = byDevice.get(key) ?? [];
-      list.push(t);
-      byDevice.set(key, list);
-    });
-    const out = Array.from(byDevice.entries()).map(([machineId, list]) => ({
-      machineId,
-      hostname: list[0]?.hostname ?? machineId,
-      platform: list[0]?.platform ?? "",
-      platformDsr: list[0]?.platformDsr ?? "",
-      count: list.length,
-      running: list.filter((t) => t.status === "running").length,
+    return this._sortedDevices.map((d) => ({
+      machineId: d.id,
+      hostname: d.hostname || d.id,
+      platform: d.platform,
+      platformDsr: d.platformDsr,
+      count:
+        d.providers.reduce((n, p) => n + (p.sessionCount ?? 0), 0) ||
+        d.sessionCount,
+      running: d.runningCount,
+      online: d.online,
+      isLocal: !!this._localMachineId && d.id === this._localMachineId,
     }));
-    out.sort((a, b) => a.hostname.localeCompare(b.hostname));
-    return out;
+  }
+
+  /**
+   * 设备的固定顺序：**本机优先、其次主机名**。
+   *
+   * 抽成一处的理由：选择器与分组都要照它排，各排各的就是两套排序并存，
+   * 后端调了口径这边不跟，每轮还可能抖。
+   */
+  private get _sortedDevices(): PortalDevice[] {
+    return [...this._devices].sort((a, b) => {
+      const local =
+        Number(b.id === this._localMachineId) -
+        Number(a.id === this._localMachineId);
+      if (local !== 0) {
+        return local;
+      }
+      return (a.hostname || a.id).localeCompare(b.hostname || b.id, "zh");
+    });
   }
 
   /** 客户端窗口里由页面注入的本机 machineId（浏览器为空） */
@@ -391,34 +436,46 @@ class PortalStore {
     this._localMachineId = id;
   };
 
+  /**
+   * 侧栏此刻在看哪一台设备。
+   *
+   * 优先级：**手动选过的 > 本机 > 列表里第一台**。
+   *
+   * 最后那一档是这一版新加的，它不是兜底而是必需：侧栏的列表现在按设备**分**了，
+   * 选不中任何一台就等于整列空着。上一版之所以能返回空串，是因为那时列表铺的是
+   * 全部设备的全部客户端，选中与否只影响一处高亮。浏览器/远程端没有本机 id，
+   * 头一回进来必须落在某一台上，才有东西可看。
+   */
   get selectedMachineId() {
-    // 选中优先级：手动选择 > 本机（仅客户端窗口注入了本机 id 时）。
-    // 非本机端（浏览器/远程）进来不自动选任何设备 —— 展示设备列表让用户自己挑，
-    // 不再回退到「第一个设备」。
-    const list = this.deviceList;
+    const list = this._sortedDevices;
+    if (list.length === 0) {
+      return "";
+    }
     if (
       this._selectedMachineId &&
-      list.some((d) => d.machineId === this._selectedMachineId)
+      list.some((d) => d.id === this._selectedMachineId)
     ) {
       return this._selectedMachineId;
     }
-    if (
-      this._localMachineId &&
-      list.some((d) => d.machineId === this._localMachineId)
-    ) {
+    if (this._localMachineId && list.some((d) => d.id === this._localMachineId)) {
       return this._localMachineId;
     }
-    return "";
+    return list[0].id;
   }
 
   public selectMachine = (id: string) => {
-    if (id === this.selectedMachineId) {
+    if (id === this._selectedMachineId) {
       return;
     }
-    // 切设备只改左侧列表的筛选，不动已打开的会话：打开的会话是全局的（可跨多设备），
-    // 配合拆分可同时查看多设备的多个会话；也不默认选中任何会话。各会话属于哪台设备由
-    // 内容区标题下方的设备名标识（见 ChatPane）。
+    // 切设备只改左侧列表看的是哪一台，不动已打开的会话：打开的会话是全局的
+    //（可跨多设备），配合拆分可同时查看多设备的多个会话；也不默认选中任何会话。
+    // 各会话属于哪台设备由内容区标题下方的设备名标识（见 ChatPane）。
     this._selectedMachineId = id;
+    try {
+      localStorage.setItem(SELECTED_MACHINE_KEY, id);
+    } catch {
+      // 隐私模式下写不进去也无妨，本次会话内仍然生效，下次回到默认
+    }
   };
 
   /**
@@ -443,8 +500,15 @@ class PortalStore {
    * 200 条历史倒推」，也一并删掉了 —— 某个终端最近一条会话排到 200 条之外就会凭空
    * 消失，那是将就不是答案。两套来源不并存。
    *
+   * **只铺 `selectedMachineId` 那一台设备的客户端。** 设备这一维被提到了侧栏顶部的
+   * 选择器上（见 `DeviceSelect`），组标题里因此不再带主机名 —— 组名就是客户端名
+   * （`Claude Code` / `Codex` / `ChatGPT 桌面版`）。上一版是「设备 × 客户端」二合一，
+   * 组标题形如 `MacBook Pro · Claude Code`：机器一多，同一个客户端名在一列里重复
+   * 出现好几遍，而「我现在在看哪台机器」没有任何一处说得清。两套分组判断不并存 ——
+   * 顶部选设备之后，这里就只按客户端分。
+   *
    * **组的顺序就是这里的建组顺序**（Map 保序），末尾不再排一次：
-   *   设备（本机优先、其次主机名）× 该设备的 `providers`（后端已按会话数降序给好）。
+   *   该设备的 `providers`（后端已按会话数降序给好）。
    * 前端再排一遍就是两套排序并存，每轮还可能抖。
    *
    * `_tasks` 与历史仍然参与，但只负责**补**：一种终端第一次跑起来时它的会话会先出现在
@@ -498,30 +562,30 @@ class PortalStore {
         t,
       );
 
-    /* 先按设备把全集建出来：**有没有会话可铺是另一回事**，组本身必须先在。
-       设备顺序在这儿定死（本机优先、其次主机名），组内顺序照后端给的 `providers`
-       原样来 —— 末尾因此不需要再 sort 一次。 */
-    const devices = [...this._devices].sort((a, b) => {
-      const local =
-        Number(b.id === this._localMachineId) -
-        Number(a.id === this._localMachineId);
-      if (local !== 0) {
-        return local;
-      }
-      return (a.hostname || a.id).localeCompare(b.hostname || b.id, "zh");
-    });
-    for (const d of devices) {
-      for (const p of d.providers) {
-        ensure(d.id, p.provider, p.desktop, {
-          hostname: d.hostname,
+    /* 先把**选中那台设备**的客户端全集建出来：**有没有会话可铺是另一回事**，
+       组本身必须先在。组内顺序照后端给的 `providers` 原样来 ——
+       末尾因此不需要再 sort 一次。 */
+    const mid = this.selectedMachineId;
+    const device = this._sortedDevices.find((d) => d.id === mid);
+    if (device) {
+      for (const p of device.providers) {
+        ensure(device.id, p.provider, p.desktop, {
+          hostname: device.hostname,
           providerDsr: p.providerDsr,
-          platformDsr: d.platformDsr,
+          platformDsr: device.platformDsr,
         });
       }
     }
 
+    /** 这条会话属于选中的那台设备吗。不属于就不进这一列 */
+    const mine = (t: PortalTaskData | HistorySession) =>
+      (t.machineId || t.hostname || "unknown") === mid;
+
     // 再铺活跃会话：它们优先级最高，后面历史里的同 id 不覆盖它
     for (const t of this._tasks) {
+      if (!mine(t)) {
+        continue;
+      }
       const key = ensureOf(t);
       if (t.status === "running") {
         byClient.get(key)!.running += 1;
@@ -536,6 +600,9 @@ class PortalStore {
     // 两处各筛一遍就会出现「服务端说 30 条、列表只显示 12 条」。
     for (const state of Object.values(this._historyByClient)) {
       for (const h of state.list) {
+        if (!mine(h)) {
+          continue;
+        }
         const key = ensureOf(h);
         const sec = byClient.get(key)!;
         sec.total = Math.max(sec.total, state.total);
@@ -547,7 +614,8 @@ class PortalStore {
         }
       }
     }
-    // 分页状态也要落到「历史一条都没返回」的那些组上（空结果同样是结果）
+    /* 分页状态也要落到「历史一条都没返回」的那些组上（空结果同样是结果）。
+       **按 key 找组，找不到就跳过** —— 别的设备的分页状态本来就不在这一列里 */
     Object.entries(this._historyByClient).forEach(([key, state]) => {
       const sec = byClient.get(key);
       if (sec) {
@@ -579,7 +647,7 @@ class PortalStore {
       }));
     }
     /* **这里不再排序**：顺序就是上面的建组顺序（Map 保序）——
-       设备（本机优先、其次主机名）× 后端给好的 `providers`（会话数降序）。
+       选中设备的 `providers`（后端已按会话数降序给好）。
        再排一遍就是两套排序并存，后端调了口径这边不跟，每轮还可能抖。 */
     return sections;
   }

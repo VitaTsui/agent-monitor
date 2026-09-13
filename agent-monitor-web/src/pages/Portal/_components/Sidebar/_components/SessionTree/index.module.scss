@@ -81,18 +81,6 @@
   opacity: 1;
 }
 
-/* 「本机」徽标：客户端窗口里标出当前这台电脑。
-   原来挂在设备行上，设备行没了，标记跟着搬到分组标题 */
-.localTag {
-  flex: none;
-  padding: 0 5px;
-  border-radius: var(--radius-sm);
-  background: var(--primary);
-  color: var(--primary-foreground);
-  font-size: var(--text-xs);
-  line-height: 16px;
-}
-
 // 这台客户端此刻有几条在执行。收起时这是唯一还看得见的动静
 .groupRunning {
   flex: none;

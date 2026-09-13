@@ -9,12 +9,14 @@
  * 往右缩一截，那根竖线就穿不过它的图标中线了。
  *
  * 三个几何数必须与 `TerminalFeed/index.module.scss` 保持同源，那边改了这里要一起改：
- *   图标列 20px（$tile）｜图标到文字 8px（$tile-gap）｜竖线画在 10px（$tile-mid）
- * 本项目的图标列是 20＋8，VitaAgent 是 18＋10 —— **文字列都落在 28**，
- * 所以 VitaAgent 那份 28px 的网格缩进可以原样照抄，不用换算。 */
-$tile: 20px;
-$tile-gap: 8px;
-/** 网格缩进到文字列：图标列 20 ＋ 间距 8 = 28，与标题、元信息那两行的左边缘齐平 */
+ *   图标列 18px（$tile）｜图标到文字 10px（$tile-gap）｜竖线画在 9px（$tile-mid）
+ * 与 VitaAgent 同值（`MessageList/index.module.scss:332-335`）——
+ * **文字列落在 28**，那份 28px 的网格缩进可以原样照抄，不用换算。
+ * 原来是 20＋8：缩进同样 28、文字列没错位，但字形跟着槽宽放到了 16，
+ * 比参照大 4px，一列扫下来先看见的是一排图标而不是一句句话。 */
+$tile: 18px;
+$tile-gap: 10px;
+/** 网格缩进到文字列：图标列 18 ＋ 间距 10 = 28，与标题、元信息那两行的左边缘齐平 */
 $text-col: $tile + $tile-gap;
 
 .AgentCard {
@@ -37,7 +39,7 @@ $text-col: $tile + $tile-gap;
   cursor: pointer;
 }
 
-/* 头一行左边那枚方形图标。规格与链上其它节点的图标槽一致（20×20），
+/* 头一行左边那枚方形图标。规格与链上其它节点的图标槽一致（18×18），
    四类节点在同一列里必须是同一副大小，否则扫下来像四种东西。
    **底色不透明**：它正是用来遮断身后那根贯穿竖线的（不遮的话线从图标中间穿过去）。
    取这一屏的地色（--card）而不是这块组底那支浅灰（--muted）—— 同色的话
@@ -212,7 +214,9 @@ $text-col: $tile + $tile-gap;
   flex: none;
   display: inline-flex;
   color: var(--muted-foreground);
-  font-size: 14px;
+  /* 12：与链上那枚字形（`TerminalFeed` 的 `.stepIcon`）同档。
+     原来 14 —— 同一个「执行中」的 `LoadingOutlined` 在一屏里出现两种大小 */
+  font-size: 12px;
 }
 
 .cell.completed .cellIcon {

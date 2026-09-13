@@ -50,8 +50,6 @@ const writeIds = (key: string, ids: string[]) => {
 
 interface SessionTreeProps {
   isMobile: boolean;
-  /** 客户端窗口内的本机 machineId（浏览器里为 null，不标「本机」） */
-  localId: string | null;
   onSelect: (id: string) => void;
 }
 
@@ -76,19 +74,21 @@ interface SessionTreeProps {
  * 点击 = 展开/收起**。两个动作各有各的落点，不会互相抢。
  */
 const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
-  const { isMobile, localId, onSelect } = props;
+  const { isMobile, onSelect } = props;
   const {
     clientSections,
     openIds,
     splitOpen,
     keyword,
     loadClientHistory,
-    selectedMachineId,
   } = PortalStore;
 
   const [collapsedClients, setCollapsedClients] = useState<string[]>(() =>
     readIds(COLLAPSED_CLIENTS_KEY),
   );
+  /* 这一列铺的就是 `selectedMachineId` 那台机器（见 PortalStore.clientSections），
+     所以命令面板里「跳到某台设备」= 换这一列，不必再在这儿把那台机器的分组
+     逐个展开。那段副作用连同它的理由一并删掉。 */
   /* 分组集合的指纹，只给下面那个副作用当依赖用。
      分隔符取 `,`：key 本身是 `machineId|provider`，`|` 不能用；`\0` 更不行 ——
      源码里夹一个 NUL 会让 grep 把整个文件判成二进制，从此谁都搜不到它。 */
@@ -108,22 +108,6 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sectionKeys, collapsedClients, keyword]);
 
-  /* 命令面板里「跳到某台设备」仍然有效：它设的是 selectedMachineId，
-     这里据此把那台机器的分组全部展开 —— 不然点了之后什么都不会发生。 */
-  useEffect(() => {
-    if (!selectedMachineId) {
-      return;
-    }
-    setCollapsedClients((prev) => {
-      const next = prev.filter((k) => !k.startsWith(`${selectedMachineId}|`));
-      if (next.length === prev.length) {
-        return prev;
-      }
-      writeIds(COLLAPSED_CLIENTS_KEY, next);
-      return next;
-    });
-  }, [selectedMachineId]);
-
   const toggleClient = (key: string) =>
     setCollapsedClients((prev) => {
       const next = prev.includes(key)
@@ -134,14 +118,16 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
     });
 
   if (clientSections.length === 0) {
-    /* 空列表只剩一种成因了：没有任何设备上报过会话。
-       从前还有「没选设备」这一种 —— 那是设备单选带来的，现在每个客户端都自带分组，
-       不存在「先点一台才看得见」这回事。 */
+    /* 两种成因，说法不同：**这台机器上一个客户端都没有**（换一台看得到别的），
+       与**一台设备都没上报过**（该去接客户端了）。合成一句兜底的话，
+       前者会被读成「系统坏了」。 */
     return (
       <div className={styles.emptyList}>
         {keyword
           ? `没有匹配「${keyword}」的会话`
-          : "还没有设备上报会话。请确认 agent-task-monitor 正在运行，且已在设备管理中信任。"}
+          : PortalStore.deviceList.length > 0
+            ? "这台设备上还没有任何终端会话。切换顶部的设备可以看别的机器。"
+            : "还没有设备上报会话。请确认 agent-task-monitor 正在运行，且已在设备管理中信任。"}
       </div>
     );
   }
@@ -240,14 +226,11 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                 onClick={() => toggleClient(sec.key)}
               >
                 <LaptopOutlined className={styles.groupIcon} />
-                <span className={styles.groupLabel}>
-                  {sec.hostname} · {sec.providerDsr}
-                </span>
-                {/* 「本机」：客户端窗口里标出当前这台电脑。
-                    原来挂在设备行上，设备行没了，标记跟着搬到分组标题 */}
-                {sec.machineId === localId ? (
-                  <span className={styles.localTag}>本机</span>
-                ) : null}
+                {/* **组名只写客户端名**（`Claude Code` / `Codex` / `ChatGPT 桌面版`）。
+                    主机名与「本机」徽标都搬到了顶部的设备选择器上 ——
+                    这一列铺的就是那台机器的会话，每一行组标题再重复一遍机器名
+                    纯属占地方，机器一多还会让同一个客户端名出现好几遍。 */}
+                <span className={styles.groupLabel}>{sec.providerDsr}</span>
                 <DownOutlined
                   className={`${styles.groupCaret} ${
                     collapsed ? styles.groupCaretUp : ""

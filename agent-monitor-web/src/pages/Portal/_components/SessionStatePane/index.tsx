@@ -1,6 +1,7 @@
 import React from "react";
 
 import { Button } from "@hsu-react/ui";
+import { Tooltip } from "antd";
 import { CloseOutlined } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
@@ -46,15 +47,23 @@ const SessionStatePane: React.FC<SessionStatePaneProps> = observer((props) => {
     <div className={styles.SessionStatePane}>
       <div className={styles.head}>
         <span className={styles.title}>会话状态</span>
-        {/* 收起：只收本格这一栏，不动别的格 */}
-        <Button
-          size="small"
-          type="text"
-          className={styles.close}
-          icon={<CloseOutlined />}
-          title="收起这一格的会话状态栏"
-          onClick={() => PortalStore.toggleRightPane(id)}
-        />
+        {/* 收起：只收本格这一栏，不动别的格。
+            **说明文字只能走 Tooltip / aria-label，不能走 `title`**：
+            hsu-ui 的 `Button` 把 `title` 当**按钮文案**用（`children ?? title`，
+            见 `@hsu-react/ui/es/components/Button/index.js:91`），不是原生的悬停
+            提示 —— 于是「收起这一格的会话状态栏」被原样印在叉号右边，
+            24px 宽的按钮里塞一整句话，溢出到栏外把标题挤没了。
+            这颗按钮只留图标，语义由 `aria-label` 承担、提示由 Tooltip 给。 */}
+        <Tooltip title="收起这一格的会话状态栏">
+          <Button
+            size="small"
+            type="text"
+            className={styles.close}
+            icon={<CloseOutlined />}
+            aria-label="收起这一格的会话状态栏"
+            onClick={() => PortalStore.toggleRightPane(id)}
+          />
+        </Tooltip>
       </div>
 
       <div className={styles.body}>

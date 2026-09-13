@@ -32,6 +32,35 @@ interface TerminalFeedProps {
   // 对话流只呈现「我说了什么、它回了什么」。
 }
 
+/**
+ * 链上每个节点左边那枚**方形图标**：外层是 18×18 的不透明色块，里层才是字形。
+ *
+ * **必须分两层。** 执行中那枚是 antd 的 `LoadingOutlined`，它的转圈动画
+ * （`anticon-spin`）挂在**图标自己的那个 `<span>`** 上；色块与字形合成一个元素时，
+ * 转的就是这枚色块本身 —— 实测外接盒被从 20 转到 25.18，方块的四个角一圈圈扫过
+ * 身后那根竖线，看着就是「图标在抖」。色块得钉住不动，只让字形转。
+ * （`AgentCard` 的 `.headTile` / `.headIcon` 早就是这个结构，这里补齐。）
+ *
+ * 色块**底色不透明**：那根贯穿整条链的竖线是从节点背后穿过去的
+ * （`.step::before`），靠它在图标处遮断，才有「线上挂着一个个格子」的样子。
+ * 四类节点（工具调用 / 旁白 / 子代理 / 提示行）共用这一副规格 —— 规格统一是
+ * 这条时间轴读得出「一节点一格」的前提。
+ */
+const StepTile: React.FC<{
+  /** antd 图标组件名（由 hsu-ui 的 `Icon` 按名取） */
+  icon: string;
+  /** 执行中：字形走 --primary，并由 antd 自己转圈 */
+  live?: boolean;
+  className?: string;
+}> = ({ icon, live, className }) => (
+  <span className={`${styles.stepTile} ${className ?? ""}`}>
+    <Icon
+      icon={icon}
+      className={`${styles.stepIcon} ${live ? styles.stepIconLive : ""}`}
+    />
+  </span>
+);
+
 /** 一轮对话：一条用户消息 + 其后的助手/工具活动 */
 interface Turn {
   key: string;
@@ -674,10 +703,7 @@ const Working: React.FC<{
   return (
     <div className={styles.step}>
       <div className={styles.stepHead}>
-        <Icon
-          icon="LoadingOutlined"
-          className={`${styles.stepIcon} ${styles.stepIconLive}`}
-        />
+        <StepTile icon="LoadingOutlined" live />
         <span className={styles.stepNameLive}>正在处理…</span>
         {elapsed ? <span className={styles.stepStatus}>{elapsed}</span> : null}
         {steps > 0 ? (
@@ -767,7 +793,7 @@ const StepRow: React.FC<{
         aria-expanded={open}
         onClick={onToggle}
       >
-        <Icon
+        <StepTile
           icon={
             running
               ? "LoadingOutlined"
@@ -775,7 +801,7 @@ const StepRow: React.FC<{
                 ? "CloseCircleFilled"
                 : "ToolOutlined"
           }
-          className={`${styles.stepIcon} ${running ? styles.stepIconLive : ""}`}
+          live={running}
         />
         {/* 工具名挂成一枚淡底小标：一列 `Browser click` / `Bash` 里，
             「这是哪个工具」比它这次的入参更先要回答。
@@ -880,6 +906,13 @@ const ChainNodes: React.FC<{
       if (it.kind === "note") {
         return (
           <div key={it.key} className={styles.chainNote}>
+            {/* 旁白也是链上的一格，也得有自己的记号 —— 原来它只有一个 28px 的
+                左缩进、图标位空着，于是那根贯穿的竖线在这一格没有色块遮断，
+                直接从空白里穿过去，一列节点里只有它像掉了一格。
+                字形取对话气泡（VitaAgent 的 `NoteBlock` 用 `ph:chat-teardrop-text`，
+                本项目图标体系里语义最近的是 `MessageOutlined`）——
+                这一格说的是「模型一边干活一边说的话」，不是一步操作。 */}
+            <StepTile icon="MessageOutlined" className={styles.noteTile} />
             {renderNote(it.msg, it.key)}
           </div>
         );
@@ -993,7 +1026,7 @@ const SubAgentChain: React.FC<{
   const hint = (icon: React.ReactNode, text: string, retry?: boolean) => (
     <div className={styles.step}>
       <div className={styles.stepHead}>
-        <span className={styles.stepIcon}>{icon}</span>
+        {icon}
         <span className={styles.stepName}>{text}</span>
         {retry ? (
           <span
@@ -1018,23 +1051,20 @@ const SubAgentChain: React.FC<{
   if (!msgs.length) {
     if (loading || pending) {
       return hint(
-        <Icon
-          icon="LoadingOutlined"
-          className={`${styles.stepIcon} ${styles.stepIconLive}`}
-        />,
+        <StepTile icon="LoadingOutlined" live />,
         pending ? "正在从那台机器读取这个子代理的内容…" : "读取中…",
       );
     }
     if (fail) {
       // 离线是可恢复的，给一条出路；不自动轮询（那台机器可能关了一整晚）
       return hint(
-        <Icon icon="CloseCircleFilled" className={styles.stepIcon} />,
+        <StepTile icon="CloseCircleFilled" />,
         SUB_FAIL_TEXT[fail] ?? "读取失败",
         true,
       );
     }
     return hint(
-      <Icon icon="ToolOutlined" className={styles.stepIcon} />,
+      <StepTile icon="ToolOutlined" />,
       "这个子代理没有留下可展示的内容",
     );
   }
@@ -1082,7 +1112,7 @@ const SubAgentChain: React.FC<{
             className={styles.stepHead}
             onClick={() => setAll(true)}
           >
-            <Icon icon="EllipsisOutlined" className={styles.stepIcon} />
+            <StepTile icon="EllipsisOutlined" />
             <span className={styles.stepName}>还有 {rest} 步，展开全部</span>
           </button>
         </div>
