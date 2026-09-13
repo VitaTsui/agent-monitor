@@ -71,7 +71,16 @@ const AgentCard: React.FC<AgentCardProps> = ({
 
   const running = agents.filter(isSubTaskRunning);
   const isRunning = running.length > 0;
-  const expanded = manual ?? isRunning;
+  /**
+   * **有小卡被点开就必然是展开的**，这一条压过手动收起态。
+   *
+   * 侧栏点一条子代理会从外面把 `picked` 设上（见 `PortalStore.focusAgent`）——
+   * 那时这张卡若还收着（用户先前手动收过），子链就挂在一张看不见的卡下面，
+   * 定位也会因为小卡不在 DOM 里而误报「找不到」。收起这个动作本身不会被这条
+   * 压住：下面那个头按钮收起时先 `onPick("")` 把小卡松开，`picked` 一空，
+   * 展开与否就交还给 `manual`。
+   */
+  const expanded = !!picked || (manual ?? isRunning);
 
   // 耗时要走字：只在真有子代理跑着时上表，且 tick 只驱动这张卡重渲染
   const [now, setNow] = useState(() => Date.now());
@@ -181,6 +190,10 @@ const AgentCard: React.FC<AgentCardProps> = ({
                 <button
                   key={a.id}
                   type="button"
+                  /* 侧栏点一条子代理时按它定位到这张小卡（见 TerminalFeed 的
+                     定位副作用）。**判据是 agentId 这个结构化字段**，
+                     不拿 label / 文案去凑 */
+                  data-agent-id={a.id}
                   className={`${styles.cell} ${styles[a.outcome]} ${
                     on ? styles.cellOn : ""
                   } ${openable ? "" : styles.cellDisabled}`}

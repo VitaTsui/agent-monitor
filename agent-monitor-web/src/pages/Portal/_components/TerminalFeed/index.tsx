@@ -28,6 +28,19 @@ interface TerminalFeedProps {
   providerDsr?: string;
   /** 会话上下文：内容里的本地图片路径靠它解析（见 utils/sessionImages） */
   imageCtx?: SessionImageCtx;
+  /**
+   * 「把执行链滚到这个子代理的卡片上并展开它」的一次请求（侧栏子会话树点的）。
+   * 带 `seq` 是因为定位是个**动作**：同一个子代理连点两次也要能再滚一次。
+   */
+  focusAgent?: { agentId: string; seq: number } | null;
+  /**
+   * 定位的结果。`el` 有值 = 卡片已经展开、这是要滚到的那个元素；
+   * `null` = 这条链上找不到它（起跑那次工具调用不在已加载的正文里）。
+   *
+   * **滚动不在这里做**：对话流的滚动容器与「钉底」那套开关都在 `ChatPane` 手上，
+   * 这边自己滚一下会被它下一帧钉回底部。找谁、怎么滚，各管各的。
+   */
+  onFocusAgent?: (el: HTMLElement | null, seq: number) => void;
   // 撤回不在这里：排队状态与撤回统一由输入框上方的排队条负责，
   // 对话流只呈现「我说了什么、它回了什么」。
 }
@@ -671,16 +684,21 @@ const summarizeChain = (items: ChainItem[]): string => {
 };
 
 /**
- * 一轮执行中的秒表：「正在处理… · 7秒」。
+ * 一轮执行中的秒表：**一枚转圈 ＋ 7秒 ＋ 已 3 步**。
+ *
+ * 「正在处理…」那四个字删掉了。它在这一行是纯冗余：转圈图标已经说了「在动」，
+ * 而它上面那条链的最后几步正写着**具体在干什么**（`正在调用工具: Bash, Read`），
+ * 顶一句没有主语的「正在处理」只是把同一件事用更空的说法再讲一遍
+ * （用户原话：「"正在处理"这个还有留着的必要吗」）。
+ * 语义没丢：这一行带 `role="status"` ＋ `aria-label="正在处理"`，
+ * 读屏与鼠标悬停照样说得出它是什么。
  *
  * 原先只有「执行中… + 已 N 步」——步数在两次工具调用之间是不动的，一段长
  * 推理里它能十几秒纹丝不动，看着和卡死没有区别。**耗时是「还在跑」与
  * 「卡住了」的唯一区别**，所以它每秒走字。
  *
  * 形态与链上的步骤行统一（`.step`）：它就是这条链的最后一行 ——
- * 照 VitaAgent `MessageList/index.tsx:158-186` 的 `Working`，
- * 那边同样是「转圈图标 ＋ 正在处理… ＋ 耗时」这一套步骤行，
- * 挂在链与正文的下面（`:1068`）。
+ * 照 VitaAgent `MessageList/index.tsx:158-186` 的 `Working`。
  *
  * 「最近动作」不再单列：链上摊着的最后三步已经把它说得更清楚，
  * 再在这里印一遍就是同一句话说两回。
@@ -702,9 +720,13 @@ const Working: React.FC<{
 
   return (
     <div className={styles.step}>
-      <div className={styles.stepHead}>
+      <div
+        className={styles.stepHead}
+        role="status"
+        aria-label="正在处理"
+        title="正在处理"
+      >
         <StepTile icon="LoadingOutlined" live />
-        <span className={styles.stepNameLive}>正在处理…</span>
         {elapsed ? <span className={styles.stepStatus}>{elapsed}</span> : null}
         {steps > 0 ? (
           <span className={styles.stepStatus}>已 {steps} 步</span>
@@ -1147,6 +1169,16 @@ const ExecChain: React.FC<{
   onToggle: () => void;
   expanded: Record<string, boolean>;
   toggleExpand: (key: string) => void;
+  /**
+   * 点开的是哪张子代理小卡：链项 key → agentId。
+   *
+   * 卡片与它点开的子链是两个平级的链节点，位置关系在 `ChainNodes` 里排；
+   * 但**这份状态住在 `TerminalFeed`**：侧栏点一条子代理要跨轮次地
+   * 「找到那张卡 → 展开它」，状态留在每一轮各自的 ExecChain 里，外面够不着。
+   * 仍然是纯 useState，不落盘。
+   */
+  picked: Record<string, string>;
+  onPick: (itemKey: string, agentId: string) => void;
   renderNote: (m: PortalMessage, key: string) => React.ReactNode;
 }> = ({
   items,
@@ -1156,18 +1188,10 @@ const ExecChain: React.FC<{
   onToggle,
   expanded,
   toggleExpand,
+  picked,
+  onPick,
   renderNote,
 }) => {
-  /**
-   * 点开的是哪张子代理小卡：链项 key → agentId。
-   *
-   * **存在链这一层**：卡片与它点开的子链是两个平级的链节点，位置关系在这里才排得出来
-   * （见 `ChainNodes`）。**纯 useState，不落盘** —— 展开态不持久化。
-   */
-  const [picked, setPicked] = useState<Record<string, string>>({});
-  const onPick = (itemKey: string, agentId: string) =>
-    setPicked((prev) => ({ ...prev, [itemKey]: agentId }));
-
   /* 留在外面的按「步」数，不按「链项」数：旁白是围着某一步说的话，
      跟着它一起留在外面。按链项切的话，一段长旁白就能把窗口占满，
      屏幕上只剩一条步骤 —— VitaAgent `:336-341` 记的就是这个实测 */
@@ -1232,8 +1256,20 @@ const ExecChain: React.FC<{
 };
 
 const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
-  const { taskId, messages, subTasks, running, providerDsr, imageCtx } = props;
+  const {
+    taskId,
+    messages,
+    subTasks,
+    running,
+    providerDsr,
+    imageCtx,
+    focusAgent,
+    onFocusAgent,
+  } = props;
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  /** 点开的是哪张子代理小卡：链项 key → agentId（理由见 ExecChain 的同名 prop） */
+  const [picked, setPicked] = useState<Record<string, string>>({});
+  const rootRef = useRef<HTMLDivElement>(null);
 
   const turns = toTurns(messages);
 
@@ -1253,6 +1289,124 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
   const toggleExpand = (key: string) => {
     setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
   };
+  const onPick = (itemKey: string, agentId: string) =>
+    setPicked((prev) => ({ ...prev, [itemKey]: agentId }));
+
+  // 「最后一个有实际活动的轮次」：本地回显（发送排队）新开的轮次还没有
+  // 任何助手/工具消息，执行中的收敛逻辑必须仍作用于它前面真正在跑的
+  // 那一轮 —— 否则一发送，跑着的轮次就不再是最后一轮，整段 Bash 工具
+  // 流水会提前铺出来。
+  let lastActive = turns.length - 1;
+  while (
+    lastActive > 0 &&
+    turns[lastActive].items.length === 0 &&
+    turns[lastActive].user?.local
+  ) {
+    lastActive--;
+  }
+
+  /**
+   * 每一轮拆成「过程进链、结论进正文」的结果。
+   *
+   * **算在 render 里、两处共用**：一处是下面的渲染，另一处是侧栏定位那个副作用
+   * （它要知道某个子代理落在哪一轮的哪一格上）。两边各算一遍的话，
+   * 「哪一步是哪一格」这个判据迟早分叉。
+   *
+   * 分界线照 VitaAgent `MessageList/index.tsx:601-637`：
+   *
+   *   跑完了 → **最后一段产出（assistant / plan）就是结论**，留在正文；
+   *            它之前的一切都是过程，收进链。不能按「最后一次工具调用」切：
+   *            一轮若以工具结尾（问路那种），它前面那段正文恰恰是说给人听的话，
+   *            按那个判据整条回答会一个字都不剩。
+   *   跑着呢 → **最后一步过程之后的正文才是「正在写的那段」**，之前的每段正文
+   *            都是旁白，按发生顺序收进链。沿用跑完那条的话，旁白会被留在链的
+   *            **下面**、而它引出的那几步却在链里 —— 顺序整个反了。
+   */
+  const turnChains = turns.map((turn, ti) => {
+    // 执行中的活动轮：不铺工具流水，只同步 Q&A（助手文本），
+    // 工具过程收进折叠块，需要时再展开。
+    const inProgress = !!running && ti === lastActive;
+    // 用内容指纹做 key：执行中 → 完成态切换时 key 不变，避免整块重挂载闪烁；
+    // 且不随消息裁剪而漂移（下标会）。
+    const keyed = turn.items.map((m) => ({ m, k: msgKey(m) }));
+    const { chain, body } = buildChain(keyed, {
+      subByToolUse,
+      split: { flat: false, inProgress },
+    });
+    return {
+      turn,
+      keyed,
+      inProgress,
+      chain,
+      body,
+      ckey: `chain|${turn.key}`,
+      // 执行中时报一下已走的步数。「最近动作」不再单列 ——
+      // 链上摊着的最后三步已经把它说得更清楚（见 ExecChain）
+      runSteps: inProgress
+        ? turn.items.filter((m) => m.role === "tool").length
+        : 0,
+    };
+  });
+
+  /* ---------- 侧栏「点一条子代理 → 滚到它那张卡」的落地 ---------- */
+
+  /** 卡片已经展开、等这一帧提交完去取元素的那次请求 */
+  const [focusHit, setFocusHit] = useState<{
+    agentId: string;
+    seq: number;
+  } | null>(null);
+  const focusSeq = focusAgent?.seq ?? 0;
+  const focusId = focusAgent?.agentId ?? "";
+
+  /* 第一步：把那张卡所在的链展开、把那张小卡点上。
+     依赖里带 `messages`：正文是异步拉回来的，头一次跑的时候链可能还是空的，
+     消息一到这个副作用就再试一次 —— 不靠定时器轮询猜「加载好了没有」。 */
+  useEffect(() => {
+    if (!focusId) {
+      return;
+    }
+    let hit: { ckey: string; itemKey: string } | null = null;
+    for (const tc of turnChains) {
+      for (const it of tc.chain) {
+        if (it.kind === "agents" && it.agents.some((a) => a.id === focusId)) {
+          hit = { ckey: tc.ckey, itemKey: it.key };
+          break;
+        }
+      }
+      if (hit) {
+        break;
+      }
+    }
+    if (!hit) {
+      /* 配不上：派出它的那次工具调用不在已加载的正文里。
+       **怎么说由调用方决定** —— 正文还在路上的时候不该报「找不到」。 */
+      onFocusAgent?.(null, focusSeq);
+      return;
+    }
+    const { ckey, itemKey } = hit;
+    // 跑完的那一轮整条链默认收着（`shown` 是空数组），不展开就什么都渲染不出来
+    setExpanded((prev) => (prev[ckey] ? prev : { ...prev, [ckey]: true }));
+    setPicked((prev) =>
+      prev[itemKey] === focusId ? prev : { ...prev, [itemKey]: focusId },
+    );
+    setFocusHit({ agentId: focusId, seq: focusSeq });
+    // turnChains 每次渲染都是新数组，不能进依赖；它由 messages / subTasks 决定
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusId, focusSeq, messages, subTasks]);
+
+  /* 第二步：上面那几个 setState 提交之后，卡片一定已经在 DOM 里了，这时才去取元素。
+     用副作用的提交顺序保证「渲染好了」，不靠 setTimeout 猜。 */
+  useEffect(() => {
+    if (!focusHit) {
+      return;
+    }
+    const el = rootRef.current?.querySelector<HTMLElement>(
+      `[data-agent-id="${CSS.escape(focusHit.agentId)}"]`,
+    );
+    onFocusAgent?.(el ?? null, focusHit.seq);
+    setFocusHit(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusHit]);
 
   const renderItem = (m: PortalMessage, key: string) => {
     // plan 模式给出的待批准方案：正文是 markdown，单独成卡片
@@ -1279,100 +1433,49 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
   };
 
   return (
-    <div className={styles.TerminalFeed}>
-      {(() => {
-        // 「最后一个有实际活动的轮次」：本地回显（发送排队）新开的轮次还没有
-        // 任何助手/工具消息，执行中的收敛逻辑必须仍作用于它前面真正在跑的
-        // 那一轮 —— 否则一发送，跑着的轮次就不再是最后一轮，整段 Bash 工具
-        // 流水会提前铺出来。
-        let lastActive = turns.length - 1;
-        while (
-          lastActive > 0 &&
-          turns[lastActive].items.length === 0 &&
-          turns[lastActive].user?.local
-        ) {
-          lastActive--;
-        }
-        return turns.map((turn, ti) => {
-          // 执行中的活动轮：不铺工具流水，只同步 Q&A（助手文本），
-          // 工具过程收进折叠块，需要时再展开。
-          const inProgress = !!running && ti === lastActive;
-          // 用内容指纹做 key：执行中 → 完成态切换时 key 不变，避免整块重挂载闪烁；
-          // 且不随消息裁剪而漂移（下标会）。
-          const keyed = turn.items.map((m) => ({ m, k: msgKey(m) }));
-          // 执行中也铺，但**过程一律折叠着**（下面的分组逻辑会把它并成一行
-          // 「执行过程 · N 步」）—— 一条条冒出来是噪音、还不停把视图往下推，
-          // 但整段藏掉又会让人不知道它在干什么。折叠着实时长，想看点开即可。
-          //
-          // （清单与后台任务是「当前状态」，已由 ChatPane 抽成单独的状态卡，
-          // 挂在对话流末尾；选择卡同理挂在输入框上方，都不进内容流。）
-          const visibleItems = keyed;
-          // 执行中时报一下已走的步数。「最近动作」不再单列 ——
-          // 链上摊着的最后三步已经把它说得更清楚（见 ExecChain）
-          const runSteps = inProgress
-            ? turn.items.filter((m) => m.role === "tool").length
-            : 0;
-
-          return (
-            <div key={turn.key} className={styles.turn}>
-              {/* 对话流只管「我说了什么」。排队状态与撤回一律交给对话流末尾的排队卡 ——
+    <div className={styles.TerminalFeed} ref={rootRef}>
+      {turnChains.map((tc) => {
+        const { turn, keyed, inProgress, chain, body, ckey, runSteps } = tc;
+        // 执行中也铺，但**过程一律折叠着**（ExecChain 会把它并成一行
+        // 「执行过程 · N 步」）—— 一条条冒出来是噪音、还不停把视图往下推，
+        // 但整段藏掉又会让人不知道它在干什么。折叠着实时长，想看点开即可。
+        //
+        // （清单与后台任务是「当前状态」，已由 ChatPane 抽成单独的状态卡，
+        // 挂在对话流末尾；选择卡同理挂在输入框上方，都不进内容流。）
+        return (
+          <div key={turn.key} className={styles.turn}>
+            {/* 对话流只管「我说了什么」。排队状态与撤回一律交给对话流末尾的排队卡 ——
                 两处都摆一份的话，同一条任务在正文和排队卡各显示一遍，还得为了去重
                 把正文里的消息藏起来，于是「我发的内容在对话流里不见了」。
                 职责分开之后，正文永远是完整的对话记录。 */}
-              {turn.user
-                ? (() => {
-                    const uKey = `u|${turn.key}`;
-                    return (
-                      <div className={styles.userRow}>
-                        <div className={styles.userBubble}>
-                          <ClampBox
-                            open={!!expanded[uKey]}
-                            onToggle={() => toggleExpand(uKey)}
-                          >
-                            {turn.user.content}
-                          </ClampBox>
-                        </div>
-                        <div className={styles.userTime}>
-                          {fmtTime(turn.user.timestamp)}
-                        </div>
+            {turn.user
+              ? (() => {
+                  const uKey = `u|${turn.key}`;
+                  return (
+                    <div className={styles.userRow}>
+                      <div className={styles.userBubble}>
+                        <ClampBox
+                          open={!!expanded[uKey]}
+                          onToggle={() => toggleExpand(uKey)}
+                        >
+                          {turn.user.content}
+                        </ClampBox>
                       </div>
-                    );
-                  })()
-                : null}
+                      <div className={styles.userTime}>
+                        {fmtTime(turn.user.timestamp)}
+                      </div>
+                    </div>
+                  );
+                })()
+              : null}
 
-              {(visibleItems.length > 0 || inProgress) && (
-                <div className={styles.agent}>
-                  {(() => {
-                    /* 一轮拆成两半：**过程进链，结论进正文**。
-                       这是这一版的全部：工具调用不再是平铺的一行原始文本，
-                       而是链上的一步；最终答案不再是链里的一个节点，
-                       而是普通正文（比例字 ＋ markdown 基线）。
-
-                       分界线照 VitaAgent `MessageList/index.tsx:601-637`：
-
-                         跑完了 → **最后一段产出（assistant / plan）就是结论**，
-                                  留在正文；它之前的一切都是过程，收进链。
-                                  不能按「最后一次工具调用」切：一轮若以工具结尾
-                                  （问路那种），它前面那段正文恰恰是说给人听的话，
-                                  按那个判据整条回答会一个字都不剩。
-                         跑着呢 → **最后一步过程之后的正文才是「正在写的那段」**，
-                                  之前的每段正文都是旁白，按发生顺序收进链。
-                                  沿用跑完那条的话，旁白会被留在链的**下面**、
-                                  而它引出的那几步却在链里 —— 顺序整个反了。 */
-                    const { chain, body } = buildChain(visibleItems, {
-                      subByToolUse,
-                      split: { flat: false, inProgress },
-                    });
-
-                    /* 一次工具都没调、也没派过子代理：整轮都是正文，不摆链。
-                       摆的话摘要行是空字符串、跑完之后 `shown` 又是空数组，
-                       这一轮会渲染成一个什么都没有的空块 —— 内容凭空消失。 */
-                    if (!chain.some(isStep)) {
-                      return visibleItems.map(({ m, k }) => renderItem(m, k));
-                    }
-
-                    const ckey = `chain|${turn.key}`;
-                    return [
+            {(keyed.length > 0 || inProgress) && (
+              <div className={styles.agent}>
+                {/* 一次工具都没调、也没派过子代理：整轮都是正文，不摆链。
+                    摆的话摘要行是空字符串、跑完之后 `shown` 又是空数组，
+                    这一轮会渲染成一个什么都没有的空块 —— 内容凭空消失。 */}
+                {chain.some(isStep)
+                  ? [
                       <ExecChain
                         key="chain"
                         items={chain}
@@ -1382,39 +1485,40 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                         onToggle={() => toggleExpand(ckey)}
                         expanded={expanded}
                         toggleExpand={toggleExpand}
+                        picked={picked}
+                        onPick={onPick}
                         renderNote={renderItem}
                       />,
                       ...body.map(({ m, k }) => renderItem(m, k)),
-                    ];
-                  })()}
-                  {inProgress ? (
-                    <Working
-                      // 起点取这一轮的起始时刻：有用户消息就用它，否则退回首条产出
-                      since={turn.user?.timestamp ?? turn.items[0]?.timestamp}
-                      steps={runSteps}
-                    />
-                  ) : null}
-                  {/* 落款：来源代理 + 时间。原先挂在终端卡的标题栏上，卡片撤掉之后
+                    ]
+                  : keyed.map(({ m, k }) => renderItem(m, k))}
+                {inProgress ? (
+                  <Working
+                    // 起点取这一轮的起始时刻：有用户消息就用它，否则退回首条产出
+                    since={turn.user?.timestamp ?? turn.items[0]?.timestamp}
+                    steps={runSteps}
+                  />
+                ) : null}
+                {/* 落款：来源代理 + 时间。原先挂在终端卡的标题栏上，卡片撤掉之后
                     这两样仍要有地方待着 —— 时间是回看时定位用的。 */}
-                  {visibleItems.length > 0 ? (
-                    <div className={styles.turnMeta}>
-                      <span className={styles.turnProvider}>
-                        {providerDsr || "终端"}
-                      </span>
-                      <span>
-                        {fmtTime(
-                          turn.items[turn.items.length - 1]?.timestamp ??
-                            turn.user?.timestamp,
-                        )}
-                      </span>
-                    </div>
-                  ) : null}
-                </div>
-              )}
-            </div>
-          );
-        });
-      })()}
+                {keyed.length > 0 ? (
+                  <div className={styles.turnMeta}>
+                    <span className={styles.turnProvider}>
+                      {providerDsr || "终端"}
+                    </span>
+                    <span>
+                      {fmtTime(
+                        turn.items[turn.items.length - 1]?.timestamp ??
+                          turn.user?.timestamp,
+                      )}
+                    </span>
+                  </div>
+                ) : null}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 };

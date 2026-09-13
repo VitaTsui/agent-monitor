@@ -1,6 +1,8 @@
 // 侧栏会话树。几何全部照参照实现（VitaAgent web 的 chat/_components/Sidebar）：
 //   行      高 32、gap 8、padding `0 4px 0 10px`、圆角 8、字号 14
-//   引导槽  20×20（状态点在这个槽里居中，一列对齐）
+//   引导槽  20×20（状态图标、子代理图标、展开箭头都在这个槽里居中，一列对齐）
+//   子级缩进 **给行自己加 padding-left: 30**，不是把容器推窄 —— 容器加 padding
+//           会把子行的右边缘也左移，一列扫下去右端参差不齐
 //   分组头  高 24、左内边距 4、13/400 灰字
 //   二级标签 padding `8px 10px 2px`、12/16、更淡一档
 //
@@ -174,6 +176,19 @@
   }
 }
 
+/* 不可点的子代理（定位不到执行链上的那一步）：整行压暗、不给手型。
+   **不做成「点了没反应」** —— 那是最让人反复戳的一种 */
+.itemDisabled {
+  cursor: default;
+  opacity: 0.55;
+
+  @media (hover: hover) {
+    &:hover {
+      background: transparent;
+    }
+  }
+}
+
 /* 带第二行（正在干什么）的会话行：高度交给内容，上下各留 4 */
 .itemTall {
   height: auto;
@@ -194,8 +209,10 @@
   mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
 }
 
-/* **每一行都用同一个引导槽**：状态点放进一个 20 宽的方块里居中，
-   于是各行的记号落在同一根竖轴上、标题也从同一个 x 起 */
+/* **每一行都用同一个引导槽**：会话的状态图标、子代理的收场图标、展开箭头都放进
+   一个 20 宽的方块里居中，于是几种行的记号落在同一根竖轴上、标题也从同一个 x 起。
+   槽是**侧栏这一列的对齐位**（30px 子级缩进与 19.5px 导引线都按它算），
+   与执行链上那枚 18×18 的色块不是一回事；对齐的是里面那个 **12px 字形**。 */
 .leadSlot {
   position: relative;
   display: inline-flex;
@@ -205,7 +222,39 @@
   width: 20px;
   height: 20px;
   color: var(--muted-foreground);
-  font-size: var(--text-base);
+  // 字形 12：与执行链的 .stepIcon、智能体卡的 .headIcon 同一档，一屏之内只有一种大小
+  font-size: 12px;
+}
+
+/* 能展开的行：**静止显示状态图标，鼠标移到槽上换成箭头**。
+   为什么不是常驻箭头 —— 「这条会话现在什么情况」才是那一眼要分辨的事；
+   而箭头是只有「能展开」这一个含义的记号，一移上去就说清楚了。 */
+.leadToggle {
+  cursor: pointer;
+
+  &:hover {
+    color: var(--foreground);
+
+    .leadRest {
+      display: none;
+    }
+
+    .leadHover {
+      display: inline-flex;
+    }
+  }
+}
+
+.leadRest {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.leadHover {
+  display: none;
+  align-items: center;
+  justify-content: center;
 }
 
 // ---------- 会话行 ----------
@@ -226,28 +275,25 @@
   gap: 8px;
 }
 
-/* 会话状态点。「执行中」走主色（墨黑 / 暗色下近白）＋ 光晕，不是绿色 ——
-   绿是「成功」的语义。全项目一个口径：SessionPanels、TerminalFeed 同此。 */
-.dot {
-  width: 7px;
-  height: 7px;
-  min-width: 7px;
-  border-radius: 50%;
-  background: var(--subtle-foreground);
-
+/**
+ * 会话状态图标的配色。与 VitaAgent 的任务状态同一套
+ * （`TaskCard/index.module.scss:109-119`）：**只有「在跑」和「成了」给颜色**，
+ * 等待与暂停都是中性 —— 它们不是异常，用告警色（上一版的 warning / destructive）
+ * 等于天天在报警。
+ *
+ * 「执行中」走主色（墨黑 / 暗色下近白）而不是绿：绿留给「成功」。
+ * 全项目一个口径：SessionPanels、TerminalFeed、AgentCard 同此。
+ */
+.statusIcon {
   &.running {
-    background: var(--primary);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent);
+    color: var(--primary);
   }
-  &.idle {
-    background: var(--warning);
-  }
-  &.paused {
-    background: var(--destructive);
-  }
+
   &.finished {
-    background: var(--subtle-foreground);
+    color: var(--success);
   }
+
+  // idle / paused 走槽本身的 --muted-foreground，不另外配色
 }
 
 /* 号位徽标：与钉钉「#N」是同一个编号。人在手机上看网页、用钉钉下发，
@@ -264,41 +310,6 @@
   font-size: 11.5px;
   line-height: 18px;
   text-align: center;
-}
-
-// 状态徽标：与右侧会话面板的 statusChip 同一套配色
-.sessStatus {
-  flex: none;
-  padding: 0 7px;
-  border-radius: var(--radius-full);
-  font-size: var(--text-xs);
-  line-height: 17px;
-  // 两个字的状态在窄侧栏里会被折成两行（「执行 / 中」），胶囊也就跟着裂开
-  white-space: nowrap;
-  background: color-mix(in srgb, var(--foreground) 7%, transparent);
-  color: var(--muted-foreground);
-
-  // 「执行中」走主色而不是绿：绿留给「成功」。不加粗 —— 侧栏就这么宽，
-  // 加粗把胶囊撑出容器、末字被裁掉；深浅差已经够把它和其余状态分开。
-  &.running {
-    background: color-mix(in srgb, var(--primary) 12%, transparent);
-    color: var(--primary);
-  }
-
-  &.idle {
-    background: color-mix(in srgb, var(--warning) 16%, transparent);
-    color: var(--warning);
-  }
-
-  &.paused {
-    background: color-mix(in srgb, var(--destructive) 14%, transparent);
-    color: var(--destructive);
-  }
-
-  &.finished {
-    background: color-mix(in srgb, var(--foreground) 7%, transparent);
-    color: var(--muted-foreground);
-  }
 }
 
 /**
@@ -346,4 +357,145 @@
     color: var(--primary);
     background: var(--accent);
   }
+}
+
+// ---------- 子代理 ----------
+
+/**
+ * 展开之后左边有一条**竖导引线**，把这一组子代理拢在会话底下。
+ *
+ * 线要正对会话行那个引导槽的中心：行左内边距 10 ＋ 槽宽 20 的一半 = 20，
+ * 所以线放 19.5（1px 的线从 19.5 铺到 20.5，正好压住 20）。
+ * 底部收 4 —— 不收的话线会顶到下一条会话上。
+ * 少了这条线，缩进的子行看着只是「几条更靠右的会话」，不像是这条会话里的。
+ */
+.subBody {
+  position: relative;
+
+  &::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 4px;
+    left: 19.5px;
+    width: 1px;
+    background: var(--border);
+    pointer-events: none;
+  }
+}
+
+// 缩进给行自己，不给容器（理由见文件头）
+.subItem {
+  padding-left: 30px;
+}
+
+/**
+ * 子代理的收场配色。**只有 `failed` 走告警红** —— `interrupted` 是「被父会话退出
+ * 连带终止」，子代理本身一点毛病没有，标红就是冤枉它（用户原话：「实际结束了却
+ * 显示失败」）。与 `AgentCard` 的小卡同一口径。
+ */
+.subIcon {
+  &.running {
+    color: var(--primary);
+  }
+
+  &.completed {
+    color: var(--success);
+  }
+
+  &.failed {
+    color: var(--destructive);
+  }
+
+  // interrupted 走槽本身的 --muted-foreground：它是中性的收场，不是失败
+}
+
+/* 「定位不到」：点过但正文里没有它那一步。走 warning 而不是 destructive ——
+   这不是出错，是**当前能看到的范围里没有**，往上翻历史把正文补齐就可能找得到。 */
+.subMiss {
+  flex: none;
+  color: var(--warning);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+// 子代理的耗时。裸字会和名字连成一片，所以自成一列、右端对齐、等宽数字
+.subMeta {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 子代理截断行「展开全部（共 N 条）」/「收起」。
+   几何照参照的 `.viewAll`（32 高 / 14px / muted）：它是这串子代理的最后一行，
+   不是一颗按钮。左内边距跟着子行的 30，与上面那串对齐。
+   **纯渲染层截断** —— 点它不会再发一次 `/subtasks`，清单早就一次拉全缓存住了。 */
+.subMore {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 10px 0 30px;
+  border-radius: var(--radius);
+  color: var(--muted-foreground);
+  font-size: var(--text-base);
+  cursor: pointer;
+
+  &:hover {
+    background: var(--overlay-1);
+    color: var(--foreground);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+}
+
+// 「正在读取子代理…」「读取中」这类说明行：不可点、更淡、可折行
+.subHint {
+  height: auto;
+  min-height: 32px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  cursor: default;
+  color: var(--muted-foreground);
+
+  .itemTitle {
+    white-space: normal;
+    mask-image: none;
+    font-size: var(--text-sm);
+    line-height: 1.5;
+    color: var(--muted-foreground);
+  }
+
+  @media (hover: hover) {
+    &:hover {
+      background: transparent;
+    }
+  }
+}
+
+// 读不到清单时那一行末尾的「重试」。机器慢半拍是可恢复的，得给一条出路
+.subRetry {
+  flex: none;
+  margin-left: 8px;
+  color: var(--primary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+/* 空列表的说明。**这条曾经随子会话树一起被误删** —— 于是 `styles.emptyList`
+   取到 undefined，那段兜底文案一直是没有样式的一坨左对齐小字。 */
+.emptyList {
+  padding: 40px 16px;
+  text-align: center;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+  line-height: 1.7;
 }

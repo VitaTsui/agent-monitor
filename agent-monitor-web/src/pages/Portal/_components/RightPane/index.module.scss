@@ -1,13 +1,18 @@
-// 一格内的右栏。照 VitaAgent 的 ViewerPane
-// （`web/src/pages/chat/_components/ViewerPane/index.module.scss`）：
-//   把手 8 宽 col-resize、中央 3×48 圆角小条 hover 才显；
-//   栏是**一张浮着的卡**：上下右各留 8 露底、圆角 10、`0 0 0 1px` 描边环 ＋ 两层轻投影。
+// 一格内的右栏 = 把手 ＋ **一条透明的、露底的滚动列**。
 //
-// 上一版是「撑满高度 + 一条左边框」，看着像把格子横切了一刀；卡片式那 8px 露底
-// 才是「它浮在正文旁边」这件事的全部来源。
+// 几何照 VitaAgent 的 `ActivityPanel`
+// （`web/src/pages/chat/_components/ActivityPanel/index.module.scss:1-21`）：
+// 外层 `padding: 8 8 16`、**不画任何底与边**，浮起来的那张卡在它**里面**
+// （本项目对应 `SessionStatePane` 的 `.card`：圆角 8 ＋ 描边环 ＋ 投影、高度随内容）。
+// 左边那 8 由把手 `.sep` 自己占掉，所以这里 padding-left 是 0。
 //
-// 投影不写 --vita-shadow-*，用跟着 --foreground 走的 color-mix：
-// 本项目的卡片投影一律这么画（见 PanesView / Sidebar），暗色下才不会是一团死黑。
+// **两层不许都画卡。** 上一版这一层画了圆角 10 ＋ 描边环 ＋ 投影，等于把参照里
+// 那张 312 宽的内卡换成了一根撑满高度的外框；再往里放一张带环的卡就是两圈框
+// 套着。取舍很清楚：参照的观感来自「露底 ＋ 内卡浮起」，外框那一圈不是它。
+// 拖拽把手与宽度算法一点没动，动的只是「谁来画那张卡」。
+//
+// 滚动条也跟着挪到这一层：卡的高度必须随内容（参照如此），所以撑不满时
+// 下面就是露底，而不是一张空着的长卡。
 
 .sep {
   display: flex;
@@ -42,14 +47,9 @@
   // 不写这两行，栏里一段长内容就能把正文挤没
   min-width: 0;
   min-height: 0;
-  margin: 8px 8px 8px 0;
-  overflow: hidden;
-  border-radius: 10px;
-  background: var(--card);
-  box-shadow:
-    0 0 0 1px var(--overlay-2),
-    0 1px 2px color-mix(in srgb, var(--foreground) 5%, transparent),
-    0 4px 6px -1px color-mix(in srgb, var(--foreground) 8%, transparent);
+  padding: 8px 8px 16px 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   transition: flex-basis 0.2s ease;
 }
 

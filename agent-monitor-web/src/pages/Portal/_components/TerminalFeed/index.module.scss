@@ -423,16 +423,6 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
     transition: color 0.15s;
   }
 
-  // 「正在处理…」那一行的名称走正文色：它是这一刻唯一在动的东西
-  .stepNameLive {
-    min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    font-size: var(--text-sm);
-    color: var(--foreground);
-  }
-
   // 工具名：一枚淡底小标，不与这次的入参抢字重
   .stepFrom {
     flex: none;
@@ -457,6 +447,13 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
       content: "·";
       margin: 0 6px;
     }
+  }
+
+  /* 那个「·」是**分隔号**，前面得真有东西可分隔。
+     执行中那一行（`Working`）删掉「正在处理…」之后，耗时直接跟在图标槽后面 ——
+     再印一个点就成了行首挂一个孤零零的「·」。 */
+  .stepTile + .stepStatus::before {
+    content: none;
   }
 
   // 跑砸的那一步：整行走 destructive，与 SessionPanels 里失败的后台任务同一套色。
@@ -577,9 +574,11 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
   }
 }
 
-// 「正在处理…」不再是独立形态：它就是这条链的最后一行，走的是上面那套
+// 执行中那一行不是独立形态：它就是这条链的最后一行，走的是上面那套
 // `.step` / `.stepIcon` / `.stepStatus`（见组件里的 Working）。原先那颗
 // 脉冲圆点与两种「执行中」记号已删 —— 一屏之内只留一套。
+// 「正在处理…」那四个字也一并删了（`.stepNameLive` 随之退役）：转圈图标
+// ＋ 走字的耗时已经把「在动」说清楚了，链上最后几步写着具体在干什么。
 
 // 交互式选择卡片（AskUserQuestion 同步）：琥珀色调，暗示「等待输入」。
 //

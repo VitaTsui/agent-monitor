@@ -29,8 +29,19 @@ interface SessionPanelsProps {
   /** 会话是否正在运行：非运行时清单里的「进行中」降级为「未完成」，
       不再显示会动的进行态（会话都停了就没有正在做的任务）。 */
   running?: boolean;
-  /** 外层追加的类名。右栏里用它抹掉「接在对话流末尾」才需要的上边距。 */
+  /** 外层追加的类名。 */
   className?: string;
+  /**
+   * **平铺模式**：不自带描边卡，改成一列 12 内边距、发丝线分隔的分区。
+   *
+   * 右栏里用它 —— 那儿外面已经是一张浮着的卡（见 `SessionStatePane`），
+   * 里面再套两张带边框的小卡就是框中框。窄屏排在对话流末尾时不传：
+   * 那儿没有外卡可依，每一块得自己是一张卡。
+   *
+   * **边框与圆角属于所处的位置，不属于内容** —— 所以这是一个外部传入的开关，
+   * 而不是在组件里再判一次「我这会儿在哪儿」。
+   */
+  flat?: boolean;
 }
 
 interface CardProps {
@@ -124,7 +135,7 @@ const TaskRow: React.FC<{ task: SubTask; now: number }> = ({ task, now }) => {
  * 这件最该被看到的事，反倒需要先点一下才看得见。
  */
 const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
-  const { messages, subTasks, running, className } = props;
+  const { messages, subTasks, running, className, flat } = props;
 
   // 「有哪些东西要展示」只有一处定义（见 sessionStateOf）：右栏要先问同一个问题
   // 才知道该不该给这条会话一个标题，两边各写一遍筛选条件迟早会对不上。
@@ -170,7 +181,11 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
   };
 
   return (
-    <div className={`${styles.SessionPanels} ${className ?? ""}`}>
+    <div
+      className={`${styles.SessionPanels} ${flat ? styles.flat : ""} ${
+        className ?? ""
+      }`}
+    >
       {todos.length > 0 && (
         <StateCard
           icon={<CheckSquareOutlined />}

@@ -27,6 +27,30 @@
   background: var(--card);
 }
 
+/**
+ * 平铺模式：右栏里用。外面已经是一张浮着的卡（`SessionStatePane`），
+ * 这里每一块就退成卡里的一个**分区** —— 12 内边距、块间一条发丝线，
+ * 照 VitaAgent 的 `ActivityPanel .section`（`index.module.scss:23-29`）。
+ *
+ * 不这么做的话就是「带边框的小卡装在带描边环的大卡里」，一眼两层框。
+ * 窄屏（对话流末尾）不传 `flat`，那儿没有外卡，每一块必须自己是卡。
+ */
+.flat {
+  gap: 0;
+  margin-top: 0;
+
+  .card {
+    padding: 12px;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+  }
+
+  .card + .card {
+    border-top: 1px solid var(--border-weak);
+  }
+}
+
 .head {
   display: flex;
   align-items: flex-start;

@@ -314,6 +314,15 @@ class PortalStore {
   /** 正在拉子任务清单的会话 */
   private _subTasksLoading: string[] = [];
   /**
+   * 清单**还没送回来**的会话（`/subtasks` 一路 `pending: true` 问到头）。
+   *
+   * 这不是「没有子会话」。那个接口是 hub 点名让那台机器现读磁盘，机器慢半拍、
+   * 上报节律没跟上都会一直 pending —— 从前问到第 6 次就把空清单写进缓存，
+   * 界面于是说「该会话没有子会话」，一句假话，而且缓存住了再也不会自己纠正。
+   * 单独记一份，侧栏才说得出「读取中」并给一条重试的出路。
+   */
+  private _subTasksPending: string[] = [];
+  /**
    * 已经问过 `/subtasks` 的会话（无论成没成）。
    *
    * 与 `_subTasksById` 分开记，是为了让**失败**也算「问过」，却不覆盖已有数据：
@@ -346,6 +355,56 @@ class PortalStore {
    */
   composerRefill: { taskId: string; text: string; nonce: number } | null = null;
   private _refillNonce = 0;
+
+  /**
+   * 「把执行链滚到这个子代理那张卡上」的一次请求。
+   *
+   * 侧栏的子会话行只负责**定位**：点它 = 打开父会话 ＋ 让正文滚到派出它的那一步。
+   * 内容一律在执行链里看（见 `AgentCard`）—— 不再有「子会话当成一条独立会话打开」
+   * 那条复合 id 路径，那套的毛病记在 `SessionTree` 的注释里。
+   *
+   * 做成一次性的请求（带 `seq`）而不是一个选中态：定位是个**动作**，
+   * 做完就该消失；留成状态的话，用户手动滚开之后它还会把视图抢回去。
+   * 同一个子代理连点两次也要能再滚一次，所以 `seq` 每次递增。
+   */
+  focusAgent: { taskId: string; agentId: string; seq: number } | null = null;
+  private _focusSeq = 0;
+  /**
+   * 上一次**没定位到**的那个子代理。
+   *
+   * 定位不到是有原因的（派出它的那次工具调用不在已加载的正文里），但**原因要说在
+   * 用户点的那个地方** —— 侧栏那一行上。弹一条飘过去的全局提示等于让人回头找
+   * 刚才点的是哪条；而什么都不说就成了「点了没反应」，那是最让人反复戳的一种。
+   */
+  private _focusMissId = "";
+
+  get focusMissId() {
+    return this._focusMissId;
+  }
+
+  /** 请求把某条会话的执行链滚到某个子代理的卡片上并展开它 */
+  public focusAgentCard = (taskId: string, agentId: string) => {
+    this._focusSeq += 1;
+    this.focusAgent = { taskId, agentId, seq: this._focusSeq };
+    // 新的一次定位开始，上一次的「定位不到」就该收回去
+    this._focusMissId = "";
+  };
+
+  /** 这次定位落地了（真的滚过去了），把请求消费掉 */
+  public clearFocusAgent = (seq: number) => {
+    if (this.focusAgent?.seq === seq) {
+      this.focusAgent = null;
+    }
+  };
+
+  /** 这次定位**找不到**目标：把原因记在那一行上，并把请求消费掉 */
+  public reportFocusMiss = (seq: number) => {
+    if (this.focusAgent?.seq !== seq) {
+      return;
+    }
+    this._focusMissId = this.focusAgent.agentId;
+    this.focusAgent = null;
+  };
 
   constructor() {
     // 连接管理字段是命令式状态（WS 句柄、定时器句柄、世代号、关闭标志），
@@ -863,6 +922,16 @@ class PortalStore {
     this._subTasksFailById = next;
   };
 
+  private setSubTasksPending = (id: string, on: boolean) => {
+    const has = this._subTasksPending.includes(id);
+    if (has === on) {
+      return;
+    }
+    this._subTasksPending = on
+      ? [...this._subTasksPending, id]
+      : this._subTasksPending.filter((x) => x !== id);
+  };
+
   // ---------- 子任务（子会话树）----------
 
   /**
@@ -915,6 +984,10 @@ class PortalStore {
   public isSubTasksLoading = (id: string): boolean =>
     this._subTasksLoading.includes(id);
 
+  /** 清单问到头仍是 `pending` —— 显示「读取中」并给重试，**不当成空** */
+  public isSubTasksPending = (id: string): boolean =>
+    this._subTasksPending.includes(id);
+
   /**
    * 这条会话的全量子任务清单拉过了没有。
    *
@@ -939,7 +1012,15 @@ class PortalStore {
    * 空清单，不再重试 —— 那条会话确实没有子会话可展，重试也只是白问。
    */
   public loadSubTasks = (id: string, force = false, tries = 0) => {
-    if (!id || this._subTasksLoading.includes(id)) {
+    if (!id) {
+      return;
+    }
+    /* 「已经在读」这一条只挡**新发起**的读（`tries === 0`）。
+       `tries > 0` 是 pending 重试 —— 它就是同一次读的下一轮，而这条会话在
+       整个重试窗口里都留在 `_subTasksLoading` 里（界面得一直说「正在读取」，
+       不能每 2.5 秒闪一句「没有子代理」）。两件事别用同一个判据：
+       挡住重试的后果是**只问一次就永远停在读取中**。 */
+    if (tries === 0 && this._subTasksLoading.includes(id)) {
       return;
     }
     // 上一次**失败**过的允许再问一次（设备离线是可恢复的）；成功拿到过的才真正缓存住
@@ -951,14 +1032,21 @@ class PortalStore {
     ) {
       return;
     }
-    this._subTasksLoading = [...this._subTasksLoading, id];
-    if (force) {
-      this.setSubTasksFail(id, undefined);
+    if (!this._subTasksLoading.includes(id)) {
+      this._subTasksLoading = [...this._subTasksLoading, id];
     }
+    if (force || tries === 0) {
+      this.setSubTasksFail(id, undefined);
+      this.setSubTasksPending(id, false);
+    }
+    /** 这一轮问完了（不再重试）才算「不在拉」 */
+    const settle = () => {
+      this._subTasksLoading = this._subTasksLoading.filter((x) => x !== id);
+    };
     getPortalSubTasks(id)
       .then((res) => {
-        this._subTasksLoading = this._subTasksLoading.filter((x) => x !== id);
         if (res.code !== 0) {
+          settle();
           // 设备离线（code 500）与会话不存在（code 404）是两回事：前者点一下重试
           // 就好，后者重试多少次都一样。判的是结构化的 code，不是 msg 里那句话。
           this.setSubTasksFail(id, this.failKindOf(id, res.code));
@@ -968,22 +1056,34 @@ class PortalStore {
           return;
         }
         const list = res.data?.list ?? [];
-        // pending 且一条都没有 = 那台机器还没把清单送回来，过一会儿再问
-        if (res.data?.pending && !list.length && tries < PENDING_RETRY_MAX) {
-          setTimeout(
-            () => this.loadSubTasks(id, force, tries + 1),
-            PENDING_RETRY_MS,
-          );
+        // pending 且一条都没有 = 那台机器还没把清单送回来，过一会儿再问。
+        // **重试窗口里不松开 loading**：松开的话这 2.5 秒界面会先说一句
+        // 「该会话没有子会话」，下一轮又变回来，一眼看过去就是在骗人。
+        if (res.data?.pending && !list.length) {
+          if (tries < PENDING_RETRY_MAX) {
+            setTimeout(
+              () => this.loadSubTasks(id, force, tries + 1),
+              PENDING_RETRY_MS,
+            );
+            return;
+          }
+          /* 问到头了还是 pending。**不写空清单**：那会把「读不到」永久缓存成
+             「没有」，而且 `_subTasksTried` 一旦落定就再也不会自己重问。
+             记成 pending，界面显示「读取中」并给一颗重试。 */
+          settle();
+          this.setSubTasksPending(id, true);
           return;
         }
+        settle();
         this._subTasksById = { ...this._subTasksById, [id]: list };
         this.setSubTasksFail(id, undefined);
+        this.setSubTasksPending(id, false);
         if (!this._subTasksTried.includes(id)) {
           this._subTasksTried = [...this._subTasksTried, id];
         }
       })
       .catch(() => {
-        this._subTasksLoading = this._subTasksLoading.filter((x) => x !== id);
+        settle();
         // **不写空清单**：活跃会话手上还有一份随上报捎带的 `Task.subTasks`，
         // 写空等于用一次失败把已经拿到的子任务擦掉
         this.setSubTasksFail(id, "network");
