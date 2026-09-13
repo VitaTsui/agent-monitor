@@ -369,6 +369,8 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
      * 于是「执行中」永远只有那三个字。用户为此提了三次。
      */
     const lastAction = status === "running" ? (t.lastAction ?? "").trim() : "";
+    /** 展开/收起的箭头字形。悬停替换那枚与触屏常驻那枚是同一个，不另起一套 */
+    const caretIcon = expanded ? <CaretDownOutlined /> : <CaretRightOutlined />;
     /**
      * **默认只列还在跑的**。跑完的收进最后一行「已结束 N 个」，点开才铺。
      *
@@ -413,15 +415,20 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
             }
           }}
         >
-          {/* 行首那一块：**常驻的展开箭头 ＋ 状态图标**，两个记号各占一列。
-              点它展开/收起，点行的其余部分打开会话 —— 两个动作各有各的落点。
+          {/* 行首那一格：**静止是状态图标，鼠标移到这一行上就换成展开箭头**
+              （照 VitaAgent 的侧栏，`Sidebar/index.module.scss:790-810` 同一手法）。
+              两个记号叠在**同一个 20×20 的槽**里，靠 CSS 切显隐 —— 不各占一列，
+              侧栏就这么宽，一列记号能换来一列文字。
 
-              箭头从前是**只在鼠标悬到那 20×20 的槽上时才换出来**的（静止显示状态
-              图标）。那等于「能不能展开」这件事在界面上没有任何痕迹：扫一眼侧栏
-              看不出有下一层，触屏上压根没有 hover、这个功能就是不存在
-              （用户原话：「子会话的显示…还没有展开收起功能」）。
-              现在箭头常驻，不能展开的行留一个同宽的空位，让所有会话行的文字
-              仍旧从同一个 x 起。
+              **不能展开的行不换箭头**：换出来点了没反应，那是骗人。
+
+              触屏没有 hover，纯悬浮替换等于没有展开入口。所以另有一个
+              `.caret` 列：桌面端宽度是 0（等于不存在），`@media (hover: none)`
+              下才撑到 14px、把箭头常驻出来 —— 状态图标仍留在槽里，不被挤掉。
+              两套的缩进、导引线都由同一个 `--caret-col` 推出来（见 scss）。
+
+              点击分工：点这一格 = 展开/收起（`stopPropagation` 掐掉冒泡），
+              点行的其余部分 = 打开会话。
 
               状态不再另印一个文字胶囊：图标已经把四态说清楚了，语义由
               `aria-label` / `title` 承担（见「去掉冗余文字」那条）。 */}
@@ -449,21 +456,23 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                 : undefined
             }
           >
+            {/* 触屏专用的常驻箭头列。桌面端 width: 0，只剩一个不占地方的空壳；
+                不可展开的行同样留这个空壳，触屏下所有会话行的文字才从同一个 x 起 */}
             <span className={styles.caret} aria-hidden>
-              {expandable ? (
-                expanded ? (
-                  <CaretDownOutlined />
-                ) : (
-                  <CaretRightOutlined />
-                )
-              ) : null}
+              {expandable ? caretIcon : null}
             </span>
             <span
               className={`${styles.leadSlot} ${styles.statusIcon} ${
                 styles[status] ?? ""
               }`}
             >
-              {STATUS_ICON[status]}
+              <span className={styles.leadRest}>{STATUS_ICON[status]}</span>
+              {/* 悬停时顶替状态图标的那枚箭头。只有能展开的行才有 */}
+              {expandable ? (
+                <span className={styles.leadHover} aria-hidden>
+                  {caretIcon}
+                </span>
+              ) : null}
             </span>
           </span>
 
