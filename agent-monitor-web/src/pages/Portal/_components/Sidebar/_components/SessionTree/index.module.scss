@@ -5,6 +5,15 @@
 // **行首只有一格**：静止显状态图标，鼠标移到这一行上换成展开箭头（两枚叠在同一个
 // 槽里，靠显隐切换）。侧栏就这么宽，少一列记号就多一列文字。
 //
+// CLI 分组里多一级「项目」，于是文字列一共四级（客户端组标题自成一档，不在这套
+// 缩进里）。每一级都比上一级右 20，两套（桌面 / 触屏）由两个变量推出来：
+//   项目行文字   = 10(pad) + C + 20(槽) + 8(gap)                  → 38 / 52
+//   会话行文字   = 10 + L + C + 20 + 8                            → 58 / 72（L=20）
+//   子代理文字   = 30 + C + L + 20 + 8                            → 78 / 92
+//   项目导引线   = 19.5 + C                    （对准项目行状态槽中心 20+C）
+//   会话导引线   = 19.5 + C + L                （对准会话行状态槽中心 20+C+L）
+// 桌面分组 L 恒为 0，于是会话 38 / 子代理 58，与加项目层之前一模一样。
+//
 // 触屏没有 hover，纯悬浮替换等于没有展开入口 —— 所以另有一个 `.caret` 列，
 // 桌面端 `--caret-col: 0`（等于不存在），`@media (hover: none)` 下才是 14px。
 // **下面四个数全部由这一个变量推出来**，两套几何不会各改各的走偏：
@@ -30,6 +39,15 @@
   /* 触屏兜底列的宽度。桌面端 0 = 那一列不存在，行首只剩状态槽（悬停换箭头）；
      触屏 14 = 箭头常驻。整棵树的缩进与导引线都从它算，改一处两套同步。 */
   --caret-col: 0px;
+  /**
+   * **多出来的那一级缩进。** CLI 分组里会话行住在项目行底下（`.projectBody` 把它
+   * 置成 20px），桌面分组里会话行直接挂在客户端组下（保持 0）。
+   *
+   * 做成一个继承下去的变量，而不是 `.projectBody .sessionItem { ... }` 这种
+   * 后代覆盖：会话行下面还有子代理行、列表末尾行、导引线，四处都要跟着挪，
+   * 写成四条后代覆盖就是四个地方各自加 20，迟早漏一个。
+   */
+  --level-indent: 0px;
 
   padding-bottom: 4px;
 
@@ -266,7 +284,7 @@
   cursor: pointer;
 
   @media (hover: hover) {
-    .sessionItem:hover &,
+    .item:hover &,
     &:hover {
       .leadRest {
         display: none;
@@ -315,11 +333,68 @@
   font-size: 12px;
 }
 
+// ---------- 项目行（只有 CLI 分组有） ----------
+
+/* 项目行在基准位（`.item` 自带的 padding-left: 10），不吃 --level-indent ——
+   它就是那一级的起点。整行点击 = 展开/收起，没有第二种含义。 */
+.projectItem {
+  .itemTitle {
+    // 项目名是这一层的标题，比会话标题重一档；不加粗的话与会话行糊成一片
+    font-weight: 500;
+  }
+}
+
+// 文件夹图标走次级色：它是「这是一层容器」的记号，不该比里面的会话还抢眼
+.projectIcon {
+  color: var(--muted-foreground);
+}
+
+/* 这个项目下开着几个终端。收起时这是唯一还看得见的动静 —— 与客户端组标题右侧
+   那枚「N 执行中」同一档（11px / 次级色 / 淡底胶囊）。 */
+.projCount {
+  flex: none;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  background: var(--overlay-1);
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+  line-height: 17px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/**
+ * 项目展开后的那一片。**多的那一级缩进在这里下发**，底下的会话行、子代理行、
+ * 列表末尾行、以及会话那条导引线全都跟着挪，不必各自再加一遍。
+ *
+ * 导引线对准项目行状态槽的中心：行左内边距 10 ＋ 触屏箭头列 ＋ 槽宽 20 的一半
+ * = 20 ＋ `--caret-col`，所以线放 `19.5px + --caret-col`。
+ * 它自己**不吃** `--level-indent`（项目行就在基准位）。
+ */
+.projectBody {
+  position: relative;
+  --level-indent: 20px;
+
+  &::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 4px;
+    left: calc(19.5px + var(--caret-col));
+    width: 1px;
+    background: var(--border);
+    pointer-events: none;
+  }
+}
+
 // ---------- 会话行 ----------
 
 .sessionItem {
   // 第二行（正在干什么）要与标题一起顶对齐，不能整块垂直居中
   align-items: center;
+  // CLI 里会话行住在项目底下（--level-indent: 20），桌面里直接挂在客户端组下（0）
+  padding-left: calc(10px + var(--level-indent));
 }
 
 .sessBody {
@@ -437,7 +512,7 @@
     position: absolute;
     top: 0;
     bottom: 4px;
-    left: calc(19.5px + var(--caret-col));
+    left: calc(19.5px + var(--caret-col) + var(--level-indent));
     width: 1px;
     background: var(--border);
     pointer-events: none;
@@ -448,7 +523,7 @@
    30 ＋ `--caret-col` ＝ 会话行的 10 内边距 ＋ 触屏箭头列 ＋ 20 状态槽：
    子行的状态槽正好从会话行状态槽的右边缘起，文字列因此比会话行右移整整 20。 */
 .subItem {
-  padding-left: calc(30px + var(--caret-col));
+  padding-left: calc(30px + var(--caret-col) + var(--level-indent));
 }
 
 /**
@@ -503,7 +578,7 @@
   align-items: center;
   gap: 6px;
   height: 32px;
-  padding: 0 10px 0 calc(58px + var(--caret-col));
+  padding: 0 10px 0 calc(58px + var(--caret-col) + var(--level-indent));
   border-radius: var(--radius);
   color: var(--muted-foreground);
   font-size: var(--text-base);

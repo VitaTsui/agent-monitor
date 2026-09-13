@@ -91,6 +91,21 @@ export interface SessionBucket {
   items: PortalTaskData[];
 }
 
+/**
+ * CLI 分组里的一个**项目**（一个 cwd 一组）。
+ *
+ * 只有 CLI 有这一层：终端会话天然长在某个工作目录下，「我在哪个项目上开着哪几个
+ * 终端」才是那一列要回答的问题。桌面客户端的对话没有 cwd，硬塞一层「未知项目」
+ * 是凭空多一级缩进。
+ */
+export interface SessionProject {
+  /** 归一化后的目录键（与后端 `encode_path` 同规则，见 `normProject`） */
+  key: string;
+  /** 展示名：备注过的项目名 > 目录名 > 「未知项目」 */
+  title: string;
+  items: PortalTaskData[];
+}
+
 /** 侧栏里的一个客户端分组（可折叠，内含该客户端的全部会话） */
 export interface ClientSection extends ClientKey {
   /**
@@ -108,6 +123,13 @@ export interface ClientSection extends ClientKey {
   /** 服务端说的历史总条数（不受分页影响）；还没拉过是 0 */
   total: number;
   buckets: SessionBucket[];
+  /**
+   * **CLI 专有**：组内按项目再分一层。桌面分组恒为空数组，走 `buckets`。
+   *
+   * 两者互斥而不是并存：一个 CLI 分组永远只走 `projects`，一个桌面分组永远只走
+   * `buckets`。渲染层据此二选一，不做「两个都铺」这种事。
+   */
+  projects: SessionProject[];
   /** 历史正在拉 */
   loading: boolean;
   /** 拉过至少一页了 */
@@ -151,6 +173,30 @@ const PENDING_RETRY_MAX = 6;
  * - `network` 请求压根没发出去 / 没回来。
  */
 export type FetchFailKind = "offline" | "missing" | "network";
+
+/**
+ * 归一化目录键：与后端 `encode_path`（core/scanner）逐字对齐 —— 去尾随分隔符后，
+ * 把每个非字母数字字符一律替换成 `-`，再小写。
+ *
+ * **必须与配对键同规则**：同一目录下的空会话（占位任务用进程 cwd）与真实会话
+ * （用 jsonl 里的 cwd），以及 cursor / 非 cursor 终端，cwd 字符串常在分隔符、
+ * 盘符冒号、标点处有细微差异；只做「斜杠 / 大小写」归一挡不住，两条本该同组的
+ * 会话会分成两个项目。
+ *
+ * 这一份是从旧的 `selectedGroups` 里原样搬过来的，不另写一套。
+ */
+const normProject = (p: string | undefined | null) =>
+  (p ?? "")
+    .replace(/[/\\]+$/, "")
+    .replace(/[^a-zA-Z0-9]/g, "-")
+    .toLowerCase();
+
+/** 项目的展示名：备注过的项目名 > 目录名 > 兜底。同样沿用旧 `selectedGroups` 的口径 */
+const projectTitleOf = (t: PortalTaskData): string => {
+  const dirName =
+    (t.project ?? "").split(/[\\/]/).filter(Boolean).pop() ?? "";
+  return t.projectName || dirName || "未知项目";
+};
 
 /** 时间桶的标签与顺序（照 VitaAgent 侧栏：今天 / 昨天 / 过去 7 天 / 过去 30 天 / 更早） */
 const BUCKET_ORDER = ["今天", "昨天", "过去 7 天", "过去 30 天", "更早"];
@@ -611,6 +657,7 @@ class PortalStore {
           running: 0,
           total: 0,
           buckets: [],
+          projects: [],
           loading: false,
           loaded: false,
           hasMore: false,
@@ -724,22 +771,42 @@ class PortalStore {
 
       if (!sec.desktop) {
         /**
-         * CLI：**一条平铺的列表，不分桶、不翻页**。
+         * CLI：**按项目再分一层，不分桶、不翻页**。
          *
-         * 分桶回答的是「这条会话是什么时候的」—— 对一列**全都开着**的终端窗口
-         * 没有意义：一个开了三天没关的终端会被标成「过去 7 天」，而它就在眼前。
-         * 桶标题留空，渲染层据此不画那一行小标签（见 SessionTree）。
+         * 终端会话天然长在某个工作目录下，「我在哪个项目上开着哪几个终端」才是
+         * 这一列要回答的问题（用户原话：「cli agent 按项目分没了」）。层级因此是
+         * 客户端 → 项目 → 会话 → 子代理，与参照的「项目行 → 会话行」同构。
          *
-         * 计数也跟着换成**实际列出的条数**：历史总数（那台机器上攒下的 73 条
-         * jsonl）与这一列没有关系，写上去就是标题说 73、列表只有 2 条。
+         * **不分时间桶**：分桶回答的是「这条会话是什么时候的」，对一列**全都开着**
+         * 的终端窗口没有意义 —— 一个开了三天没关的终端会被标成「过去 7 天」，
+         * 而它就在眼前。`buckets` 在 CLI 这一侧恒为空，渲染层走 `projects`。
+         *
+         * 项目内保持 `rows` 已有的「最近活动倒序」；项目之间也按各自最近活动的
+         * 那一条排 —— 刚动过的项目排在前面，与整列「我最近在弄什么」同一个口径。
+         *
+         * 计数换成**实际列出的条数**：历史总数（那台机器上攒下的 73 条 jsonl）
+         * 与这一列没有关系，写上去就是标题说 73、列表只有 2 条。
          */
-        sec.buckets = rows.length ? [{ label: "", items: rows }] : [];
+        const byProject = new Map<string, SessionProject>();
+        for (const r of rows) {
+          const title = projectTitleOf(r);
+          const key = normProject(r.project) || title.toLowerCase();
+          const grp = byProject.get(key);
+          if (grp) {
+            grp.items.push(r);
+          } else {
+            byProject.set(key, { key, title, items: [r] });
+          }
+        }
+        sec.projects = [...byProject.values()];
+        sec.buckets = [];
         sec.total = rows.length;
         sec.loading = false;
         sec.loaded = true;
         sec.hasMore = false;
         continue;
       }
+      sec.projects = [];
 
       const buckets = new Map<string, PortalTaskData[]>();
       for (const r of rows) {
