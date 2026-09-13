@@ -180,12 +180,13 @@
  *
  * 上一版这里是一枚 7×7 的色点（失败时换成 13px 的 `WarningFilled`），
  * 与那三处对不上，也分不出「被中断」和「等着轮到」。 */
+/* 只管尺寸。字形与语义色一律由 `StatusIcon` 一处给 —— 这儿原先另写了
+   running/failed 两条配色，与 `AgentCard`、`TerminalFeed` 那两份并存 */
 .itemIcon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: none;
-  color: var(--muted-foreground);
   font-size: 12px;
 }
 
@@ -215,18 +216,6 @@
 }
 
 // ---------- 任务清单 ----------
-
-/* 「还没轮到」的记号：一枚虚线圈，对 VitaAgent 的 `ph:circle-dashed`
-   （`TaskCard/index.tsx:81`）。antd 没有这个字形，就在同一个 12px 的槽里
-   画出来 —— `1em` 见方，跟着 `.itemIcon` 的字号走，与旁边的 antd 图标严丝合缝。
-   上一版是一枚 13px 的圆角方框，既不是圈也不是这一档大小。 */
-.todoPending {
-  box-sizing: border-box;
-  width: 1em;
-  height: 1em;
-  border: 1.5px dashed currentcolor;
-  border-radius: 50%;
-}
 
 .todoText {
   flex: 1;

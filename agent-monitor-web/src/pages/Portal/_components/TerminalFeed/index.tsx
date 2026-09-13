@@ -11,6 +11,7 @@ import { PortalMessage, SelectPayload, SubTask } from "@/services/apis/portal";
 import PortalStore from "../../PortalStore";
 import { fmtElapsed } from "../../_utils/sessionState";
 import AgentCard from "../AgentCard";
+import StatusIcon, { CHAIN_ICON } from "../StatusIcon";
 import styles from "./index.module.scss";
 
 interface TerminalFeedProps {
@@ -48,8 +49,8 @@ interface TerminalFeedProps {
 /**
  * 链上每个节点左边那枚**方形图标**：外层是 18×18 的不透明色块，里层才是字形。
  *
- * **必须分两层。** 执行中那枚是 antd 的 `LoadingOutlined`，它的转圈动画
- * （`anticon-spin`）挂在**图标自己的那个 `<span>`** 上；色块与字形合成一个元素时，
+ * **必须分两层。** 执行中那枚要转圈（`StatusIcon` 的 `.spin`），动画挂在**图标
+ * 自己的那个元素**上；色块与字形合成一个元素时，
  * 转的就是这枚色块本身 —— 实测外接盒被从 20 转到 25.18，方块的四个角一圈圈扫过
  * 身后那根竖线，看着就是「图标在抖」。色块得钉住不动，只让字形转。
  * （`AgentCard` 的 `.headTile` / `.headIcon` 早就是这个结构，这里补齐。）
@@ -60,18 +61,15 @@ interface TerminalFeedProps {
  * 这条时间轴读得出「一节点一格」的前提。
  */
 const StepTile: React.FC<{
-  /** antd 图标组件名（由 hsu-ui 的 `Icon` 按名取） */
-  icon: string;
-  /** 执行中：字形走 --primary，并由 antd 自己转圈 */
-  live?: boolean;
+  children: React.ReactNode;
   className?: string;
-}> = ({ icon, live, className }) => (
-  <span className={`${styles.stepTile} ${className ?? ""}`}>
-    <Icon
-      icon={icon}
-      className={`${styles.stepIcon} ${live ? styles.stepIconLive : ""}`}
-    />
-  </span>
+}> = ({ children, className }) => (
+  <span className={`${styles.stepTile} ${className ?? ""}`}>{children}</span>
+);
+
+/** 槽里那枚**非状态**的字形（工具 / 旁白 / 省略号）。状态一律走 `StatusIcon` */
+const StepGlyph: React.FC<{ icon: string }> = ({ icon }) => (
+  <Icon icon={icon} className={`${styles.stepIcon} ${styles.stepGlyph}`} />
 );
 
 /** 一轮对话：一条用户消息 + 其后的助手/工具活动 */
@@ -706,10 +704,7 @@ const summarizeChain = (items: ChainItem[]): string => {
  * 口径与 SessionPanels / SubAgentChip 共用 `fmtElapsed`：起点取这一轮的
  * 起始时间戳（会话记录里的时刻），全项目只有这一套算法。
  */
-const Working: React.FC<{
-  since?: string;
-  steps: number;
-}> = ({ since, steps }) => {
+const Working: React.FC<{ since?: string }> = ({ since }) => {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -720,16 +715,23 @@ const Working: React.FC<{
 
   return (
     <div className={styles.step}>
-      <div
-        className={styles.stepHead}
-        role="status"
-        aria-label="正在处理"
-        title="正在处理"
-      >
-        <StepTile icon="LoadingOutlined" live />
-        {elapsed ? <span className={styles.stepStatus}>{elapsed}</span> : null}
-        {steps > 0 ? (
-          <span className={styles.stepStatus}>已 {steps} 步</span>
+      <div className={styles.stepHead} role="status" aria-label="正在处理">
+        <StepTile>
+          <StatusIcon kind="running" className={styles.stepIcon} />
+        </StepTile>
+        {/* **这一行必须有名字。** 上一版把「正在处理…」删了，于是它成了一行
+            「一枚转圈 ＋ 一个 14秒」的空壳 —— 信息量为零，用户直接指出来了。
+            参照那一行是 `⟳ 正在处理… · 7s`（`VitaAgent/web/src/pages/chat/
+            _components/MessageList/index.tsx:235`），名字与耗时缺一不可：
+            名字说「还在做」，耗时说「做了多久」—— 后者是「还在跑」与「卡死了」
+            的唯一区别。删名字省不下什么，只是把这一行变成看不懂的噪音。 */}
+        <span className={styles.stepNameLive}>正在处理…</span>
+        {/* 耗时靠右，与参照的 `.stepMeta` 同一处（它是这一行的「量」，
+            不是名字的一部分，所以不跟着名字用间隔点粘在一起） */}
+        {elapsed ? (
+          <span className={styles.stepMeta}>
+            <span className={styles.stepMetaText}>{elapsed}</span>
+          </span>
         ) : null}
       </div>
     </div>
@@ -813,24 +815,29 @@ const StepRow: React.FC<{
         type="button"
         className={styles.stepHead}
         aria-expanded={open}
+        {...(running ? { role: "status", "aria-label": "执行中" } : {})}
         onClick={onToggle}
       >
-        <StepTile
-          icon={
-            running
-              ? "LoadingOutlined"
-              : bad
-                ? "CloseCircleFilled"
-                : "ToolOutlined"
-          }
-          live={running}
-        />
+        <StepTile>
+          {running || bad ? (
+            <StatusIcon
+              kind={running ? "running" : "failed"}
+              className={styles.stepIcon}
+            />
+          ) : (
+            <StepGlyph icon={CHAIN_ICON.tool} />
+          )}
+        </StepTile>
         {/* 工具名挂成一枚淡底小标：一列 `Browser click` / `Bash` 里，
             「这是哪个工具」比它这次的入参更先要回答。
             没有入参提示时它就是这一行的全部内容，不再另摆一枚重复的标 */}
         {step.hint ? <span className={styles.stepFrom}>{human}</span> : null}
         <span className={styles.stepName}>{step.hint || human}</span>
-        {running ? <span className={styles.stepStatus}>执行中…</span> : null}
+        {/* **跑着的时候不写「执行中…」**：这一行左边那枚 `ph:circle-notch` 正在转，
+            状态已经由它说完了；再补三个字，是同一件事在 20px 内说两遍，
+            而且它占的正是「这一步在干什么」该待的位置。
+            语义不丢：整行带 `role="status"` ＋ `aria-label`（见下）。
+            **失败那一档仍然写字** —— 一个红叉说不出「跑砸了」，读屏更读不出来。 */}
         {bad ? <span className={styles.stepStatus}>失败</span> : null}
         <Icon
           icon={open ? "UpOutlined" : "DownOutlined"}
@@ -931,10 +938,11 @@ const ChainNodes: React.FC<{
             {/* 旁白也是链上的一格，也得有自己的记号 —— 原来它只有一个 28px 的
                 左缩进、图标位空着，于是那根贯穿的竖线在这一格没有色块遮断，
                 直接从空白里穿过去，一列节点里只有它像掉了一格。
-                字形取对话气泡（VitaAgent 的 `NoteBlock` 用 `ph:chat-teardrop-text`，
-                本项目图标体系里语义最近的是 `MessageOutlined`）——
+                字形就是 VitaAgent `NoteBlock` 那一枚 `ph:chat-teardrop-text` ——
                 这一格说的是「模型一边干活一边说的话」，不是一步操作。 */}
-            <StepTile icon="MessageOutlined" className={styles.noteTile} />
+            <StepTile className={styles.noteTile}>
+              <StepGlyph icon={CHAIN_ICON.note} />
+            </StepTile>
             {renderNote(it.msg, it.key)}
           </div>
         );
@@ -1073,20 +1081,26 @@ const SubAgentChain: React.FC<{
   if (!msgs.length) {
     if (loading || pending) {
       return hint(
-        <StepTile icon="LoadingOutlined" live />,
+        <StepTile>
+          <StatusIcon kind="running" className={styles.stepIcon} />
+        </StepTile>,
         pending ? "正在从那台机器读取这个子代理的内容…" : "读取中…",
       );
     }
     if (fail) {
       // 离线是可恢复的，给一条出路；不自动轮询（那台机器可能关了一整晚）
       return hint(
-        <StepTile icon="CloseCircleFilled" />,
+        <StepTile>
+          <StatusIcon kind="failed" className={styles.stepIcon} />
+        </StepTile>,
         SUB_FAIL_TEXT[fail] ?? "读取失败",
         true,
       );
     }
     return hint(
-      <StepTile icon="ToolOutlined" />,
+      <StepTile>
+        <StepGlyph icon={CHAIN_ICON.tool} />
+      </StepTile>,
       "这个子代理没有留下可展示的内容",
     );
   }
@@ -1134,7 +1148,9 @@ const SubAgentChain: React.FC<{
             className={styles.stepHead}
             onClick={() => setAll(true)}
           >
-            <StepTile icon="EllipsisOutlined" />
+            <StepTile>
+              <StepGlyph icon={CHAIN_ICON.more} />
+            </StepTile>
             <span className={styles.stepName}>还有 {rest} 步，展开全部</span>
           </button>
         </div>
@@ -1435,7 +1451,7 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
   return (
     <div className={styles.TerminalFeed} ref={rootRef}>
       {turnChains.map((tc) => {
-        const { turn, keyed, inProgress, chain, body, ckey, runSteps } = tc;
+        const { turn, keyed, inProgress, chain, body, ckey } = tc;
         // 执行中也铺，但**过程一律折叠着**（ExecChain 会把它并成一行
         // 「执行过程 · N 步」）—— 一条条冒出来是噪音、还不停把视图往下推，
         // 但整段藏掉又会让人不知道它在干什么。折叠着实时长，想看点开即可。
@@ -1496,7 +1512,6 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                   <Working
                     // 起点取这一轮的起始时刻：有用户消息就用它，否则退回首条产出
                     since={turn.user?.timestamp ?? turn.items[0]?.timestamp}
-                    steps={runSteps}
                   />
                 ) : null}
                 {/* 落款：来源代理 + 时间。原先挂在终端卡的标题栏上，卡片撤掉之后

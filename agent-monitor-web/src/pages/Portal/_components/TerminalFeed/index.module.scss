@@ -410,11 +410,17 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
     overflow: hidden;
   }
 
-  // 槽里那枚字形。大小由这里定、槽的尺寸不受它影响（照 VitaAgent 的 12px）
+  /* 槽里那枚字形的**大小**。只管尺寸，不管颜色 ——
+     状态图标（执行中 / 失败…）的颜色由 `StatusIcon` 一处说了算，
+     在这儿再写一遍就是两套配色并存。照 VitaAgent 的 12px。 */
   .stepIcon {
     flex: none;
-    color: var(--muted-foreground);
     font-size: 12px;
+  }
+
+  // 非状态的字形（工具 / 旁白 / 省略号）：它们没有状态可言，走次级灰
+  .stepGlyph {
+    color: var(--muted-foreground);
   }
 
   /* 旁白那一格的图标对齐到**第一行文字的中线**，不是整段的中线 ——
@@ -423,11 +429,6 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
     margin-top: 2px;
   }
 
-  // 执行中：与 SessionPanels 同一口径走 --primary（墨黑 / 暗色下近白），
-  // 绿留给「成功」—— 一屏之内不出现两种「执行中」
-  .stepIconLive {
-    color: var(--primary);
-  }
 
   .stepName {
     min-width: 0;
@@ -447,6 +448,25 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
     color: var(--muted-foreground);
     font-size: var(--text-sm);
     line-height: 18px;
+  }
+
+  /* 一行的「量」靠右，与参照的 `.stepMeta` 同一处
+     （`VitaAgent/web/src/pages/chat/_components/MessageList/index.module.scss:458`：
+     `margin-left: auto` ＋ 左留 12）。用在「正在处理…」那一行的耗时上 ——
+     它不是名字的一部分，不跟着名字用间隔点粘在一起。 */
+  .stepMeta {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    padding-left: 12px;
+  }
+
+  .stepMetaText {
+    color: var(--muted-foreground);
+    font-size: var(--text-sm);
+    font-variant-numeric: tabular-nums;
   }
 
   // 状态紧跟名称、用间隔点连起来，不甩到行尾：耗时/状态是这一步的一部分，

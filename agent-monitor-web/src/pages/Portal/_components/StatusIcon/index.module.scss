@@ -1,0 +1,55 @@
+// 状态图标的**唯一**一份配色与动画。四处（侧栏会话行 / 执行链 / 智能体卡 / 右栏
+// 会话状态）共用，任何一处都不要再自己写一份 —— 那正是「同一个执行中长出四个样子」
+// 的来源。尺寸不在这里定：落在多大的槽里由调用方说了算。
+
+.StatusIcon {
+  flex: none;
+  // 不给颜色：没命中下面任何一档时（`plain`），它就继承父级的 color
+  line-height: 1;
+}
+
+// 执行中：主色 ＋ 1.1s linear 无限旋转。
+// **1.1s 是照 VitaAgent 的值**（`TaskCard/index.module.scss:138`），
+// 不是 antd `LoadingOutlined` 自带的 1s —— 换成 Phosphor 的 `circle-notch` 之后
+// 转圈得自己驱动，索性把周期也对齐。
+.running {
+  color: var(--primary);
+}
+
+.spin {
+  animation: status-icon-spin 1.1s linear infinite;
+}
+
+@keyframes status-icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+// 等人输入：与侧栏状态点同一口径走 --warning
+.waiting {
+  color: var(--warning);
+}
+
+.paused {
+  color: var(--destructive);
+}
+
+// 排着 / 会话结束：中性。**结束不是「成功」** —— 会话没有成败可言，绿留给真成了的
+.pending,
+.finished {
+  color: var(--subtle-foreground);
+}
+
+.completed {
+  color: var(--success);
+}
+
+.failed {
+  color: var(--destructive);
+}
+
+// 被连带终止：不是它的错，走中性的减号圈，不走失败的红
+.interrupted {
+  color: var(--muted-foreground);
+}

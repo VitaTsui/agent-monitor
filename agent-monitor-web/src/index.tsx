@@ -27,6 +27,24 @@ import Routes from "./router/Routes";
 
 import { SingleRouter } from "@hsu-react/single-router";
 
+import { addCollection, type IconifyJSON } from "@iconify/react";
+import phSubset from "./assets/iconify/ph.subset.json";
+
+/* Phosphor 图标子集，**构建期打进产物**（3.6 KB，11 枚）。
+ *
+ * 状态图标（执行中 / 成功 / 失败 / 中断…）一律走 Phosphor，与 VitaAgent 逐字相同
+ * （见 `pages/Portal/_components/StatusIcon`）；此前在 antd 图标里挑「语义最近的
+ * 那一个」，尺寸颜色对齐过三轮，形状始终对不上 —— 两套图标集的字形本来就不同。
+ *
+ * **必须在这儿 `addCollection`，不能让它运行时去 Iconify 公共 API 拉。**
+ * 这是个要在内网/离线环境跑的监控工具：运行时依赖外部 CDN，断网就是一片空白图标。
+ * 注册过的名字 `@iconify/react` 一律走本地，不发任何请求。
+ *
+ * 子集由 `@iconify/json` 的 `ph.json` 裁出来（只留用到的那几枚），整集 4.3 MB
+ * 不进产物、也不进依赖。要加图标：把名字加进 `StatusIcon` 的映射，再把对应条目
+ * 补进 `assets/iconify/ph.subset.json`。 */
+addCollection(phSubset as unknown as IconifyJSON);
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <BrowserRouter>
     <SingleRouter showPath={false}>

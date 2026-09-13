@@ -1,16 +1,13 @@
 import React, { useEffect, useState } from "react";
 
-import {
-  CheckCircleFilled,
-  CloseCircleFilled,
-  DownOutlined,
-  LoadingOutlined,
-  MinusCircleOutlined,
-  PartitionOutlined,
-  WarningFilled,
-} from "@ant-design/icons";
+import { Icon } from "@hsu-react/ui";
+import { DownOutlined, WarningFilled } from "@ant-design/icons";
 
 import { SubTask, SubTaskOutcome } from "@/services/apis/portal";
+import StatusIcon, {
+  CHAIN_ICON,
+  statusOfOutcome,
+} from "../StatusIcon";
 import {
   SUB_OUTCOME_LABEL,
   fmtElapsed,
@@ -19,15 +16,6 @@ import {
   isSubTaskRunning,
 } from "../../_utils/sessionState";
 import styles from "./index.module.scss";
-
-/** 一个子代理的收场对应的图标 */
-const OUTCOME_ICON: Record<SubTaskOutcome, React.ReactNode> = {
-  running: <LoadingOutlined />,
-  completed: <CheckCircleFilled />,
-  failed: <CloseCircleFilled />,
-  // 被父会话连带终止 —— 不是它的错，走中性的减号圈，不走失败的叉
-  interrupted: <MinusCircleOutlined />,
-};
 
 interface AgentCardProps {
   /** 这一批子代理的标题：一个时是它的派活说明，多个时是「起了 N 个子代理」 */
@@ -96,9 +84,12 @@ const AgentCard: React.FC<AgentCardProps> = ({
   const failed = agents.filter(isSubTaskFailed);
   const interrupted = agents.filter((a) => a.outcome === "interrupted");
 
-  /** 这一格整体是什么收场。三种异常分开说，别把「被中断」并进「失败」 */
+  /* 这一格整体是什么收场。三种异常分开说，别把「被中断」并进「失败」。
+     **跑着的时候是空串**：卡头那枚树状图标已经在转，右边还写着
+     `已完成 1 / 3 个` ＋ 走字的耗时 —— 再补「执行中」三个字，同一件事在一行里
+     说了三遍。收场（失败 / 已中断 / 已完成）仍然写字：图标说不出这些。 */
   const statusText = isRunning
-    ? "执行中"
+    ? ""
     : failed.length
       ? `${failed.length} 个失败`
       : interrupted.length
@@ -131,6 +122,7 @@ const AgentCard: React.FC<AgentCardProps> = ({
         type="button"
         className={styles.head}
         aria-expanded={expanded}
+        {...(isRunning ? { role: "status", "aria-label": "执行中" } : {})}
         onClick={() => {
           // 收起时把点开的那张小卡一并松开，否则子链会挂在一张看不见的卡下面
           if (expanded) {
@@ -140,7 +132,10 @@ const AgentCard: React.FC<AgentCardProps> = ({
         }}
       >
         <span className={styles.headTile}>
-          <PartitionOutlined
+          {/* 卡头是那枚树状结构图标（VitaAgent `TaskCard` 同款 `ph:tree-structure`）：
+              这一格说的是「模型在这一步派了活出去」，不是一个状态 */}
+          <Icon
+            icon={CHAIN_ICON.agents}
             className={`${styles.headIcon} ${isRunning ? styles.headIconLive : ""}`}
           />
         </span>
@@ -151,9 +146,11 @@ const AgentCard: React.FC<AgentCardProps> = ({
             {goal}
           </span>
           <span className={styles.meta}>
-            <span className={`${styles.status} ${styles[statusKind]}`}>
-              {statusText}
-            </span>
+            {statusText ? (
+              <span className={`${styles.status} ${styles[statusKind]}`}>
+                {statusText}
+              </span>
+            ) : null}
             <span>
               {isRunning
                 ? `已完成 ${done} / ${agents.length} 个`
@@ -207,9 +204,10 @@ const AgentCard: React.FC<AgentCardProps> = ({
                   onClick={() => onPick(on ? "" : a.id)}
                 >
                   <span className={styles.cellHead}>
-                    <span className={styles.cellIcon}>
-                      {OUTCOME_ICON[a.outcome]}
-                    </span>
+                    <StatusIcon
+                      kind={statusOfOutcome(a.outcome)}
+                      className={styles.cellIcon}
+                    />
                     <span className={styles.cellNm}>{a.label}</span>
                   </span>
                   {/* 第二行是这一个的「量」：状态 ＋ 耗时（＋ 被派过几次）。
@@ -221,9 +219,14 @@ const AgentCard: React.FC<AgentCardProps> = ({
                       子代理忽然又动起来，没有任何解释 —— 跟这一版一直在修的
                       「界面别骗人」是同一件事。
                       `runs` 缺失或等于 1 时什么都不写：「第 1 次派活」是噪音。 */}
+                  {/* 跑着的那张小卡不写「执行中」：它左边那枚 `ph:circle-notch`
+                      正在转，而这一行的位置该留给走字的耗时 —— 「还在跑」与
+                      「卡死了」的唯一区别就是它在不在动。 */}
                   <span className={styles.cellMeta}>
-                    {SUB_OUTCOME_LABEL[a.outcome] ?? a.status}
-                    {` · ${fmtSubTaskElapsed(a, now) || "—"}`}
+                    {a.outcome === "running"
+                      ? ""
+                      : (SUB_OUTCOME_LABEL[a.outcome] ?? a.status)}
+                    {`${a.outcome === "running" ? "" : " · "}${fmtSubTaskElapsed(a, now) || "—"}`}
                     {a.runs && a.runs > 1 ? ` · 第 ${a.runs} 次派活` : ""}
                   </span>
                 </button>

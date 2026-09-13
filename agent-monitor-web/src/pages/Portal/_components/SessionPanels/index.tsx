@@ -2,15 +2,12 @@ import React, { useEffect, useState } from "react";
 
 import { Tooltip } from "antd";
 import {
-  CheckCircleFilled,
   CheckSquareOutlined,
-  CloseCircleFilled,
-  LoadingOutlined,
-  MinusCircleOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 
-import { PortalMessage, SubTask, SubTaskOutcome } from "@/services/apis/portal";
+import { PortalMessage, SubTask } from "@/services/apis/portal";
+import StatusIcon, { statusOfOutcome } from "../StatusIcon";
 import {
   SUB_OUTCOME_LABEL,
   fmtSubTaskElapsed,
@@ -23,10 +20,10 @@ import styles from "./index.module.scss";
  * 后台命令的收场图标。**与 `AgentCard` / 侧栏会话树是同一份字形**，
  * 也就是 VitaAgent 那套任务状态语言（`TaskCard/index.tsx:80-86`）：
  *
- *   running     转圈（antd 自带 1s linear）＋ 主色   ← `ph:circle-notch`
- *   completed   实心勾 ＋ success                     ← `ph:check-circle-fill`
- *   failed      实心叉 ＋ error                       ← `ph:x-circle-fill`
- *   interrupted 减号圈、中性                          ← `ph:minus-circle`
+ * 字形、配色、转速全部由 `_components/StatusIcon` 一处给（Phosphor，与 VitaAgent
+ * 逐字相同）：running `ph:circle-notch` 1.1s linear ＋ 主色、completed
+ * `ph:check-circle-fill` ＋ success、failed `ph:x-circle-fill` ＋ error、
+ * interrupted `ph:minus-circle` 中性。
  *
  * 原先这里是一枚 7×7 的彩色圆点（失败时换成一个 13px 的 `WarningFilled` 三角）——
  * 同一件事在一屏里就有三种画法：链上是 12px 字形、侧栏是 12px 字形、这儿是色点。
@@ -36,13 +33,6 @@ import styles from "./index.module.scss";
  * `completed` 只是为了把这张表补全（`Record<SubTaskOutcome>`）—— 正常跑完的
  * 后台命令在 `aliveBgCommands` 就被滤掉了，走不到这儿。
  */
-const OUTCOME_ICON: Record<SubTaskOutcome, React.ReactNode> = {
-  running: <LoadingOutlined />,
-  completed: <CheckCircleFilled />,
-  failed: <CloseCircleFilled />,
-  interrupted: <MinusCircleOutlined />,
-};
-
 interface SessionPanelsProps {
   messages: PortalMessage[];
   /**
@@ -120,7 +110,10 @@ const TaskRow: React.FC<{ task: SubTask; now: number }> = ({ task, now }) => {
   return (
     <li className={`${styles.item} ${styles[task.outcome] ?? ""}`}>
       <span className={styles.itemHead}>
-        <span className={styles.itemIcon}>{OUTCOME_ICON[task.outcome]}</span>
+        <StatusIcon
+          kind={statusOfOutcome(task.outcome)}
+          className={styles.itemIcon}
+        />
         <Tooltip title={task.label}>
           <span className={styles.itemName}>{task.label}</span>
         </Tooltip>
@@ -222,17 +215,13 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
             return (
               <li key={t.id} className={`${styles.item} ${styles[eff] ?? ""}`}>
                 <span className={styles.itemHead}>
-                  {/* 同一套字形：进行中转圈 ＋ 主色，没轮到的是一枚虚线圈
-                      （对 VitaAgent 的 `ph:circle-dashed`；antd 没有这个字形，
-                      就用同一个 1em 见方的槽画出来，尺寸与其余图标完全一致）。
+                  {/* 与全项目同一份状态图标：进行中是 `ph:circle-notch` 转圈 ＋ 主色，
+                      没轮到的是 `ph:circle-dashed`。
                       清单里不会有「已完成」——那些在 `sessionStateOf` 就滤掉了。 */}
-                  <span className={styles.itemIcon}>
-                    {eff === "in_progress" ? (
-                      <LoadingOutlined />
-                    ) : (
-                      <span className={styles.todoPending} aria-hidden />
-                    )}
-                  </span>
+                  <StatusIcon
+                    kind={eff === "in_progress" ? "running" : "pending"}
+                    className={styles.itemIcon}
+                  />
                   <span className={styles.todoText}>{t.subject}</span>
                 </span>
               </li>

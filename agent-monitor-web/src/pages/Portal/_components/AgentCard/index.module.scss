@@ -70,8 +70,8 @@ $text-col: $tile + $tile-gap;
   font-size: 12px;
 }
 
-/* 执行中走 --primary（墨黑 / 暗色下近白），与链上的 .stepIconLive 同一口径 ——
-   绿留给「成功」，一屏之内不出现两种「执行中」 */
+/* 卡头那枚树状图标在跑动时走 --primary（墨黑 / 暗色下近白），与 `StatusIcon`
+   的「执行中」同一支色 —— 绿留给「成功」，一屏之内不出现两种「执行中」 */
 .headIconLive {
   color: var(--primary);
 }
@@ -217,25 +217,14 @@ $text-col: $tile + $tile-gap;
 
 /* 收场的勾/叉/圈给语义色：一排卡里「这几个成了、那一个还在跑」要一眼分得出，
    全是灰的就只能逐个读字 */
+/* 小卡上那枚收场图标。**只管尺寸**：字形与语义色一律由 `StatusIcon` 一处说了算
+   （原来这儿另写了 completed/failed/running 三条配色，与右栏、执行链那两份并存，
+   同一个「执行中」因此在一屏里能长出三个样子）。
+   12：与链上那枚字形（`TerminalFeed` 的 `.stepIcon`）同档 */
 .cellIcon {
   flex: none;
   display: inline-flex;
-  color: var(--muted-foreground);
-  /* 12：与链上那枚字形（`TerminalFeed` 的 `.stepIcon`）同档。
-     原来 14 —— 同一个「执行中」的 `LoadingOutlined` 在一屏里出现两种大小 */
   font-size: 12px;
-}
-
-.cell.completed .cellIcon {
-  color: var(--success);
-}
-
-.cell.failed .cellIcon {
-  color: var(--destructive);
-}
-
-.cell.running .cellIcon {
-  color: var(--primary);
 }
 
 .cellNm {
