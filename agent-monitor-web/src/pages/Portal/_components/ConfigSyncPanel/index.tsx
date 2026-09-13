@@ -2,8 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 
 // message / Empty / Tag / Badge / Popconfirm 属 hsu-ui 未覆盖的能力，按约定用 antd 兜底
 import { Badge, Empty, Popconfirm, Spin, Tag } from "antd";
-import { message } from "@hsu-react/ui";
-import { CloudSyncOutlined } from "@ant-design/icons";
+import { Icon, message } from "@hsu-react/ui";
 
 import { Button } from "@hsu-react/ui";
 
@@ -87,7 +86,11 @@ const ConfigSyncPanel: React.FC = () => {
               cancelText="取消"
               onConfirm={() => choose("")}
             >
-              <Button size="small" className={styles.actBtn} loading={saving === "off"}>
+              <Button
+                size="small"
+                className={styles.actBtn}
+                loading={saving === "off"}
+              >
                 关闭同步
               </Button>
             </Popconfirm>
@@ -131,7 +134,7 @@ const ConfigSyncPanel: React.FC = () => {
     <div className={styles.ConfigSyncPanel}>
       <div className={styles.summary}>
         <div className={styles.sumIcon}>
-          <CloudSyncOutlined />
+          <Icon icon="ph:cloud-arrow-up" />
         </div>
         <div className={styles.sumText}>
           <div className={styles.sumTitle}>
@@ -155,14 +158,16 @@ const ConfigSyncPanel: React.FC = () => {
         <div className={styles.noteTitle}>同步范围</div>
         <div className={styles.noteBody}>
           只同步 Markdown 类配置：<code>CLAUDE.md</code>、<code>agents/</code>、
-          <code>commands/</code>、<code>skills/</code>，以及 Codex 的 <code>AGENTS.md</code> 与
-          <code>prompts/</code>。
+          <code>commands/</code>、<code>skills/</code>，以及 Codex 的{" "}
+          <code>AGENTS.md</code> 与<code>prompts/</code>。
           <br />
           <strong>登录凭据不会同步</strong>，它们不会离开你本机；
-          <code>settings.json</code> 也不同步 —— 里面混着机器相关的路径（包括本客户端写入的配对
+          <code>settings.json</code> 也不同步 ——
+          里面混着机器相关的路径（包括本客户端写入的配对
           hook），整份覆盖会让另一台机器的配对失效。
           <br />
-          被覆盖的文件会在原地留一份 <code>.am-bak</code> 备份。源机删除的文件<strong>不会</strong>
+          被覆盖的文件会在原地留一份 <code>.am-bak</code> 备份。源机删除的文件
+          <strong>不会</strong>
           在其它设备上被删除。
         </div>
       </div>

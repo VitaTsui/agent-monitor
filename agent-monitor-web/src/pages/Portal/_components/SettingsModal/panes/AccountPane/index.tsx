@@ -1,7 +1,6 @@
 import React from "react";
 
-import { Button } from "@hsu-react/ui";
-import { LogoutOutlined } from "@ant-design/icons";
+import { Button, Icon } from "@hsu-react/ui";
 
 import { removeToken } from "@/utils/auth";
 import { usePortalUser } from "../../../../_context/portalUser";
@@ -31,7 +30,7 @@ const AccountPane: React.FC = () => {
           </div>
         </div>
       </div>
-      <Button icon={<LogoutOutlined />} danger onClick={onLogout}>
+      <Button icon={<Icon icon="ph:sign-out" />} danger onClick={onLogout}>
         退出登录
       </Button>
     </>

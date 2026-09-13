@@ -1,6 +1,7 @@
+import { Icon } from "@hsu-react/ui";
 import React from "react";
 
-import { CodeOutlined, SplitCellsOutlined } from "@ant-design/icons";
+import { CodeOutlined } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
 import PortalStore from "../../PortalStore";
@@ -51,11 +52,15 @@ const PanesView: React.FC = observer(() => {
           你好，{nickname}
         </div>
         <div className={styles.greetSub}>
-          <span className={styles.descDesktop}>从左侧选择一个终端会话查看执行内容</span>
-          <span className={styles.descMobile}>点左上角菜单，选择一个终端会话查看</span>
+          <span className={styles.descDesktop}>
+            从左侧选择一个终端会话查看执行内容
+          </span>
+          <span className={styles.descMobile}>
+            点左上角菜单，选择一个终端会话查看
+          </span>
         </div>
         <div className={`${styles.hint} ${styles.descDesktop}`}>
-          点击会话右侧的 <SplitCellsOutlined /> 可并排显示多个任务
+          点击会话右侧的 <Icon icon="ph:columns" /> 可并排显示多个任务
         </div>
       </div>
     );
@@ -68,7 +73,11 @@ const PanesView: React.FC = observer(() => {
     return (
       <div className={styles.focusLayout}>
         <div className={styles.focusMain}>
-          <ChatPane key={focusedTask.id} task={focusedTask} closable={paneCount > 1} />
+          <ChatPane
+            key={focusedTask.id}
+            task={focusedTask}
+            closable={paneCount > 1}
+          />
         </div>
         <div className={styles.focusSide}>
           {openTasks
@@ -77,7 +86,9 @@ const PanesView: React.FC = observer(() => {
               <div
                 key={t.id}
                 className={`${styles.focusCard} ${
-                  t.pendingSelect?.questions?.length ? styles.focusCardAlert : ""
+                  t.pendingSelect?.questions?.length
+                    ? styles.focusCardAlert
+                    : ""
                 }`}
               >
                 <ChatPane

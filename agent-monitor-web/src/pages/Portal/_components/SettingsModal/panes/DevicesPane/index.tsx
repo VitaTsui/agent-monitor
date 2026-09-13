@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 
-import { Button, Input, Modal, Switch, message } from "@hsu-react/ui";
+import { Button, Icon, Input, Modal, Switch, message } from "@hsu-react/ui";
 import {
   Badge,
   ConfigProvider,
@@ -11,7 +11,6 @@ import {
   Tag,
   type ThemeConfig,
 } from "antd";
-import { LinkOutlined, RightOutlined } from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
 import {
@@ -615,7 +614,7 @@ const DevicesPane: React.FC = observer(() => {
         }}
       >
         <span className={styles.connectEntryIcon}>
-          <LinkOutlined />
+          <Icon icon="ph:link" />
         </span>
         <div className={styles.connectEntryText}>
           <div className={styles.connectEntryTitle}>接入他人电脑</div>
@@ -623,7 +622,7 @@ const DevicesPane: React.FC = observer(() => {
             输入对方的协助码，远程查看、控制其终端会话
           </div>
         </div>
-        <RightOutlined className={styles.connectEntryArrow} />
+        <Icon icon="ph:caret-right" className={styles.connectEntryArrow} />
       </div>
 
       <ShareModal device={shareDevice} onClose={() => setShareDevice(null)} />

@@ -1,8 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
-import { Markdown, message } from "@hsu-react/ui";
+import { Icon, Markdown, message } from "@hsu-react/ui";
 import { Empty, Spin } from "antd";
-import { LeftOutlined } from "@ant-design/icons";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { SessionHistoryItem, getSessionHistory } from "@/services/apis/portal";
@@ -104,14 +103,15 @@ const HistoryView: React.FC = () => {
                 }
               }}
             >
-              <LeftOutlined />
+              <Icon icon="ph:caret-left" />
             </span>
             <span className={views.headTitle} title={title}>
               {title}
             </span>
           </div>
           <div className={styles.hint}>
-            经钉钉 / 网页 / MCP 下发的任务与其结果。终端关掉、机器关机后仍可在此回看。
+            经钉钉 / 网页 / MCP
+            下发的任务与其结果。终端关掉、机器关机后仍可在此回看。
           </div>
         </div>
 
@@ -123,7 +123,9 @@ const HistoryView: React.FC = () => {
           )}
           {!loading && list.length === 0 && (
             <Empty
-              description={taskId ? "这个会话还没有远程往来记录" : "无法确定当前会话"}
+              description={
+                taskId ? "这个会话还没有远程往来记录" : "无法确定当前会话"
+              }
             />
           )}
           {!loading &&
@@ -134,7 +136,9 @@ const HistoryView: React.FC = () => {
                   key={it.id}
                   className={isUser ? styles.rowUser : styles.rowAgent}
                 >
-                  <div className={isUser ? styles.bubbleUser : styles.bubbleAgent}>
+                  <div
+                    className={isUser ? styles.bubbleUser : styles.bubbleAgent}
+                  >
                     {/* 结果里满是代码块/列表/表格，纯文本读不了，交给 markdown 渲染；
                         我发的指令通常是一句话，但也可能贴了代码，一并渲染保持一致 */}
                     <Markdown.Views>{it.content}</Markdown.Views>
