@@ -2,20 +2,46 @@ import React, { useEffect, useState } from "react";
 
 import { Tooltip } from "antd";
 import {
+  CheckCircleFilled,
   CheckSquareOutlined,
+  CloseCircleFilled,
+  LoadingOutlined,
+  MinusCircleOutlined,
   ThunderboltOutlined,
-  WarningFilled,
 } from "@ant-design/icons";
 
-import { PortalMessage, SubTask } from "@/services/apis/portal";
+import { PortalMessage, SubTask, SubTaskOutcome } from "@/services/apis/portal";
 import {
   SUB_OUTCOME_LABEL,
   fmtSubTaskElapsed,
   isEmptySessionState,
-  isSubTaskFailed,
   sessionStateOf,
 } from "../../_utils/sessionState";
 import styles from "./index.module.scss";
+
+/**
+ * 后台命令的收场图标。**与 `AgentCard` / 侧栏会话树是同一份字形**，
+ * 也就是 VitaAgent 那套任务状态语言（`TaskCard/index.tsx:80-86`）：
+ *
+ *   running     转圈（antd 自带 1s linear）＋ 主色   ← `ph:circle-notch`
+ *   completed   实心勾 ＋ success                     ← `ph:check-circle-fill`
+ *   failed      实心叉 ＋ error                       ← `ph:x-circle-fill`
+ *   interrupted 减号圈、中性                          ← `ph:minus-circle`
+ *
+ * 原先这里是一枚 7×7 的彩色圆点（失败时换成一个 13px 的 `WarningFilled` 三角）——
+ * 同一件事在一屏里就有三种画法：链上是 12px 字形、侧栏是 12px 字形、这儿是色点。
+ * 色点还把「被中断」和「等待中」画成同一个灰点，看不出区别。
+ *
+ * **`interrupted` 不给红**：它是被父会话连带终止的，标红等于冤枉它。
+ * `completed` 只是为了把这张表补全（`Record<SubTaskOutcome>`）—— 正常跑完的
+ * 后台命令在 `aliveBgCommands` 就被滤掉了，走不到这儿。
+ */
+const OUTCOME_ICON: Record<SubTaskOutcome, React.ReactNode> = {
+  running: <LoadingOutlined />,
+  completed: <CheckCircleFilled />,
+  failed: <CloseCircleFilled />,
+  interrupted: <MinusCircleOutlined />,
+};
 
 interface SessionPanelsProps {
   messages: PortalMessage[];
@@ -76,8 +102,8 @@ const StateCard: React.FC<CardProps> = ({ icon, title, meta, children }) => (
 /**
  * 后台命令的一行。
  *
- * 三种收场分色（与 VitaAgent 一致，见 `TaskCard/index.module.scss:94-104`）：
- * 执行中走主色（墨黑）+ 脉冲，异常收场走 destructive，其余中性。
+ * 收场分色（与 VitaAgent 一致，见 `TaskCard/index.module.scss:94-119`）：
+ * 执行中走主色（墨黑）转圈，跑砸了走 destructive，被中断与其余中性。
  * 右侧那枚小胶囊写耗时 —— 「还在跑」与「卡死了」的唯一区别就是它。
  *
  * 收场不对的还多一行原因（`task.summary`，见 `BgTask.summary`）：光有「失败」
@@ -89,17 +115,12 @@ const StateCard: React.FC<CardProps> = ({ icon, title, meta, children }) => (
  * （`Agent "X" finished`），那句话和上面的名字是重复的，正好一条都进不来。
  */
 const TaskRow: React.FC<{ task: SubTask; now: number }> = ({ task, now }) => {
-  const failed = isSubTaskFailed(task);
   const elapsed = fmtSubTaskElapsed(task, now);
   const reason = task.summary?.trim();
   return (
-    <li className={`${styles.item} ${failed ? styles.failed : ""}`}>
+    <li className={`${styles.item} ${styles[task.outcome] ?? ""}`}>
       <span className={styles.itemHead}>
-        {failed ? (
-          <WarningFilled className={styles.itemIcon} />
-        ) : (
-          <span className={`${styles.dot} ${styles[task.outcome] ?? ""}`} />
-        )}
+        <span className={styles.itemIcon}>{OUTCOME_ICON[task.outcome]}</span>
         <Tooltip title={task.label}>
           <span className={styles.itemName}>{task.label}</span>
         </Tooltip>
@@ -201,7 +222,17 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
             return (
               <li key={t.id} className={`${styles.item} ${styles[eff] ?? ""}`}>
                 <span className={styles.itemHead}>
-                  <span className={styles.todoBox} aria-hidden />
+                  {/* 同一套字形：进行中转圈 ＋ 主色，没轮到的是一枚虚线圈
+                      （对 VitaAgent 的 `ph:circle-dashed`；antd 没有这个字形，
+                      就用同一个 1em 见方的槽画出来，尺寸与其余图标完全一致）。
+                      清单里不会有「已完成」——那些在 `sessionStateOf` 就滤掉了。 */}
+                  <span className={styles.itemIcon}>
+                    {eff === "in_progress" ? (
+                      <LoadingOutlined />
+                    ) : (
+                      <span className={styles.todoPending} aria-hidden />
+                    )}
+                  </span>
                   <span className={styles.todoText}>{t.subject}</span>
                 </span>
               </li>

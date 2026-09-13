@@ -1,33 +1,19 @@
-// 一格右栏的内容：**一张浮着的卡**，卡里是一行头 ＋ 一列用发丝线分开的分区。
+// 一格右栏的内容：一行头 ＋ 一列用发丝线分开的分区，**直接画在栏的白底上**。
 //
 // 数值照 VitaAgent 的 ActivityPanel
-// （`web/src/pages/chat/_components/ActivityPanel/index.module.scss:1-70`）：
-//   外层   padding 8 8 16、**不画底不画边**（在本项目是 `RightPane`，左边那 8 由把手占）
-//   卡     圆角 8、`0 0 0 1px` 描边环 ＋ 一层柔和投影、**高度随内容**
+// （`web/src/pages/chat/_components/ActivityPanel/index.module.scss:23-47`）：
 //   头     padding 12、标题 14/400、收起钮 24×24
 //   分区   padding 12，块与块之间 `border-top: 1px` 发丝线（第一块不加）
 //
-// **描边环用 box-shadow 不用 border**：border 会把卡撑宽一圈，而这张卡的宽度
-// 是跟着栏宽走的；环画在外沿又正好落在外层那 8px 露底里，两边都不打架。
+// **这一层不再画卡。** 上一版是「透明的栏 ＋ 里面一张圆角 8 / 描边环 / 投影的卡」，
+// 靠露底让卡浮起来。现在栏本身就是一条 `--card` 白列（见 `RightPane`），
+// 白底上再压一张白卡，那圈环和投影只会变成一道没有理由的框。
 //
 // 头下面**不画整条分隔线** —— 参照就是这么排的：头是「你在看哪个东西」，
 // 它和下面第一块之间不是并列关系，切一刀反而多一层框。
-//
-// 投影不写 --vita-shadow-*，用跟着 --foreground 走的 color-mix：
-// 本项目的卡片投影一律这么画（见 PanesView / Sidebar），暗色下才不会是一团死黑。
 
 .SessionStatePane {
-  // 栏的滚动在外层 RightPane 上（卡要能随内容收缩，撑不满时下面就是露底）
   min-width: 0;
-}
-
-.card {
-  border-radius: 8px;
-  background: var(--card);
-  box-shadow:
-    0 0 0 1px var(--overlay-2),
-    0 1px 2px color-mix(in srgb, var(--foreground) 5%, transparent),
-    0 4px 6px -1px color-mix(in srgb, var(--foreground) 8%, transparent);
 }
 
 .head {
@@ -54,13 +40,4 @@
   width: 24px;
   height: 24px;
   min-width: 24px;
-}
-
-// 空态也是卡里的一块，走同一档 12 内边距 —— 不然空的时候卡会缩成一条头。
-// 与头之间同样不画线（理由见文件头）
-.empty {
-  padding: 12px;
-  color: var(--muted-foreground);
-  font-size: var(--text-base);
-  line-height: 1.7;
 }

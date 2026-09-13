@@ -7,8 +7,9 @@
 //   元信息 12px 次级色，与标题隔 2                              （:106-113）
 //   量胶囊 padding 2/6、圆角 sm、muted 底、11px/500、等宽数字   （:376-388）
 //   状态色 成功=success、失败=error、执行中=primary + 转动      （:94-119）
+//   状态形 12px 字形：转圈/虚线圈/实心勾/实心叉/减号圈           （TaskCard :80-86）
 //
-// 「执行中」在这里是**主色墨黑 + 脉冲**，不是绿色：VitaAgent 同一位置用的就是
+// 「执行中」在这里是**主色墨黑 + 转圈**，不是绿色：VitaAgent 同一位置用的就是
 // `--vita-primary`（那边同样是 #18181b 墨黑），绿留给「成功」。原先本项目两处并存
 // —— 这里墨黑、TerminalFeed 与侧栏绿色，同一屏能同时出现两种「执行中」。
 
@@ -170,27 +171,38 @@
   overflow-wrap: anywhere;
 }
 
-// 状态点：执行中主色 + 脉冲，等待中中性
-.dot {
+/* 条目前面那一枚状态图标的槽。
+ *
+ * **12px 字形，与全项目那三处同一档**：执行链的 `TerminalFeed .stepIcon`、
+ * 智能体卡的 `AgentCard .cellIcon`、侧栏会话树的 `SessionTree .leadSlot`。
+ * 转圈用的是 antd `LoadingOutlined` 自带的 1s linear —— 不另写关键帧，
+ * 一屏之内不出现第二种转速。
+ *
+ * 上一版这里是一枚 7×7 的色点（失败时换成 13px 的 `WarningFilled`），
+ * 与那三处对不上，也分不出「被中断」和「等着轮到」。 */
+.itemIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: none;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--muted-foreground);
-
-  &.running {
-    background: var(--primary);
-    animation: statePulse 1.4s ease-in-out infinite;
-  }
+  color: var(--muted-foreground);
+  font-size: 12px;
 }
 
-// 异常收场（失败 / 被终止 / 被停止）：整行走 destructive。
+/* 收场配色。口径与 `AgentCard`（`index.module.scss:222-232`）逐字一致：
+   执行中走主色（墨黑 / 暗色下近白）、跑砸了走 destructive。
+   `interrupted` 不配色，走槽本身的中性 —— 被父会话连带终止不是它的错。
+   `completed` 这儿没有规则：正常跑完的后台命令压根不进这张清单
+   （`aliveBgCommands` 就滤掉了），配个永远用不上的色只是死代码。 */
+.running .itemIcon {
+  color: var(--primary);
+}
+
+// 跑砸了（只有 failed，不含 interrupted）：整行走 destructive。
 // 这几种原来被当成「已完成」整条滤掉了 —— 跑砸的子代理在界面上无声消失。
 .failed {
   .itemIcon {
-    flex: none;
     color: var(--destructive);
-    font-size: 13px;
   }
 
   .itemName {
@@ -204,13 +216,16 @@
 
 // ---------- 任务清单 ----------
 
-.todoBox {
-  flex: none;
-  width: 13px;
-  height: 13px;
-  border-radius: 3px;
-  border: 1.5px solid color-mix(in srgb, var(--foreground) 35%, transparent);
+/* 「还没轮到」的记号：一枚虚线圈，对 VitaAgent 的 `ph:circle-dashed`
+   （`TaskCard/index.tsx:81`）。antd 没有这个字形，就在同一个 12px 的槽里
+   画出来 —— `1em` 见方，跟着 `.itemIcon` 的字号走，与旁边的 antd 图标严丝合缝。
+   上一版是一枚 13px 的圆角方框，既不是圈也不是这一档大小。 */
+.todoPending {
   box-sizing: border-box;
+  width: 1em;
+  height: 1em;
+  border: 1.5px dashed currentcolor;
+  border-radius: 50%;
 }
 
 .todoText {
@@ -222,32 +237,16 @@
   overflow-wrap: anywhere;
 }
 
-// 进行中：实心主色 + 脉冲，文字也跟着主色
-// （已完成项不进清单，所以空框=待办、实心=进行中，语义清晰）
+// 进行中：转圈图标走主色（由 `.running .itemIcon` 之外单列一条，因为清单用的
+// 是 todo 的 `in_progress` 而不是子任务的 `running`），文字也跟着主色。
+// 已完成项不进清单，所以虚线圈=待办、转圈=进行中，两态够用。
 .in_progress {
-  .todoBox {
-    border-color: var(--primary);
-    background: var(--primary);
-    animation: statePulse 1.4s ease-in-out infinite;
+  .itemIcon {
+    color: var(--primary);
   }
 
   .todoText {
     color: var(--primary);
     font-weight: 500;
-  }
-}
-
-.pending .todoBox {
-  border-color: color-mix(in srgb, var(--foreground) 35%, transparent);
-}
-
-@keyframes statePulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-
-  50% {
-    opacity: 0.4;
   }
 }

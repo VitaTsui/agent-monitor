@@ -26,6 +26,10 @@ import RightPane from "../RightPane";
 import SessionPanels from "../SessionPanels";
 import SessionRename from "../SessionRename";
 import SessionStatePane from "../SessionStatePane";
+import {
+  isEmptySessionState,
+  sessionStateOf,
+} from "../../_utils/sessionState";
 import { sessionTitle } from "../../_utils/sessionNote";
 import { useIsMobile } from "../../_hooks/useIsMobile";
 import styles from "./index.module.scss";
@@ -64,11 +68,15 @@ const FLAT_MIN_W = { multi: 400, single: 320 };
 /**
  * 格子摆得下右栏的最小宽度。
  *
- * 640 = 右栏默认 0.36 时正文还剩约 410px（还能正常读一行代码）的那个临界点。
+ * **右栏改成固定 320 之后这条得重算**：老值 640 是按「右栏占 0.36」算的
+ * （640 × 0.36 ≈ 230，正文还剩约 410）。现在右栏不再随格宽缩水，它永远要走 320 ——
+ * 同样想给正文留住那 400 上下（还能正常读一行代码 / 一行栈信息的宽度），
+ * 门槛就是 320 ＋ 400 = 720。
+ *
  * 比它窄就别摆第三栏了 —— 正文会被切成一条缝，两边都用不成；
- * 与其让人拖出一个没法看的布局，不如把开关灰掉、指一条出路（放大这一格）。
+ * 与其给一个没法看的布局，不如把开关灰掉、指一条出路（放大这一格）。
  */
-const RIGHT_PANE_MIN_W = 640;
+const RIGHT_PANE_MIN_W = 720;
 
 /**
  * 「刚送达终端」的宽限期：这几秒里终端还没来得及把队列上报回来，先按「在排队」算，
@@ -143,18 +151,6 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
      开关亮着却不出栏是更糟的那一种：人会以为功能坏了。
      记录不动：格子重新变宽（或放大这一格）时，原来开着的那一栏自己回来。 */
   const rightPaneFits = rowW === 0 || rowW >= RIGHT_PANE_MIN_W;
-  /* 这一格自己的右栏开着没有。**按格取**，不是全局一份 —— 四格并排时
-     每一格的这颗按钮只管自己那一栏。
-     紧凑卡片不给：那张卡只有 320×248，再切一栏就什么都看不见了；
-     窄屏也不给：那边没有第三栏，状态卡留在对话流末尾（见下方）。 */
-  const rightPaneOpen =
-    !compact && !isMobile && rightPaneFits && isRightPaneOpen(id);
-  /** 右栏开关的提示语。灰掉时说清「为什么不能点、怎么才能点」 */
-  const rightPaneHint = !rightPaneFits
-    ? "这一格太窄，摆不下会话状态栏；放大这一格后可用"
-    : rightPaneOpen
-      ? "收起会话状态栏"
-      : "展开会话状态栏";
   const messages = messagesOf(id);
   const hubQueued = hubQueuedOf(id);
   const loading = isLoadingMessages(id);
@@ -240,6 +236,36 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     );
     return () => window.clearInterval(timer);
   }, [id, hasRunningSub, loadSubTasks]);
+
+  /* 这一格此刻有没有「会话状态」可说（未完成的清单条目 ＋ 活着的后台命令）。
+     判据只有这一处 —— `sessionStateOf` / `isEmptySessionState`，与右栏里真正
+     渲染的那份是同一个函数，不会出现「按钮亮着、栏里却是空的」。
+
+     **没东西可说就整条栏不渲染、开关一并置灰**（下面的 `rightPaneOpen` 与
+     `rightPaneUsable` 都吃这个值）。上一版是栏照常出、里面写一句「暂无…」——
+     一条 320 宽的空栏一直占着正文的地方，只为了说「这儿没东西」。
+
+     记录不动：内容一回来（清单更新、起了个后台命令），原来开着的那一栏自己回来，
+     与「格子太窄」那条规则是同一套做法。 */
+  const hasSessionState = !isEmptySessionState(
+    sessionStateOf(messages, subTasks),
+  );
+  /* 这颗开关能不能点。**与「栏出不出得来」是同一个表达式的两半**，
+     不许各写一遍：亮着却不出栏，人会以为功能坏了。 */
+  const rightPaneUsable = !isMobile && rightPaneFits && hasSessionState;
+  /* 这一格自己的右栏开着没有。**按格取**，不是全局一份 —— 四格并排时
+     每一格的这颗按钮只管自己那一栏。
+     紧凑卡片不给：那张卡只有 320×248，再切一栏就什么都看不见了；
+     窄屏也不给：那边没有第三栏，状态卡留在对话流末尾（见下方）。 */
+  const rightPaneOpen = !compact && rightPaneUsable && isRightPaneOpen(id);
+  /** 右栏开关的提示语。灰掉时说清「为什么不能点、怎么才能点」 */
+  const rightPaneHint = !hasSessionState
+    ? "这个会话暂无进行中的任务清单或后台命令，没有可展示的状态"
+    : !rightPaneFits
+      ? "这一格太窄，摆不下会话状态栏；放大这一格后可用"
+      : rightPaneOpen
+        ? "收起会话状态栏"
+        : "展开会话状态栏";
 
   // 宽限期的时钟：只在真有回显处在宽限期内时上表，到点走一次即停。
   // 不是每秒空转 —— 没有待出窗的回显就压根不建定时器。
@@ -648,7 +674,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                             label: (
                               <span title={rightPaneHint}>{rightPaneHint}</span>
                             ),
-                            disabled: !rightPaneFits,
+                            disabled: !rightPaneUsable,
                             onClick: () => toggleRightPane(id),
                           },
                         ]),
@@ -739,7 +765,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                         type="text"
                         className={rightPaneOpen ? styles.paneBtnOn : undefined}
                         icon={<ProfileOutlined />}
-                        disabled={!rightPaneFits}
+                        disabled={!rightPaneUsable}
                         onClick={() => toggleRightPane(id)}
                       />
                     </span>
@@ -1080,7 +1106,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
       </div>
 
       {rightPaneOpen && (
-        <RightPane taskId={id}>
+        <RightPane>
           <SessionStatePane task={task} />
         </RightPane>
       )}
