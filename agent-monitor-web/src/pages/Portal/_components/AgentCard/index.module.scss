@@ -23,7 +23,14 @@ $text-col: $tile + $tile-gap;
   margin: 6px -8px;
   padding: 8px;
   border-radius: var(--radius-lg);
-  background: var(--muted);
+  /* 卡内是链上的**第二块底**，两支色在这儿一起翻过来（与 `ChatPane` 那份同构）：
+     面是 `--muted`，槽因此取另一支面 `--card` —— 灰底上一枚白色块。
+     照 VitaAgent `TaskCard/index.module.scss:18`（卡 `--vita-muted`）与
+     `:60`（卡内槽 `--vita-surface`）。与 `background` 挨着写，
+     改卡底色时不可能漏掉槽。 */
+  --chain-surface: var(--muted);
+  --chain-tile: var(--card);
+  background: var(--chain-surface);
 }
 
 .head {
@@ -42,8 +49,8 @@ $text-col: $tile + $tile-gap;
 /* 头一行左边那枚方形图标。规格与链上其它节点的图标槽一致（18×18），
    四类节点在同一列里必须是同一副大小，否则扫下来像四种东西。
    **底色不透明**：它正是用来遮断身后那根贯穿竖线的（不遮的话线从图标中间穿过去）。
-   取这一屏的地色（--card）而不是这块组底那支浅灰（--muted）—— 同色的话
-   图标块化进背景里，等于什么都没遮。
+   取 `--chain-tile` —— 由容器一处声明的「槽该用哪支面」（见上面 `.AgentCard`）。
+   从前这里写死 `--card`：**值碰巧对，理由是错的** —— 卡的底色一换它就不跟。
    色块与图标分两层：跑动时转的是图标，色块得钉住不动。 */
 .headTile {
   display: flex;
@@ -55,7 +62,7 @@ $text-col: $tile + $tile-gap;
   width: $tile;
   height: $tile;
   border-radius: var(--radius-xs);
-  background: var(--card);
+  background: var(--chain-tile);
 }
 
 .headIcon {

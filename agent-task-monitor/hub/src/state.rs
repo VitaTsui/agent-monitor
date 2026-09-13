@@ -486,6 +486,23 @@ pub struct BotMonitor {
     pub last_ts: String,
 }
 
+/// 按会话号去重，**留先出现的那一条**。
+///
+/// 调用方把热列表排在历史列表前面，于是「先出现」= 热列表那份 —— 它每轮刷新，
+/// 带着进程、子任务这些只有活跃会话才有的东西，而历史列表是 30 秒才刷新一次的旧快照。
+///
+/// 为什么会重：客户端每轮按 mtime 把会话分流给两张表（同一轮里是不重的），但历史列表
+/// 每 30 秒才随上报带一次（见 client 的 `HISTORY_REPORT_INTERVAL_SECS`）。一条老会话
+/// 被重新打开后立刻进热列表，而 hub 手里那份历史快照还带着它 —— 最长 30 秒内两边都有。
+/// 此前直接 chain、同一个 id 出两条，全靠网页那头用 Map 压着才没发作；
+/// **靠消费方兜着的不算修好**，在产出侧收口。
+fn dedup_by_id(
+    tasks: impl Iterator<Item = Task>,
+    seen: &mut std::collections::HashSet<String>,
+) -> Vec<Task> {
+    tasks.filter(|t| seen.insert(t.id.clone())).collect()
+}
+
 /// 一台设备上「有哪几个客户端、各有多少条会话」。
 ///
 /// **分组键是 `(provider, desktop)` 这一对，不是 `provider` 一个值**：同一台机器上
@@ -631,13 +648,28 @@ impl AppState {
         let machines = self.machines.read().await;
         let registry = self.registry.read().await;
         let mut out = Vec::new();
+        // 会话号去重：同一条会话只出一条（跨机器也去重 —— 同一个 id 不该在两台机器上）
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (id, entry) in machines.iter() {
             if !registry.can_view(id, username) {
                 continue;
             }
             let online = entry.last_report.elapsed().as_secs() < OFFLINE_AFTER_SECS;
-            for t in entry.tasks.iter().chain(entry.history_tasks.iter()) {
-                let mut t = t.clone();
+            // **热列表优先**：同一个会话号可能同时出现在两张表里 —— 客户端每轮按
+            // mtime 把会话分流给热列表/历史列表（disjoint），但历史列表每 30 秒才刷新
+            // 一次（见 client 的 HISTORY_REPORT_INTERVAL_SECS）。一条老会话被重新打开
+            // 后立刻进热列表，而 hub 手里那份历史快照还带着它，最长 30 秒内两边都有。
+            // 此前直接 chain、同一个 id 出两条，全靠网页用 Map 压着才没发作 ——
+            // 靠消费方兜着的不算修好，在产出侧收口。
+            // 冲突取热列表那份：它每轮刷新，带着进程、子任务这些只有活跃会话才有的东西。
+            for mut t in dedup_by_id(
+                entry
+                    .tasks
+                    .iter()
+                    .chain(entry.history_tasks.iter())
+                    .cloned(),
+                &mut seen,
+            ) {
                 if !online {
                     t.status = TaskStatus::Finished;
                     t.status_dsr = "已离线".into();
@@ -861,5 +893,47 @@ pub async fn tick_loop(state: SharedState) {
         }
         let _ = state.tx.send(tick);
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    }
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::*;
+
+    fn task(id: &str, pid: Option<u32>) -> Task {
+        let mut t: Task = serde_json::from_value(serde_json::json!({
+            "id": id, "provider": "claude", "project": "/p", "projectName": "p",
+            "prompt": "", "lastAction": "", "status": "idle", "statusDsr": "等待输入",
+            "providerDsr": "Claude Code", "ideDsr": "—", "pid": pid,
+            "startedAt": null, "lastActiveAt": null, "mtimeMs": 0, "lineCount": 0,
+            "version": null, "gitBranch": null, "process": null
+        }))
+        .unwrap();
+        t.title = id.into();
+        t
+    }
+
+    /// 同一条会话可能同时出现在热列表与历史列表里：客户端每轮分流是不重的，但历史列表
+    /// 每 30 秒才刷新一次，一条老会话被重新打开后会在两边并存最长 30 秒。
+    /// 产出侧必须只出一条，且取热列表那份（它更新、带着进程信息）。
+    #[test]
+    fn same_session_in_both_lists_yields_one_hot_wins() {
+        let hot = [task("s1", Some(123)), task("s2", None)];
+        let history = [task("s1", None), task("s3", None)];
+        let mut seen = std::collections::HashSet::new();
+        let out = dedup_by_id(hot.iter().chain(history.iter()).cloned(), &mut seen);
+        let ids: Vec<&str> = out.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["s1", "s2", "s3"], "同一个 id 只出一条");
+        assert_eq!(out[0].pid, Some(123), "冲突取热列表那份");
+    }
+
+    /// 跨机器同样去重：同一个会话号不该在两台机器上各出一条
+    #[test]
+    fn dedup_carries_across_machines() {
+        let mut seen = std::collections::HashSet::new();
+        let a = dedup_by_id(vec![task("s1", None)].into_iter(), &mut seen);
+        let b = dedup_by_id(vec![task("s1", None)].into_iter(), &mut seen);
+        assert_eq!(a.len(), 1);
+        assert!(b.is_empty(), "第二台机器上的同号会话不再出一条");
     }
 }
