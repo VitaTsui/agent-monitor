@@ -298,6 +298,18 @@ CI 会跑 `cargo fmt --check`、`cargo clippy`、`cargo test`（Linux / macOS / 
 以及前端的 `pnpm lint` 与 `pnpm build`。`main` 上的版本号一变，`release` 工作流就按
 `agent-task-monitor/Cargo.toml` 里的 workspace 版本打 tag 并建 Release，tag 已存在时安全跳过。
 
+**clone 之后先挂上 git 钩子**（一次性，每个工作副本各做一次）：
+
+```bash
+git config core.hooksPath .githooks
+```
+
+`.githooks/pre-commit` 会在**本次提交暂存了 `.rs` 文件时**跑一遍
+`cargo fmt --all -- --check`，不合规就拦下并告诉你跑什么命令修。只暂存前端文件时它
+直接跳过，不会启动 cargo。不挂也能提交，代价是格式漂移要等 CI 变红才发现——
+0.12.0 和 0.12.4 两次都是发版当场才现形、临时补了一刀格式提交。
+临时要跳过用 `git commit --no-verify`；clippy 与测试仍由 CI 兜底，钩子不碰。
+
 ## License
 
 [MIT](./LICENSE) © VitaHsu

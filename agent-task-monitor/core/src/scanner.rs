@@ -85,6 +85,16 @@ pub struct SessionSummary {
     /// 会话标题也可能是空的，那种有内容、不该丢。（本机没有这类样本，所以这道保险是
     /// 按可能性留的，不是按现象留的。）
     pub has_content: bool,
+    /// **这条会话派过几个子代理**（只数 `subagents/agent-*.jsonl` 的文件数）。
+    ///
+    /// 给列表用的一个便宜的「有没有、有几个」：侧栏要据此决定这一行画不画展开箭头，
+    /// 而真正的子代理清单只能现读磁盘（`/monitor/tasks/:id/subtasks`，大会话 0.8~2 秒），
+    /// 一行拉一次是不可能的。所以这里**只 readdir 数文件名，不打开任何文件**。
+    ///
+    /// 与 [`crate::model::Task::sub_tasks`] 不是一回事：那份是带状态的清单、还套着
+    /// 24 小时 / 50 条的保留窗口（只服务「当前状态面板」），而这个是**总数、不设窗口**，
+    /// 历史会话照样是真实值 —— 两个数字对不上是正常的。
+    pub sub_agent_count: usize,
 }
 
 /// 一个会话的「当前全貌」：对话消息 + 后台子任务。
@@ -463,6 +473,10 @@ impl SessionScanner {
                 if let Some(mut summary) = self.summarize(&path, meta.len(), mtime_ms) {
                     summary.created_ms = created_ms;
                     summary.desktop = desktop;
+                    // 每轮现数：父会话 jsonl 一个字节没动、子代理目录照样会变
+                    // （子代理跑完时只有它自己那份记录在长），放进 summarize 的
+                    // size+mtime 缓存里会一直是旧值。
+                    summary.sub_agent_count = count_sub_agents(&path);
                     out.push(summary);
                 }
             }
@@ -646,6 +660,8 @@ impl SessionScanner {
             cleared: false,
             // Codex 会话没有斜杠命令信封那套，能解析出来就是有内容的
             has_content: true,
+            // Codex 没有子代理这套机制
+            sub_agent_count: 0,
             started_at,
             last_active_at: last_active,
             version: None,
@@ -1450,6 +1466,7 @@ pub fn build_tasks(
             process: proc_info,
             recent_messages: Vec::new(),
             sub_tasks: Vec::new(),
+            sub_task_count: s.sub_agent_count,
             queued_inputs: s.queued_inputs.clone(),
             // hook 侧的实时信号，扫描器看不到；由客户端在配对后回填（见 client/state.rs）
             pending_select: None,
@@ -1518,6 +1535,8 @@ pub fn build_tasks(
             process: Some(p.clone()),
             recent_messages: Vec::new(),
             sub_tasks: Vec::new(),
+            // 进程占位任务还没有会话文件，自然也没有子代理目录
+            sub_task_count: 0,
             queued_inputs: Vec::new(),
             // 这是「只有进程、没配上会话」的占位任务，压根谈不上等你选
             pending_select: None,
@@ -1781,6 +1800,8 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         turn_ended: turn_ended || cleared,
         cleared,
         has_content,
+        // 由 scan 在产出处现数（解析器只看文件内容，不知道这份 jsonl 躺在哪个根下）
+        sub_agent_count: 0,
         started_at,
         last_active_at,
         version,
@@ -3008,6 +3029,40 @@ struct SubAgentDir {
     dir: PathBuf,
     /// 子会话号（= 父记录里的 `agentId`）→ 最后写入时刻（epoch 毫秒）
     last_write: HashMap<String, u64>,
+}
+
+/// 一条会话派过几个子代理：只数 `<会话 jsonl 同级>/<会话号>/subagents/` 下的
+/// `agent-*.jsonl` 文件数，**不打开任何文件、不 stat**。
+///
+/// 与 [`SubAgentDir::scan`] 的区别就在这：那个要逐个 `stat` 拿最后写入时刻（对齐状态用），
+/// 这个只要一次 `read_dir` 把文件名过一遍。目录不存在（绝大多数会话都没派过子代理）时
+/// `read_dir` 当场返回 ENOENT，代价接近于零。
+///
+/// 只数 `agent-*`：后台命令（`kind:"bg"`）没有独立记录，本来就不在这个目录里，
+/// 侧栏的树也只列子代理。
+fn count_sub_agents(session_path: &Path) -> usize {
+    let Some(dir) = session_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|stem| {
+            session_path
+                .parent()
+                .map(|p| p.join(stem).join("subagents"))
+        })
+    else {
+        return 0;
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("agent-") && n.ends_with(".jsonl"))
+        })
+        .count()
 }
 
 impl SubAgentDir {
@@ -4920,6 +4975,37 @@ mod noise_filter_tests {
         assert!(!is_throwaway_cwd(""), "拿不到 cwd 时不做判断");
     }
 
+    /// 列表里那个「有没有子代理」的数：只 readdir 数文件名，不打开任何文件。
+    #[test]
+    fn sub_agent_count_only_counts_agent_records() {
+        let tmp = std::env::temp_dir().join(format!("am-cnt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let proj = tmp.join("-p");
+        let sess = proj.join("sess");
+        fs::create_dir_all(sess.join("subagents")).unwrap();
+        let jsonl = proj.join("sess.jsonl");
+        fs::write(&jsonl, "").unwrap();
+        // 目录存在但空 → 0
+        assert_eq!(count_sub_agents(&jsonl), 0);
+        for name in [
+            "agent-a1.jsonl",
+            "agent-a2.jsonl",
+            // 这些都不该算：sidecar、别的前缀、别的后缀
+            "agent-a1.meta.json",
+            "tool-results.jsonl",
+            "agent-a3.txt",
+        ] {
+            fs::write(sess.join("subagents").join(name), "x").unwrap();
+        }
+        assert_eq!(count_sub_agents(&jsonl), 2, "只数 agent-*.jsonl");
+
+        // 目录整个不存在（绝大多数会话）→ 0，不是报错
+        let none = proj.join("other.jsonl");
+        fs::write(&none, "").unwrap();
+        assert_eq!(count_sub_agents(&none), 0);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
     /// 同一个会话号在两个项目目录下各有一份时，产出侧只留一条（留 mtime 大的）。
     /// 此前不去重，重复与否全靠运气，只是网页那头用 Map 压着才没发作。
     #[test]
@@ -4939,6 +5025,7 @@ mod noise_filter_tests {
                 turn_ended: true,
                 cleared: false,
                 has_content: true,
+                sub_agent_count: 0,
                 started_at: None,
                 last_active_at: None,
                 version: None,
@@ -5140,6 +5227,7 @@ mod pairing_tests {
             turn_ended: true,
             cleared: false,
             has_content: true,
+            sub_agent_count: 0,
             started_at: Some(started.into()),
             last_active_at: None,
             version: None,
@@ -5881,6 +5969,7 @@ mod codex_tests {
             turn_ended: true,
             cleared: false,
             has_content: true,
+            sub_agent_count: 0,
             started_at: None,
             last_active_at: None,
             version: None,
@@ -6214,6 +6303,7 @@ mod desktop_session_tests {
             turn_ended: true,
             cleared: false,
             has_content: true,
+            sub_agent_count: 0,
             started_at: None,
             last_active_at: None,
             version: None,

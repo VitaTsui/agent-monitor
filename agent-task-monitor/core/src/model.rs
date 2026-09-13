@@ -352,6 +352,18 @@ pub struct Task {
     /// 里头最老的已经是 11 天前的事，且永远不会消失。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sub_tasks: Vec<SubTask>,
+    /// **这条会话派过几个子代理**（`subagents/agent-*.jsonl` 的文件数）。
+    ///
+    /// 给列表用的一个便宜的「有没有、有几个」：侧栏据此决定这一行画不画展开箭头，
+    /// 不必为每一行都去拉一次 `/monitor/tasks/:id/subtasks`（那条要现读磁盘，
+    /// 大会话 0.8~2 秒）。拿不到 / 目录不存在一律是 0，不是缺字段 —— 前端直接判 `> 0`。
+    ///
+    /// **与 [`Self::sub_tasks`] 不是一回事**：那份是带状态的清单，还套着 24 小时 /
+    /// 50 条的保留窗口（只服务「当前状态面板」），且只有活跃会话才带；这个是**总数、
+    /// 不设窗口**，历史会话照样是真实值。所以 `sub_tasks.len() != sub_task_count`
+    /// 是正常的 —— 前者是「最近这些」，后者是「一共这些」。
+    #[serde(default)]
+    pub sub_task_count: usize,
     /// 终端里 claude 原生排队、尚未被接受执行的输入（按入队顺序，供前端底部挂载显示）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued_inputs: Vec<String>,

@@ -248,6 +248,20 @@ interface IPortalTaskData {
    * 此前从会话开头全量累积且永不淘汰，实测单条会话能挂到 147 条、最老的是 11 天前的。
    */
   subTasks: SubTask[];
+  /**
+   * **这条会话派过几个子代理**（`subagents/agent-*.jsonl` 的文件数）。
+   *
+   * 侧栏据此决定这一行画不画展开箭头：`> 0` 才画。没有就别画箭头、也别渲染
+   * 「该会话没有派过子代理」那句空态 —— 那句话只在用户主动展开后才有意义。
+   * **拿不到 / 目录不存在一律是 `0`，不是 `undefined`**，可以直接判 `> 0`。
+   *
+   * **与 {@link PortalTaskData.subTasks} 不是一回事**：那份是带状态的清单，套着
+   * 24 小时 / 50 条的保留窗口（只服务「当前状态面板」），而且只有活跃会话才带；
+   * 这个是**总数、不设窗口**，历史会话照样是真实值。所以
+   * `subTasks.length !== subTaskCount` 是正常的 —— 前者「最近这些」，后者「一共这些」。
+   * 展开后的完整清单仍然走 {@link getPortalSubTasks}（现读磁盘，大会话 0.8~2 秒）。
+   */
+  subTaskCount: number;
 }
 export type PortalTaskData = Partial<IPortalTaskData>;
 
@@ -469,6 +483,20 @@ interface IHistorySession {
   gitBranch: string | null;
   /** 用户给这个终端起的名字；没起过是 null */
   note: string | null;
+  /**
+   * **这条会话派过几个子代理**（`subagents/agent-*.jsonl` 的文件数）。
+   *
+   * 侧栏据此决定这一行画不画展开箭头：`> 0` 才画。没有就别画箭头、也别渲染
+   * 「该会话没有派过子代理」那句空态 —— 那句话只在用户主动展开后才有意义。
+   * **拿不到 / 目录不存在一律是 `0`，不是 `undefined`**，可以直接判 `> 0`。
+   *
+   * **与 {@link PortalTaskData.subTasks} 不是一回事**：那份是带状态的清单，套着
+   * 24 小时 / 50 条的保留窗口（只服务「当前状态面板」），而且只有活跃会话才带；
+   * 这个是**总数、不设窗口**，历史会话照样是真实值。所以
+   * `subTasks.length !== subTaskCount` 是正常的 —— 前者「最近这些」，后者「一共这些」。
+   * 展开后的完整清单仍然走 {@link getPortalSubTasks}（现读磁盘，大会话 0.8~2 秒）。
+   */
+  subTaskCount: number;
 }
 export type HistorySession = Partial<IHistorySession>;
 

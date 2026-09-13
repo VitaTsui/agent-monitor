@@ -528,8 +528,22 @@ class PortalStore {
   /**
    * 侧栏的**客户端分组**：一台机器上的一种终端（Claude / Codex 各算一个）一组。
    *
-   * 每组里铺的是该客户端的**全部会话**，按时间分桶（今天 / 昨天 / 过去 7 天 /
-   * 过去 30 天 / 更早）。两份数据合成一列：
+   * **CLI 与桌面客户端铺的东西不一样**，判据是现成的 `desktop` 布尔量：
+   *
+   *   - **`desktop === false`（Claude Code、Codex CLI）→ 只列「当前打开的」会话。**
+   *     CLI 的一条会话就是一个终端窗口：窗口一关会话就结束了，磁盘上那些 jsonl
+   *     只是残留记录，不是用户心智里「还在的那段对话」。所以这一列不拉历史、
+   *     不分页、也不按时间分桶（都是开着的窗口，「昨天」这种标签只是噪音）。
+   *     「打开」的判据是 **`PortalTaskData.process != null`** —— 那个终端的进程
+   *     还在。**不是 `status`**：`status` 说的是「在不在跑任务」，一个空闲但没关的
+   *     终端照样是打开的；也不是时间阈值，那是字面量式的猜测。
+   *     （同一判据在 `am-client` 里就是 `t.process.is_none()` = 父会话已结束。）
+   *
+   *   - **`desktop === true`（Claude 桌面版、ChatGPT 桌面版）→ 列全部历史**，
+   *     按时间分桶（今天 / 昨天 / 过去 7 天 / 过去 30 天 / 更早）、游标翻页、
+   *     搜索照旧。它的会话是持久的对话列表，回去翻、接着聊都成立。
+   *
+   * 桌面那一侧两份数据合成一列：
    *
    *   - **活跃会话**来自 `_tasks`（WS 秒级推送）—— 它带 `status`、`lastAction`、
    *     `slot`、`subTasks` 这些「此刻在干什么」的字段；
@@ -628,6 +642,16 @@ class PortalStore {
     const mine = (t: PortalTaskData | HistorySession) =>
       (t.machineId || t.hostname || "unknown") === mid;
 
+    /**
+     * 这条 CLI 会话的终端**还开着吗**。
+     *
+     * `process` 是后端每轮上报捎带的进程快照，进程没了就是 `null` ——
+     * 与 `am-client` 里 `t.process.is_none()`（父会话已结束）同一个信号。
+     * 不拿 `status` 凑：`status === "idle"` 的终端可能开着也可能早就关了，
+     * 那说的是「在不在跑任务」，不是「窗口在不在」。
+     */
+    const cliOpen = (t: PortalTaskData) => t.process != null;
+
     // 再铺活跃会话：它们优先级最高，后面历史里的同 id 不覆盖它
     for (const t of this._tasks) {
       if (!mine(t)) {
@@ -636,6 +660,12 @@ class PortalStore {
       const key = ensureOf(t);
       if (t.status === "running") {
         byClient.get(key)!.running += 1;
+      }
+      /* CLI 那一列只铺**当前打开的**：`_tasks` 里还会留着刚结束、进程已经没了的
+         那些，它们对 CLI 来说就是残留记录，不该混在「我现在开着哪几个终端」里。
+         桌面那一侧照旧全收（它的会话本来就是持久的）。 */
+      if (!byClient.get(key)!.desktop && !cliOpen(t)) {
+        continue;
       }
       if (!t.id || !hit(t.note, t.title, t.prompt, t.projectName, t.hostname)) {
         continue;
@@ -652,6 +682,12 @@ class PortalStore {
         }
         const key = ensureOf(h);
         const sec = byClient.get(key)!;
+        /* CLI 组不吃历史。正常情况下它压根没有历史可吃（`loadClientHistory`
+           在源头就挡了），这一条是防**换过语义之前留下的旧分页状态**
+           在内存里把已经关掉的终端重新铺回来。 */
+        if (!sec.desktop) {
+          continue;
+        }
         sec.total = Math.max(sec.total, state.total);
         sec.loading = state.loading;
         sec.loaded = state.loaded;
@@ -665,7 +701,7 @@ class PortalStore {
        **按 key 找组，找不到就跳过** —— 别的设备的分页状态本来就不在这一列里 */
     Object.entries(this._historyByClient).forEach(([key, state]) => {
       const sec = byClient.get(key);
-      if (sec) {
+      if (sec?.desktop) {
         sec.total = Math.max(sec.total, state.total);
         sec.loading = state.loading;
         sec.loaded = state.loaded;
@@ -678,6 +714,26 @@ class PortalStore {
       const rows = [...rowsByClient.get(sec.key)!.values()];
       // 最近活动倒序：侧栏回答的是「我最近在弄什么」，字母序在这儿没有意义
       rows.sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0));
+
+      if (!sec.desktop) {
+        /**
+         * CLI：**一条平铺的列表，不分桶、不翻页**。
+         *
+         * 分桶回答的是「这条会话是什么时候的」—— 对一列**全都开着**的终端窗口
+         * 没有意义：一个开了三天没关的终端会被标成「过去 7 天」，而它就在眼前。
+         * 桶标题留空，渲染层据此不画那一行小标签（见 SessionTree）。
+         *
+         * 计数也跟着换成**实际列出的条数**：历史总数（那台机器上攒下的 73 条
+         * jsonl）与这一列没有关系，写上去就是标题说 73、列表只有 2 条。
+         */
+        sec.buckets = rows.length ? [{ label: "", items: rows }] : [];
+        sec.total = rows.length;
+        sec.loading = false;
+        sec.loaded = true;
+        sec.hasMore = false;
+        continue;
+      }
+
       const buckets = new Map<string, PortalTaskData[]>();
       for (const r of rows) {
         const label = bucketOf(r.mtimeMs ?? 0);
@@ -1085,6 +1141,22 @@ class PortalStore {
     const [machineId, provider, desktopFlag] = key.split("|");
     const desktop = desktopFlag === "true";
     if (!machineId) {
+      return;
+    }
+    /**
+     * **CLI 没有「历史会话」这回事，所以这个请求压根不发。**
+     *
+     * CLI 的一条「会话」就是一个终端窗口：窗口一关，会话就结束了，磁盘上留下的
+     * jsonl 只是残留记录，不是用户心智里「还在的那段对话」——他不会回去翻，
+     * 翻了也接不上（那个终端已经没了）。桌面客户端才相反：它的会话是持久的
+     * 对话列表，回去翻、接着聊都成立。两者的列表语义本来就不同，从前一视同仁
+     * 当成「可浏览的历史」是错的。
+     *
+     * 守卫放在这一层而不是调用方：这个接口是**现读磁盘**的，漏掉任何一个调用点
+     * 就白白多一次昂贵请求。CLI 那一列铺什么，全由 `clientSections` 从 `_tasks`
+     * 里挑（见那边的 `desktop === false` 分支）。
+     */
+    if (!desktop) {
       return;
     }
     const prev = this._historyByClient[key];

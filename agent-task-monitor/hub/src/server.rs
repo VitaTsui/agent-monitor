@@ -866,6 +866,9 @@ async fn list_session_history(
                 "mtimeMs": t.mtime_ms,
                 "lineCount": t.line_count,
                 "gitBranch": t.git_branch,
+                // 这条会话派过几个子代理 —— 侧栏据此决定画不画展开箭头，
+                // 不必为每一行都去拉一次 /monitor/tasks/:id/subtasks
+                "subTaskCount": t.sub_task_count,
                 "note": notes.get(&crate::slots::anchor_of(t)),
             })
         })
