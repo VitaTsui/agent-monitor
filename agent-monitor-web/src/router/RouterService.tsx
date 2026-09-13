@@ -4,6 +4,8 @@ import { cloneDeep, debounce } from "lodash";
 import wsCache, { CACHE_KEY } from "@/utils/wsCache";
 
 import { Icon, Panel } from "@hsu-react/ui";
+
+import { menuIconName } from "./menuIcons";
 import NoFoundPage from "@/404";
 import { Outlet } from "react-router";
 import { ADMIN_BASE, RouteType } from "./router.config";
@@ -311,7 +313,9 @@ class RouterStore {
           name: item.nm,
           title: item.nm,
           menu: !item.status,
-          icon: item.icon ? <Icon icon={item.icon} /> : undefined,
+          // item.icon 是 hub 下发的**语义 key**（user / version），不是图标名 ——
+          // 图标名在 menuIcons.ts 里，构建期的图标子集扫描才管得住它
+          icon: <Icon icon={menuIconName(item.icon)} />,
           hasPermi: item.perm ? [item.perm] : undefined,
         },
       };

@@ -52,24 +52,6 @@ const PREFIXES = ["ph", "fa-regular", "ep"];
  */
 const LIB_SCAN_DIRS = ["node_modules/@hsu-react/ui/es"];
 
-/**
- * 额外保留清单 —— 扫描扫不到、但运行时确实要用的图标名，写全名（`prefix:name`）。
- *
- * 扫描是纯文本匹配，只认**写死的字面量**。以下两类看不见，必须登记在这里：
- *   a) 拼出来的名字，如 `` `ph:${kind}` ``（本项目当前没有这种写法）；
- *   b) 从接口拿到的名字 —— `src/router/RouterService.tsx` 的
- *      `<Icon icon={item.icon} />`，后管菜单图标由 hub 下发。
- *
- * 下面这两枚就是 (b)：hub 的 `GET /sys/menu/getMenuATopATopMenu` 目前硬编码下发
- * 「用户管理 / 版本管理」两条菜单的图标（见 `agent-task-monitor/hub/src/admin.rs`）。
- *
- * ⚠️ 这是个**长期风险点**：后端改菜单图标、或将来加新菜单填个新图标名，前端这边
- * 不跟着登记，那枚图标线上就是空白 + 走外网 + 控制台一声不吭。真正的解法在后端
- * （限定可选图标集 / 只下发枚举 key 由前端映射），见报告。在那之前，**改了
- * admin.rs 里的 icon 就必须同步改这里**。
- */
-const EXTRA_ICONS = ["carbon:user-multiple", "carbon:upgrade"];
-
 const ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(ROOT, "src");
 const JSON_DIR = path.join(ROOT, "node_modules", "@iconify", "json", "json");
@@ -144,27 +126,6 @@ function collectCandidates(isRealIcon) {
   return { byPrefix, fromLib };
 }
 
-/** 把额外保留清单并进候选集，返回它们的全名集合（漏掉时要单独报警） */
-function mergeExtraIcons(byPrefix) {
-  const extras = new Set();
-
-  for (const full of EXTRA_ICONS) {
-    const idx = full.indexOf(":");
-    if (idx <= 0) {
-      console.warn(`[gen:icons] EXTRA_ICONS 里 "${full}" 不是 prefix:name 形式，已忽略`);
-      continue;
-    }
-
-    const prefix = full.slice(0, idx);
-    const name = full.slice(idx + 1);
-    if (!byPrefix.has(prefix)) byPrefix.set(prefix, new Set());
-    byPrefix.get(prefix).add(name);
-    extras.add(full);
-  }
-
-  return extras;
-}
-
 /** 把一枚图标（可能是 alias）连同它的 parent 链一起收进结果 */
 function resolveIcon(source, target, name, seen = new Set()) {
   if (seen.has(name)) return false; // 防御 alias 成环
@@ -223,14 +184,12 @@ function main() {
   };
 
   const { byPrefix: candidates, fromLib } = collectCandidates(isRealIcon);
-  const extras = mergeExtraIcons(candidates);
 
   const collections = [];
   const missing = [];
-  const missingExtras = [];
   let total = 0;
 
-  // EXTRA_ICONS 与扫库都可能带来白名单之外的集合，所以取并集而不是只走 PREFIXES
+  // 扫依赖可能带来白名单之外的集合，所以取并集而不是只走 PREFIXES
   const prefixes = [...new Set([...PREFIXES, ...candidates.keys()])].sort();
 
   for (const prefix of prefixes) {
@@ -253,8 +212,6 @@ function main() {
       const full = `${prefix}:${name}`;
       if (resolveIcon(source, target, name)) {
         hit += 1;
-      } else if (extras.has(full)) {
-        missingExtras.push(full);
       } else {
         missing.push(full);
       }
@@ -272,14 +229,8 @@ function main() {
   const size = fs.statSync(OUT_FILE).size;
   console.log(
     `[gen:icons] 已生成 ${collections.length} 个精简图标集、${total} 枚图标，共 ${size} B（${(size / 1024).toFixed(1)} KB）` +
-      `；其中扫依赖命中 ${fromLib} 处、EXTRA_ICONS 登记 ${extras.size} 枚`
+      `；其中扫依赖命中 ${fromLib} 处`
   );
-  if (missingExtras.length) {
-    // 登记了却查无此图标：线上就是一枚空白图标，必须改掉登记
-    console.warn(
-      `[gen:icons] EXTRA_ICONS 里这些图标在图标集里不存在，页面上会是空白：\n  ${missingExtras.join("\n  ")}`
-    );
-  }
   if (missing.length) {
     console.log(
       `[gen:icons] 以下字面量像图标名但集合里查无此图标，已忽略：\n  ${missing.join("\n  ")}`
