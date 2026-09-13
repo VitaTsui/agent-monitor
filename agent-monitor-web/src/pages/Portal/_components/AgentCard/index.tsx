@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 
 import { Icon } from "@hsu-react/ui";
-import { DownOutlined, WarningFilled } from "@ant-design/icons";
+import { WarningFilled } from "@ant-design/icons";
 
 import { SubTask, SubTaskOutcome } from "@/services/apis/portal";
 import StatusIcon, {
@@ -159,8 +159,16 @@ const AgentCard: React.FC<AgentCardProps> = ({
             {elapsed ? <span>{elapsed}</span> : null}
           </span>
         </span>
-        <DownOutlined
-          className={`${styles.caret} ${expanded ? styles.caretOpen : ""}`}
+        {/* 折叠箭头换 Phosphor，与链上其余箭头同一副字形。
+            **不是尺寸问题**：它一直是 12px，但 antd 的 `DownOutlined` 把 em 框
+            填得更满 —— 同样 12px，antd 画出来的实体比 `ph:caret-down` 大一圈，
+            看着就「太大」。改的是字形，不是数字。
+            展开态**换字形**而不是把它转 180°（参照 `MessageList/index.tsx:747`
+            就是 `expanded ? "ph:caret-up" : "ph:caret-down"`）—— caret 的上下两式
+            本来就各画一枚，转出来的那枚三角重心是反的。 */}
+        <Icon
+          icon={expanded ? "ph:caret-up" : "ph:caret-down"}
+          className={styles.caret}
         />
       </button>
 

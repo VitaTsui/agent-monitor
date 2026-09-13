@@ -783,7 +783,7 @@ const StepRow: React.FC<{
             **失败那一档仍然写字** —— 一个红叉说不出「跑砸了」，读屏更读不出来。 */}
         {bad ? <span className={styles.stepStatus}>失败</span> : null}
         <Icon
-          icon={open ? "UpOutlined" : "DownOutlined"}
+          icon={open ? "ph:caret-up" : "ph:caret-down"}
           className={styles.stepCaret}
         />
       </button>
@@ -1186,7 +1186,7 @@ const ExecChain: React.FC<{
         >
           <span className={styles.chainText}>{headText}</span>
           <Icon
-            icon={open ? "UpOutlined" : "DownOutlined"}
+            icon={open ? "ph:caret-up" : "ph:caret-down"}
             className={styles.stepCaret}
           />
         </button>
