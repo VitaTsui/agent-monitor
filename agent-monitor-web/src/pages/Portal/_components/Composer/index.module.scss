@@ -159,12 +159,22 @@
   }
 }
 
-// 上传按钮图标加大（icon 的 className 会被 Chat.Input 克隆吞掉，
-// 从容器选择器压进去才生效）
-.Composer :global(.anticon-paper-clip),
-.chatInput :global(.anticon-paper-clip) {
-  // 组件库按钮内 .anticon 有更高优先级的 14px，这里必须 !important 压回
-  font-size: 20px !important;
+/* 输入框左下角那三枚并排的工具图标（历史 / 浏览目录 / 附件）。
+   **一个字号管三枚**，不再逐个 inline 微调 —— 那是 antd 时期的将就：它那三枚墨迹
+   本来就参差（实测 `getBBox` 归一化到 viewBox：history .960 / file-search .973 /
+   paper-clip .862），只能靠 17 / 18 / 20 三个数手调对齐，实际墨迹 16.32 / 17.51 / 17.24。
+   换成 Phosphor 之后三枚只差一档（clock-counter-clockwise .781 /
+   file-magnifying-glass .813 / paperclip .813），**21 一个数就够**：
+   21×.781 = 16.40、21×.813 = 17.07、17.07 —— 彼此相差 4%（原来那三枚是 7%），
+   均值 16.85 与原来的 17.02 基本等重。
+
+   选择器与 `!important` 沿用这一块原来的写法，两个理由都还成立：
+   Chat.Input 会克隆图标元素，类得从容器压进去；而组件库按钮内的 `.anticon`
+   有更高优先级的 14px，不加 `!important` 压不回来（实测加了 21px 的普通规则
+   仍然渲染成 14px）。 */
+.Composer .uploadIcon,
+.chatInput .uploadIcon {
+  font-size: 21px !important;
 }
 
 // buttonGroup 的按钮挪到工具栏左侧。

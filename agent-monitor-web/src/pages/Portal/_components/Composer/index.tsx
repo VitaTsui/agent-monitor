@@ -1,20 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
 
-import { Chat, Input, Modal } from "@hsu-react/ui";
+import { Chat, Icon, Input, Modal } from "@hsu-react/ui";
 import { message } from "@hsu-react/ui";
 import { reaction } from "mobx";
 import { useNavigate } from "react-router-dom";
 
 import { isMobileViewport } from "@/utils/breakpoint";
-import {
-  DeleteOutlined,
-  EditOutlined,
-  FileSearchOutlined,
-  FolderAddOutlined,
-  HistoryOutlined,
-  PaperClipOutlined,
-  WarningOutlined,
-} from "@ant-design/icons";
 
 import {
   SlashCommand,
@@ -864,9 +855,9 @@ const Composer: React.FC<ComposerProps> = (props) => {
           {
             title: "查看会话历史（已结束会话的最终产出）",
             icon: (
-              <HistoryOutlined
+              <Icon
+                icon="ph:clock-counter-clockwise"
                 className={styles.uploadIcon}
-                style={{ fontSize: 17 }}
               />
             ),
             type: "text" as const,
@@ -878,11 +869,14 @@ const Composer: React.FC<ComposerProps> = (props) => {
             ? [
                 {
                   title: "选择会话目录里的文件，插入相对路径",
-                  // FileSearchOutlined 字形本身偏小，略调大与旁边回形针视觉一致
+                  /* 三枚并排的字号**统一由 `.uploadIcon` 给**，不再逐个 inline 微调：
+                     antd 那三枚墨迹本来就参差（history .960 / file-search .973 /
+                     paper-clip .862），只能靠手调对齐；换成 Phosphor 之后三枚
+                     墨迹一致，一个字号就齐了（依据写在 scss 里）。 */
                   icon: (
-                    <FileSearchOutlined
+                    <Icon
+                      icon="ph:file-magnifying-glass"
                       className={styles.uploadIcon}
-                      style={{ fontSize: 18 }}
                     />
                   ),
                   type: "text" as const,
@@ -900,7 +894,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
                                 : ""
                             }`
                           : "传文件到会话目录（可多选，大文件自动分片）",
-                        icon: <PaperClipOutlined className={styles.uploadIcon} />,
+                        icon: <Icon icon="ph:paperclip" className={styles.uploadIcon} />,
                         type: "text" as const,
                         loading: uploading,
                         onClick: () => fileRef.current?.click(),
@@ -963,7 +957,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
               tabIndex={0}
               onClick={newFolder}
             >
-              <FolderAddOutlined /> 新建文件夹
+              <Icon icon="ph:folder-plus" /> 新建文件夹
             </span>
           </div>
           <div className={styles.dirCrumb}>
@@ -1004,14 +998,14 @@ const Composer: React.FC<ComposerProps> = (props) => {
                     <span className={styles.dirIcon}>📁</span> {d}
                   </span>
                   <span className={styles.dirItemOps}>
-                    <EditOutlined
+                    <Icon icon="ph:pencil-simple"
                       title="重命名"
                       onClick={(e) => {
                         e.stopPropagation();
                         renameFolder(d);
                       }}
                     />
-                    <DeleteOutlined
+                    <Icon icon="ph:trash"
                       title="删除"
                       onClick={(e) => {
                         e.stopPropagation();
@@ -1225,7 +1219,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
         className={styles.dangerModal}
         title={
           <span className={styles.dangerTitle}>
-            <WarningOutlined /> 高危操作确认（{dangerStep}/2）
+            <Icon icon="ph:warning-circle" /> 高危操作确认（{dangerStep}/2）
           </span>
         }
         open={dangerStep > 0}

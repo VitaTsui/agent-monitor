@@ -18,7 +18,10 @@
   // 但不能藏起来只在 hover 出现 —— 触屏没有 hover，那等于没有入口。
   .renameIcon {
     flex: none;
-    font-size: 12px;
+    /* 14 而不是 12：`ph:pencil-simple` 的墨迹只占 em 框的 .781，而原来那枚
+       antd `EditOutlined` 是 .893 —— 12×.781 = 9.4 比原来的 10.7 轻一成三，
+       14×.781 = 10.9，与原来等重。 */
+    font-size: 14px;
     color: var(--muted-foreground);
     opacity: 0.55;
   }
