@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# iconify 精简图标集是生成物（scripts/genIconCollections.cjs 在 start/build 前自动跑）。
+# 不入库：手工维护的子集必然漂（删了用法那一枚不会消失、加了用法忘补就线上空白），
+# 并行改动还会人人撞同一个 JSON。CI 装了 @iconify/json（devDep）后 pnpm build 会自己生成。
+src/assets/iconify/collections.generated.json
+
 .playwright-mcp
 playwright
 .cursor

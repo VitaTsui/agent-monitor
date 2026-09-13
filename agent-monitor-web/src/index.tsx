@@ -28,23 +28,28 @@ import Routes from "./router/Routes";
 import { SingleRouter } from "@hsu-react/single-router";
 
 import { addCollection, type IconifyJSON } from "@iconify/react";
-import phSubset from "./assets/iconify/ph.subset.json";
+import iconCollections from "./assets/iconify/collections.generated.json";
 
-/* Phosphor 图标子集，**构建期打进产物**（4.5 KB，15 枚）。
+/* 精简 iconify 图标集，**构建期打进产物**。
  *
- * 状态图标（执行中 / 成功 / 失败 / 中断…）一律走 Phosphor，与 VitaAgent 逐字相同
- * （见 `pages/Portal/_components/StatusIcon`）；此前在 antd 图标里挑「语义最近的
- * 那一个」，尺寸颜色对齐过三轮，形状始终对不上 —— 两套图标集的字形本来就不同。
+ * 状态图标（执行中 / 成功 / 失败 / 中断…）一律走 Phosphor（`ph:*`），与 VitaAgent
+ * 逐字相同（见 `pages/Portal/_components/StatusIcon`）；此前在 antd 图标里挑「语义
+ * 最近的那一个」，尺寸颜色对齐过三轮，形状始终对不上 —— 两套图标集的字形本就不同。
  *
  * **必须在这儿 `addCollection`，不能让它运行时去 Iconify 公共 API 拉。**
  * 这是个要在内网/离线环境跑的监控工具：运行时依赖外部 CDN，断网就是一片空白图标。
  * 注册过的名字 `@iconify/react` 一律走本地，不发任何请求。
  *
- * 子集由 `@iconify/json` 的 `ph.json` 裁出来（只留用到的那几枚），整集 4.3 MB
- * 不进产物、也不进依赖。要加图标：把对应条目补进 `assets/iconify/ph.subset.json`
- * （`viewBox` 必须与子集的 256×256 一致，否则不能直接并进去），再在用它的地方
- * 按名字引 —— 状态类的进 `StatusIcon` 的映射，非状态的直接用 `Icon icon="ph:xxx"`。 */
-addCollection(phSubset as unknown as IconifyJSON);
+ * 这个 JSON 是**生成物、不入库**：`scripts/genIconCollections.cjs` 在 `pnpm start`
+ * / `pnpm build` 前扫 src 里写死的 `ph:` 图标名字面量，从 `@iconify/json`（devDep，
+ * 整集 4.3 MB，不进产物）里裁出用到的那几枚。所以 **加图标不用改这里、也不用维护
+ * 任何清单**：直接在用它的地方按名字引（状态类进 `StatusIcon` 的映射，其余直接
+ * `Icon icon="ph:图标名"`），下次启动/构建自动就位；删掉用法它也会自动消失。
+ * 唯一的例外是「名字不是写死的」—— 拼接出来的或接口下发的图标名扫不到，得登记进
+ * 那个脚本的 `EXTRA_ICONS`，脚本头部有说明。 */
+(iconCollections as unknown as IconifyJSON[]).forEach((collection) =>
+  addCollection(collection)
+);
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <BrowserRouter>
