@@ -58,6 +58,19 @@ const STATUS_ICON: Record<string, React.ReactNode> = {
   finished: <CheckCircleFilled />,
 };
 
+/**
+ * 子代理清单没读回来的三种原因，各说各的。
+ *
+ * 清单在**那台机器的磁盘上**，hub 手里没有 —— 机器离线就取不到，但那是可恢复的；
+ * 「记录不存在」重试多少次都一样；「网络不通」又是第三回事。合成一句兜底的话，
+ * 用户没法判断该等一等还是该去查网络。
+ */
+const SUB_FAIL_TEXT: Record<string, string> = {
+  offline: "这台设备离线，读不到它磁盘上的子代理清单",
+  missing: "找不到这条会话的记录，子代理清单也就无从读起",
+  network: "读取子代理清单失败，请检查网络",
+};
+
 /** 子代理的收场图标。与 `AgentCard` 的 `OUTCOME_ICON` 同一份字形，不另起一套 */
 const OUTCOME_ICON: Record<SubTaskOutcome, React.ReactNode> = {
   running: <LoadingOutlined />,
@@ -150,8 +163,8 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
     keyword,
     subTasksOf,
     isSubTasksLoading,
-    isSubTasksLoaded,
     isSubTasksPending,
+    subTasksFailOf,
     loadSubTasks,
     loadClientHistory,
   } = PortalStore;
@@ -355,13 +368,36 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
     /* 树里**只列子代理**：后台命令在执行链上根本没有节点，列出来只能是一排
        永远灰着的行；它们该看的地方是右栏「会话状态」里的后台任务卡。 */
     const subs = subTasksOf(id).filter((st) => st.kind === "agent");
-    const expanded = expandedSessions.includes(id);
     const loadingSubs = isSubTasksLoading(id);
     const pendingSubs = isSubTasksPending(id);
-    /* 给不给展开箭头：拉过且一条没有 → 确定没有子代理，不给（给了点下去什么都不会出现）；
-       还没拉过 → 给，点了才去问。活跃会话手里已经有一份 `Task.subTasks`，
-       但那份只覆盖近 24 小时 / 50 条，空不代表真的没有。 */
-    const expandable = subs.length > 0 || !isSubTasksLoaded(id);
+    /* 清单没读回来的**原因**。三种要分开说：离线是可恢复的、记录没了重试也白搭、
+       网络断了是第三回事。判的是后端信封里的 code，不是文案。 */
+    const subFail = subTasksFailOf(id);
+    /**
+     * 给不给展开箭头：**只看 `subTaskCount`**。
+     *
+     * 它是后端在会话列表里直接带的子代理数量（数 `subagents/agent-*.jsonl` 的文件数，
+     * 不解析内容，所以便宜），热路径与历史列表都有、不设保留窗口。
+     *
+     * 从前这里是「拉过且一条没有 → 不给，还没拉过 → 先给上，点了才去问」——
+     * 侧栏根本不知道一条会话有没有子代理（那只有现读磁盘的 `/subtasks` 才知道，
+     * 大会话 0.8~2 秒，不可能为每一行都拉一次），于是只能先假设有、再用一句
+     * 「该会话没有派过子代理」的空态圆场。用户原话：「子会话是临时的，没有子会话，
+     * 就不要有『该会话没有派过子代理』和展开收起 icon」。有了准确的数量，
+     * 那套假设连同那句空态一起拆掉，**不留兜底**（留着就是两套判断并存）。
+     *
+     * `subTasks`（24 小时 / 50 条窗口的带状态清单）**不能拿来判有没有**：
+     * 它空只说明「最近没有」，不说明「一共没有」。
+     */
+    const subCount = t.subTaskCount ?? 0;
+    const expandable = subCount > 0;
+    /* **展开着 ＝ 用户要展开 ＋ 它确实有东西可展**。两个条件缺一不可：
+       展开态是落 localStorage 的（用户意图，跨刷新保留），而「有没有子代理」
+       是每轮上报刷新的事实。只看前者的话，一条曾经展开过、后来子代理数变成 0
+       的会话，会**顶着一个没有箭头的行渲染出一片子树**——实测就撞见了：
+       那片子树里还挂着一句「读取中：这台机器还没把清单送回来」，
+       而那条会话压根没有子代理可读。 */
+    const expanded = expandable && expandedSessions.includes(id);
     /**
      * **执行中的会话第二行显示它此刻在干什么**（`正在调用工具: Bash` 这类）。
      *
@@ -618,10 +654,37 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                 ) : null}
               </>
             ) : (
+              /* 走到这儿只有一种情形：**这条会话确实有 `subCount` 个子代理**
+                 （没有的话上面压根不给箭头、展不开），但清单没读回来 ——
+                 设备离线、记录没了、网络断了，或者数量与清单对不上（数文件数的
+                 那一侧看得见、解析清单的那一侧读不出来）。
+                 **不说「没有派过子代理」** —— 那句话是上一版没有数量可依时的
+                 圆场话，现在它既不成立、也不该留着当兜底（留着就是两套判断并存）。
+                 说不出所以然的时候就说「读不到」，并给一条重试的出路。 */
               <div
                 className={`${styles.item} ${styles.subItem} ${styles.subHint}`}
               >
-                <span className={styles.itemTitle}>该会话没有派过子代理</span>
+                <span className={styles.itemTitle}>
+                  {SUB_FAIL_TEXT[subFail ?? ""] ??
+                    `读不到这 ${subCount} 个子代理的清单`}
+                </span>
+                <span
+                  className={styles.subRetry}
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    loadSubTasks(id, true);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      loadSubTasks(id, true);
+                    }
+                  }}
+                >
+                  重试
+                </span>
               </div>
             )}
           </div>
@@ -667,7 +730,12 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
               <div className={styles.groupBody}>
                 {sec.buckets.map((b) => (
                   <div key={b.label}>
-                    <div className={styles.subLabel}>{b.label}</div>
+                    {/* CLI 分组是一条平铺的列表，桶标题是空串 —— 不画那一行小标签。
+                        它那一列全是**开着的终端窗口**，「昨天 / 过去 7 天」这种
+                        时间标签在那儿只是噪音（见 PortalStore.clientSections）。 */}
+                    {b.label ? (
+                      <div className={styles.subLabel}>{b.label}</div>
+                    ) : null}
                     {b.items.map(renderSession)}
                   </div>
                 ))}
@@ -680,7 +748,14 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                 ) : null}
                 {!sec.loading && !sec.buckets.length ? (
                   <div className={styles.groupHint}>
-                    {keyword ? "没有匹配的会话" : "这个客户端还没有会话"}
+                    {keyword
+                      ? "没有匹配的会话"
+                      : sec.desktop
+                        ? "这个客户端还没有会话"
+                        : /* CLI 空着**不等于**它没跑过东西 —— 那台机器上多半攒了
+                             一堆 jsonl，只是此刻一个终端都没开着。说成「还没有
+                             会话」是假话。 */
+                          "当前没有打开的终端会话"}
                   </div>
                 ) : null}
 
