@@ -435,7 +435,14 @@ class PortalStore {
     hostname: string;
     platform: string;
     platformDsr: string;
-    /** 这台机器上一共有多少条会话（含历史，取自 `providers[].sessionCount`） */
+    /**
+     * 这台机器**近 30 天**有多少条会话（取自 `providers[].sessionCount` 之和）。
+     *
+     * **不是「列表里会列出这么多条」**：那个窗口是客户端的 `AM_HISTORY_DAYS`
+     * （默认 30 天），而侧栏 CLI 那一列只列当前打开的终端、桌面那一列要翻页。
+     * 消费方印它的时候必须带上「近 30 天」这个限定词（见 `DeviceSelect`），
+     * 否则就是一个没有限定词的数字对着一列三条的列表。
+     */
     count: number;
     /** 此刻有几条在执行 */
     running: number;

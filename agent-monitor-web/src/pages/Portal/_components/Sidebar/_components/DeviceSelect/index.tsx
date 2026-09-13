@@ -52,9 +52,24 @@ const DeviceSelect: React.FC = observer(() => {
     </>
   );
 
+  /**
+   * 会话数**必须带上口径**：它是客户端回溯窗口（`AM_HISTORY_DAYS`，默认 30 天）
+   * 内的条数，不是「列表里有这么多条」。
+   *
+   * 不带限定词的那句「64 会话」是在说假话：CLI 那一列现在只列**当前打开的**终端
+   * （见 PortalStore.clientSections），点开往往只有两三条；桌面那一列也要翻页
+   * 才铺得出来。用户原话：「会话数量不对」。
+   *
+   * 为什么不改成「实际会列出的条数」：那个数对**没选中的设备**根本不存在 ——
+   * 桌面客户端列的是历史，而历史只有点开那一组才会去拉；这里要给列表里每一台
+   * 设备都印一个数，只能用随 `/monitor/devices` 一起下发的这个。
+   * 与其印一个算不准的，不如把印的这个说清楚是什么。
+   */
+  const countDsr = (n: number) => `近 30 天 ${n} 条`;
+
   const title = `${current.hostname} · ${current.platformDsr}${
     current.online ? "" : " · 离线"
-  } · ${current.count} 会话${
+  } · ${countDsr(current.count)}${
     current.running > 0 ? ` · ${current.running} 执行中` : ""
   }`;
 
@@ -80,7 +95,7 @@ const DeviceSelect: React.FC = observer(() => {
         <span className={styles.menuName}>{d.hostname}</span>
         {d.isLocal ? <span className={styles.localTag}>本机</span> : null}
         <span className={styles.menuMeta}>
-          {d.online ? `${d.count} 会话` : "离线"}
+          {d.online ? countDsr(d.count) : "离线"}
           {d.running > 0 ? ` · ${d.running} 执行中` : ""}
         </span>
         {d.machineId === current.machineId ? (
