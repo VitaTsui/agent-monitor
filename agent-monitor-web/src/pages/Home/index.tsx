@@ -1,20 +1,7 @@
 import React, { useEffect, useState } from "react";
 
-import { Button } from "@hsu-react/ui";
+import { Button, Icon } from "@hsu-react/ui";
 import { useNavigate } from "react-router-dom";
-import {
-  AndroidFilled,
-  AppleFilled,
-  CloudServerOutlined,
-  CodeOutlined,
-  ControlOutlined,
-  DesktopOutlined,
-  EyeOutlined,
-  LockOutlined,
-  SafetyCertificateOutlined,
-  ThunderboltFilled,
-  WindowsFilled,
-} from "@ant-design/icons";
 
 import { getAccessToken } from "@/utils/auth";
 import { getVersionInfo } from "@/services/apis/portal";
@@ -23,32 +10,32 @@ import styles from "./index.module.scss";
 
 const FEATURES = [
   {
-    icon: <EyeOutlined />,
+    icon: <Icon icon="ph:eye" />,
     title: "实时会话监控",
     desc: "解析 Claude Code / Codex 会话，WebSocket 实时推送提示词、工具调用、任务清单与后台任务；其余代理进程级接管，同样可控。",
   },
   {
-    icon: <ControlOutlined />,
+    icon: <Icon icon="ph:sliders-horizontal" />,
     title: "远程控制与发布",
     desc: "暂停 / 恢复 / 中断 / 终止正在运行的代理任务，或直接向会话注入一行输入发布新任务——就在网页上。",
   },
   {
-    icon: <CloudServerOutlined />,
+    icon: <Icon icon="ph:hard-drives" />,
     title: "多机聚合",
     desc: "Mac / Windows / Linux 多台电脑的会话统一聚合到一处，按设备与终端类型分组，一屏总览全部代理动态。",
   },
   {
-    icon: <LockOutlined />,
+    icon: <Icon icon="ph:lock" />,
     title: "隐私隔离",
     desc: "只能看到自己名下、且已信任的设备；会话内容纯实时读取、我方不落存储，超级管理员也看不到别人的会话。",
   },
   {
-    icon: <SafetyCertificateOutlined />,
+    icon: <Icon icon="ph:shield-check" />,
     title: "安全加固",
     desc: "口令 RSA+AES 加密传输、加盐哈希存储，后管部署令牌双重锁，危险指令发布需多重确认。",
   },
   {
-    icon: <DesktopOutlined />,
+    icon: <Icon icon="ph:desktop" />,
     title: "桌面 & 移动端",
     desc: "Mac / Windows 桌面应用内嵌完整前台，关闭可缩到托盘后台同步、开机自启；Android 应用随时随地查看与控制。",
   },
@@ -90,7 +77,7 @@ const Home: React.FC = () => {
       <header className={styles.nav}>
         <div className={styles.navInner}>
           <div className={styles.brand}>
-            <span className={styles.logo}><CodeOutlined /></span>
+            <span className={styles.logo}><Icon icon="ph:terminal-window" /></span>
             <span className={styles.brandName}>终端任务监控</span>
           </div>
           <nav className={styles.navLinks}>
@@ -108,7 +95,7 @@ const Home: React.FC = () => {
       <section className={styles.hero}>
         <div className={styles.heroText}>
           <div className={styles.badge}>
-            <ThunderboltFilled /> 面向所有 AI 编码代理的终端监控
+            <Icon icon="ph:lightning-fill" /> 面向所有 AI 编码代理的终端监控
           </div>
           <h1 className={styles.title}>
             盯住每一台电脑上
@@ -187,13 +174,13 @@ const Home: React.FC = () => {
           {/* macOS 安装包暂不提供：无签名证书，Gatekeeper 拦截体验差；
               取得开发者证书完成公证后再上架 */}
           <div className={`${styles.clientCard} ${styles.clientCardDisabled}`}>
-            <AppleFilled className={styles.clientIcon} />
+            <Icon icon="ph:apple-logo-fill" className={styles.clientIcon} />
             <div className={styles.clientName}>macOS</div>
             <div className={styles.clientDesc}>安装包准备中</div>
             <span className={styles.clientDl}>即将提供</span>
           </div>
           <a className={styles.clientCard} href={winUrl} download>
-            <WindowsFilled className={styles.clientIcon} />
+            <Icon icon="ph:windows-logo-fill" className={styles.clientIcon} />
             <div className={styles.clientName}>Windows</div>
             <div className={styles.clientDesc}>适用于 Windows 10 / 11</div>
             <span className={styles.clientDl}>
@@ -201,7 +188,7 @@ const Home: React.FC = () => {
             </span>
           </a>
           <a className={styles.clientCard} href={apkUrl} download>
-            <AndroidFilled className={styles.clientIcon} />
+            <Icon icon="ph:android-logo-fill" className={styles.clientIcon} />
             <div className={styles.clientName}>Android</div>
             <div className={styles.clientDesc}>适用于 Android 手机</div>
             <span className={styles.clientDl}>
@@ -221,7 +208,7 @@ const Home: React.FC = () => {
 
       <footer className={styles.footer}>
         <div className={styles.footBrand}>
-          <span className={styles.logo}><CodeOutlined /></span>
+          <span className={styles.logo}><Icon icon="ph:terminal-window" /></span>
           <span>终端任务监控</span>
         </div>
         <div className={styles.footNote}>

@@ -1,5 +1,5 @@
 import React from "react";
-import { CodeOutlined } from "@ant-design/icons";
+import { Icon } from "@hsu-react/ui";
 
 import styles from "./index.module.scss";
 
@@ -10,7 +10,7 @@ const MockPortal: React.FC = () => {
       {/* 左侧栏 */}
       <div className={styles.sider}>
         <div className={styles.siderTop}>
-          <span className={styles.logo}><CodeOutlined /></span>
+          <span className={styles.logo}><Icon icon="ph:terminal-window" /></span>
           <span className={styles.name}>终端任务监控</span>
         </div>
         <div className={styles.search}>搜索会话 / 项目</div>

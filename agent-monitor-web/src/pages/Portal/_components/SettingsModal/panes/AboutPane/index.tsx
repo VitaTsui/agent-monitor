@@ -1,6 +1,6 @@
 import React from "react";
 
-import { CodeOutlined } from "@ant-design/icons";
+import { Icon } from "@hsu-react/ui";
 
 import st from "../../settings.module.scss";
 import styles from "./index.module.scss";
@@ -11,7 +11,7 @@ const AboutPane: React.FC = () => (
     <div className={st.paneTitle}>关于</div>
     <div className={styles.about}>
       <div className={styles.aboutLogo}>
-        <CodeOutlined />
+        <Icon icon="ph:terminal-window" />
       </div>
       <div className={styles.aboutName}>终端任务监控</div>
       <div className={styles.aboutDesc}>
