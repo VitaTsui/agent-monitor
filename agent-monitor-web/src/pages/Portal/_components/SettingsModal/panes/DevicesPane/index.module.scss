@@ -37,27 +37,18 @@
   }
 }
 
-// 有新版时的「更新」按钮：实心主题色 + 主色前景（胶囊形）。
-// 前景取 --primary-foreground 而不是写死白色 —— 暗色下主色翻成近白，白字会消失。
+// 有新版时的「更新」按钮：只管胶囊形状，颜色交给 antd 的 type="primary"。
+// 不要在这里重新刷底色/前景：antd 6 的 hover 规则是
+// `:where(.css-xxx).ant-btn:not(:disabled):not(.ant-btn-disabled):hover`（0,4,0），
+// 顶层单类的 `.updateNowBtn:hover`（0,2,0）压不过它 —— 底会被刷回 antd 的
+// 默认 hover 白底，而钉在内层 span 上的前景色压得住，于是 hover 时白字落白底。
+// 实心主色 + 明暗两套前景本来就由 router/Routes.tsx 的 colorPrimary /
+// colorTextLightSolid 下发，用 type="primary" 即可，不需要 CSS 再覆盖一遍。
 .updateNowBtn {
   height: 26px;
   border-radius: var(--radius-full);
   padding-inline: 14px;
   font-size: var(--text-sm);
-  background: var(--primary);
-  border-color: var(--primary);
-
-  &,
-  span,
-  :global(.anticon) {
-    color: var(--primary-foreground);
-  }
-
-  &:hover,
-  &:focus {
-    background: var(--primary-hover);
-    border-color: var(--primary-hover);
-  }
 }
 
 .termScope {

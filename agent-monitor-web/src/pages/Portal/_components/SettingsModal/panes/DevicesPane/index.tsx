@@ -422,6 +422,7 @@ const DevicesPane: React.FC = observer(() => {
               // 「更新中」+进度（updating 已排除了「已是最新却有遗留进度」的误判）。
               <Button
                 size="small"
+                type="primary"
                 className={styles.updateNowBtn}
                 onClick={() =>
                   tauriInvoke?.("update_start").catch(() =>
@@ -468,6 +469,7 @@ const DevicesPane: React.FC = observer(() => {
               {pluginVer.installed !== pluginVer.latest ? (
                 <Button
                   size="small"
+                  type="primary"
                   className={styles.updateNowBtn}
                   loading={checkingPlugin}
                   onClick={updatePlugin}
