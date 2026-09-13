@@ -1,7 +1,8 @@
 import React from "react";
 
 import { Dropdown, Tooltip } from "antd";
-import { CheckOutlined, DownOutlined, LaptopOutlined } from "@ant-design/icons";
+import { CheckOutlined, LaptopOutlined } from "@ant-design/icons";
+import { Icon } from "@hsu-react/ui";
 import { observer } from "mobx-react-lite";
 
 import PortalStore from "../../../../PortalStore";
@@ -110,7 +111,9 @@ const DeviceSelect: React.FC = observer(() => {
           title={title}
         >
           {face}
-          <DownOutlined className={styles.caret} />
+          {/* 「这一行可以展开成一个下拉」的记号。`ph:caret-down` 与侧栏里客户端组
+              那枚折叠箭头是同一枚字形、同一个尺寸 —— 一列之内不该有两种箭头。 */}
+          <Icon icon="ph:caret-down" className={styles.caret} />
         </button>
       </Dropdown>
     </div>

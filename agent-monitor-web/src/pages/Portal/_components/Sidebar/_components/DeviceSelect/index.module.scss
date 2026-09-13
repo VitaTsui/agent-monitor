@@ -102,9 +102,20 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent);
 }
 
+/**
+ * 下拉记号。**12（--text-sm），不是原来的 11（--text-xs）** —— 与侧栏客户端组
+ * 那枚 `ph:caret-down` 取齐，一列之内同一枚字形不该有两个尺寸。
+ *
+ * 为什么换了字形还要动这个数：两套图标集在同样 px 下画出来的**墨迹**不一样。
+ * 实测（量 svg 的 getBBox 再换算成 px）：
+ *   antd `DownOutlined` @11px → 墨迹 9.33 × 6.29
+ *   `ph:caret-down`     @12px → 墨迹 8.25 × 4.50
+ * 直接按 11 换过去是 7.56 × 4.13，比原来轻掉一大截；12 才落在原来那个视觉重量
+ * 附近，同时与旁边那枚一致。**这是量出来的，不是随手调的数字。**
+ */
 .caret {
   flex: none;
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   color: var(--muted-foreground);
 }
 

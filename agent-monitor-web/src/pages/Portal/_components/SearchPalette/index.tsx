@@ -170,7 +170,16 @@ const SearchPalette: React.FC<SearchPaletteProps> = observer((props) => {
         key: `dev-${d.machineId}`,
         icon: <LaptopOutlined />,
         title: d.hostname,
-        meta: `${d.count} 会话${d.running > 0 ? ` · ${d.running} 执行中` : ""}`,
+        /* 不印会话数（用户原话：「这里数量不需要」）。它是客户端回溯窗口内的条数，
+           与侧栏实际列出多少不是一回事，容易被读成「列表里有这么多」。
+           设备行那一处已经去掉了，**同一个数不能只删一边**。
+           留下的是状态不是数量：在线就报几条在跑，离线就说离线 ——
+           与 `DeviceSelect` 同一口径。 */
+        meta: d.online
+          ? d.running > 0
+            ? `${d.running} 执行中`
+            : ""
+          : "离线",
         tag: "设备",
         run: () => {
           PortalStore.selectMachine(d.machineId);
