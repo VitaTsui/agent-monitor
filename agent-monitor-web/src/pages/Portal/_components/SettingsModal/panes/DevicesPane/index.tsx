@@ -66,11 +66,13 @@ const OUTLINE_WARN_THEME: ThemeConfig = {
       defaultBg: "transparent",
       defaultColor: "var(--muted-foreground)",
       defaultBorderColor: "var(--overlay-2)",
+      // 底是浅红染底，字就得取「染底上的文字」那一档：基准色 --destructive 压在
+      // --destructive-subtle 上只有 4.41:1（暗色 4.21:1），正文门槛是 4.5:1。
       defaultHoverBg: "var(--destructive-subtle)",
-      defaultHoverColor: "var(--destructive)",
+      defaultHoverColor: "var(--destructive-subtle-foreground)",
       defaultHoverBorderColor: "var(--destructive-subtle)",
       defaultActiveBg: "var(--destructive-subtle)",
-      defaultActiveColor: "var(--destructive)",
+      defaultActiveColor: "var(--destructive-subtle-foreground)",
       defaultActiveBorderColor: "var(--destructive)",
     },
   },

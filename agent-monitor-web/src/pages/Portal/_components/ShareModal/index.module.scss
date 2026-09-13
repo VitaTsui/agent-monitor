@@ -102,7 +102,8 @@
       background: transparent;
 
       &:hover {
-        color: var(--destructive);
+        // 底是浅红染底，文字走文字档（基准色压在它上面只有 4.41:1）
+        color: var(--destructive-subtle-foreground);
         border-color: var(--destructive-subtle);
         background: var(--destructive-subtle);
       }
@@ -141,7 +142,10 @@
         color: var(--muted-foreground);
 
         &:hover {
-          color: var(--destructive);
+          // 与旁边那颗「删除」（antd 的 text danger 按钮）统一：浅红染底 ＋ 染底上的
+          // 文字档。原来只改文字色、底仍是 antd 的中性灰，基准红压上去只有 4.39:1
+          color: var(--destructive-subtle-foreground);
+          background: var(--destructive-subtle);
         }
       }
     }

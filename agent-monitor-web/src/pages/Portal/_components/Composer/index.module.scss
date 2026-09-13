@@ -113,8 +113,10 @@
         line-height: 1.9;
 
         code {
-          background: color-mix(in srgb, var(--destructive) 8%, transparent);
-          color: var(--destructive);
+          // 染底走令牌那一份，不再自己调百分比
+          background: var(--destructive-subtle);
+          // 染底上的文字走文字档（浅色下基准色压这层底只有 4.27:1）
+          color: var(--destructive-subtle-foreground);
           border-radius: 4px;
           padding: 1px 6px;
           margin-right: 8px;
