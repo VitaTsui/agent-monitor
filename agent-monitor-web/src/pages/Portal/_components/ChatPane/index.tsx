@@ -1,21 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
-import { Button } from "@hsu-react/ui";
+import { Button, Icon } from "@hsu-react/ui";
 import { Dropdown, Modal, Popconfirm, Spin, Tooltip } from "antd";
-import {
-  ArrowDownOutlined,
-  ClockCircleOutlined,
-  CloseOutlined,
-  CompressOutlined,
-  ExpandOutlined,
-  MoreOutlined,
-  PauseCircleOutlined,
-  PlayCircleOutlined,
-  ProfileOutlined,
-  StopOutlined,
-  SyncOutlined,
-  ThunderboltOutlined,
-} from "@ant-design/icons";
 import { observer } from "mobx-react-lite";
 
 import { PortalMessage, PortalTaskData } from "@/services/apis/portal";
@@ -634,7 +620,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                   <Button
                     size="small"
                     type="text"
-                    icon={<CloseOutlined />}
+                    icon={<Icon icon="ph:x" className={`${styles.headIcon} ${styles.closeIcon}`} />}
                     onClick={() => closePane(id)}
                   />
                 </Tooltip>
@@ -655,9 +641,9 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                       key: "focus",
                       icon:
                         focusedId === id ? (
-                          <CompressOutlined />
+                          <Icon icon="ph:arrows-in-simple" className={styles.headIcon} />
                         ) : (
-                          <ExpandOutlined />
+                          <Icon icon="ph:arrows-out-simple" className={styles.headIcon} />
                         ),
                       label: focusedId === id ? "还原为网格" : "放大这一格",
                       onClick: () => setFocused(id),
@@ -669,7 +655,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                       : [
                           {
                             key: "rightPane",
-                            icon: <ProfileOutlined />,
+                            icon: <Icon icon="ph:sidebar-simple" />,
                             // 摆不下时灰掉，缘由挂 title（与「中断」那条同一套做法）
                             label: (
                               <span title={rightPaneHint}>{rightPaneHint}</span>
@@ -680,16 +666,16 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                         ]),
                     {
                       key: "sync",
-                      icon: <SyncOutlined />,
+                      icon: <Icon icon="ph:arrow-clockwise" />,
                       label: "重新同步内容",
                       onClick: () => syncMessages(id),
                     },
                     {
                       key: "pause",
                       icon: paused ? (
-                        <PlayCircleOutlined />
+                        <Icon icon="ph:play-circle" className={styles.headIcon} />
                       ) : (
-                        <PauseCircleOutlined />
+                        <Icon icon="ph:pause-circle" className={styles.headIcon} />
                       ),
                       label: paused ? "恢复" : "暂停",
                       disabled: !controllable,
@@ -697,7 +683,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                     },
                     {
                       key: "interrupt",
-                      icon: <ThunderboltOutlined />,
+                      icon: <Icon icon="ph:lightning" />,
                       // 菜单项写动作名，禁用的缘由挂 title —— 拿「当前没有正在执行的任务」
                       // 当条目名，读起来是句状态描述，不像个能点的东西
                       label: <span title={interruptHint}>中断当前任务</span>,
@@ -706,7 +692,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                     },
                     {
                       key: "stop",
-                      icon: <StopOutlined />,
+                      icon: <Icon icon="ph:stop-circle" />,
                       label: "终止进程",
                       danger: true,
                       disabled: !controllable,
@@ -722,14 +708,14 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                     { type: "divider" as const },
                     {
                       key: "close",
-                      icon: <CloseOutlined />,
+                      icon: <Icon icon="ph:x" />,
                       label: "关闭此格",
                       onClick: () => closePane(id),
                     },
                   ],
                 }}
               >
-                <Button size="small" type="text" icon={<MoreOutlined />} />
+                <Button size="small" type="text" icon={<Icon icon="ph:dots-three-vertical" className={styles.headIcon} />} />
               </Dropdown>
             ) : (
               <>
@@ -743,9 +729,9 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                       type="text"
                       icon={
                         focusedId === id ? (
-                          <CompressOutlined />
+                          <Icon icon="ph:arrows-in-simple" className={styles.headIcon} />
                         ) : (
-                          <ExpandOutlined />
+                          <Icon icon="ph:arrows-out-simple" className={styles.headIcon} />
                         )
                       }
                       onClick={() => setFocused(id)}
@@ -764,7 +750,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                         size="small"
                         type="text"
                         className={rightPaneOpen ? styles.paneBtnOn : undefined}
-                        icon={<ProfileOutlined />}
+                        icon={<Icon icon="ph:sidebar-simple" className={styles.headIcon} />}
                         disabled={!rightPaneUsable}
                         onClick={() => toggleRightPane(id)}
                       />
@@ -775,7 +761,17 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                   <Button
                     size="small"
                     type="text"
-                    icon={<SyncOutlined spin={loading} />}
+                    icon={
+                      /* 转圈自己驱动：antd 的 `spin` prop 只对 antd 图标生效，
+                         换成 Phosphor 之后要自己给类（周期与 `StatusIcon` 的
+                         执行中同为 1.1s linear —— 一屏之内只有一种转法） */
+                      <Icon
+                        icon="ph:arrow-clockwise"
+                        className={`${styles.headIcon} ${
+                          loading ? styles.syncSpin : ""
+                        }`}
+                      />
+                    }
                     onClick={() => syncMessages(id)}
                   />
                 </Tooltip>
@@ -784,7 +780,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                     size="small"
                     type="text"
                     icon={
-                      paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />
+                      paused ? <Icon icon="ph:play-circle" /> : <Icon icon="ph:pause-circle" className={styles.headIcon} />
                     }
                     disabled={!controllable}
                     onClick={() => control(id, paused ? "resume" : "pause")}
@@ -797,7 +793,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                     <Button
                       size="small"
                       type="text"
-                      icon={<ThunderboltOutlined />}
+                      icon={<Icon icon="ph:lightning" className={styles.headIcon} />}
                       disabled={!canInterrupt}
                       onClick={() => control(id, "interrupt")}
                     />
@@ -815,7 +811,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                       size="small"
                       type="text"
                       danger
-                      icon={<StopOutlined />}
+                      icon={<Icon icon="ph:stop-circle" className={styles.headIcon} />}
                       disabled={!controllable}
                     />
                   </Tooltip>
@@ -826,7 +822,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                     <Button
                       size="small"
                       type="text"
-                      icon={<CloseOutlined />}
+                      icon={<Icon icon="ph:x" className={`${styles.headIcon} ${styles.closeIcon}`} />}
                       onClick={() => closePane(id)}
                     />
                   </Tooltip>
@@ -859,7 +855,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                   {bodyFail ? (
                     <Button
                       size="small"
-                      icon={<SyncOutlined />}
+                      icon={<Icon icon="ph:arrow-clockwise" />}
                       onClick={() => syncMessages(id)}
                     >
                       重试
@@ -910,7 +906,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                     与状态卡同一套规格（照 VitaAgent 的任务卡） */}
                   <div className={styles.queuedHead}>
                     <span className={styles.queuedTile}>
-                      <ClockCircleOutlined />
+                      <Icon icon="ph:clock" />
                     </span>
                     <span className={styles.queuedHeadText}>
                       <span className={styles.queuedTitle}>终端排队中</span>
@@ -1025,7 +1021,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                   }
                 }}
               >
-                <ArrowDownOutlined />
+                <Icon icon="ph:arrow-down" />
               </span>
             </div>
           ) : null}
@@ -1047,7 +1043,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                   <Button
                     size="small"
                     type="primary"
-                    icon={<PlayCircleOutlined />}
+                    icon={<Icon icon="ph:play-circle" className={styles.headIcon} />}
                     onClick={() => control(id, "resume")}
                   >
                     恢复

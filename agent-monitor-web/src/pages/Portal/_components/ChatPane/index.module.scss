@@ -202,10 +202,47 @@
       }
     }
 
+    /* 「重新同步」转圈。antd 的 `spin` prop 只认 antd 自家的图标，换成
+       Phosphor 之后得自己驱动。周期 1.1s linear 与 `StatusIcon` 的执行中同值
+       —— 一屏之内只有一种转法。 */
+    .syncSpin {
+      animation: chat-pane-spin 1.1s linear infinite;
+    }
+
+    @keyframes chat-pane-spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
     .headActions {
       display: flex;
       gap: 2px;
       white-space: nowrap;
+
+      /* **换字形要补墨迹。** Phosphor 的字形统一只占 em 框的 0.813，而 antd 这一排
+         原来是 0.772~1.000（实测 `getBBox` 归一化到 viewBox：profile .893 /
+         sync .938 / pause-circle 1.000 / thunderbolt .928 / stop 1.000 / close .772，
+         均值 .922）。照搬 14px 的话墨迹高度 14×.922 = 12.9 掉到 14×.813 = 11.4，
+         整排轻一档；16×.813 = 13.0，与原来的 12.9 基本相等。
+         好处顺带：这一排现在**每一枚都是 .813**，比 antd 那 .772~1.000 的参差齐整。
+
+         **尺寸必须挂在图标自己的类上，不能选 `.anticon`**：CSS Modules 的直通表
+         （`.env/.env.common` 的 `PASS_CLS`）只放行 `ant-` 前缀，而这个类叫
+         `anticon`（没有连字符）—— 写 `.anticon` 会被哈希成 `.anticon--xxxx`，
+         一条都选不中。踩过一次，记在这儿。
+         另外它得压过 antd 的 `.ant-btn-sm.ant-btn-icon-only .anticon`（0,2,0，
+         而且 CSS-in-JS 注入在静态表之后），这条 0,4,0 稳赢。 */
+      .headIcon {
+        font-size: 16px;
+      }
+
+      /* `ph:x` 是这一排里唯一的例外：它的墨迹只占 .625（X 本身内缩），
+         16×.625 = 10.0 比邻居的 13.0 轻两成。18×.625 = 11.3，与 antd 那枚
+         close（14×.772 = 10.8）持平，也与邻居拉近。 */
+      .headIcon.closeIcon {
+        font-size: 18px;
+      }
 
       // 右栏开关亮着的样子（照 VitaAgent 顶栏 `panelBtnOn`）：栏开着时
       // 这枚钮要能一眼看出是「按下」的，否则用户不知道右边那栏是它管的
@@ -340,7 +377,10 @@
       border-radius: var(--radius);
       background: color-mix(in srgb, var(--warning) 10%, transparent);
       color: var(--warning);
-      font-size: 16px;
+      /* 18 而不是 16：antd 的 `ClockCircleOutlined` 墨迹占满 em 框（1.000），
+         `ph:clock` 只占 .813 —— 16×.813 = 13.0 比原来的 16.0 轻两成，
+         18×.813 = 14.6，在 28 的槽里与原来最接近的一档。 */
+      font-size: 18px;
     }
 
     .queuedHeadText {

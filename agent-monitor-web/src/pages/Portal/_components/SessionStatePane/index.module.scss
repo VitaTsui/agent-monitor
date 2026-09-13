@@ -40,4 +40,16 @@
   width: 24px;
   height: 24px;
   min-width: 24px;
+
+}
+
+/* 18 而不是继承的 14：`ph:x` 的墨迹只占 em 框的 .625（X 本身内缩），
+   14×.625 = 8.8 比原来那枚 antd close（14×.772 = 10.8）轻两成；
+   18×.625 = 11.3，与原来持平。24 的按钮里放得下。
+   **挂在图标自己的类上**：`anticon` 不在 CSS Modules 的直通表里（只放行 `ant-`
+   前缀），写 `.anticon` 会被哈希掉、一条都选不中。 */
+/* 写到 0,3,0 才压得住 antd 的 `.ant-btn-sm.ant-btn-icon-only .anticon`
+   （0,2,0，而且 CSS-in-JS 注入在这份静态表之后，同权重是它赢） */
+.SessionStatePane .head .closeIcon {
+  font-size: 18px;
 }

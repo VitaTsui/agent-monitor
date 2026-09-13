@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from "react";
 
 import { Icon } from "@hsu-react/ui";
-import { WarningFilled } from "@ant-design/icons";
 
 import { SubTask, SubTaskOutcome } from "@/services/apis/portal";
 import StatusIcon, {
@@ -178,7 +177,7 @@ const AgentCard: React.FC<AgentCardProps> = ({
       {failed.map((a) =>
         a.summary?.trim() ? (
           <div key={`e${a.id}`} className={styles.cardError}>
-            <WarningFilled className={styles.cardErrorIcon} />
+            <Icon icon="ph:warning-circle-fill" className={styles.cardErrorIcon} />
             <span>{a.summary.trim()}</span>
           </div>
         ) : null,

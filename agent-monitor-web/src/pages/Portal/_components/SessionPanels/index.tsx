@@ -1,10 +1,7 @@
 import React, { useEffect, useState } from "react";
 
+import { Icon } from "@hsu-react/ui";
 import { Tooltip } from "antd";
-import {
-  CheckSquareOutlined,
-  ThunderboltOutlined,
-} from "@ant-design/icons";
 
 import { PortalMessage, SubTask } from "@/services/apis/portal";
 import StatusIcon, { statusOfOutcome } from "../StatusIcon";
@@ -202,7 +199,7 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
     >
       {todos.length > 0 && (
         <StateCard
-          icon={<CheckSquareOutlined />}
+          icon={<Icon icon="ph:list-checks" />}
           title="任务清单"
           // 计数只报「还剩几条」：列表里已经不显示做完的了，
           // 再写成 22/23 会与眼前只有 1 条的列表对不上。
@@ -232,7 +229,7 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
 
       {bgTasks.length > 0 && (
         <StateCard
-          icon={<ThunderboltOutlined />}
+          icon={<Icon icon="ph:lightning" />}
           title="后台任务"
           meta={countMeta(bgTasks)}
         >
