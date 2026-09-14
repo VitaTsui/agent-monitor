@@ -930,6 +930,22 @@ impl Registry {
             || m.shared_with.iter().any(|u| u == username)
     }
 
+    /// 该设备的**文件系统**是否允许被指定用户访问（浏览目录 / 取文件 / 新建删除重命名）。
+    ///
+    /// 比 [`Self::can_view`] 严一档：**只认主人本人，协助访客一律不给**。
+    ///
+    /// `can_view` 是「能不能看会话」，它有意把协助访客放进来 —— 共享的本意是让人帮你
+    /// 看会话、接着往下干活。但那两条文件接口给的是**会话根目录下的任意文件**，
+    /// 也就是整个项目源码，`.env`、密钥、证书全在里面；「帮我看一眼会话」不该顺带
+    /// 交出整个仓库。文件夹操作更是能直接删改主人的文件。
+    ///
+    /// 判据取 `can_view` 的主人那一支（已信任 且 归属本人），不是另起一套。
+    /// 上传（`upload_file`）本来就是 `owned_by` 一条线，这里与它对齐。
+    pub fn can_access_files(&self, machine_id: &str, username: &str) -> bool {
+        let m = self.device_meta(machine_id);
+        m.trusted && m.owner.as_deref() == Some(username)
+    }
+
     /// 该设备是否归属指定用户（用于设备管理列表，含未信任的 pending）
     pub fn owned_by(&self, machine_id: &str, username: &str) -> bool {
         self.device_meta(machine_id).owner.as_deref() == Some(username)
@@ -1389,5 +1405,61 @@ mod dingtalk_routing_tests {
         let left = r.dingtalk_ids_of("dave");
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].0, "s2");
+    }
+}
+
+#[cfg(test)]
+mod file_access_tests {
+    use super::*;
+
+    fn reg_with(owner: &str, trusted: bool, guests: &[&str]) -> Registry {
+        let dir = std::env::temp_dir().join(format!(
+            "am-reg-{}-{}",
+            std::process::id(),
+            owner.len() * 31 + guests.len() * 7 + usize::from(trusted)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut r = Registry::load(dir, "admin", "admin123");
+        let m = r.devices.entry("m1".to_string()).or_default();
+        m.owner = Some(owner.to_string());
+        m.trusted = trusted;
+        m.shared_with = guests.iter().map(|s| s.to_string()).collect();
+        r
+    }
+
+    /// 协助访客**能看会话**（共享的本意），但**拿不到文件** ——
+    /// 那两条文件接口给的是会话根下的任意文件，等于整个项目源码 + .env + 密钥。
+    #[test]
+    fn shared_guest_can_view_but_cannot_access_files() {
+        let r = reg_with("owner", true, &["guest"]);
+        assert!(r.can_view("m1", "guest"), "共享访客照常能看会话");
+        assert!(
+            !r.can_access_files("m1", "guest"),
+            "共享访客不该拿到文件系统访问"
+        );
+    }
+
+    /// 设备主人不受影响
+    #[test]
+    fn owner_keeps_file_access() {
+        let r = reg_with("owner", true, &["guest"]);
+        assert!(r.can_view("m1", "owner"));
+        assert!(r.can_access_files("m1", "owner"));
+    }
+
+    /// 未信任的设备连主人自己也不给（与 can_view 的主人那一支同口径）
+    #[test]
+    fn untrusted_device_denies_even_owner() {
+        let r = reg_with("owner", false, &[]);
+        assert!(!r.can_view("m1", "owner"));
+        assert!(!r.can_access_files("m1", "owner"));
+    }
+
+    /// 不相干的人两样都没有
+    #[test]
+    fn stranger_gets_nothing() {
+        let r = reg_with("owner", true, &["guest"]);
+        assert!(!r.can_view("m1", "someone-else"));
+        assert!(!r.can_access_files("m1", "someone-else"));
     }
 }

@@ -57,6 +57,13 @@ interface ComposerProps {
   onSend: (text: string) => void;
   /** 会话所在设备（上传文件的目标） */
   machineId?: string;
+  /**
+   * 这台设备是「他人协助共享给我的」。后端只对设备主人开放文件类接口，访客调
+   * 列目录 / 上传一律 403 —— 所以这两个入口要**在点之前**就灰掉，理由写进 tooltip。
+   *
+   * 值由 `ChatPane` 给（与那边文件查看器开关吃的是同一个），不在这里各算一遍。
+   */
+  deviceShared?: boolean;
   /** 会话锚定目录（上传落点；回填的相对路径以此为基准） */
   cwd?: string;
 }
@@ -73,12 +80,19 @@ interface ComposerProps {
  * 原先固定 1.2s × 8 ≈ 9.6 秒，比实际往返短 3～6 倍，于是几乎必然超时。
  * 前几拍保持密集（缓存已热时秒回），随后退避，避免长时间空转刷请求。
  */
+/**
+ * 访客（设备是别人共享给他的）把鼠标移到那两颗灰按钮上时看到的那句话。
+ * 与后端 403 的口径一致（hub：「该设备是他人共享给你的，不提供文件访问」）。
+ */
+const SHARED_NO_FILES_HINT = "这台设备是他人共享给你的，不提供文件访问";
+
 const DIR_POLL_DELAYS = [
   1200, 1200, 1500, 2000, 3000, 4000, 5000, 6000, 8000, 10000, 12000, 15000, 22000,
 ];
 
 const Composer: React.FC<ComposerProps> = (props) => {
-  const { taskId, disabled, disabledHint, onSend, machineId, cwd } = props;
+  const { taskId, disabled, disabledHint, onSend, machineId, cwd, deviceShared } =
+    props;
   const navigate = useNavigate();
   const offHint = disabledHint || "该会话无存活进程，无法发布";
   const [commands, setCommands] = useState<SlashCommand[]>([]);
@@ -868,7 +882,9 @@ const Composer: React.FC<ComposerProps> = (props) => {
           ...(cwd && !disabled
             ? [
                 {
-                  title: "选择会话目录里的文件，插入相对路径",
+                  title: deviceShared
+                    ? SHARED_NO_FILES_HINT
+                    : "选择会话目录里的文件，插入相对路径",
                   /* 三枚并排的字号**统一由 `.uploadIcon` 给**，不再逐个 inline 微调：
                      antd 那三枚墨迹本来就参差（history .960 / file-search .973 /
                      paper-clip .862），只能靠手调对齐；换成 Phosphor 之后三枚
@@ -880,6 +896,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
                     />
                   ),
                   type: "text" as const,
+                  disabled: deviceShared,
                   onClick: openPicker,
                 },
                 ...(machineId
@@ -887,16 +904,19 @@ const Composer: React.FC<ComposerProps> = (props) => {
                       {
                         // 批量上传是串行的，会持续一段时间 —— 标题里带上进度，
                         // 否则用户只看到一个转圈的回形针，不知道传到第几个了
-                        title: uploading
-                          ? `正在上传… ${uploadDone} 个已完成${
-                              uploadPct > 0 && uploadPct < 100
-                                ? `，当前 ${uploadPct}%`
-                                : ""
-                            }`
-                          : "传文件到会话目录（可多选，大文件自动分片）",
+                        title: deviceShared
+                          ? SHARED_NO_FILES_HINT
+                          : uploading
+                            ? `正在上传… ${uploadDone} 个已完成${
+                                uploadPct > 0 && uploadPct < 100
+                                  ? `，当前 ${uploadPct}%`
+                                  : ""
+                              }`
+                            : "传文件到会话目录（可多选，大文件自动分片）",
                         icon: <Icon icon="ph:paperclip" className={styles.uploadIcon} />,
                         type: "text" as const,
                         loading: uploading,
+                        disabled: deviceShared,
                         onClick: () => fileRef.current?.click(),
                       },
                     ]

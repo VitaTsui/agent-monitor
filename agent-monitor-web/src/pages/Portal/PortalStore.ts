@@ -314,6 +314,8 @@ class PortalStore {
    * 表里没有的会话＝没动过，走默认值；所以这张表只装「用户真的改过的那几格」。
    */
   private _rightPaneById: Record<string, RightPaneState> = readRightPaneState();
+  /** 哪几格开着文件查看器（见 isFilePaneOpen：不落盘） */
+  private _filePaneIds: string[] = [];
   private _messagesById: Record<string, PortalMessage[]> = {};
   /**
    * hub 队列里待下发的输入（会话 id → 条目）。
@@ -872,6 +874,22 @@ class PortalStore {
     return this._devices.filter((d) => !d.trusted).length;
   }
 
+  /**
+   * 这台机器是不是「别人用协助码共享给我的」。
+   *
+   * **判据是结构化字段**：`/monitor/devices` 每条设备下发的 `shared`，不是拿报错文案
+   * 或权限码反推。后端自 `f70eb09` 起把文件类接口（列目录 / 读文件 / 上传）只对设备
+   * 主人开放，访客一律 403 —— 入口要在**发请求之前**就灰掉，只能靠这个字段。
+   *
+   * 设备列表还没回来时返回 false：宁可先亮着（点下去会收到明确的 403 原文），
+   * 也好过把主人自己的按钮先灰一下再亮回来。
+   */
+  isSharedDevice(machineId?: string): boolean {
+    return (
+      !!machineId && this._devices.some((d) => d.id === machineId && d.shared)
+    );
+  }
+
   /** 全量会话列表（分享接收等场景选目标用） */
   get tasks() {
     return this._tasks;
@@ -912,6 +930,26 @@ class PortalStore {
       [taskId]: { open: !this.isRightPaneOpen(taskId) },
     };
     this.saveRightPaneState();
+  };
+
+  /**
+   * 这一格的**文件查看器**开着吗。默认关着 —— 它是用户主动要看文件时才开的一列，
+   * 不像右栏那样是「这条会话此刻在办什么」的常驻状态。
+   *
+   * **不落盘**：刷新之后回到「只有对话」是对的；上次开着的那一列在新一轮里多半
+   * 已经不是你要看的那个文件了，而它每开一次都要向那台机器要一次目录（慢往返）。
+   */
+  public isFilePaneOpen = (taskId: string): boolean =>
+    this._filePaneIds.includes(taskId);
+
+  /** 开/收某一格的文件查看器。**每格一份**，与右栏同一条规矩 */
+  public toggleFilePane = (taskId: string) => {
+    if (!taskId) {
+      return;
+    }
+    this._filePaneIds = this.isFilePaneOpen(taskId)
+      ? this._filePaneIds.filter((x) => x !== taskId)
+      : [...this._filePaneIds, taskId];
   };
 
   /**

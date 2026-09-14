@@ -1550,6 +1550,63 @@ const MAX_FETCH_BYTES: u64 = 10 * 1024 * 1024;
 /// **只允许会话目录内的文件**：canonicalize 后必须仍在 cwd 之下。会话内容里的路径
 /// 不可全信 —— 一句 `![](../../.ssh/id_rsa)` 就能把目录外的东西读走。判据与
 /// [`list_entries`] 同源。
+/// **不外发的敏感文件**：命中就拒读，不管请求方是谁。
+///
+/// 这是**读盘那一层**的闸，不是界面上的隐藏 —— 藏在前端等于没堵，接口照样能取到。
+/// 会话根目录下的任意文件都可被 `/monitor/tasks/:id/file` 取走，而那个根就是整个项目：
+/// 密钥、证书、`.env` 全在里面。
+///
+/// 判据只看**文件名**（不看目录、不看内容），分三类：
+///   a) 整名精确命中（`.env`、`credentials`…）；
+///   b) 前缀命中（`.env.` → `.env.local` / `.env.production`；`id_rsa` → `id_rsa.pub`）；
+///   c) 后缀命中（`.pem` / `.key` / `.pfx` / `.p12` / `.keystore`）。
+///
+/// **保守取舍**：宁可漏拦几个，也别把正常源码拦掉 —— 误拦会让人以为功能坏了，
+/// 而真正的防线是上一层「只有设备主人能访问文件」（见 hub 的 `can_access_files`），
+/// 这份名单是给主人自己的第二道保险（比如误把 `.env` 拖进对话）。
+/// 所以这里**不做**「名字里带 secret/token 就拦」那种模糊匹配，那会误伤
+/// `secretSanta.ts`、`tokenizer.rs` 这类正常文件。
+///
+/// 要加条目就往这三个数组里加，注意保持「名字级、可解释」这个口径。
+const DENY_EXACT: &[&str] = &[
+    ".env",
+    ".npmrc",
+    ".netrc",
+    ".pypirc",
+    "credentials",
+    ".git-credentials",
+    ".htpasswd",
+];
+const DENY_PREFIX: &[&str] = &[".env.", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"];
+const DENY_SUFFIX: &[&str] = &[
+    ".pem",
+    ".key",
+    ".pfx",
+    ".p12",
+    ".keystore",
+    ".jks",
+    ".asc",
+    ".kdbx",
+];
+
+/// 这个**文件名**是否属于不外发的敏感文件（见 [`DENY_EXACT`]）。
+///
+/// 只认文件名那一段，大小写不敏感（Windows/macOS 的文件系统本就不区分，
+/// 只比小写才不会被 `.ENV` 这种写法绕开）。
+fn is_denied_file(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    DENY_EXACT.contains(&n.as_str())
+        || DENY_PREFIX.iter().any(|p| n.starts_with(p))
+        || DENY_SUFFIX.iter().any(|p| n.ends_with(p))
+}
+
+/// `.git` 目录下的东西一律不外发：`config` 里有远端地址与可能内嵌的凭据，
+/// objects 里是整份仓库历史。判目录名而不是逐个枚举文件名。
+fn is_inside_vcs_dir(rel: &str) -> bool {
+    rel.split(['/', '\\'])
+        .any(|seg| seg.eq_ignore_ascii_case(".git"))
+}
+
 fn read_session_file(q: &am_core::model::FileFetch) -> am_core::model::FileFetchResult {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     use std::path::Path;
@@ -1561,6 +1618,12 @@ fn read_session_file(q: &am_core::model::FileFetch) -> am_core::model::FileFetch
     };
     if q.rel.split(['/', '\\']).any(|s| s == "..") {
         return fail("非法路径");
+    }
+    // 敏感文件在**读盘前**就拒，并且明确说是被策略拒绝 ——
+    // 回「文件不存在」会让人以为是 bug，到处去查一个不存在的问题。
+    let name = q.rel.rsplit(['/', '\\']).next().unwrap_or(&q.rel);
+    if is_denied_file(name) || is_inside_vcs_dir(&q.rel) {
+        return fail("该文件被安全策略拒绝（密钥/凭据类文件不外发）");
     }
     let base = Path::new(&q.cwd).join(q.rel.replace('/', std::path::MAIN_SEPARATOR_STR));
     let (Ok(file), Ok(root)) = (base.canonicalize(), Path::new(&q.cwd).canonicalize()) else {
@@ -1807,5 +1870,69 @@ mod transfer_report_tests {
         assert!(!r.err.is_empty(), "要说明原因");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod file_policy_tests {
+    use super::*;
+
+    /// 密钥/凭据类文件不外发 —— 判据在**读盘那一层**，不是界面上的隐藏
+    #[test]
+    fn sensitive_names_are_denied() {
+        for name in [
+            ".env",
+            ".env.local",
+            ".env.production",
+            ".ENV", // 大小写不能绕开
+            "id_rsa",
+            "id_rsa.pub",
+            "id_ed25519",
+            "server.pem",
+            "private.key",
+            "cert.pfx",
+            "store.p12",
+            "release.keystore",
+            ".npmrc",
+            ".netrc",
+            "credentials",
+            ".git-credentials",
+        ] {
+            assert!(is_denied_file(name), "{name} 应当被拒");
+        }
+    }
+
+    /// **保守**：正常源码/配置不能被误拦 —— 误拦会让人以为功能坏了
+    #[test]
+    fn ordinary_files_are_not_denied() {
+        for name in [
+            "main.rs",
+            "index.tsx",
+            "PortalStore.ts",
+            "Cargo.toml",
+            "package.json",
+            "README.md",
+            "style.module.scss",
+            "env.d.ts",       // 带 env 但不是 .env
+            "environment.ts", // 同上
+            "secretSanta.ts", // 不做「名字带 secret 就拦」那种模糊匹配
+            "tokenizer.rs",
+            "keyboard.tsx", // 带 key 但不是 .key 结尾
+            "monkey.py",
+            "config.yaml",
+        ] {
+            assert!(!is_denied_file(name), "{name} 不该被拦");
+        }
+    }
+
+    /// `.git` 目录整体不外发（config 里有远端地址与可能内嵌的凭据）
+    #[test]
+    fn vcs_dir_is_denied_but_similar_names_are_not() {
+        assert!(is_inside_vcs_dir(".git/config"));
+        assert!(is_inside_vcs_dir("sub/.git/objects/ab/cdef"));
+        assert!(is_inside_vcs_dir("sub\\.git\\config"));
+        assert!(!is_inside_vcs_dir("src/gitignore.ts"));
+        assert!(!is_inside_vcs_dir("docs/git/README.md"));
+        assert!(!is_inside_vcs_dir(".gitignore"));
     }
 }
