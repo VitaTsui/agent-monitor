@@ -212,29 +212,14 @@
   font-size: 12px;
 }
 
-/* 收场配色。口径与 `AgentCard`（`index.module.scss:222-232`）逐字一致：
-   执行中走主色（墨黑 / 暗色下近白）、跑砸了走 destructive。
-   `interrupted` 不配色，走槽本身的中性 —— 被父会话连带终止不是它的错。
-   `completed` 这儿没有规则：正常跑完的后台命令压根不进这张清单
-   （`aliveBgCommands` 就滤掉了），配个永远用不上的色只是死代码。 */
+/* 执行中走主色（墨黑 / 暗色下近白），口径与 `AgentCard`
+   （`index.module.scss:222-232`）逐字一致。
+
+   **这一节只有执行中这一态**：收场了的后台命令与子代理都不进这张清单
+   （`runningBgCommands` / `runningSubAgents`），所以这儿没有 failed /
+   interrupted / completed 的规则 —— 配永远用不上的色只是死代码。 */
 .running .itemIcon {
   color: var(--primary);
-}
-
-// 跑砸了（只有 failed，不含 interrupted）：整行走 destructive。
-// 这几种原来被当成「已完成」整条滤掉了 —— 跑砸的子代理在界面上无声消失。
-.failed {
-  .itemIcon {
-    color: var(--destructive);
-  }
-
-  .itemName {
-    color: var(--destructive);
-  }
-
-  .itemStatus {
-    color: var(--destructive);
-  }
 }
 
 // ---------- 任务清单 ----------

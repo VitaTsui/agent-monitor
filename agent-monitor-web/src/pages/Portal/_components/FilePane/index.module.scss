@@ -2,6 +2,9 @@
    `.viewerCol` 给 —— 与右栏那张卡同一套形制（8px 露底 ＋ 圆角 8 ＋ 描边环 ＋ 影），
    一屏之内不出现两种「浮起来的面板」。 */
 
+// markdown 渲染态的排版基线，与会话正文共用（用法见该文件顶部注释）
+@use "@/styles/chatMarkdown" as md;
+
 .FilePane {
   display: flex;
   flex-direction: column;
@@ -83,6 +86,13 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
+}
+
+/* 表格态：这一层不滚，改成 flex 列把高度交给表自己（见 SheetView 的 `scroll`） */
+.bodyFill {
+  display: flex;
+  overflow: hidden;
+  flex-direction: column;
 }
 
 .list {
@@ -222,6 +232,7 @@
 }
 
 .clip {
+  flex: none;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border-weak);
   color: var(--muted-foreground);
@@ -337,4 +348,38 @@
   height: 100%;
   min-height: 320px;
   border: none;
+}
+
+/* ---------- 渲染态：markdown ---------- */
+
+/* 排版套**全项目共用的对话基线**（`styles/_chatMarkdown.scss`）——
+   会话正文、方案卡、远程往来历史页用的是同一份。查看器再写一套局部覆盖的话，
+   同一份 README 在这一列里和在对话流里会是两种排版。
+   按那份文件的用法：挂在**包住 `Markdown.Views` 的元素**上，不是 Markdown 自己。 */
+.md {
+  padding: 10px 12px 20px;
+
+  @include md.chat-markdown;
+}
+
+/* ---------- 表格态 ---------- */
+
+/* 多表切换。这一列最窄 320，表名一多就放不下，所以让这一条自己横滚 —— 不是换行 */
+.sheetTabs {
+  overflow-x: auto;
+  flex: none;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-weak);
+  white-space: nowrap;
+}
+
+/* 表自己横滚（antd 的 `scroll.x` 在 `.ant-table-content` 上开 overflow-x），
+   这里只管别让它把列撑开：`min-width: 0` 是那条「折行不横滚」的守门人 */
+.sheet {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 8px;
+  font-size: var(--text-sm);
 }

@@ -6,7 +6,7 @@ import { observer } from "mobx-react-lite";
 
 import { PortalMessage, SubTask } from "@/services/apis/portal";
 import PortalStore from "../../PortalStore";
-import StatusIcon, { CHAIN_ICON, statusOfOutcome } from "../StatusIcon";
+import StatusIcon, { CHAIN_ICON } from "../StatusIcon";
 import {
   SUB_OUTCOME_LABEL,
   fmtSubTaskElapsed,
@@ -15,23 +15,6 @@ import {
 } from "../../_utils/sessionState";
 import styles from "./index.module.scss";
 
-/**
- * 后台命令的收场图标。**与 `AgentCard` / 侧栏会话树是同一份字形**，
- * 也就是 VitaAgent 那套任务状态语言（`TaskCard/index.tsx:80-86`）：
- *
- * 字形、配色、转速全部由 `_components/StatusIcon` 一处给（Phosphor，与 VitaAgent
- * 逐字相同）：running `ph:circle-notch` 1.1s linear ＋ 主色、completed
- * `ph:check-circle-fill` ＋ success、failed `ph:x-circle-fill` ＋ error、
- * interrupted `ph:minus-circle` 中性。
- *
- * 原先这里是一枚 7×7 的彩色圆点（失败时换成一个 13px 的 `WarningFilled` 三角）——
- * 同一件事在一屏里就有三种画法：链上是 12px 字形、侧栏是 12px 字形、这儿是色点。
- * 色点还把「被中断」和「等待中」画成同一个灰点，看不出区别。
- *
- * **`interrupted` 不给红**：它是被父会话连带终止的，标红等于冤枉它。
- * `completed` 只是为了把这张表补全（`Record<SubTaskOutcome>`）—— 正常跑完的
- * 后台命令在 `aliveBgCommands` 就被滤掉了，走不到这儿。
- */
 interface SessionPanelsProps {
   /**
    * 这一份状态说的是哪一条会话。
@@ -46,7 +29,7 @@ interface SessionPanelsProps {
    * 这条会话名下的子任务。取自 `PortalTaskData.subTasks`。
    *
    * **只用其中的后台命令**：子代理有自己的执行链节点（正文里的智能体卡），
-   * 状态区再列一遍就是同一件事说两遍。筛选口径在 `aliveBgCommands` 里，只有一份。
+   * 状态区再列一遍就是同一件事说两遍。筛选口径在 `runningBgCommands` 里，只有一份。
    */
   subTasks?: SubTask[];
   /** 会话是否正在运行：非运行时清单里的「进行中」降级为「未完成」，
@@ -97,47 +80,31 @@ const StateCard: React.FC<CardProps> = ({ icon, title, meta, children }) => (
 );
 
 /**
- * 后台命令的一行。
+ * 后台命令的一行。**这一节只有还在跑的**（见 `runningBgCommands`），
+ * 所以这里不再有收场分色、也不再有那行收场原因 —— 收场了的条目根本走不到这儿。
  *
- * 收场分色（与 VitaAgent 一致，见 `TaskCard/index.module.scss:94-119`）：
- * 执行中走主色（墨黑）转圈，跑砸了走 destructive，被中断与其余中性。
- * 右侧那枚小胶囊写耗时 —— 「还在跑」与「卡死了」的唯一区别就是它。
+ * 字形与转速由 `_components/StatusIcon` 一处给（Phosphor `ph:circle-notch`
+ * 1.1s linear ＋ 主色，与 VitaAgent `TaskCard/index.tsx:80-86` 逐字相同）。
+ * 右侧那枚小胶囊写耗时 —— **「还在跑」与「卡死了」的唯一区别就是它动不动**。
  *
- * 收场不对的还多一行原因（`task.summary`，见 `BgTask.summary`）：光有「失败」
- * 两个字回答不了「所以我该怎么办」——退出码、限流、卡死超时是三件完全不同的事。
- * 这一行只在**真有原因可说**时才出现，没有就退回原先的一行。
- *
- * 跑完的那些不在这里：清单本身就把 `completed` 滤掉了（见 `BG_DONE` /
- * `aliveBgTasks`），所以不必再判一次状态 —— 后端给完成条目也带 `summary`
- * （`Agent "X" finished`），那句话和上面的名字是重复的，正好一条都进不来。
+ * 上一版这里按 `task.outcome` 分色、并在收场不对时多画一行 `task.summary`。
+ * 那套是给「跑砸的也留在清单里」配的，随那条口径一并撤掉，不留第二套判断：
+ * `summary` 只有终态条目才有（后端对 `running` 恒给 `None`），留着必然是死代码。
  */
 const TaskRow: React.FC<{ task: SubTask; now: number }> = ({ task, now }) => {
   const elapsed = fmtSubTaskElapsed(task, now);
-  const reason = task.summary?.trim();
   return (
-    <li className={`${styles.item} ${styles[task.outcome] ?? ""}`}>
+    <li className={`${styles.item} ${styles.running}`}>
       <span className={styles.itemHead}>
-        <StatusIcon
-          kind={statusOfOutcome(task.outcome)}
-          className={styles.itemIcon}
-        />
+        <StatusIcon kind="running" className={styles.itemIcon} />
         <Tooltip title={task.label}>
           <span className={styles.itemName}>{task.label}</span>
         </Tooltip>
-        <span className={styles.itemStatus}>
-          {SUB_OUTCOME_LABEL[task.outcome] ?? task.status}
-        </span>
+        <span className={styles.itemStatus}>{SUB_OUTCOME_LABEL.running}</span>
         {/* 耗时做成胶囊而不是裸字：与名字同处一行，裸字会连成一片
             （VitaAgent `TaskCard/index.module.scss:376-388` 的 `.cellMeta`） */}
         {elapsed ? <span className={styles.itemMeta}>{elapsed}</span> : null}
       </span>
-      {/* 原文照登：这句话是上游写的英文，翻译或改写都会把退出码、request id
-          这类真正有用的东西弄丢。整句放不下时用 title 兜住，鼠标停一下看全 */}
-      {reason ? (
-        <span className={styles.itemReason} title={reason}>
-          {reason}
-        </span>
-      ) : null}
     </li>
   );
 };
@@ -221,30 +188,6 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
     return null;
   }
 
-  /**
-   * 一行计数。**三种收场分开数，不许把「被中断」并进「未跑成」** ——
-   * 被父会话连带终止和自己跑砸是两回事，合成一句话就是在冤枉前者
-   * （用户原话：「实际结束了却显示失败」）。
-   */
-  const countMeta = (list: SubTask[]) => {
-    const parts: string[] = [];
-    const count = (o: SubTask["outcome"]) =>
-      list.filter((t) => t.outcome === o).length;
-    const running_ = count("running");
-    const failed = count("failed");
-    const interrupted = count("interrupted");
-    if (running_) {
-      parts.push(`${running_} 个进行中`);
-    }
-    if (failed) {
-      parts.push(`${failed} 个失败`);
-    }
-    if (interrupted) {
-      parts.push(`${interrupted} 个已中断`);
-    }
-    return parts.join(" · ");
-  };
-
   return (
     <div
       className={`${styles.SessionPanels} ${flat ? styles.flat : ""} ${
@@ -302,7 +245,10 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
         <StateCard
           icon={<Icon icon="ph:lightning" />}
           title="后台任务"
-          meta={countMeta(bgTasks)}
+          // 只列还在跑的，所以这一行就是个数 —— 与上面那一节同一个口径。
+          // 上一版这里分开数「N 个失败 / N 个已中断」，那是给「跑砸的也留在清单里」
+          // 配的；口径改成「还在跑的」之后那两个数恒为 0，留着就是骗人的计数。
+          meta={`${bgTasks.length} 个`}
         >
           {bgTasks.map((t) => (
             <TaskRow key={t.id} task={t} now={now} />

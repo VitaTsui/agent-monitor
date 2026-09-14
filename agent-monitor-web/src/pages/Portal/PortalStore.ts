@@ -1134,6 +1134,24 @@ class PortalStore {
    * 「还在跑」这件事只有清单自己说得出来，所以它既是刷新的条件、也是刷新的结果：
    * 最后一个子代理翻成终态的那一轮，这里跟着翻假，定时器当场停 —— 不靠超时上限、
    * 不靠次数封顶那类「让它自己累死」的补丁。
+   *
+   * **只数 `kind === "agent"` 是对的，别顺手加上后台命令。** 这一条实测坐实过一轮：
+   * 后台命令的活性根本不走这条定时器，走的是每轮推送里的 `Task.subTasks`（见
+   * {@link subTasksOf} 的合并规则：同 id 以 live 那份为准）。两道结构性保证让它冻不住 ——
+   *   1. **在跑的后台命令永远在 live 那份里**：hub 侧 `retain_recent`（am-core
+   *      `scanner.rs`）只淘汰终态条目，`outcome === "running"` 的一条都不淘汰；
+   *   2. **会话一旦不在 `_tasks` 里，格子当场就关了**：`taskOf` 只认 `_tasks` ＋
+   *      `_histById`，而 `loadClientHistory` 在源头挡掉了 CLI（`if (!desktop) return`），
+   *      `desktop` 又只有 Codex Desktop 才为真 —— 带后台命令的 Claude 会话进不了
+   *      `_histById`，于是 `applyTasks` 的存活清理直接把格子摘掉，没有东西留在屏幕上冻着。
+   *
+   * 实测（假客户端走 `POST /monitor/report` 造数据）：整格从打开到后台命令收场，
+   * `/subtasks` 现读**只发生过 1 次**（即打开那一下），而界面仍在磁盘状态翻成
+   * completed 后约 6 秒内正确退场 —— 定时器没开过，活性照样是对的。
+   *
+   * 反过来把它改成「所有还在跑的子任务」的代价是实打实的：每条挂着 dev server /
+   * watcher 的会话都会 10 秒一次现读磁盘（{@link loadSubTasks} 注释里实测 0.8~2 秒），
+   * 换不来任何可观察的收益。要动它，先拿出一份真能复现的「冻在执行中」。
    */
   public hasRunningSubAgent = (id: string): boolean =>
     this.subTasksOf(id).some((t) => t.kind === "agent" && t.outcome === "running");

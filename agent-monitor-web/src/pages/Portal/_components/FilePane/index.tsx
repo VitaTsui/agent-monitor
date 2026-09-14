@@ -1,10 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
-import { Icon } from "@hsu-react/ui";
+import classNames from "classnames";
+
+import { Icon, Markdown } from "@hsu-react/ui";
 import { Tooltip, message } from "antd";
 
 import { getTaskDirs, getTaskFile } from "@/services/apis/portal";
 import CodeLines from "./CodeLines";
+import SheetView from "./SheetView";
 import styles from "./index.module.scss";
 
 /**
@@ -50,7 +53,13 @@ const looksText = (bytes: Uint8Array<ArrayBuffer>): boolean => {
   return bad / n < 0.05;
 };
 
-const IMAGE_EXT = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico"];
+/** 位图。**svg 不在里面** —— 它是文本，自成一类（有预览 / 源码两态，见 `Kind`） */
+const IMAGE_EXT = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico"];
+
+const MD_EXT = ["md", "markdown"];
+
+/** 表格。前两个是二进制（没有源码态），后两个本身就是文本（有） */
+const SHEET_EXT = ["xlsx", "xls", "csv", "tsv"];
 
 /** base64 → 字节。`atob` 一次性拿到二进制字符串，再逐字节转（文件上限 10 MB） */
 const b64ToBytes = (b64: string): Uint8Array<ArrayBuffer> => {
@@ -63,7 +72,22 @@ const b64ToBytes = (b64: string): Uint8Array<ArrayBuffer> => {
   return out;
 };
 
-type Kind = "text" | "image" | "pdf" | "binary";
+/**
+ * 这份文件**按什么方式画**。扩的是这一个枚举，不是在 `text` 旁边再挂开关：
+ * 「是不是 markdown」这件事只该有一个判据，两套判断并存迟早对不上。
+ *
+ * 其中 `markdown` / `svg` / `sheet` 有**渲染态与源码态两态**（见 `hasTwoViews`）：
+ * 默认渲染态，头部那颗按钮切到源码。`text` 只有源码一态，`image` / `pdf` /
+ * `binary` 连源码都没有。
+ */
+type Kind =
+  | "markdown"
+  | "sheet"
+  | "svg"
+  | "text"
+  | "image"
+  | "pdf"
+  | "binary";
 
 /**
  * 一次取件为什么没成。**三类分得开，靠的是结构化信号，不是文案**：
@@ -107,7 +131,28 @@ interface FileState {
   size: number;
   /** 行数超过 `MAX_LINES` 被夹过 */
   clipped?: boolean;
+  /** 原始字节，只有 `sheet` 留 —— 表格要交给解析器，文本那份没法回推 */
+  bytes?: Uint8Array<ArrayBuffer>;
 }
+
+/**
+ * 这份文件有没有「渲染 ↔ 源码」两态。
+ *
+ * 判据只有两条、都来自 `FileState` 本身：**这一类天生有渲染态**，并且
+ * **手里确实有源码可给**。`.csv` 有（它就是文本），`.xlsx` 没有（二进制，
+ * 给不出源码，所以那颗按钮根本不出现）。
+ */
+const hasTwoViews = (f: FileState | null): boolean =>
+  !!f &&
+  f.text !== undefined &&
+  (f.kind === "markdown" || f.kind === "svg" || f.kind === "sheet");
+
+/** 两态里「渲染那一态」叫什么、用哪枚图标 —— 按钮显示的是**点了会去哪**，不是当前在哪 */
+const RENDER_VIEW: Record<string, { label: string; icon: string }> = {
+  markdown: { label: "渲染", icon: "ph:eye" },
+  svg: { label: "预览", icon: "ph:eye" },
+  sheet: { label: "表格", icon: "ph:table" },
+};
 
 interface FilePaneProps {
   taskId: string;
@@ -124,6 +169,9 @@ interface FilePaneProps {
  * `web/src/components/FileViewer/index.tsx`）：一列、可拖宽、只读、
  * 源码态行号 ＋ 逐行高亮 ＋ 折行不横滚，PDF 交给浏览器自带阅读器，
  * 认不出的给「暂无预览」。**这一阶段没有 diff、没有编辑。**
+ *
+ * **按文件类型渲染**（见 `Kind`）：markdown 默认渲染态、svg 默认预览态、
+ * 表格（xlsx/xls/csv/tsv）默认表格态，头部那颗按钮切到源码；其余文本只有源码一态。
  *
  * 两处**必须**与参照不同，都是被这套架构逼的：
  *
@@ -150,6 +198,11 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
 
   const [file, setFile] = useState<FileState | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
+  /**
+   * 当前是不是源码态。**属于「这一个文件」** —— 每次 `openFile` 都归零，
+   * 不然在 A.md 里切到源码之后打开 B.svg 会直接落在源码上
+   */
+  const [source, setSource] = useState(false);
   /** 这次取文件为什么没成（null = 没失败）。分类见 `Fail` */
   const [fileFail, setFileFail] = useState<Fail | null>(null);
 
@@ -237,6 +290,7 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
     if (attempt === 0) {
       setFileFail(null);
       setFileLoading(true);
+      setSource(false);
       setFile({ rel: full, name, kind: "text", size: 0 });
     }
     getTaskFile(taskId, full)
@@ -265,26 +319,37 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
         const b64 = res.data?.contentB64 ?? "";
         const bytes = b64ToBytes(b64);
         const ext = extOf(name);
+        // 扩展名先说了算，认不出再看字节：`.md` 就是 markdown、`.csv` 就是表，
+        // 而没有扩展名的 `Makefile`、`LICENSE` 得靠字节判
+        const isText = looksText(bytes);
         let kind: Kind = "binary";
         let text: string | undefined;
         let url: string | undefined;
         let clipped = false;
         if (ext === "pdf") {
           kind = "pdf";
+        } else if (ext === "svg") {
+          kind = "svg";
         } else if (IMAGE_EXT.includes(ext)) {
           kind = "image";
-        } else if (looksText(bytes)) {
-          kind = "text";
+        } else if (SHEET_EXT.includes(ext)) {
+          kind = "sheet";
+        } else if (isText) {
+          kind = MD_EXT.includes(ext) ? "markdown" : "text";
+        }
+        // 能给出源码的都把文本解出来：源码态要它，复制也要它。
+        // `.xlsx` 这种走不到这儿（`isText` 为假），它那颗切换按钮也就不会出现
+        if (isText && kind !== "image" && kind !== "pdf" && kind !== "binary") {
           const whole = new TextDecoder("utf-8").decode(bytes);
           const lines = whole.split("\n");
           clipped = lines.length > MAX_LINES;
           text = clipped ? lines.slice(0, MAX_LINES).join("\n") : whole;
         }
-        if (kind === "image" || kind === "pdf") {
+        if (kind === "image" || kind === "pdf" || kind === "svg") {
           const mime =
             kind === "pdf"
               ? "application/pdf"
-              : ext === "svg"
+              : kind === "svg"
                 ? "image/svg+xml"
                 : `image/${ext === "jpg" ? "jpeg" : ext}`;
           const blob = new Blob([bytes], { type: mime });
@@ -294,7 +359,17 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
           URL.revokeObjectURL(urlRef.current);
         }
         urlRef.current = url ?? "";
-        setFile({ rel: full, name, kind, text, url, size: bytes.length, clipped });
+        setFile({
+          rel: full,
+          name,
+          kind,
+          text,
+          url,
+          size: bytes.length,
+          clipped,
+          // 表格态要原始字节喂解析器；别的类型留着只是白占内存
+          bytes: kind === "sheet" ? bytes : undefined,
+        });
         setFileLoading(false);
       })
       .catch(() => {
@@ -428,13 +503,6 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
     if (!file) {
       return null;
     }
-    if (file.kind === "image") {
-      return (
-        <div className={styles.media}>
-          <img src={file.url} alt={file.name} />
-        </div>
-      );
-    }
     if (file.kind === "pdf") {
       /* PDF 交给浏览器自带的阅读器，不引 pdf.js（Chrome / Safari / Edge 都自带，
          多背一个几百 KB 的解析器只为显示一份只读文档不值当）——照参照 */
@@ -451,6 +519,32 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
         </div>
       );
     }
+    // 位图，以及**源码态没开着的** svg：都走 `<img>`。
+    // svg 走 `<img>` 不是图省事 —— 浏览器对 `<img>` 里的 SVG 用的是「安全静态模式」，
+    // 里头的 `<script>` / 事件属性 / 外链一律不执行不加载。这份 svg 来自别人的机器，
+    // 内联脚本是要防的，所以**不能**改成把它内联进 DOM
+    if (file.kind === "image" || (file.kind === "svg" && !source)) {
+      return (
+        <div className={styles.media}>
+          <img src={file.url} alt={file.name} />
+        </div>
+      );
+    }
+    if (file.kind === "sheet" && !source) {
+      return file.bytes ? (
+        <SheetView bytes={file.bytes} textual={file.text !== undefined} />
+      ) : null;
+    }
+    if (file.kind === "markdown" && !source) {
+      /* 渲染走组件库的 `Markdown.Views` —— 与会话正文（`SessionMarkdown`）同一条路径，
+         排版也套同一份基线（`styles/_chatMarkdown.scss`）。它不带 `rehype-raw`，
+         **markdown 里的裸 HTML 不会被当标签渲染**，正合这份「别人机器上的文件」的定位 */
+      return (
+        <div className={styles.md}>
+          <Markdown.Views>{file.text ?? ""}</Markdown.Views>
+        </div>
+      );
+    }
     return (
       <>
         {file.clipped ? (
@@ -462,6 +556,10 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
       </>
     );
   };
+
+  /** 此刻正在画表格（不是骨架屏、不是失败态、也不是切到了源码） */
+  const sheetView =
+    !fileLoading && !fileFail && file?.kind === "sheet" && !source;
 
   const copyText = () => {
     if (!file?.text) {
@@ -486,7 +584,22 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
         <span className={styles.headPath} title={cwd ? `${cwd}/${rel}` : rel}>
           {file ? file.name : rel || "会话目录"}
         </span>
-        {file?.kind === "text" ? (
+        {/* 两态切换：与复制、关闭同一排、同一规格（`.headBtn`）。
+            只在真有两态的类型下出现 —— `.xlsx` 给不出源码，就没有这颗按钮 */}
+        {hasTwoViews(file) && file ? (
+          <Tooltip title={source ? RENDER_VIEW[file.kind].label : "源码"}>
+            <button
+              type="button"
+              className={styles.headBtn}
+              onClick={() => setSource((v) => !v)}
+              aria-label={source ? RENDER_VIEW[file.kind].label : "源码"}
+            >
+              <Icon icon={source ? RENDER_VIEW[file.kind].icon : "ph:code"} />
+            </button>
+          </Tooltip>
+        ) : null}
+        {/* 有源码就能复制：markdown / svg / csv 在渲染态下复制的也是这份源码 */}
+        {file?.text !== undefined ? (
           <Tooltip title="复制全文">
             <button type="button" className={styles.headBtn} onClick={copyText}>
               <Icon icon="ph:copy" />
@@ -513,7 +626,13 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
         </button>
       ) : null}
 
-      <div className={styles.body}>{file ? renderFile() : renderTree()}</div>
+      {/* 表格态要把高度**钉死**交给表自己滚（组件库的 Table 是 height:100% 的 flex 列，
+          父级没有确定高度就画不出表体）。其余形态仍是「内容多高就多高、这一层滚」 */}
+      <div
+        className={classNames(styles.body, { [styles.bodyFill]: sheetView })}
+      >
+        {file ? renderFile() : renderTree()}
+      </div>
     </div>
   );
 };

@@ -7,11 +7,20 @@ import { SessionImageCtx } from "@/utils/sessionImages";
 
 import { observer } from "mobx-react-lite";
 
-import { PortalMessage, SelectPayload, SubTask } from "@/services/apis/portal";
+import {
+  PortalMessage,
+  SelectPayload,
+  SubTask,
+  SubTaskOutcome,
+} from "@/services/apis/portal";
 import PortalStore from "../../PortalStore";
-import { fmtElapsed, isSubTaskRunning } from "../../_utils/sessionState";
+import {
+  SUB_OUTCOME_LABEL,
+  fmtElapsed,
+  isSubTaskRunning,
+} from "../../_utils/sessionState";
 import AgentCard from "../AgentCard";
-import StatusIcon, { CHAIN_ICON } from "../StatusIcon";
+import StatusIcon, { CHAIN_ICON, statusOfOutcome } from "../StatusIcon";
 import styles from "./index.module.scss";
 
 interface TerminalFeedProps {
@@ -21,6 +30,9 @@ interface TerminalFeedProps {
   /**
    * 这条会话名下的子任务。执行链靠它把「派子代理那次工具调用」认出来：
    * `tool.id === subTask.toolUseId` 即为同一次派活（见 buildChain）。
+   *
+   * **后台命令也认这个键**：那次 `Bash` 调用的返回只说「已经放到后台了」，
+   * 它后来跑成什么样只有这份清单知道 —— 配上之后画在链上那一步的右端。
    */
   subTasks?: SubTask[];
   /** 会话是否执行中（末尾显示工作指示） */
@@ -449,6 +461,19 @@ interface ChainCall {
   hint: string;
   /** 这次调用的输出。一条调用可能跟着多条输出记录 */
   results: { key: string; text: string; bad?: boolean }[];
+  /**
+   * 这一步起的是个**后台命令**（`tool.id === subTask.toolUseId` 且 `kind === "bg"`）。
+   *
+   * 后台命令的收场**不在这次调用的返回里**：那条返回只说「已经放到后台了」，
+   * `isError` 恒为 false，于是链上这一步永远显得「办妥了」，哪怕它十秒后就挂了。
+   * 真正的收场在子任务清单的 `outcome` 上（后端按完成通知 / `TaskStop` 结果 /
+   * 父会话是否已结束算出来的事实）—— 挂在这里，让它在**发生的位置**说出来。
+   *
+   * 这是「后台任务」那一节只列还在跑的之后，跑砸的唯一去处
+   * （见 `_utils/sessionState.ts` 的 `runningBgCommands`）：那一节是「此刻在办什么」，
+   * 收场了的属于历史，而历史就是这条链。
+   */
+  bg?: SubTask;
 }
 interface ChainNote {
   kind: "note";
@@ -648,6 +673,14 @@ const buildChain = (
     /** `tool_use_id` → 它派出去的那个子代理。空表 = 这段里不画智能体卡 */
     subByToolUse: Map<string, SubTask>;
     /**
+     * `tool_use_id` → 它起的那个后台命令。空表 = 这段里的 Bash 步不带收场。
+     *
+     * 与 `subByToolUse` **分开两张表**：子代理那张决定「这一格画成智能体卡还是
+     * 普通一步」，这张只往普通一步上补一个收场，两件事合成一张表就得在取值处
+     * 再判一次 `kind`，判漏了就会把后台命令画成智能体卡（它没有正文可展开）。
+     */
+    bgByToolUse: Map<string, SubTask>;
+    /**
      * 「结论留在链外」的分界线怎么画。跑着的那一轮与跑完的那一轮判据不同，
      * 见调用处。`flat` = 全都进链，一个字都不留到链外（子代理那条链就是这样：
      * 它整段都是过程，结论已经由父会话并回主对话了）。
@@ -655,7 +688,7 @@ const buildChain = (
     split: { flat: true } | { flat: false; inProgress: boolean };
   },
 ): { chain: ChainItem[]; body: { m: PortalMessage; k: string }[] } => {
-  const { subByToolUse, split } = opts;
+  const { subByToolUse, bgByToolUse, split } = opts;
   const chain: ChainItem[] = [];
   const body: { m: PortalMessage; k: string }[] = [];
 
@@ -710,6 +743,7 @@ const buildChain = (
           name: t.name,
           hint: t.hint ?? "",
           results: [],
+          bg: t.id ? bgByToolUse.get(t.id) : undefined,
         };
         chain.push(call);
         lastCall = call;
@@ -954,9 +988,11 @@ const ResultBlock: React.FC<{
  * 图标列 20 宽、行高 28、名称与状态之间用间隔点连读、箭头紧跟内容，
  * 展开后是「工具 / 入参 / 返回」三段。
  *
- * 右端的状态**只在真有依据时才写**：这一步还在跑（跑着的那一轮里、最后一次
- * 调用还没有任何输出）写「执行中…」。耗时与成功/失败后端没下发 ——
- * 详见文件末尾的 TODO，宁可空着也不拿两条记录的时间戳相减冒充。
+ * 右端的状态**只在真有依据时才写**，依据一律是结构化字段：普通调用看返回里的
+ * `isError`，后台命令看子任务清单算出来的 `outcome`（见 `ChainCall.bg`）。
+ * 「还在跑」与「正常跑完」都不写字（左边那枚图标已经说完了）。
+ * 每步耗时后端没下发 —— 详见文件末尾的 TODO，宁可空着也不拿两条记录的
+ * 时间戳相减冒充。
  */
 const StepRow: React.FC<{
   step: ChainCall;
@@ -967,10 +1003,23 @@ const StepRow: React.FC<{
   toggleExpand: (key: string) => void;
 }> = ({ step, running, open, onToggle, expanded, toggleExpand }) => {
   const human = step.name ? humanTool(step.name) : "命令输出";
+  /* 这一步的收场。两个来源，**语义互补不重叠**：
+       - 普通调用：只有「返回里报没报错」（`stepFailed` 认后端的 `isError`）；
+       - 后台命令：那条返回只说「已经放到后台了」，`isError` 恒 false，收场得看
+         子任务清单算出来的 `outcome`（见 `ChainCall.bg`）。
+     一律走结构化字段，不去输出文本里找「失败」两个字。 */
+  const outcome: SubTaskOutcome | undefined =
+    step.bg?.outcome ?? (stepFailed(step) ? "failed" : undefined);
   /* 跑砸的那一步整行走 destructive（与 SessionPanels 的失败行同一套色）：
      一列灰扑扑的步骤里，只有它是「这里出过事」—— 图标、名字、状态一起变色，
-     扫一眼就能定位到出错的位置，不用逐条展开找。 */
-  const bad = stepFailed(step);
+     扫一眼就能定位到出错的位置，不用逐条展开找。
+     **`interrupted` 不进这一档**：被父会话连带终止不是它自己跑砸的，标红是冤枉
+     （与 `SUB_OUTCOME_LABEL` 那段、`AgentCard` 同一条规矩）。 */
+  const bad = outcome === "failed";
+  /* 「还在跑」也有两个来源：这一轮最后一次调用还没有输出（`running`），
+     或者它是个此刻仍挂在后台的命令。后者是本项目独有的一档 —— 长命的
+     dev server 起在半小时前，链上这一步应当仍然转着。 */
+  const live = running || outcome === "running";
 
   return (
     <div className={`${styles.step} ${bad ? styles.stepBad : ""}`}>
@@ -978,13 +1027,18 @@ const StepRow: React.FC<{
         type="button"
         className={styles.stepHead}
         aria-expanded={open}
-        {...(running ? { role: "status", "aria-label": "执行中" } : {})}
+        {...(live ? { role: "status", "aria-label": "执行中" } : {})}
         onClick={onToggle}
       >
         <StepTile>
-          {running || bad ? (
+          {/* 正常跑完的仍然是工具字形 —— 链上每一步默认都是「办妥了」，
+              给成功的后台命令另配一枚勾会让它在一列步骤里莫名其妙地扎眼。
+              只有「还在跑 / 跑砸了 / 被中断」这三档才换成状态字形。 */}
+          {live ? (
+            <StatusIcon kind="running" className={styles.stepIcon} />
+          ) : outcome && outcome !== "completed" ? (
             <StatusIcon
-              kind={running ? "running" : "failed"}
+              kind={statusOfOutcome(outcome)}
               className={styles.stepIcon}
             />
           ) : (
@@ -997,17 +1051,18 @@ const StepRow: React.FC<{
         {step.hint ? <span className={styles.stepFrom}>{human}</span> : null}
         {/* 正跑着的那一步，名字走流光（见 `.liveText`）。**效果代替状态词**：
             「它还在动」这件事由光走过去说，而这一行的字仍然写的是「它在干什么」 */}
-        <span
-          className={`${styles.stepName} ${running ? styles.liveText : ""}`}
-        >
+        <span className={`${styles.stepName} ${live ? styles.liveText : ""}`}>
           {step.hint || human}
         </span>
         {/* **跑着的时候不写「执行中…」**：这一行左边那枚 `ph:circle-notch` 正在转，
             状态已经由它说完了；再补三个字，是同一件事在 20px 内说两遍，
             而且它占的正是「这一步在干什么」该待的位置。
-            语义不丢：整行带 `role="status"` ＋ `aria-label`（见下）。
-            **失败那一档仍然写字** —— 一个红叉说不出「跑砸了」，读屏更读不出来。 */}
-        {bad ? <span className={styles.stepStatus}>失败</span> : null}
+            语义不丢：整行带 `role="status"` ＋ `aria-label`（见上）。
+            **收场不对的那两档仍然写字** —— 一个红叉说不出「跑砸了」，读屏更读不出来。
+            措辞取自 `SUB_OUTCOME_LABEL`（与右栏、智能体卡同一张表），不另起一套。 */}
+        {!live && outcome && outcome !== "completed" ? (
+          <span className={styles.stepStatus}>{SUB_OUTCOME_LABEL[outcome]}</span>
+        ) : null}
         <Icon
           icon={open ? "ph:caret-up" : "ph:caret-down"}
           className={styles.stepCaret}
@@ -1282,7 +1337,13 @@ const SubAgentChain: React.FC<{
      key 前缀带上 agentId：两条链的消息时间戳可能撞，展开态会串到别的行上 */
   const { chain } = buildChain(
     msgs.map((m) => ({ m, k: `${agentId}|${msgKey(m)}` })),
-    { subByToolUse: EMPTY_SUB_MAP, split: { flat: true } },
+    {
+      subByToolUse: EMPTY_SUB_MAP,
+      // 子代理那条链上的后台命令属于**它自己的**子任务清单，这里没有那份数据
+      // （按需只拉了正文），所以不补收场 —— 空着比错标一个强。
+      bgByToolUse: EMPTY_SUB_MAP,
+      split: { flat: true },
+    },
   );
 
   /* 按「步」截断，不按链项：旁白是围着某一步说的话，跟着它一起留下。
@@ -1515,9 +1576,18 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
      **不套 useMemo**：`subTasksOf` 现在是两份合并出来的新数组（见 PortalStore），
      引用每次都变，memo 只会每帧重算一遍再多存一份；清单最多一两百条，直接建。 */
   const subByToolUse = new Map<string, SubTask>();
+  /* 「哪次 Bash 调用起了哪个后台命令」。同样只认 `toolUseId`。
+     后台命令的收场只能在这儿说 —— 右栏那一节只列还在跑的（见 `runningBgCommands`），
+     跑砸的、被中断的就落在链上它发生的那一步。 */
+  const bgByToolUse = new Map<string, SubTask>();
   (subTasks ?? []).forEach((t) => {
-    if (t.kind === "agent" && t.toolUseId) {
+    if (!t.toolUseId) {
+      return;
+    }
+    if (t.kind === "agent") {
       subByToolUse.set(t.toolUseId, t);
+    } else {
+      bgByToolUse.set(t.toolUseId, t);
     }
   });
 
@@ -1566,6 +1636,7 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
     const keyed = turn.items.map((m) => ({ m, k: msgKey(m) }));
     const { chain, body } = buildChain(keyed, {
       subByToolUse,
+      bgByToolUse,
       split: { flat: false, inProgress },
     });
     return {
