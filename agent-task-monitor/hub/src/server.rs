@@ -1958,6 +1958,17 @@ async fn task_dirs(
     let Some(task) = task else {
         return err(404, "任务不存在");
     };
+    // 文件系统接口只给设备主人：协助访客虽然 can_view 成立（能看会话），但这条给的是
+    // 会话根目录下的任意文件 —— 整个项目源码、.env、密钥、证书都在里面。
+    // 见 registry::can_access_files。
+    if !state
+        .registry
+        .read()
+        .await
+        .can_access_files(&task.machine_id, &user)
+    {
+        return err(403, "该设备是他人共享给你的，不提供文件访问");
+    }
     let cwd = session_root(&task);
     if cwd.is_empty() {
         return err(400, "该会话没有工作目录信息");
@@ -2138,6 +2149,17 @@ async fn task_file(
     else {
         return err(404, "任务不存在");
     };
+    // 文件系统接口只给设备主人：协助访客虽然 can_view 成立（能看会话），但这条给的是
+    // 会话根目录下的任意文件 —— 整个项目源码、.env、密钥、证书都在里面。
+    // 见 registry::can_access_files。
+    if !state
+        .registry
+        .read()
+        .await
+        .can_access_files(&task.machine_id, &user)
+    {
+        return err(403, "该设备是他人共享给你的，不提供文件访问");
+    }
     let cwd = session_root(&task);
     if cwd.is_empty() {
         return err(400, "该会话没有工作目录信息");
@@ -2228,6 +2250,16 @@ async fn task_fsop(
     let Some(task) = task else {
         return err(404, "任务不存在");
     };
+    // 文件夹操作（新建/删除/重命名）更不能给协助访客：那是直接改主人的文件。
+    // 见 registry::can_access_files。
+    if !state
+        .registry
+        .read()
+        .await
+        .can_access_files(&task.machine_id, &user)
+    {
+        return err(403, "该设备是他人共享给你的，不提供文件操作");
+    }
     let cwd = session_root(&task);
     if cwd.is_empty() {
         return err(400, "该会话没有工作目录信息");
