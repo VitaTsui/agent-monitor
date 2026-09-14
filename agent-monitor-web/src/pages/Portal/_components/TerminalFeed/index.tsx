@@ -757,12 +757,16 @@ const Working: React.FC<{ since?: string; thinking?: boolean }> = ({
         <span className={`${styles.stepNameLive} ${styles.liveText}`}>
           {text}
         </span>
-        {/* 耗时靠右，与参照的 `.stepMeta` 同一处：它是这一行的「量」，
-            不是名字的一部分，所以不跟着名字用间隔点粘在一起 */}
+        {/* 耗时**紧跟着话**，用间隔点连起来 —— 与失败那一步的 `失败` 同一枚
+            `.stepStatus`。原来它走右对齐的 `.stepMeta`（照参照
+            `MessageList/index.module.scss:455`）：参照那边 `stepMeta` 是**每一步都有**
+            的一列量（步数、耗时），右对齐是在排一张表；我们后端不下发每步耗时
+            （见文件末尾 TODO），这一列全项目只有这一行用得上 —— 一列只有一个元素，
+            右对齐就不是对齐，是把「29秒」和「正在处理…」甩到 768 宽正文列的两端
+            （实测间距 604px），读起来像两件无关的事。
+            链上其余的量早就是这个口径了，见 `.stepStatus` 那段注释。 */}
         {elapsed ? (
-          <span className={styles.stepMeta}>
-            <span className={styles.stepMetaText}>{elapsed}</span>
-          </span>
+          <span className={styles.stepStatus}>{elapsed}</span>
         ) : null}
       </div>
     </div>
