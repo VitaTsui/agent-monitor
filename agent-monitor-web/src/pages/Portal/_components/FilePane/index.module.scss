@@ -1,0 +1,340 @@
+/* 文件查看器那一列的内容。列本身（宽度、可拖、露底浮卡）由 `ChatPane` 的
+   `.viewerCol` 给 —— 与右栏那张卡同一套形制（8px 露底 ＋ 圆角 8 ＋ 描边环 ＋ 影），
+   一屏之内不出现两种「浮起来的面板」。 */
+
+.FilePane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+/* 头一行：返回 / 路径 / 复制 / 关闭。36 高 —— 比格子头（63/45）矮一档，
+   它是这一列自己的工具条，不该与格子的头抢量级 */
+.head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 6px 6px 10px;
+  border-bottom: 1px solid var(--border-weak);
+}
+
+.headPath {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--foreground);
+  font-size: var(--text-base);
+  // 路径从中间截会把文件名截没，宁可从尾巴截
+  direction: ltr;
+}
+
+.headBtn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+
+  &:hover {
+    background: var(--overlay-2);
+    color: var(--foreground);
+  }
+}
+
+// 返回上级：一条与文件行同宽的行，不做成按钮块 —— 它就是列表的第一行
+.up {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--overlay-2);
+  }
+}
+
+.upIcon {
+  font-size: 14px;
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.list {
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--overlay-2);
+  }
+}
+
+.rowIcon {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: 14px;
+}
+
+.rowName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--foreground);
+  font-size: var(--text-base);
+}
+
+.rowGo {
+  flex: none;
+  color: var(--subtle-foreground);
+  font-size: 12px;
+}
+
+/* 慢往返那句话。**从第一帧就在**，不是超时之后才出现 ——
+   这一列等的是「那台机器下一轮上报」，不说清楚的话用户只会觉得卡死了 */
+.hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 10px;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.hintIcon {
+  flex: none;
+  margin-top: 2px;
+  font-size: 14px;
+}
+
+/* 骨架屏：等的是内容，就先把内容的形状摆出来。
+   `prefers-reduced-motion` 下不呼吸（与执行链那道流光同一个口径） */
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 10px 10px;
+}
+
+.skelLine {
+  height: 10px;
+  border-radius: var(--radius-xs);
+  background: var(--muted);
+  animation: file-skel 1.6s ease-in-out infinite;
+
+  &:nth-child(3n) {
+    width: 70%;
+  }
+
+  &:nth-child(3n + 1) {
+    width: 92%;
+  }
+
+  &:nth-child(3n + 2) {
+    width: 80%;
+  }
+}
+
+@keyframes file-skel {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skelLine {
+    animation: none;
+  }
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 14px 10px;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.dim {
+  color: var(--subtle-foreground);
+}
+
+.retry {
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--foreground);
+  font-size: var(--text-sm);
+  cursor: pointer;
+
+  &:hover {
+    background: var(--overlay-2);
+  }
+}
+
+.clip {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-weak);
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+}
+
+/* ---------- 源码态 ---------- */
+
+/* 一行一个 flex 行：左 40 的行号列、右边代码。**折行不横滚**（见 CodeLines） */
+.code {
+  padding: 6px 0 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.line {
+  display: flex;
+  gap: 10px;
+  padding: 0 10px;
+
+  &:hover {
+    background: var(--overlay-2);
+  }
+}
+
+.lineNo {
+  flex: none;
+  width: 40px;
+  color: var(--subtle-foreground);
+  text-align: right;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.lineCode {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--foreground);
+}
+
+/* highlight.js 的类名映到本项目的令牌 —— **不引它自带的主题 css**：
+   那些主题自带深色底与一整套写死的颜色，压在我们的面上既不跟主题翻、
+   也与执行链里的代码块两个样。只挑真正用得上的那几类。 */
+.code {
+  :global(.hljs-comment),
+  :global(.hljs-quote) {
+    color: var(--subtle-foreground);
+    font-style: italic;
+  }
+
+  :global(.hljs-keyword),
+  :global(.hljs-selector-tag),
+  :global(.hljs-literal),
+  :global(.hljs-type) {
+    color: var(--primary);
+    font-weight: 500;
+  }
+
+  :global(.hljs-string),
+  :global(.hljs-title),
+  :global(.hljs-name),
+  :global(.hljs-attr),
+  :global(.hljs-symbol),
+  :global(.hljs-bullet) {
+    color: var(--success);
+  }
+
+  :global(.hljs-number),
+  :global(.hljs-built_in),
+  :global(.hljs-builtin-name),
+  :global(.hljs-meta),
+  :global(.hljs-variable),
+  :global(.hljs-template-variable) {
+    color: var(--warning);
+  }
+
+  :global(.hljs-deletion) {
+    color: var(--destructive);
+  }
+
+  :global(.hljs-section),
+  :global(.hljs-strong) {
+    font-weight: 600;
+  }
+
+  :global(.hljs-emphasis) {
+    font-style: italic;
+  }
+}
+
+/* ---------- 图片 / PDF ---------- */
+
+.media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+
+  img {
+    max-width: 100%;
+    // 高度不限死：竖图也该看全，列自己能滚
+    border-radius: var(--radius-sm);
+    background: var(--muted);
+  }
+}
+
+.pdf {
+  width: 100%;
+  // 交给浏览器内置阅读器，它自己有工具条与滚动
+  height: 100%;
+  min-height: 320px;
+  border: none;
+}

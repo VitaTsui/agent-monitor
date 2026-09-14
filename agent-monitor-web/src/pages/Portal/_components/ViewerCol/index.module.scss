@@ -1,0 +1,65 @@
+/* 文件查看器那一列 = 一条 8px 的把手 ＋ 一张浮着的卡。
+   几何照 VitaAgent `ViewerPane/index.module.scss:23-36`（把手 8 宽、中央 3×48 的
+   小条、悬停才显）与 `:57-74`（卡：圆角、描边环 ＋ 影、四周留 8 露底）。
+   卡的形制与右栏那张**完全一致**（见 `RightPane` / `SessionStatePane`）：
+   一屏之内不出现两种「浮起来的面板」。 */
+
+.ViewerCol {
+  display: flex;
+  /* 宽度只由 `flex-basis` 一处说了算（组件按比例塞进来），grow/shrink 都是 0 ——
+     拖动就是改这一个数，不换布局方式 */
+  flex: 0 0 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.handle {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 8px;
+  cursor: col-resize;
+  // 触屏上别让浏览器把拖动当成滚页
+  touch-action: none;
+
+  &:hover .grip,
+  &:active .grip {
+    opacity: 1;
+  }
+}
+
+.grip {
+  width: 3px;
+  height: 48px;
+  border-radius: 2px;
+  background: var(--subtle-foreground);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+/* 系统开了「减少动态效果」：把手不做淡入淡出，直接常显一档浅的 ——
+   它是个操作点，不能因为不给动效就变得找不到 */
+@media (prefers-reduced-motion: reduce) {
+  .grip {
+    opacity: 0.5;
+    transition: none;
+  }
+}
+
+.card {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  /* 上 8 / 右 8 / 下 16 —— 与右栏那张卡同一套留白（`RightPane`），
+     上面那 8 正是让卡从横跨整格的头底下让开的那道缝 */
+  margin: 8px 8px 16px 0;
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow:
+    0 0 0 1px var(--border),
+    var(--shadow-2);
+}

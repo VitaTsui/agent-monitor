@@ -9,6 +9,8 @@ import PortalStore from "../../PortalStore";
 import Composer from "../Composer";
 import TerminalFeed, { SelectCard } from "../TerminalFeed";
 import RightPane from "../RightPane";
+import ViewerCol from "../ViewerCol";
+import FilePane from "../FilePane";
 import SessionPanels from "../SessionPanels";
 import SessionRename from "../SessionRename";
 import SessionStatePane from "../SessionStatePane";
@@ -61,6 +63,19 @@ const FLAT_MIN_W = { multi: 400, single: 320 };
  * 与其给一个没法看的布局，不如把开关灰掉、指一条出路（放大这一格）。
  */
 const RIGHT_PANE_MIN_W = 720;
+
+/**
+ * 摆得下**文件查看器**那一列的最小格宽，以及**三列同开**的最小格宽。
+ *
+ * 算法与 `RIGHT_PANE_MIN_W` 同一套：正文至少留 400（再窄就成了一条缝），
+ * 查看器自己至少 360（行号 40 ＋ 一行代码看得出形状）、右栏固定 320。
+ *   查看器 ＋ 正文        = 400 + 360 = 760
+ *   查看器 ＋ 正文 ＋ 右栏 = 400 + 360 + 320 = 1080
+ * 比 1080 窄而两样都开着时**右栏让位**（见 `rightPaneOpen`）：查看器是用户刚点开的
+ * 东西、看完就关；右栏是常驻状态清单，随时点一下就回来 —— 让后者等更不打断人。
+ */
+const FILE_PANE_MIN_W = 760;
+const THREE_COL_MIN_W = 1080;
 
 /**
  * 「刚送达终端」的宽限期：这几秒里终端还没来得及把队列上报回来，先按「在排队」算，
@@ -134,6 +149,8 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
      开关亮着却不出栏是更糟的那一种：人会以为功能坏了。
      记录不动：格子重新变宽（或放大这一格）时，原来开着的那一栏自己回来。 */
   const rightPaneFits = rowW === 0 || rowW >= RIGHT_PANE_MIN_W;
+  /** 这一格摆不摆得下文件查看器那一列（判据与右栏同源，见 FILE_PANE_MIN_W） */
+  const filePaneFits = rowW === 0 || rowW >= FILE_PANE_MIN_W;
   const messages = messagesOf(id);
   const hubQueued = hubQueuedOf(id);
   const loading = isLoadingMessages(id);
@@ -235,20 +252,42 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   );
   /* 这颗开关能不能点。**与「栏出不出得来」是同一个表达式的两半**，
      不许各写一遍：亮着却不出栏，人会以为功能坏了。 */
-  const rightPaneUsable = !isMobile && rightPaneFits && hasSessionState;
+  const rightPaneUsable =
+    !isMobile &&
+    rightPaneFits &&
+    hasSessionState &&
+    // 查看器开着时要么摆得下三列，要么右栏让位（按钮跟着灰，两者一致）
+    (!PortalStore.isFilePaneOpen(id) ||
+      !filePaneFits ||
+      rowW === 0 ||
+      rowW >= THREE_COL_MIN_W);
   /* 这一格自己的右栏开着没有。**按格取**，不是全局一份 —— 四格并排时
      每一格的这颗按钮只管自己那一栏。
      紧凑卡片不给：那张卡只有 320×248，再切一栏就什么都看不见了；
      窄屏也不给：那边没有第三栏，状态卡留在对话流末尾（见下方）。 */
+  /* 这一格的文件查看器。开关与右栏同一条规矩：**每格一份**、摆不下就置灰不渲染。
+     紧凑卡片与窄屏不给：那两处连第二列都摆不下。 */
+  const filePaneUsable = !isMobile && !compact && filePaneFits && !!id;
+  const filePaneOpen = filePaneUsable && PortalStore.isFilePaneOpen(id);
+  const filePaneHint = !filePaneFits
+    ? "这一格太窄，摆不下文件查看器；放大这一格后可用"
+    : filePaneOpen
+      ? "关闭文件查看"
+      : "查看这台机器上、这条会话目录里的文件";
+  /* 这一格自己的右栏开着没有。**按格取**，不是全局一份。
+     多一条：**查看器开着、而格子摆不下三列时右栏让位** —— 理由见 THREE_COL_MIN_W。
+     它同时进 `rightPaneUsable`（下一行），所以按钮态与栏出不出来仍然是同一个表达式。 */
   const rightPaneOpen = !compact && rightPaneUsable && isRightPaneOpen(id);
   /** 右栏开关的提示语。灰掉时说清「为什么不能点、怎么才能点」 */
   const rightPaneHint = !hasSessionState
     ? "这个会话暂无进行中的任务清单或后台命令，没有可展示的状态"
-    : !rightPaneFits
-      ? "这一格太窄，摆不下会话状态栏；放大这一格后可用"
-      : rightPaneOpen
-        ? "收起会话状态栏"
-        : "展开会话状态栏";
+    : !rightPaneUsable && filePaneOpen
+      ? "这一格摆不下三列；关掉文件查看或放大这一格后可用"
+      : !rightPaneFits
+        ? "这一格太窄，摆不下会话状态栏；放大这一格后可用"
+        : rightPaneOpen
+          ? "收起会话状态栏"
+          : "展开会话状态栏";
 
   // 宽限期的时钟：只在真有回显处在宽限期内时上表，到点走一次即停。
   // 不是每秒空转 —— 没有待出窗的回显就压根不建定时器。
@@ -693,6 +732,19 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                   },
                   // 右栏开关同样收进来：格子窄到折叠时它更需要 —— 那种宽度下
                   // 正文与右栏抢地方，收放是高频动作
+                  ...(isMobile || compact
+                    ? []
+                    : [
+                        {
+                          key: "filePane",
+                          icon: <Icon icon="ph:folder-open" />,
+                          label: (
+                            <span title={filePaneHint}>{filePaneHint}</span>
+                          ),
+                          disabled: !filePaneUsable,
+                          onClick: () => PortalStore.toggleFilePane(id),
+                        },
+                      ]),
                   ...(isMobile
                     ? []
                     : [
@@ -795,6 +847,28 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                     }
                     onClick={() => setFocused(id)}
                   />
+                </Tooltip>
+              ) : null}
+              {/* 文件查看开关。**摆在右栏开关前面**：它开的是「内容」那一列，
+                  右栏开的是「状态」那一条，内容在前。
+                  灰掉的理由挂在 Tooltip 上（同右栏那颗）。 */}
+              {!isMobile && !compact ? (
+                <Tooltip title={filePaneHint}>
+                  <span>
+                    <Button
+                      size="small"
+                      type="text"
+                      className={filePaneOpen ? styles.paneBtnOn : undefined}
+                      icon={
+                        <Icon
+                          icon="ph:folder-open"
+                          className={styles.headIcon}
+                        />
+                      }
+                      disabled={!filePaneUsable}
+                      onClick={() => PortalStore.toggleFilePane(id)}
+                    />
+                  </span>
                 </Tooltip>
               ) : null}
               {/* 右栏开关。照 VitaAgent 顶栏那枚 28×28 的面板钮
@@ -1208,6 +1282,22 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
             </div>
           )}
         </div>
+
+        {/* 文件查看器那一列：**正文与右栏之间**。
+            宽度可拖（见 `ViewerCol`）—— 与右栏「固定 320、不可拖」并不矛盾：
+            右栏装的是一张状态清单，320 够用、再宽也不会多出信息；这一列装的是
+            任意宽度的源码与图片，宽度直接决定「一行代码折不折、图看不看得清」，
+            那是内容本身的诉求，不是个人偏好。参照两者也正是这么分的
+            （`ActivityPanel` 定宽、`ViewerPane` 可拖）。 */}
+        {filePaneOpen && (
+          <ViewerCol>
+            <FilePane
+              taskId={id}
+              cwd={task.liveCwd || task.process?.cwd}
+              onClose={() => PortalStore.toggleFilePane(id)}
+            />
+          </ViewerCol>
+        )}
 
         {rightPaneOpen && (
           <RightPane>

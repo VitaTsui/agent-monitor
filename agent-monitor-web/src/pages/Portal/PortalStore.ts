@@ -314,6 +314,8 @@ class PortalStore {
    * 表里没有的会话＝没动过，走默认值；所以这张表只装「用户真的改过的那几格」。
    */
   private _rightPaneById: Record<string, RightPaneState> = readRightPaneState();
+  /** 哪几格开着文件查看器（见 isFilePaneOpen：不落盘） */
+  private _filePaneIds: string[] = [];
   private _messagesById: Record<string, PortalMessage[]> = {};
   /**
    * hub 队列里待下发的输入（会话 id → 条目）。
@@ -912,6 +914,26 @@ class PortalStore {
       [taskId]: { open: !this.isRightPaneOpen(taskId) },
     };
     this.saveRightPaneState();
+  };
+
+  /**
+   * 这一格的**文件查看器**开着吗。默认关着 —— 它是用户主动要看文件时才开的一列，
+   * 不像右栏那样是「这条会话此刻在办什么」的常驻状态。
+   *
+   * **不落盘**：刷新之后回到「只有对话」是对的；上次开着的那一列在新一轮里多半
+   * 已经不是你要看的那个文件了，而它每开一次都要向那台机器要一次目录（慢往返）。
+   */
+  public isFilePaneOpen = (taskId: string): boolean =>
+    this._filePaneIds.includes(taskId);
+
+  /** 开/收某一格的文件查看器。**每格一份**，与右栏同一条规矩 */
+  public toggleFilePane = (taskId: string) => {
+    if (!taskId) {
+      return;
+    }
+    this._filePaneIds = this.isFilePaneOpen(taskId)
+      ? this._filePaneIds.filter((x) => x !== taskId)
+      : [...this._filePaneIds, taskId];
   };
 
   /**
