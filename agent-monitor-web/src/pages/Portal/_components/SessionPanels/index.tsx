@@ -149,11 +149,12 @@ const TaskRow: React.FC<{ task: SubTask; now: number }> = ({ task, now }) => {
  * 正文仍然只在链里渲染一次。不在右栏里就地展开：同一份内容画两处是这一版
  * 反复踩过的坑（子会话树那一套正是因此被推翻的）。
  *
- * **配不上的也照列。** 子代理与链上的卡靠 `toolUseId` 配对，起跑那条记录掉出正文
- * 窗口时就配不上 —— 但「有个子代理正在跑」这件事本身仍然要看得见（这正是 0.12.14
- * 那一版的主题）。所以列出来，点了定位不到时把原因**说在这一行上**
- * （`PortalStore.focusMissId`，与侧栏那套同一份机制）：不许点了没反应，
- * 也不弹一条飘过去的全局提示 —— 那得让人回头找刚才点的是哪条。
+ * **点了必定找得到。** 子代理的卡片现在由子任务清单决定、不再依赖正文窗口
+ * （见 `TerminalFeed` 的 `attachLooseAgents`）—— 配不上派活记录的那些也照样在链上
+ * 有位置（按 `startedAt` 落位）。于是「定位不到」只剩**一种**触发条件：
+ * **这一格连一条正文都还没读到**（设备离线 / 记录读不出来），那时链本身就不存在。
+ * 那一句仍然说在这一行上（`PortalStore.focusMissId`，与旧那套同一份机制）：
+ * 不许点了没反应，也不弹一条飘过去的全局提示 —— 那得让人回头找刚才点的是哪条。
  */
 const AgentRow: React.FC<{ taskId: string; task: SubTask; now: number }> =
   observer(({ taskId, task, now }) => {
@@ -177,7 +178,7 @@ const AgentRow: React.FC<{ taskId: string; task: SubTask; now: number }> =
         </button>
         {missed ? (
           <span className={styles.itemReason}>
-            在当前加载的正文里找不到派出它的那一步，往上翻一段再点
+            这条会话的正文还没读到，取回来之后再点
           </span>
         ) : null}
       </li>

@@ -255,6 +255,39 @@ const emitBuildId = (buildId: string): Plugin => ({
   },
 });
 
+/**
+ * 把 **antd 自己静态用到的那几十枚图标**并成一个 chunk。
+ *
+ * 起因：`@hsu-react/ui` 的 `Icon` 支持传 antd 图标名，2.5.12 起改成逐枚 `import()`
+ * 按需加载（`@ant-design/icons/es/icons/<Name>`）。于是 antd 自己静态引着的那批
+ * （`CloseOutlined`、`SearchOutlined`、`CaretDownFilled` …… 实测 39 枚）同时出现在
+ * **静态图**和**动态图**里 —— rollup 的规矩是「能到达它的入口集合不同就切开」，
+ * 每一枚 `import()` 目标又都是一个独立的 chunk 根，所以它们各自单独成块：
+ * 首屏 script 54 → 93 个，gzip 896 → 919 KB。**raw 几乎没变（3119 → 3137 KB）**，
+ * 多出来的全是碎片化的压缩损失 —— 同样的字节，分 39 个小文件各压一次。
+ *
+ * 这条规则只做一件事：把这 39 枚并回一个 chunk。判据是「除了 `@ant-design/icons`
+ * 自己的 barrel 之外，还有别的静态引用方」——
+ * 有，说明这一枚**本来就在首屏**（是 antd 的组件在用），并进来不会新增任何字节；
+ * 没有，说明它只被那张按需表动态引到，**一枚都不碰**，继续保持「传到才下载」。
+ *
+ * 所以它不违反上面那条禁令：它不跨静态/动态边界，也不会把 846 枚拖成静态依赖
+ * （真拖回去的话首屏会退回 1 MB，一眼能量出来）。
+ */
+const antdIconsStaticGroup = (
+  id: string,
+  { getModuleInfo }: { getModuleInfo: (id: string) => { importers: readonly string[] } | null }
+): string | undefined => {
+  if (!/@ant-design[\\/]icons[\\/]es[\\/]icons[\\/][A-Z][A-Za-z0-9]*\.js$/.test(id)) {
+    return undefined;
+  }
+  const importers = getModuleInfo(id)?.importers ?? [];
+  const fromOutside = importers.some(
+    (imp) => !/@ant-design[\\/]icons[\\/]/.test(imp)
+  );
+  return fromOutside ? "antdIconsStatic" : undefined;
+};
+
 export default defineConfig(({ mode }): UserConfig => {
   const isProd = mode === "production";
 
@@ -359,6 +392,10 @@ export default defineConfig(({ mode }): UserConfig => {
           // 合并跨越「入口图」与「异步图」的边界：只要某个包在任何地方被引用，合并出来
           // 的 chunk 就会被算进首屏（改前 index.html 里挂着 95 个文件、5.15 MiB）。
           // rollup 默认的切分尊重静态/动态边界，交给它即可。
+          //
+          // 下面这条是**唯一的例外**，而且它刻意不跨那条边界 —— 只把「本来就已经是静态
+          // 依赖」的模块并到一起，一个动态模块都不碰：
+          manualChunks: antdIconsStaticGroup,
         },
       },
       chunkSizeWarningLimit: 1000,

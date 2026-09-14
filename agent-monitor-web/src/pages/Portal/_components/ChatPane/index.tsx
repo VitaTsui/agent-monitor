@@ -12,10 +12,7 @@ import RightPane from "../RightPane";
 import SessionPanels from "../SessionPanels";
 import SessionRename from "../SessionRename";
 import SessionStatePane from "../SessionStatePane";
-import {
-  isEmptySessionState,
-  sessionStateOf,
-} from "../../_utils/sessionState";
+import { isEmptySessionState, sessionStateOf } from "../../_utils/sessionState";
 import { sessionTitle } from "../../_utils/sessionNote";
 import { useIsMobile } from "../../_hooks/useIsMobile";
 import { prefersReducedMotion } from "@/hooks/useReducedMotion";
@@ -114,7 +111,6 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   const isMobile = useIsMobile();
   const chatRef = useRef<HTMLDivElement>(null);
   const stickBottomRef = useRef(true);
-  const rootRef = useRef<HTMLDivElement>(null);
   /** 整格（正文 ＋ 右栏）那一行。右栏摆不摆得下要按它量，不能按正文列量 */
   const rowRef = useRef<HTMLDivElement>(null);
   /** 本格是否窄到摆不下一排按钮（按实测宽度判定，不看视口 —— 决定拥挤的是格宽） */
@@ -377,32 +373,27 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   // 按实际格宽决定头部平铺还是收进菜单。用 ResizeObserver 而非视口断点：同一个视口下
   // 格子可能是 1/2/3/4 等分，还能被侧栏折叠改变，只有量自己才准。
   useEffect(() => {
-    const el = rootRef.current;
     const row = rowRef.current;
-    if (!el) {
+    if (!row) {
       return;
     }
     const limit = closable ? FLAT_MIN_W.multi : FLAT_MIN_W.single;
-    // 一个观察器量两处，各答各的问题：
-    //   正文列 → 头部按钮平铺还是收进 ⋯（拥挤的是那一排按钮所在的列）
-    //   整行   → 摆不摆得下右栏（见 rightPaneFits）
+    /* **量整格这一行就够了**，两个问题同一个数：
+         头挤不挤 → 头现在横跨整格（见下面的 `.paneRow`），它的可用宽就是行宽；
+         摆不摆得下右栏 → 也是行宽（见 `rightPaneFits`）。
+       改前头长在正文列里，所以拥挤与否量的是正文列；头提出来之后再量那一列就
+       低估了 320 —— 右栏一开，按钮会莫名其妙地收进 ⋯。 */
     const ro = new ResizeObserver((entries) => {
       entries.forEach((e) => {
         const w = e.contentRect.width;
         if (!w) {
           return;
         }
-        if (e.target === row) {
-          setRowW(w);
-        } else {
-          setNarrow(w < limit);
-        }
+        setRowW(w);
+        setNarrow(w < limit);
       });
     });
-    ro.observe(el);
-    if (row) {
-      ro.observe(row);
-    }
+    ro.observe(row);
     return () => ro.disconnect();
   }, [closable]);
 
@@ -550,65 +541,93 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
         ? "中断当前任务"
         : "当前没有正在执行的任务";
 
-  /* 本格 = 正文 ＋（可选）本格自己的右栏，两者并排在一行里。
-     右栏从前钉在 Portal 那一层、整页只有一条：四格共用一个开关、共用一份宽度，
-     点哪一格的按钮都是在拨同一个值。栏归哪一格，就得长在哪一格里。 */
+  /* 本格 = **一个头** ＋ 下面的「正文 ＋（可选）本格自己的右栏」。
+
+     头**横跨两列**：它说的是「这一格是哪条会话」，右栏是这一格的一部分，不是浮在
+     旁边的另一块面板。改前头长在正文列里，右栏与正文平级 —— 于是右栏得自己再顶一条
+     标题栏，两条栏还不在同一条水平线上（用户截图里就是这个样子）。
+     现在头提到 `.paneRow` 这一层，正文与右栏一起收进 `.paneBody`。
+
+     **每格仍然各有各的头与各自的右栏**：这整段就在 `ChatPane` 里，一格一份实例 ——
+     头没有被提到 Portal 那一层去（右栏从前钉在那儿，四格共用一个开关、一份宽度，
+     点哪一格都是在拨同一个值，那是 0.12.x 早期修掉的毛病，不走回去）。 */
   return (
-    <div ref={rowRef} className={styles.paneRow}>
-      <div
-        ref={rootRef}
-        className={`${styles.ChatPane} ${compact ? styles.compact : ""} ${
-          compact && showPending ? styles.awaitingSelect : ""
-        }`}
-        // 紧凑卡片整体可点：右侧那一列的用途就是「点它换到主区」，
-        // 只让标题可点的话，卡片大半面积都是死的。头部按钮各自 stopPropagation。
-        onClick={compact ? onActivate : undefined}
-      >
-        <header className={styles.paneHeader}>
-          <div className={styles.headInfo}>
-            {/* 状态放标题前；标题只显示会话标题（设备/IDE/PID 等杂项不再展示） */}
-            <div className={styles.headTitle}>
-              {/* 紧凑卡片里，「终端正等你选」必须显式标出来：卡片是只读的，
+    <div
+      ref={rowRef}
+      className={`${styles.paneRow} ${compact ? styles.compactRow : ""}`}
+      // 紧凑卡片整体可点（含头）：那一列的用途就是「点它换到主区」，
+      // 只让标题可点的话卡片大半面积都是死的。头部按钮各自 stopPropagation。
+      onClick={compact ? onActivate : undefined}
+    >
+      <header className={styles.paneHeader}>
+        <div className={styles.headInfo}>
+          {/* 状态放标题前；标题只显示会话标题（设备/IDE/PID 等杂项不再展示） */}
+          <div className={styles.headTitle}>
+            {/* 紧凑卡片里，「终端正等你选」必须显式标出来：卡片是只读的，
                 选择卡本身不在这儿渲染，不给提示的话这个会话会一直干等着没人知道。
                 点卡片换到主区即可作答。放在状态胶囊的位置 —— 此刻「在等你」
                 比「执行中/等待输入」更该被先看到。 */}
-              {compact && showPending ? (
-                <span className={styles.pendingChip}>⌨ 待你选择</span>
-              ) : (
-                <span
-                  className={`${styles.statusChip} ${styles[task.status ?? ""] ?? ""}`}
-                >
-                  {task.statusDsr}
-                </span>
-              )}
-              {/* 号位：手机上看着这个号去钉钉发「@N …」。移动端头部是唯一能看到它的
-                地方（侧栏是抽屉、看完就收起了），所以这里必须有。 */}
-              {task.slot != null && (
-                <Tooltip
-                  title={`钉钉里发「#${task.slot} 内容」即下发到这个终端`}
-                >
-                  <span className={styles.slotChip}>#{task.slot}</span>
-                </Tooltip>
-              )}
-              {/* 点标题即改名。紧凑卡片除外 —— 那张卡整块都是「换到主区」的点击区，
-                标题再抢一次点击，右侧那列就没法用了。 */}
-              <SessionRename
-                taskId={id}
-                note={task.note}
-                disabled={compact || !id}
-                className={styles.headTitleEdit}
+            {compact && showPending ? (
+              <span className={styles.pendingChip}>⌨ 待你选择</span>
+            ) : (
+              <span
+                className={`${styles.statusChip} ${styles[task.status ?? ""] ?? ""}`}
               >
-                <span className={styles.headTitleText}>
-                  {sessionTitle(task, "会话")}
+                {task.statusDsr}
+              </span>
+            )}
+            {/* 号位：手机上看着这个号去钉钉发「@N …」。移动端头部是唯一能看到它的
+                地方（侧栏是抽屉、看完就收起了），所以这里必须有。 */}
+            {task.slot != null && (
+              <Tooltip title={`钉钉里发「#${task.slot} 内容」即下发到这个终端`}>
+                <span className={styles.slotChip}>#{task.slot}</span>
+              </Tooltip>
+            )}
+            {/* **项目名排在标题前，同字号同色，中间一个灰斜杠** —— 面包屑，
+                形制照 VitaAgent 顶栏（`web/src/pages/chat/index.tsx:723-737`：
+                `🕐 任务名 / 会话标题`，注释里写死了「两段**同字号同颜色**，
+                不是『灰面包屑 ＋ 重标题』」，只有分隔符是灰的）。
+
+                改前项目名混在第二行里，与主机名、5h 用量同一个灰、同一个字号 ——
+                一行三样东西没有主次，扫一眼认不出哪个是项目（用户截图）。
+                **不靠加粗变色堆权重**：换的是**位置** —— 这一格的身份是
+                「哪个项目的哪条会话」，那就让这两样待在同一行、同一个量级；
+                设备与用量是补充信息，留在第二行。
+
+                **窄格（`narrow`，格宽 < 400）整段不要**：实测 376 宽时它被夹成
+                「f…」—— 半个字母回答不了任何问题，却仍占着 20px。那时这一行要保住的
+                是标题，项目由侧栏的项目分组回答。 */}
+            {!narrow && task.projectName ? (
+              <>
+                <span className={styles.crumbProject} title={task.projectName}>
+                  {task.projectName}
                 </span>
-              </SessionRename>
-            </div>
+                <span className={styles.crumbSep}>/</span>
+              </>
+            ) : null}
+            {/* 点标题即改名。紧凑卡片除外 —— 那张卡整块都是「换到主区」的点击区，
+                标题再抢一次点击，右侧那列就没法用了。 */}
+            <SessionRename
+              taskId={id}
+              note={task.note}
+              disabled={compact || !id}
+              className={styles.headTitleEdit}
+            >
+              <span className={styles.headTitleText}>
+                {sessionTitle(task, "会话")}
+              </span>
+            </SessionRename>
+          </div>
+          {/* 第二行是**补充信息**：哪台机器、近 5 小时用了多少 token。
+              **窄格先牺牲它**（`narrow`，与头部按钮收进 ⋯ 同一个判据）——
+              四格并排时头只有三百多宽，那时要留住的是第一行那句
+              「哪个项目的哪条会话」，设备与用量让位。设备仍可从侧栏的设备选择器
+              与会话行看到，不是唯一入口。 */}
+          {!narrow && (
             <div className={styles.headMeta}>
-              {/* 拆分可同时看多设备的会话：标题下标明本会话所属设备 */}
               {task.hostname ? (
                 <span className={styles.deviceChip}>💻 {task.hostname}</span>
               ) : null}
-              <span>{task.projectName}</span>
               {task.usedTokens5h ? (
                 <Tooltip title="近 5 小时 token 用量（输入 + 输出 + 缓存创建）">
                   <span className={styles.tokenChip}>
@@ -617,290 +636,344 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 </Tooltip>
               ) : null}
             </div>
-          </div>
-          <div
-            className={styles.headActions}
-            // 紧凑卡片整卡可点（换到主区），但头部这些是各自独立的动作 ——
-            // 不拦住冒泡的话，点「暂停」会连带把卡片换到主区。
-            onClick={compact ? (e) => e.stopPropagation() : undefined}
-          >
-            {compact ? (
-              /* 紧凑卡片只留「关闭」：卡片是拿来瞥一眼的，点它本体就换到主区，
+          )}
+        </div>
+        <div
+          className={styles.headActions}
+          // 紧凑卡片整卡可点（换到主区），但头部这些是各自独立的动作 ——
+          // 不拦住冒泡的话，点「暂停」会连带把卡片换到主区。
+          onClick={compact ? (e) => e.stopPropagation() : undefined}
+        >
+          {compact ? (
+            /* 紧凑卡片只留「关闭」：卡片是拿来瞥一眼的，点它本体就换到主区，
                暂停/中断/终止这些都该在主区从容地做，摆在这儿既挤又容易误触。 */
-              closable ? (
-                <Tooltip title="关闭此格">
+            closable ? (
+              <Tooltip title="关闭此格">
+                <Button
+                  size="small"
+                  type="text"
+                  icon={
+                    <Icon
+                      icon="ph:x"
+                      className={`${styles.headIcon} ${styles.closeIcon}`}
+                    />
+                  }
+                  onClick={() => closePane(id)}
+                />
+              </Tooltip>
+            ) : null
+          ) : narrow ? (
+            // 收进下拉菜单的两种情形：放大布局右侧那一列的窄卡片，以及格子被切得太窄
+            //（见 FLAT_MIN_W）。其余情况一律平铺 —— 功能藏在 ⋯ 里每次都要多点一下，
+            // 而这些恰恰是高频操作。移动端不受这里影响：整个 paneHeader 被样式隐藏，
+            // 操作走全局顶栏的「⋯」菜单。
+            <Dropdown
+              trigger={["click"]}
+              placement="bottomRight"
+              menu={{
+                items: [
+                  // 放大/还原排在最前：它是布局操作，比暂停这些更常用，
+                  // 而多格时头部空间只够一个 ⋯，只能收进菜单（与其余按钮同一处境）。
+                  {
+                    key: "focus",
+                    icon:
+                      focusedId === id ? (
+                        <Icon
+                          icon="ph:arrows-in-simple"
+                          className={styles.headIcon}
+                        />
+                      ) : (
+                        <Icon
+                          icon="ph:arrows-out-simple"
+                          className={styles.headIcon}
+                        />
+                      ),
+                    label: focusedId === id ? "还原为网格" : "放大这一格",
+                    onClick: () => setFocused(id),
+                  },
+                  // 右栏开关同样收进来：格子窄到折叠时它更需要 —— 那种宽度下
+                  // 正文与右栏抢地方，收放是高频动作
+                  ...(isMobile
+                    ? []
+                    : [
+                        {
+                          key: "rightPane",
+                          icon: <Icon icon="ph:sidebar-simple" />,
+                          // 摆不下时灰掉，缘由挂 title（与「中断」那条同一套做法）
+                          label: (
+                            <span title={rightPaneHint}>{rightPaneHint}</span>
+                          ),
+                          disabled: !rightPaneUsable,
+                          onClick: () => toggleRightPane(id),
+                        },
+                      ]),
+                  {
+                    key: "sync",
+                    icon: <Icon icon="ph:arrow-clockwise" />,
+                    label: "重新同步内容",
+                    onClick: () => syncMessages(id),
+                  },
+                  {
+                    key: "pause",
+                    icon: paused ? (
+                      <Icon icon="ph:play-circle" className={styles.headIcon} />
+                    ) : (
+                      <Icon
+                        icon="ph:pause-circle"
+                        className={styles.headIcon}
+                      />
+                    ),
+                    label: paused ? "恢复" : "暂停",
+                    disabled: !controllable,
+                    onClick: () => control(id, paused ? "resume" : "pause"),
+                  },
+                  {
+                    key: "interrupt",
+                    icon: <Icon icon="ph:lightning" />,
+                    // 菜单项写动作名，禁用的缘由挂 title —— 拿「当前没有正在执行的任务」
+                    // 当条目名，读起来是句状态描述，不像个能点的东西
+                    label: <span title={interruptHint}>中断当前任务</span>,
+                    disabled: !canInterrupt,
+                    onClick: () => control(id, "interrupt"),
+                  },
+                  {
+                    key: "stop",
+                    icon: <Icon icon="ph:stop-circle" />,
+                    label: "终止进程",
+                    danger: true,
+                    disabled: !controllable,
+                    onClick: () =>
+                      Modal.confirm({
+                        title: "确定终止该任务进程？",
+                        okText: "终止",
+                        cancelText: "取消",
+                        okButtonProps: { danger: true },
+                        onOk: () => control(id, "stop"),
+                      }),
+                  },
+                  { type: "divider" as const },
+                  {
+                    key: "close",
+                    icon: <Icon icon="ph:x" />,
+                    label: "关闭此格",
+                    onClick: () => closePane(id),
+                  },
+                ],
+              }}
+            >
+              <Button
+                size="small"
+                type="text"
+                icon={
+                  <Icon
+                    icon="ph:dots-three-vertical"
+                    className={styles.headIcon}
+                  />
+                }
+              />
+            </Dropdown>
+          ) : (
+            <>
+              {/* 放大/还原：单格没有意义（本来就占满），故与关闭按钮一样只在多格时出现 */}
+              {closable ? (
+                <Tooltip title={focusedId === id ? "还原为网格" : "放大这一格"}>
                   <Button
                     size="small"
                     type="text"
-                    icon={<Icon icon="ph:x" className={`${styles.headIcon} ${styles.closeIcon}`} />}
-                    onClick={() => closePane(id)}
+                    icon={
+                      focusedId === id ? (
+                        <Icon
+                          icon="ph:arrows-in-simple"
+                          className={styles.headIcon}
+                        />
+                      ) : (
+                        <Icon
+                          icon="ph:arrows-out-simple"
+                          className={styles.headIcon}
+                        />
+                      )
+                    }
+                    onClick={() => setFocused(id)}
                   />
                 </Tooltip>
-              ) : null
-            ) : narrow ? (
-              // 收进下拉菜单的两种情形：放大布局右侧那一列的窄卡片，以及格子被切得太窄
-              //（见 FLAT_MIN_W）。其余情况一律平铺 —— 功能藏在 ⋯ 里每次都要多点一下，
-              // 而这些恰恰是高频操作。移动端不受这里影响：整个 paneHeader 被样式隐藏，
-              // 操作走全局顶栏的「⋯」菜单。
-              <Dropdown
-                trigger={["click"]}
-                placement="bottomRight"
-                menu={{
-                  items: [
-                    // 放大/还原排在最前：它是布局操作，比暂停这些更常用，
-                    // 而多格时头部空间只够一个 ⋯，只能收进菜单（与其余按钮同一处境）。
-                    {
-                      key: "focus",
-                      icon:
-                        focusedId === id ? (
-                          <Icon icon="ph:arrows-in-simple" className={styles.headIcon} />
-                        ) : (
-                          <Icon icon="ph:arrows-out-simple" className={styles.headIcon} />
-                        ),
-                      label: focusedId === id ? "还原为网格" : "放大这一格",
-                      onClick: () => setFocused(id),
-                    },
-                    // 右栏开关同样收进来：格子窄到折叠时它更需要 —— 那种宽度下
-                    // 正文与右栏抢地方，收放是高频动作
-                    ...(isMobile
-                      ? []
-                      : [
-                          {
-                            key: "rightPane",
-                            icon: <Icon icon="ph:sidebar-simple" />,
-                            // 摆不下时灰掉，缘由挂 title（与「中断」那条同一套做法）
-                            label: (
-                              <span title={rightPaneHint}>{rightPaneHint}</span>
-                            ),
-                            disabled: !rightPaneUsable,
-                            onClick: () => toggleRightPane(id),
-                          },
-                        ]),
-                    {
-                      key: "sync",
-                      icon: <Icon icon="ph:arrow-clockwise" />,
-                      label: "重新同步内容",
-                      onClick: () => syncMessages(id),
-                    },
-                    {
-                      key: "pause",
-                      icon: paused ? (
-                        <Icon icon="ph:play-circle" className={styles.headIcon} />
-                      ) : (
-                        <Icon icon="ph:pause-circle" className={styles.headIcon} />
-                      ),
-                      label: paused ? "恢复" : "暂停",
-                      disabled: !controllable,
-                      onClick: () => control(id, paused ? "resume" : "pause"),
-                    },
-                    {
-                      key: "interrupt",
-                      icon: <Icon icon="ph:lightning" />,
-                      // 菜单项写动作名，禁用的缘由挂 title —— 拿「当前没有正在执行的任务」
-                      // 当条目名，读起来是句状态描述，不像个能点的东西
-                      label: <span title={interruptHint}>中断当前任务</span>,
-                      disabled: !canInterrupt,
-                      onClick: () => control(id, "interrupt"),
-                    },
-                    {
-                      key: "stop",
-                      icon: <Icon icon="ph:stop-circle" />,
-                      label: "终止进程",
-                      danger: true,
-                      disabled: !controllable,
-                      onClick: () =>
-                        Modal.confirm({
-                          title: "确定终止该任务进程？",
-                          okText: "终止",
-                          cancelText: "取消",
-                          okButtonProps: { danger: true },
-                          onOk: () => control(id, "stop"),
-                        }),
-                    },
-                    { type: "divider" as const },
-                    {
-                      key: "close",
-                      icon: <Icon icon="ph:x" />,
-                      label: "关闭此格",
-                      onClick: () => closePane(id),
-                    },
-                  ],
-                }}
-              >
-                <Button size="small" type="text" icon={<Icon icon="ph:dots-three-vertical" className={styles.headIcon} />} />
-              </Dropdown>
-            ) : (
-              <>
-                {/* 放大/还原：单格没有意义（本来就占满），故与关闭按钮一样只在多格时出现 */}
-                {closable ? (
-                  <Tooltip
-                    title={focusedId === id ? "还原为网格" : "放大这一格"}
-                  >
+              ) : null}
+              {/* 右栏开关。照 VitaAgent 顶栏那枚 28×28 的面板钮
+                  （`web/src/pages/chat/index.tsx` 的 `panelBtn`）：亮起表示栏开着。
+                  窄屏不给 —— 那边没有第三栏，状态卡就在对话流里，开关无处可开。 */}
+              {!isMobile ? (
+                <Tooltip title={rightPaneHint}>
+                  {/* 禁用的 Button 不发事件，Tooltip 就没法解释「为什么不能点」，
+                      所以包一层可悬停的 span（同「中断」那颗） */}
+                  <span>
                     <Button
                       size="small"
                       type="text"
+                      className={rightPaneOpen ? styles.paneBtnOn : undefined}
                       icon={
-                        focusedId === id ? (
-                          <Icon icon="ph:arrows-in-simple" className={styles.headIcon} />
-                        ) : (
-                          <Icon icon="ph:arrows-out-simple" className={styles.headIcon} />
-                        )
+                        <Icon
+                          icon="ph:sidebar-simple"
+                          className={styles.headIcon}
+                        />
                       }
-                      onClick={() => setFocused(id)}
+                      disabled={!rightPaneUsable}
+                      onClick={() => toggleRightPane(id)}
                     />
-                  </Tooltip>
-                ) : null}
-                {/* 右栏开关。照 VitaAgent 顶栏那枚 28×28 的面板钮
-                  （`web/src/pages/chat/index.tsx` 的 `panelBtn`）：亮起表示栏开着。
-                  窄屏不给 —— 那边没有第三栏，状态卡就在对话流里，开关无处可开。 */}
-                {!isMobile ? (
-                  <Tooltip title={rightPaneHint}>
-                    {/* 禁用的 Button 不发事件，Tooltip 就没法解释「为什么不能点」，
-                      所以包一层可悬停的 span（同「中断」那颗） */}
-                    <span>
-                      <Button
-                        size="small"
-                        type="text"
-                        className={rightPaneOpen ? styles.paneBtnOn : undefined}
-                        icon={<Icon icon="ph:sidebar-simple" className={styles.headIcon} />}
-                        disabled={!rightPaneUsable}
-                        onClick={() => toggleRightPane(id)}
-                      />
-                    </span>
-                  </Tooltip>
-                ) : null}
-                {/* 同步中的状态**不能只由转圈来表达**：系统开了「减少动态效果」
+                  </span>
+                </Tooltip>
+              ) : null}
+              {/* 同步中的状态**不能只由转圈来表达**：系统开了「减少动态效果」
                     就没有转圈了，读屏的人也从来看不到它。所以置灰 ＋ 改口 ——
                     这两条对所有人都在，转不转只是锦上添花。
                     顺带把「同步中还能再点一次」也堵上（原来点两下发两次）。
                     `disabled` 的钮不派发事件，Tooltip 要挂在外层 span 上才显示
                     （与上面那枚右栏开关同一写法）。 */}
-                <Tooltip
-                  title={
-                    loading ? "正在重新同步…" : "重新同步该终端的对话内容"
-                  }
-                >
-                  <span>
-                    <Button
-                      size="small"
-                      type="text"
-                      disabled={loading}
-                      icon={
-                        /* 转圈自己驱动：antd 的 `spin` prop 只对 antd 图标生效，
+              <Tooltip
+                title={loading ? "正在重新同步…" : "重新同步该终端的对话内容"}
+              >
+                <span>
+                  <Button
+                    size="small"
+                    type="text"
+                    disabled={loading}
+                    icon={
+                      /* 转圈自己驱动：antd 的 `spin` prop 只对 antd 图标生效，
                            换成 Phosphor 之后要自己给类（周期与 `StatusIcon` 的
                            执行中同为 1.1s linear —— 一屏之内只有一种转法） */
-                        <Icon
-                          icon="ph:arrow-clockwise"
-                          className={`${styles.headIcon} ${
-                            loading ? styles.syncSpin : ""
-                          }`}
-                        />
-                      }
-                      onClick={() => syncMessages(id)}
-                    />
-                  </span>
-                </Tooltip>
-                <Tooltip title={paused ? "恢复" : "暂停"}>
+                      <Icon
+                        icon="ph:arrow-clockwise"
+                        className={`${styles.headIcon} ${
+                          loading ? styles.syncSpin : ""
+                        }`}
+                      />
+                    }
+                    onClick={() => syncMessages(id)}
+                  />
+                </span>
+              </Tooltip>
+              <Tooltip title={paused ? "恢复" : "暂停"}>
+                <Button
+                  size="small"
+                  type="text"
+                  icon={
+                    paused ? (
+                      <Icon icon="ph:play-circle" />
+                    ) : (
+                      <Icon
+                        icon="ph:pause-circle"
+                        className={styles.headIcon}
+                      />
+                    )
+                  }
+                  disabled={!controllable}
+                  onClick={() => control(id, paused ? "resume" : "pause")}
+                />
+              </Tooltip>
+              <Tooltip title={interruptHint}>
+                {/* 禁用的 Button 不发事件，Tooltip 就没法解释「为什么不能点」，
+                    所以包一层可悬停的 span */}
+                <span>
                   <Button
                     size="small"
                     type="text"
                     icon={
-                      paused ? <Icon icon="ph:play-circle" /> : <Icon icon="ph:pause-circle" className={styles.headIcon} />
+                      <Icon icon="ph:lightning" className={styles.headIcon} />
+                    }
+                    disabled={!canInterrupt}
+                    onClick={() => control(id, "interrupt")}
+                  />
+                </span>
+              </Tooltip>
+              <Popconfirm
+                title="确定终止该任务进程？"
+                okText="终止"
+                cancelText="取消"
+                onConfirm={() => control(id, "stop")}
+                disabled={!controllable}
+              >
+                <Tooltip title="终止进程">
+                  <Button
+                    size="small"
+                    type="text"
+                    danger
+                    icon={
+                      <Icon icon="ph:stop-circle" className={styles.headIcon} />
                     }
                     disabled={!controllable}
-                    onClick={() => control(id, paused ? "resume" : "pause")}
                   />
                 </Tooltip>
-                <Tooltip title={interruptHint}>
-                  {/* 禁用的 Button 不发事件，Tooltip 就没法解释「为什么不能点」，
-                    所以包一层可悬停的 span */}
-                  <span>
-                    <Button
-                      size="small"
-                      type="text"
-                      icon={<Icon icon="ph:lightning" className={styles.headIcon} />}
-                      disabled={!canInterrupt}
-                      onClick={() => control(id, "interrupt")}
-                    />
-                  </span>
+              </Popconfirm>
+              {/* 关闭此格：只在多格时给 —— 单格关掉就空了，没有「回到网格」可言 */}
+              {closable ? (
+                <Tooltip title="关闭此格">
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={
+                      <Icon
+                        icon="ph:x"
+                        className={`${styles.headIcon} ${styles.closeIcon}`}
+                      />
+                    }
+                    onClick={() => closePane(id)}
+                  />
                 </Tooltip>
-                <Popconfirm
-                  title="确定终止该任务进程？"
-                  okText="终止"
-                  cancelText="取消"
-                  onConfirm={() => control(id, "stop")}
-                  disabled={!controllable}
-                >
-                  <Tooltip title="终止进程">
-                    <Button
-                      size="small"
-                      type="text"
-                      danger
-                      icon={<Icon icon="ph:stop-circle" className={styles.headIcon} />}
-                      disabled={!controllable}
-                    />
-                  </Tooltip>
-                </Popconfirm>
-                {/* 关闭此格：只在多格时给 —— 单格关掉就空了，没有「回到网格」可言 */}
-                {closable ? (
-                  <Tooltip title="关闭此格">
-                    <Button
-                      size="small"
-                      type="text"
-                      icon={<Icon icon="ph:x" className={`${styles.headIcon} ${styles.closeIcon}`} />}
-                      onClick={() => closePane(id)}
-                    />
-                  </Tooltip>
-                ) : null}
-              </>
-            )}
-          </div>
-        </header>
+              ) : null}
+            </>
+          )}
+        </div>
+      </header>
 
-        <div className={styles.chat} ref={chatRef} onScroll={onChatScroll}>
-          <Spin spinning={loading}>
-            <div className={styles.chatColumn}>
-              {!loading &&
-              feedMessages.length === 0 &&
-              queuedItems.length === 0 ? (
-                <div className={styles.chatEmpty}>
-                  <div className={styles.big}>
-                    {bodyPending
-                      ? "⏳"
-                      : (bodyFail && FAIL_TEXT[bodyFail].icon) || "💬"}
+      {/* 头下面才分两列：正文 ＋（可选）本格自己的右栏 */}
+      <div className={styles.paneBody}>
+        <div
+          className={`${styles.ChatPane} ${compact ? styles.compact : ""} ${
+            compact && showPending ? styles.awaitingSelect : ""
+          }`}
+        >
+          <div className={styles.chat} ref={chatRef} onScroll={onChatScroll}>
+            <Spin spinning={loading}>
+              <div className={styles.chatColumn}>
+                {!loading &&
+                feedMessages.length === 0 &&
+                queuedItems.length === 0 ? (
+                  <div className={styles.chatEmpty}>
+                    <div className={styles.big}>
+                      {bodyPending
+                        ? "⏳"
+                        : (bodyFail && FAIL_TEXT[bodyFail].icon) || "💬"}
+                    </div>
+                    <div>
+                      {bodyPending
+                        ? "正在从那台机器读取这条会话的正文…"
+                        : bodyFail
+                          ? FAIL_TEXT[bodyFail].text
+                          : "该会话暂无可展示的对话内容"}
+                    </div>
+                    {/* 离线是可恢复状态，得给一条出路；不自动轮询（那台机器可能关了一整晚） */}
+                    {bodyFail ? (
+                      <Button
+                        size="small"
+                        icon={<Icon icon="ph:arrow-clockwise" />}
+                        onClick={() => syncMessages(id)}
+                      >
+                        重试
+                      </Button>
+                    ) : null}
                   </div>
-                  <div>
-                    {bodyPending
-                      ? "正在从那台机器读取这条会话的正文…"
-                      : bodyFail
-                        ? FAIL_TEXT[bodyFail].text
-                        : "该会话暂无可展示的对话内容"}
-                  </div>
-                  {/* 离线是可恢复状态，得给一条出路；不自动轮询（那台机器可能关了一整晚） */}
-                  {bodyFail ? (
-                    <Button
-                      size="small"
-                      icon={<Icon icon="ph:arrow-clockwise" />}
-                      onClick={() => syncMessages(id)}
-                    >
-                      重试
-                    </Button>
-                  ) : null}
-                </div>
-              ) : (
-                <TerminalFeed
-                  taskId={id}
-                  messages={feedMessages}
-                  subTasks={subTasks}
-                  running={task.status === "running"}
-                  providerDsr={task.providerDsr}
-                  imageCtx={imageCtx}
-                  focusAgent={focusMine}
-                  onFocusAgent={onFocusAgent}
-                />
-              )}
+                ) : (
+                  <TerminalFeed
+                    taskId={id}
+                    messages={feedMessages}
+                    subTasks={subTasks}
+                    running={task.status === "running"}
+                    providerDsr={task.providerDsr}
+                    imageCtx={imageCtx}
+                    focusAgent={focusMine}
+                    onFocusAgent={onFocusAgent}
+                  />
+                )}
 
-              {/* 清单 / 后台任务 / 子代理是「当前状态」而非时序事件 —— 所以宽屏把它们
+                {/* 清单 / 后台任务 / 子代理是「当前状态」而非时序事件 —— 所以宽屏把它们
                 放进右栏（见 SessionStatePane）：与正文并排、不跟着对话滚走，
                 往上翻历史时仍然看得见。
 
@@ -908,16 +981,16 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 唯一的去处。同一份内容任何时候只出现在一处，不会两边都有。
 
                 紧凑卡片仍然不给 —— 它只有 320×260，摆下这些就没剩多少地方看内容了。 */}
-              {!compact && isMobile && (
-                <SessionPanels
-                  taskId={id}
-                  messages={messages}
-                  subTasks={subTasks}
-                  running={task.status === "running"}
-                />
-              )}
+                {!compact && isMobile && (
+                  <SessionPanels
+                    taskId={id}
+                    messages={messages}
+                    subTasks={subTasks}
+                    running={task.status === "running"}
+                  />
+                )}
 
-              {/* 排队卡：同样挂在对话流末尾，接在状态卡后面。
+                {/* 排队卡：同样挂在对话流末尾，接在状态卡后面。
 
                 **与对话流是互补的两半，同一条任务任何时刻只出现在一处**：
                 进不进对话流、进不进排队卡，判据是同一个 `stillQueued`
@@ -926,212 +999,222 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 改的只是它待在哪儿，不会让同一条内容显示两遍。
 
                 紧凑卡片不给：它整块都是操作（撤回、打断），而紧凑卡片是只读的。 */}
-              {!compact && queuedItems.length > 0 && (
-                <section className={styles.queuedCard}>
-                  {/* 卡片头：28×28 描边色块放图标 + 标题 + 一行元信息，
+                {!compact && queuedItems.length > 0 && (
+                  <section className={styles.queuedCard}>
+                    {/* 卡片头：28×28 描边色块放图标 + 标题 + 一行元信息，
                     与状态卡同一套规格（照 VitaAgent 的任务卡） */}
-                  <div className={styles.queuedHead}>
-                    <span className={styles.queuedTile}>
-                      <Icon icon="ph:clock" />
-                    </span>
-                    <span className={styles.queuedHeadText}>
-                      <span className={styles.queuedTitle}>终端排队中</span>
-                      <span className={styles.queuedMeta}>
-                        还有 {queuedItems.length} 条没轮到
+                    <div className={styles.queuedHead}>
+                      <span className={styles.queuedTile}>
+                        <Icon icon="ph:clock" />
                       </span>
-                    </span>
-                    <span className={styles.queuedActions}>
-                      <span
-                        className={styles.recallAll}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => {
-                          const cmds = queuedItems
-                            .filter((q) => q.recallable && q.cmdId)
-                            .map((q) => q.cmdId as string);
-                          const nativeCount = queuedItems.filter(
-                            (q) => !q.recallable,
-                          ).length;
-                          // hub 队列里的（还没注入终端）走撤回 + 回填对话框
-                          if (cmds.length) {
-                            recallAllQueued(
-                              id,
-                              cmds,
-                              queuedItems
-                                .filter((q) => q.recallable)
-                                .map((q) => q.text)
-                                .join("\n"),
-                            );
-                          }
-                          // 已进终端原生队列的，注入 ↑ 键逐条撤回（iTerm2/Windows）
-                          if (nativeCount > 0) {
-                            termKey(id, "up", nativeCount);
-                          }
-                        }}
-                      >
-                        全部撤回
+                      <span className={styles.queuedHeadText}>
+                        <span className={styles.queuedTitle}>终端排队中</span>
+                        <span className={styles.queuedMeta}>
+                          还有 {queuedItems.length} 条没轮到
+                        </span>
                       </span>
-                      {/* 注入 Esc：打断终端当前正在跑的那一轮，排队的内容随即开始执行。
-                        原先叫「插入会话」，看不出会打断什么 —— 而"打断"恰恰是这个按钮
-                        最该让人先知道的后果。 */}
-                      <Tooltip title="打断终端当前正在执行的任务，让排队内容立即开始">
+                      <span className={styles.queuedActions}>
                         <span
                           className={styles.recallAll}
                           role="button"
                           tabIndex={0}
-                          onClick={() => termKey(id, "esc")}
+                          onClick={() => {
+                            const cmds = queuedItems
+                              .filter((q) => q.recallable && q.cmdId)
+                              .map((q) => q.cmdId as string);
+                            const nativeCount = queuedItems.filter(
+                              (q) => !q.recallable,
+                            ).length;
+                            // hub 队列里的（还没注入终端）走撤回 + 回填对话框
+                            if (cmds.length) {
+                              recallAllQueued(
+                                id,
+                                cmds,
+                                queuedItems
+                                  .filter((q) => q.recallable)
+                                  .map((q) => q.text)
+                                  .join("\n"),
+                              );
+                            }
+                            // 已进终端原生队列的，注入 ↑ 键逐条撤回（iTerm2/Windows）
+                            if (nativeCount > 0) {
+                              termKey(id, "up", nativeCount);
+                            }
+                          }}
                         >
-                          打断并执行
+                          全部撤回
                         </span>
-                      </Tooltip>
-                    </span>
-                  </div>
-                  <ul className={styles.queuedList}>
-                    {queuedItems.map((q, i) => (
-                      <li key={i} className={styles.queuedItem}>
-                        <span className={styles.queuedDot} />
-                        <span className={styles.queuedItemText}>{q.text}</span>
-                        {/* 单条撤回跟排队卡同属一处 —— 撤回是「队列管理」；
-                          留在正文里既与这块重复，又要为去重把消息藏起来。
-                          已进终端原生队列的撤不回（只能整体注入 ↑），仍只给个标签。 */}
-                        {q.recallable && q.cmdId ? (
+                        {/* 注入 Esc：打断终端当前正在跑的那一轮，排队的内容随即开始执行。
+                        原先叫「插入会话」，看不出会打断什么 —— 而"打断"恰恰是这个按钮
+                        最该让人先知道的后果。 */}
+                        <Tooltip title="打断终端当前正在执行的任务，让排队内容立即开始">
                           <span
-                            className={styles.queuedItemRecall}
+                            className={styles.recallAll}
                             role="button"
                             tabIndex={0}
-                            onClick={() =>
-                              recallInput(id, q.cmdId as string, q.text)
-                            }
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" || e.key === " ") {
-                                e.preventDefault();
-                                recallInput(id, q.cmdId as string, q.text);
-                              }
-                            }}
+                            onClick={() => termKey(id, "esc")}
                           >
-                            撤回
+                            打断并执行
                           </span>
-                        ) : (
-                          <span className={styles.queuedTag}>已入终端队列</span>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                  {queuedItems.some((q) => !q.recallable) ? (
-                    <div className={styles.queuedHint}>
-                      「全部撤回」注入 ↑、「打断并执行」注入 Esc（仅 iTerm2 /
-                      Windows）； Terminal.app 请在终端里手动按 ↑ /
-                      Esc（操作后此处自动同步）
+                        </Tooltip>
+                      </span>
                     </div>
-                  ) : null}
-                </section>
-              )}
-            </div>
-          </Spin>
+                    <ul className={styles.queuedList}>
+                      {queuedItems.map((q, i) => (
+                        <li key={i} className={styles.queuedItem}>
+                          <span className={styles.queuedDot} />
+                          <span className={styles.queuedItemText}>
+                            {q.text}
+                          </span>
+                          {/* 单条撤回跟排队卡同属一处 —— 撤回是「队列管理」；
+                          留在正文里既与这块重复，又要为去重把消息藏起来。
+                          已进终端原生队列的撤不回（只能整体注入 ↑），仍只给个标签。 */}
+                          {q.recallable && q.cmdId ? (
+                            <span
+                              className={styles.queuedItemRecall}
+                              role="button"
+                              tabIndex={0}
+                              onClick={() =>
+                                recallInput(id, q.cmdId as string, q.text)
+                              }
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  recallInput(id, q.cmdId as string, q.text);
+                                }
+                              }}
+                            >
+                              撤回
+                            </span>
+                          ) : (
+                            <span className={styles.queuedTag}>
+                              已入终端队列
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                    {queuedItems.some((q) => !q.recallable) ? (
+                      <div className={styles.queuedHint}>
+                        「全部撤回」注入 ↑、「打断并执行」注入 Esc（仅 iTerm2 /
+                        Windows）； Terminal.app 请在终端里手动按 ↑ /
+                        Esc（操作后此处自动同步）
+                      </div>
+                    ) : null}
+                  </section>
+                )}
+              </div>
+            </Spin>
 
-          {/* 回到底部。滚动条不再被藏掉（见 index.module.scss 的 scrollbar-gutter），
+            {/* 回到底部。滚动条不再被藏掉（见 index.module.scss 的 scrollbar-gutter），
             但上滚看历史之后仍需要一键回到最新内容 —— 尤其执行中，新内容一直在长。 */}
-          {!atBottom ? (
-            <div className={styles.toBottomDock}>
-              <span
-                className={styles.toBottomBtn}
-                role="button"
-                tabIndex={0}
-                aria-label="回到底部"
-                title="回到底部"
-                onClick={scrollToBottom}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    scrollToBottom();
-                  }
-                }}
-              >
-                <Icon icon="ph:arrow-down" />
-              </span>
-            </div>
-          ) : null}
-        </div>
+            {!atBottom ? (
+              <div className={styles.toBottomDock}>
+                <span
+                  className={styles.toBottomBtn}
+                  role="button"
+                  tabIndex={0}
+                  aria-label="回到底部"
+                  title="回到底部"
+                  onClick={scrollToBottom}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      scrollToBottom();
+                    }
+                  }}
+                >
+                  <Icon icon="ph:arrow-down" />
+                </span>
+              </div>
+            ) : null}
+          </div>
 
-        {/* 紧凑卡片不给输入区：卡片只有固定的一点高度，塞下输入框就没剩多少地方看内容。
+          {/* 紧凑卡片不给输入区：卡片只有固定的一点高度，塞下输入框就没剩多少地方看内容。
           要发东西点一下把它换到主区 —— 那里才有完整的输入体验（附件、斜杠命令等）。 */}
-        {compact ? null : (
-          <div className={styles.composerWrap}>
-            <div className={styles.chatColumn}>
-              {/* 暂停中必须说破。SIGSTOP 冻住的进程从外面看就是「什么都不回」——
+          {compact ? null : (
+            <div className={styles.composerWrap}>
+              <div className={styles.chatColumn}>
+                {/* 暂停中必须说破。SIGSTOP 冻住的进程从外面看就是「什么都不回」——
               而人在手机上只看到终端毫无动静，第一反应是远程控制坏了，不会想到
               是自己（或别人）点过暂停。所以把状态和出路一起摆在输入框正上方。 */}
-              {paused ? (
-                <div className={styles.pausedBar}>
-                  <span className={styles.pausedText}>
-                    该终端已暂停，发出去的内容不会被执行
-                  </span>
-                  <Button
-                    size="small"
-                    type="primary"
-                    icon={<Icon icon="ph:play-circle" className={styles.headIcon} />}
-                    onClick={() => control(id, "resume")}
-                  >
-                    恢复
-                  </Button>
-                </div>
-              ) : null}
-              {/* 终端正等你选：由 hook 在选项弹出终端**之前**报上来，所以这里是「现在就能
+                {paused ? (
+                  <div className={styles.pausedBar}>
+                    <span className={styles.pausedText}>
+                      该终端已暂停，发出去的内容不会被执行
+                    </span>
+                    <Button
+                      size="small"
+                      type="primary"
+                      icon={
+                        <Icon
+                          icon="ph:play-circle"
+                          className={styles.headIcon}
+                        />
+                      }
+                      onClick={() => control(id, "resume")}
+                    >
+                      恢复
+                    </Button>
+                  </div>
+                ) : null}
+                {/* 终端正等你选：由 hook 在选项弹出终端**之前**报上来，所以这里是「现在就能
               替它做决定」，而不是对话流里那张事后追认的记录卡。放在输入框正上方 ——
               人回到这个页面时视线本来就落在这儿，且它比打字更该被先处理。 */}
-              {showPending && task.pendingSelect ? (
-                <div className={styles.pendingSelect}>
-                  {/* key 必须跟着题目走：连着问两题时，React 会复用同一个 SelectCard
+                {showPending && task.pendingSelect ? (
+                  <div className={styles.pendingSelect}>
+                    {/* key 必须跟着题目走：连着问两题时，React 会复用同一个 SelectCard
                   实例，它内部记「已回应」的 state 不会重置 —— 新题一弹出来就是
                   灰的锁定态，根本点不了。换 key 强制重挂载。 */}
-                  {/* 收起的时机是 onDone（所有题都答完），不是 onAnswer ——
+                    {/* 收起的时机是 onDone（所有题都答完），不是 onAnswer ——
                   AskUserQuestion 可以带多道题，答完第一题就把卡收了，
                   后面的题就再也没机会回答了。 */}
-                  <SelectCard
-                    key={pendingKey}
-                    data={task.pendingSelect}
-                    onAnswer={
-                      canSend
-                        ? (text) => sendInput(id, text, { fromSelect: true })
-                        : undefined
-                    }
-                    onDone={() => setAnsweredKey(pendingKey)}
-                  />
-                </div>
-              ) : null}
-              <Composer
-                taskId={id}
-                disabled={!canSend}
-                disabledHint={
-                  paused
-                    ? "该终端已暂停，先恢复再发布"
-                    : "该会话无存活进程，无法发布"
-                }
-                machineId={task.machineId}
-                // 会话此刻的工作目录优先：会话 cd 进子目录后，进程 cwd 还钉在启动目录，
-                // 拿它当上传落点就会「文件写在项目根、终端在子目录里找」（见 Task.liveCwd）。
-                cwd={task.liveCwd || task.process?.cwd}
-                onSend={(text) => {
-                  sendInput(id, text);
-                  // 发送后强制滚到底部：即使之前上滚看历史，发出内容也应带着滚回底部
-                  stickBottomRef.current = true;
-                  setAtBottom(true);
-                  requestAnimationFrame(() => {
-                    const el = chatRef.current;
-                    if (el) el.scrollTop = el.scrollHeight;
-                  });
-                }}
-              />
+                    <SelectCard
+                      key={pendingKey}
+                      data={task.pendingSelect}
+                      onAnswer={
+                        canSend
+                          ? (text) => sendInput(id, text, { fromSelect: true })
+                          : undefined
+                      }
+                      onDone={() => setAnsweredKey(pendingKey)}
+                    />
+                  </div>
+                ) : null}
+                <Composer
+                  taskId={id}
+                  disabled={!canSend}
+                  disabledHint={
+                    paused
+                      ? "该终端已暂停，先恢复再发布"
+                      : "该会话无存活进程，无法发布"
+                  }
+                  machineId={task.machineId}
+                  // 会话此刻的工作目录优先：会话 cd 进子目录后，进程 cwd 还钉在启动目录，
+                  // 拿它当上传落点就会「文件写在项目根、终端在子目录里找」（见 Task.liveCwd）。
+                  cwd={task.liveCwd || task.process?.cwd}
+                  onSend={(text) => {
+                    sendInput(id, text);
+                    // 发送后强制滚到底部：即使之前上滚看历史，发出内容也应带着滚回底部
+                    stickBottomRef.current = true;
+                    setAtBottom(true);
+                    requestAnimationFrame(() => {
+                      const el = chatRef.current;
+                      if (el) el.scrollTop = el.scrollHeight;
+                    });
+                  }}
+                />
+              </div>
             </div>
-          </div>
+          )}
+        </div>
+
+        {rightPaneOpen && (
+          <RightPane>
+            <SessionStatePane task={task} />
+          </RightPane>
         )}
       </div>
-
-      {rightPaneOpen && (
-        <RightPane>
-          <SessionStatePane task={task} />
-        </RightPane>
-      )}
     </div>
   );
 });

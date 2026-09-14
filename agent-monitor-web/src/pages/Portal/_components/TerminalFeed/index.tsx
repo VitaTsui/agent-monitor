@@ -439,6 +439,8 @@ const humanTool = (name: string) => {
 interface ChainCall {
   kind: "call";
   key: string;
+  /** 这一格发生的时刻（源消息的 timestamp）。按时间往链里插东西要用它，见 `attachLooseAgents` */
+  at?: string;
   /** 这次调用的 `tool_use_id`。老记录可能没有 */
   id?: string;
   /** 原始工具名，展开后照原样给 */
@@ -451,6 +453,7 @@ interface ChainCall {
 interface ChainNote {
   kind: "note";
   key: string;
+  at?: string;
   msg: PortalMessage;
 }
 /**
@@ -463,9 +466,17 @@ interface ChainNote {
 interface ChainAgents {
   kind: "agents";
   key: string;
+  at?: string;
   agents: SubTask[];
   /** 各自那次调用的入参提示（比 `SubTask.label` 长一截：120 字 vs 80 字） */
   hints: string[];
+  /**
+   * 这张卡是**按时间落位**的，不是由某次派活记录带出来的。
+   *
+   * 为真时说明「派出它的那条记录不在已加载的正文里」（或父记录里压根没有），
+   * 卡片仍然要画 —— 子代理存不存在由子任务清单说了算，消息流只决定它插在哪儿。
+   */
+  loose?: boolean;
 }
 type ChainItem = ChainCall | ChainNote | ChainAgents;
 
@@ -487,6 +498,112 @@ const isStep = (it: ChainItem) => it.kind === "call" || it.kind === "agents";
  */
 const hasLiveAgent = (it: ChainItem) =>
   it.kind === "agents" && it.agents.some(isSubTaskRunning);
+
+/** 时刻 → 毫秒。解析不了给 `NaN`，调用方据此退回「排最后」 */
+const atMs = (iso?: string): number => (iso ? Date.parse(iso) : NaN);
+
+/**
+ * **把「配不上任何一次派活记录」的子代理按时间插回链里。**
+ *
+ * 为什么必须有这一步（正确性问题，不是体验优化）：链上画不画一张卡，此前的唯一判据是
+ * 「正文里有没有那次 `Agent` 调用」，而正文是**被三层窗口截断过**的 ——
+ * 客户端每轮只捎带 80 条（`client/src/agent.rs:891`）、hub 对活跃会话直接回这份缓存、
+ * 前端再留最多 `MAX_MESSAGES_PER_TASK` 条，而且**没有 offset/游标，更早的根本取不到**。
+ * 实测真实会话 `9168ec90`（789 条消息 / 28 个子代理）：留 500 条时链上只配得上 8 个，
+ * **20 个凭空消失**。还有一类抬多高的窗口都救不回来 —— 父记录里压根没有那条
+ * `tool_use`（`toolUseId` 取自 `agent-*.meta.json`），实测 2 个。
+ *
+ * 所以判据改成两件事解耦：
+ *   **画不画卡** → 由子任务清单说了算（`/subtasks` 是全量、不受窗口限制）；
+ *   **插在哪儿** → 由消息流说了算（配得上就插在那一步，配不上就按 `startedAt` 落位）。
+ * 这样「子代理凭空消失」在结构上不可能再发生，不依赖任何一层窗口调到多大。
+ *
+ * 落位规则（按时间，不另开一个「找不到的那些」区域）：
+ *   1. 落到**它起跑那一刻所属的那一轮**（最后一个「开始时刻 ≤ startedAt」的轮次；
+ *      比所有轮次都早 = 它起跑于已经被截掉的那段对话，落到最早那一轮的**开头**）；
+ *   2. 轮内插在第一个「发生时刻 > startedAt」的链项之前，因此不会出现后起的排在先起的前面；
+ *   3. `startedAt` 完全相同的几个并成一张卡 —— 那就是同一批并行派出去的；
+ *   4. `startedAt` 缺失的排到最后（没有时间可依，至少不谎报位置）。
+ *
+ * **不另开区域**是有理由的：链本身就是时间轴，按时间插回去仍然回答得了「它属于哪个阶段」；
+ * 另开一块则会出现第二个放子代理的地方，而「同一份东西画两处」是这一版反复推翻的东西。
+ * **同一个子代理只出现一次**：配上的在那一步，配不上的按时间落位，两条路互斥（`placed`）。
+ */
+const attachLooseAgents = (
+  turnChains: { chain: ChainItem[]; startMs: number }[],
+  agents: SubTask[],
+): void => {
+  if (!turnChains.length || !agents.length) {
+    return;
+  }
+  /* 已经就地插好的那些：链上任何一张卡里出现过的 id。
+     判据是「渲染结果里有没有它」，不是「配没配上 toolUseId」—— 两者迟早分叉 */
+  const placed = new Set<string>();
+  turnChains.forEach(({ chain }) =>
+    chain.forEach((it) => {
+      if (it.kind === "agents") {
+        it.agents.forEach((a) => placed.add(a.id));
+      }
+    }),
+  );
+
+  const loose = agents
+    .filter((a) => !placed.has(a.id))
+    .sort((a, b) => {
+      const x = atMs(a.startedAt);
+      const y = atMs(b.startedAt);
+      if (Number.isNaN(x)) return 1;
+      if (Number.isNaN(y)) return -1;
+      return x - y;
+    });
+  if (!loose.length) {
+    return;
+  }
+
+  // 起跑时刻完全相同的并成一张卡：那是同一批并行派出去的
+  const batches: SubTask[][] = [];
+  loose.forEach((a) => {
+    const last = batches[batches.length - 1];
+    if (last && last[0].startedAt && last[0].startedAt === a.startedAt) {
+      last.push(a);
+      return;
+    }
+    batches.push([a]);
+  });
+
+  batches.forEach((batch) => {
+    const ms = atMs(batch[0].startedAt);
+    /* 落到哪一轮：最后一个「开始时刻 ≤ 它」的轮次。比所有轮次都早（起跑于已被截掉
+       的那段对话）就落到最早那一轮；时刻缺失就落到最后一轮的末尾。 */
+    let ti = 0;
+    if (Number.isNaN(ms)) {
+      ti = turnChains.length - 1;
+    } else {
+      for (let i = 0; i < turnChains.length; i += 1) {
+        if (turnChains[i].startMs <= ms) {
+          ti = i;
+        }
+      }
+    }
+    const chain = turnChains[ti].chain;
+    const item: ChainAgents = {
+      kind: "agents",
+      key: `loose|${batch.map((a) => a.id).join(",")}`,
+      at: batch[0].startedAt,
+      agents: batch,
+      // 没有派活记录就没有入参提示，卡片标题退回子代理自己的名字（见 agentsGoal）
+      hints: batch.map(() => ""),
+      loose: true,
+    };
+    const at = Number.isNaN(ms)
+      ? chain.length
+      : chain.findIndex((x) => {
+          const t = atMs(x.at);
+          return !Number.isNaN(t) && t > ms;
+        });
+    chain.splice(at < 0 ? chain.length : at, 0, item);
+  });
+};
 
 /**
  * 这条链上**此刻挂起着的那一步**的 key（没有就是空串）。
@@ -574,6 +691,7 @@ const buildChain = (
             openAgents = {
               kind: "agents",
               key: `${k}#a${ti}`,
+              at: m.timestamp,
               agents: [],
               hints: [],
             };
@@ -587,6 +705,7 @@ const buildChain = (
         const call: ChainCall = {
           kind: "call",
           key: `${k}#${ti}`,
+          at: m.timestamp,
           id: t.id,
           name: t.name,
           hint: t.hint ?? "",
@@ -621,6 +740,7 @@ const buildChain = (
       const orphan: ChainCall = {
         kind: "call",
         key: k,
+        at: m.timestamp,
         name: "",
         hint: "",
         results: [out],
@@ -632,7 +752,7 @@ const buildChain = (
 
     if (split.flat) {
       openAgents = null;
-      chain.push({ kind: "note", key: k, msg: m });
+      chain.push({ kind: "note", key: k, at: m.timestamp, msg: m });
       return;
     }
 
@@ -647,7 +767,7 @@ const buildChain = (
       return;
     }
     openAgents = null;
-    chain.push({ kind: "note", key: k, msg: m });
+    chain.push({ kind: "note", key: k, at: m.timestamp, msg: m });
   });
 
   return { chain, body };
@@ -1455,8 +1575,18 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
       chain,
       body,
       ckey: `chain|${turn.key}`,
+      /** 这一轮从什么时候开始：有用户消息就用它，否则用首条产出。落位要用（见下） */
+      startMs: atMs(turn.user?.timestamp ?? turn.items[0]?.timestamp),
     };
   });
+
+  /* **配不上任何一次派活记录的子代理，按时间插回链里。**
+     子代理存不存在由清单说了算，消息流只决定它插在哪一步 —— 理由与落位规则见
+     `attachLooseAgents`。就地改上面那几条链（都是这一帧现建的数组，没有别人看着）。 */
+  attachLooseAgents(
+    turnChains,
+    (subTasks ?? []).filter((t) => t.kind === "agent"),
+  );
 
   /* ---------- 侧栏「点一条子代理 → 滚到它那张卡」的落地 ---------- */
 
@@ -1488,8 +1618,9 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
       }
     }
     if (!hit) {
-      /* 配不上：派出它的那次工具调用不在已加载的正文里。
-       **怎么说由调用方决定** —— 正文还在路上的时候不该报「找不到」。 */
+      /* 找不到。`attachLooseAgents` 之后**只剩一种可能**：这一格连一条正文都还没有
+         （因此一条链都没有，无处可插）。派活记录掉出窗口那一类已经不会再走到这儿。
+         **怎么说由调用方决定** —— 正文还在路上的时候不该报「找不到」。 */
       onFocusAgent?.(null, focusSeq);
       return;
     }

@@ -113,6 +113,14 @@
   --input: var(--vita-border);
   --ring: var(--vita-primary);
 
+  // ---- 浮层阴影 ----
+  // 组件库那三档的语义别名（值不另抄，理由同下面的圆角）。
+  // 右栏那张浮卡用的就是这一档：`0 0 0 1px --border` 画环 ＋ 这一层影
+  // （照 VitaAgent `ActivityPanel/index.module.scss:14-21`）。
+  --shadow-1: var(--vita-shadow-1);
+  --shadow-2: var(--vita-shadow-2);
+  --shadow-3: var(--vita-shadow-3);
+
   // ---- 圆角 ----
   // 值不再另抄一份：组件库的 --vita-radius-* 就是 6 / 8 / 12 这三档，
   // 抄一遍就意味着改圆角要改两处、还会悄悄跑偏。
