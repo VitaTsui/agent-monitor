@@ -69,18 +69,27 @@ export const isSubTaskRunning = (t: SubTask) => t.outcome === "running";
 export const hasSubTaskBody = (t: SubTask) => t.kind === "agent" && t.hasBody;
 
 /**
- * **值得展示**的后台命令：还在跑的，以及跑砸 / 被中断的。
+ * **还在跑的**后台命令。右栏「后台任务」一节列的就是这些。
  *
- * 只有 `completed` 掉出去 —— 正常跑完的后台命令没有关注价值。反过来，异常收场的
- * 必须留着：成功的产出会出现在正文里，失败的什么都不会留下，滤掉就等于让一个
- * 跑砸的后台命令在界面上**无声消失**。
+ * 判据是「它此刻还在跑」（`outcome === "running"`），不是「它没跑成功」。
+ * 旧口径是后者（`outcome !== "completed"`），理由写的是「失败的滤掉就无声消失了」——
+ * 那条理由把**两件事混成了一个状态**：跑砸了是一种**结束**，不是一种进行中。
+ * 叠上 `PortalStore.subTasksOf` 喂进来的那份**全量快照**（`sub_tasks_all`，
+ * 服务端明确不套保留窗口，见 hub `GET /monitor/tasks/:id/subtasks`），后果就是
+ * 这条会话**历史上每一条没跑成的后台命令永远挂在这一节里**：实测本机会话
+ * `460884c8` 会挂 16 条（2026-08-21 ～ 08-30，最老的 24 天前），
+ * `cf98eaca` 挂 8 条、`bc6b3a11` 挂 5 条 —— 就是用户说的「失败的一直挂着不走」。
  *
- * **这一条只管后台命令。** 子代理从前也走同一个过滤，于是跑完的子代理会从界面上
- * 消失；现在子代理归执行链管（链要的是完整的「它派过谁」，一条都不能少），
- * 那套过滤随旧设计一并撤销，不留第二个入口。
+ * 旧口径整条推翻，不留第二个入口：这一节与旁边两节（清单只留没做完的、子代理只列
+ * 在跑的）现在是同一个语义 ——「此刻在办什么」。
+ *
+ * **不会误清真在跑的**：`outcome` 由后端按结构化事实算出来（完成通知里的
+ * `<status>` / `TaskStop` 结果 / 父会话是否已结束），不是按耗时或文案猜的。
+ * 「刚开始就打印了报错但进程还在」这种的 `outcome` 仍是 `running`，照常留在列表里、
+ * 耗时照常走。
  */
-export const aliveBgCommands = (list?: SubTask[]): SubTask[] =>
-  (list ?? []).filter((t) => t.kind !== "agent" && t.outcome !== "completed");
+export const runningBgCommands = (list?: SubTask[]): SubTask[] =>
+  (list ?? []).filter((t) => t.kind !== "agent" && isSubTaskRunning(t));
 
 /**
  * **正在跑的**子代理。右栏「正在执行的子代理」一节列的就是这些。
@@ -94,7 +103,7 @@ export const runningSubAgents = (list?: SubTask[]): SubTask[] =>
   (list ?? []).filter((t) => t.kind === "agent" && isSubTaskRunning(t));
 
 /**
- * 一条会话此刻的「当前状态」：未完成的清单条目、活着的后台命令、正在跑的子代理。
+ * 一条会话此刻的「当前状态」：未完成的清单条目、正在跑的后台命令、正在跑的子代理。
  *
  * 三样的共同点是**「此刻」**：清单是每轮重算的状态，后台命令在链上压根没有节点，
  * 子代理虽然链上有卡，但一条长会话滚回去找那张卡是件苦差事 —— 这一节只给入口
@@ -132,8 +141,8 @@ export function parseLast<T>(messages: PortalMessage[], role: string): T[] {
  * （`SessionStatePane`）还要先问「这条会话有没有东西可展示」才决定要不要给它一个
  * 标题。两处各写一遍筛选条件，改一处漏一处就会出现「右栏列了标题、底下却空着」。
  *
- * 清单只留没做完的：做完的条目没有关注价值。后台命令同理只留没正常跑完的
- * （理由见 `aliveBgCommands`）。
+ * 三样的口径是同一句话 ——「此刻」：清单只留没做完的，后台命令只留还在跑的
+ * （见 `runningBgCommands`），子代理只列还在跑的。
  */
 export const sessionStateOf = (
   messages: PortalMessage[],
@@ -142,7 +151,7 @@ export const sessionStateOf = (
   todos: parseLast<TodoItem>(messages, "todos").filter(
     (t) => t.status !== "completed",
   ),
-  bgTasks: aliveBgCommands(subTasks),
+  bgTasks: runningBgCommands(subTasks),
   agents: runningSubAgents(subTasks),
 });
 
