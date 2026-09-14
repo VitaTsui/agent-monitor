@@ -32,9 +32,14 @@
    对 reduce 就是直接停掉 `dot-blink`）。
 
    **停转之后「执行中」仍然认得出来**，靠的是另外两条通道，不是那圈动画：
-     1. **色**：`running` 是全项目**唯一**走 `--primary` 的一档（#0F9BAD）。
-        与它最容易混的两档是排着（`--subtle-foreground` 灰）与等人输入
-        （`--warning` 橙）—— 三个色在明度与色相上都分得开。
+     1. **色**：`running` 是全项目**唯一**走 `--primary` 的一档。与它最容易混的
+        两档是排着（`--subtle-foreground`）与等人输入（`--warning`）——
+        三支取值在明度与色相上都分得开。
+        **这里不写具体色值**：曾经写着「#0F9BAD」，而主色早已换成单色墨黑
+        （见 `styles/tokens.scss` 顶部那段），一条写死的注释就这么把人往
+        「主色是个显眼的青」上带 —— 真按它去用 `--primary` 当状态信号，
+        会得到一个和正文色几乎同样深的近黑。要判断两个 token 分不分得开，
+        去 `tokens.scss` 看当下的值，或者直接量 `getComputedStyle`。
      2. **形**：`ph:circle-notch` 是一圈开口的实线环，`pending` / `waiting` 用的
         `ph:circle-dashed` 是一圈虚线段，静止下并排看也是两个东西。
    `transform` 停在 0°，开口朝上，不是随机一帧 —— 动画从 0 起算，停掉就回到起点。

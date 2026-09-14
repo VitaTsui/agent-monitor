@@ -171,10 +171,11 @@
              `mobilePulse` 的 0% 是 `opacity: 1`，停掉即停在满不透明那一帧。
 
              **停掉仍认得出「执行中」**：靠的是色，不是那一下呼吸。这枚点四态
-             四色，且 `--primary`（实测 #18181b 近黑）在本项目里**只给「在跑」**
-             这一档用 —— 邻居分别是 `--warning` #f59e0b 橙（等人输入）、
-             `--subtle-foreground` #a1a1aa 灰（暂停）、`--border` #e4e4e7 浅灰
-             （其余），明度与色相都分得开。 */
+             四色，且 `--primary` 在本项目里**只给「在跑」**这一档用 —— 邻居
+             分别是 `--warning`（等人输入）、`--subtle-foreground`（暂停）、
+             `--border`（其余），四支取值实测互不相近，明度与色相都分得开。
+             同 `StatusIcon` 一样**不写具体色值**：写死的色值注释必然过时
+             （那边就被坑过一次），要核当下的值去 `styles/tokens.scss`。 */
           @media (prefers-reduced-motion: reduce) {
             animation: none;
           }
