@@ -4,68 +4,21 @@
    这一层才是网格/放大布局眼里的「一格」，所以撑满格子的活由它干。
    底色取正文同色（`--card`）—— 正文与右栏都是实底、把它盖满，它只在两者之间
    那条缝里露一线，露出别的颜色就是一条色带。 */
+/* 一格的外框：**一个头横跨整格**，头下面才分成「正文 ＋ 右栏」两列。
+   改前是 `display:flex` 的一行、头长在正文列里，于是右栏只能自己再顶一条标题栏，
+   两条栏还不在同一条水平线上 —— 看着像旁边浮了另一块面板（用户截图）。 */
 .paneRow {
   display: flex;
+  flex-direction: column;
   height: 100%;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
   background: var(--card);
-}
 
-.ChatPane {
-  display: flex;
-  // 右栏的宽度由它自己的 flex-basis 定死，正文吃掉剩下的全部并且能被压窄
-  flex: 1 1 0%;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  /* 正文面 = `--card`（→ `--vita-surface` #ffffff / #18181b），与 VitaAgent 前台
-     对话页的 `.Chat` 同一支（`VitaAgent/web/src/pages/chat/index.module.scss:22`）；
-     外层 `.main` 早就写着「正文取面色(--card)、侧栏取画布色(--background)」，
-     这里曾被改成 `--primary-subtle`（#f4f4f5）—— 那支是**选中/标签的淡染底**，
-     不是一块面。后果有三条，都是实测出来的：
-       · 它与智能体卡的 `--muted` **同值**，卡片整块消失（1.00:1）；
-       · 贯穿执行链那根 `--border` 竖线压在它上面只有 1.21:1，等于没画；
-       · 顶部那条毛玻璃头是按「与正文同色」调的，于是多出一条可见色带。
-     三层递进（画布 `--background` → 面 `--card` → 卡 `--muted`）是 VitaAgent
-     的原始关系，回到它即可，不必给卡片或竖线另挑颜色。
-
-     **执行链的两支色由画这块底的人一处说了算**，声明与 `background` 挨着写，
-     不可能再各走各的：
-       · `--chain-surface` = 这块面本身。渐隐遮罩这类「要收在底色上」的东西取它。
-       · `--chain-tile` = 链上那枚图标槽的底。它取的是**另一支面**（这块面是
-         `--card` 白，槽就是 `--muted` 浅灰；卡内反过来），照 VitaAgent
-         `MessageList/index.module.scss:415`（槽 `--vita-muted`）与
-         `TaskCard/index.module.scss:60`（卡内槽 `--vita-surface`）。
-         槽的第一职责是把身后那根贯穿竖线遮断，但参照并不让它隐形 ——
-         它是一枚**看得见的小色块**，一列扫下来「一节点一格」才读得出来。 */
-  --chain-surface: var(--card);
-  --chain-tile: var(--muted);
-  background: var(--chain-surface);
-  overflow: hidden;
-
-  // 紧凑只读卡片（放大布局右侧那一列）：整卡可点，用来与主区对调。
-  // 内容区不再抢高度 —— 卡片高度由外层的 focusCard 钉死，超出的部分自己滚。
-  &.compact {
+  // 紧凑卡片整卡可点（含头）——点它换到主区，见 ChatPane 的 onActivate
+  &.compactRow {
     cursor: pointer;
-    height: 100%;
-
-    .chat {
-      // 卡片里正文比主区窄得多，两侧再留宽边距就没剩多少字了
-      padding-left: 4px;
-      padding-right: 4px;
-    }
-  }
-  // 「回到底部」那枚圆钮钉在本格内部而非整页：多格并排时，
-  // 各格的圆钮才会各自待在自己格子里，不会叠在一起。
-  position: relative;
-
-  // 居中内容列（Claude 式窄栏）。768 —— 页面骨架那个 832 是另一回事，别混用。
-  .chatColumn {
-    max-width: 768px;
-    width: 100%;
-    margin: 0 auto;
   }
 
   .paneHeader {
@@ -153,11 +106,35 @@
       .headTitle {
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: 6px;
         min-width: 0;
         font-size: var(--text-md);
         font-weight: 600;
         color: var(--foreground);
+
+        /* 面包屑的第一段：项目名。**与标题同字号同色**，只有中间那个斜杠是灰的
+           —— 照 VitaAgent 顶栏（`chat/index.module.scss` 的 `.crumb` / `.crumbSep`，
+           它的注释写着「两段同字号同颜色，不是『灰面包屑 ＋ 重标题』」）。
+           一格的身份是「哪个项目的哪条会话」，两样同等重要，谁也不压过谁。
+
+           **它不被压缩，先夹的是标题**：`flex: 0 0 auto` ＋ 上限 45%。实测 556 宽的格子
+           里若让它先让，它会被夹成「fol…」—— 项目名夹掉两个字就认不出是哪个项目了，
+           而标题夹掉尾巴仍读得出在干什么。项目名超过 45% 才自己夹。
+           更窄（格宽 < 400）则整段不渲染，见 `ChatPane` 里那段注释。 */
+        .crumbProject {
+          flex: 0 0 auto;
+          min-width: 0;
+          max-width: 45%;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .crumbSep {
+          flex: none;
+          color: var(--subtle-foreground);
+          font-weight: 400;
+        }
 
         // 改名触发器：不撑宽度，标题该省略号还是省略号
         .headTitleEdit {
@@ -265,6 +242,72 @@
       }
     }
   }
+}
+
+// 头下面那两列：正文吃掉剩下的宽，右栏定宽 320（见 RightPane）
+.paneBody {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ChatPane {
+  display: flex;
+  // 右栏的宽度由它自己的 flex-basis 定死，正文吃掉剩下的全部并且能被压窄
+  flex: 1 1 0%;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  /* 正文面 = `--card`（→ `--vita-surface` #ffffff / #18181b），与 VitaAgent 前台
+     对话页的 `.Chat` 同一支（`VitaAgent/web/src/pages/chat/index.module.scss:22`）；
+     外层 `.main` 早就写着「正文取面色(--card)、侧栏取画布色(--background)」，
+     这里曾被改成 `--primary-subtle`（#f4f4f5）—— 那支是**选中/标签的淡染底**，
+     不是一块面。后果有三条，都是实测出来的：
+       · 它与智能体卡的 `--muted` **同值**，卡片整块消失（1.00:1）；
+       · 贯穿执行链那根 `--border` 竖线压在它上面只有 1.21:1，等于没画；
+       · 顶部那条毛玻璃头是按「与正文同色」调的，于是多出一条可见色带。
+     三层递进（画布 `--background` → 面 `--card` → 卡 `--muted`）是 VitaAgent
+     的原始关系，回到它即可，不必给卡片或竖线另挑颜色。
+
+     **执行链的两支色由画这块底的人一处说了算**，声明与 `background` 挨着写，
+     不可能再各走各的：
+       · `--chain-surface` = 这块面本身。渐隐遮罩这类「要收在底色上」的东西取它。
+       · `--chain-tile` = 链上那枚图标槽的底。它取的是**另一支面**（这块面是
+         `--card` 白，槽就是 `--muted` 浅灰；卡内反过来），照 VitaAgent
+         `MessageList/index.module.scss:415`（槽 `--vita-muted`）与
+         `TaskCard/index.module.scss:60`（卡内槽 `--vita-surface`）。
+         槽的第一职责是把身后那根贯穿竖线遮断，但参照并不让它隐形 ——
+         它是一枚**看得见的小色块**，一列扫下来「一节点一格」才读得出来。 */
+  --chain-surface: var(--card);
+  --chain-tile: var(--muted);
+  background: var(--chain-surface);
+  overflow: hidden;
+
+  // 紧凑只读卡片（放大布局右侧那一列）：整卡可点，用来与主区对调。
+  // 内容区不再抢高度 —— 卡片高度由外层的 focusCard 钉死，超出的部分自己滚。
+  &.compact {
+    cursor: pointer;
+    height: 100%;
+
+    .chat {
+      // 卡片里正文比主区窄得多，两侧再留宽边距就没剩多少字了
+      padding-left: 4px;
+      padding-right: 4px;
+    }
+  }
+  // 「回到底部」那枚圆钮钉在本格内部而非整页：多格并排时，
+  // 各格的圆钮才会各自待在自己格子里，不会叠在一起。
+  position: relative;
+
+  // 居中内容列（Claude 式窄栏）。768 —— 页面骨架那个 832 是另一回事，别混用。
+  .chatColumn {
+    max-width: 768px;
+    width: 100%;
+    margin: 0 auto;
+  }
+
 
   .chat {
     flex: 1;
@@ -605,7 +648,7 @@
 
 // 移动端：标题与操作已上移到全局顶栏，本格头部整行隐藏
 @include r.down(md) {
-  .ChatPane .paneHeader {
+  .paneRow .paneHeader {
     display: none;
   }
 }

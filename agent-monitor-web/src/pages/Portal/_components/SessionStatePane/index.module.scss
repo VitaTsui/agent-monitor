@@ -1,55 +1,18 @@
-// 一格右栏的内容：一行头 ＋ 一列用发丝线分开的分区，**直接画在栏的白底上**。
+// 一格右栏的内容：一列用发丝线分开的分区，**直接画在栏的白底上**。
+//
+// **没有自己的标题栏**：这一栏长在本格那个横跨整格的头下面（见 ChatPane 的
+// `.paneRow`），头已经说了这是哪条会话；收起走头上那颗右栏开关。
 //
 // 数值照 VitaAgent 的 ActivityPanel
 // （`web/src/pages/chat/_components/ActivityPanel/index.module.scss:23-47`）：
-//   头     padding 12、标题 14/400、收起钮 24×24
 //   分区   padding 12，块与块之间 `border-top: 1px` 发丝线（第一块不加）
 //
 // **这一层不再画卡。** 上一版是「透明的栏 ＋ 里面一张圆角 8 / 描边环 / 投影的卡」，
 // 靠露底让卡浮起来。现在栏本身就是一条 `--card` 白列（见 `RightPane`），
 // 白底上再压一张白卡，那圈环和投影只会变成一道没有理由的框。
-//
-// 头下面**不画整条分隔线** —— 参照就是这么排的：头是「你在看哪个东西」，
-// 它和下面第一块之间不是并列关系，切一刀反而多一层框。
+
 
 .SessionStatePane {
   min-width: 0;
 }
 
-.head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 4px;
-  padding: 12px;
-}
-
-// 14/400：它不是标题，是「你在看哪个东西」，跟 VitaAgent 栏顶那行同一个量级
-.title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--foreground);
-  font-size: var(--text-base);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.close {
-  flex: none;
-  width: 24px;
-  height: 24px;
-  min-width: 24px;
-
-}
-
-/* 18 而不是继承的 14：`ph:x` 的墨迹只占 em 框的 .625（X 本身内缩），
-   14×.625 = 8.8 比原来那枚 antd close（14×.772 = 10.8）轻两成；
-   18×.625 = 11.3，与原来持平。24 的按钮里放得下。
-   **挂在图标自己的类上**：`anticon` 不在 CSS Modules 的直通表里（只放行 `ant-`
-   前缀），写 `.anticon` 会被哈希掉、一条都选不中。 */
-/* 写到 0,3,0 才压得住 antd 的 `.ant-btn-sm.ant-btn-icon-only .anticon`
-   （0,2,0，而且 CSS-in-JS 注入在这份静态表之后，同权重是它赢） */
-.SessionStatePane .head .closeIcon {
-  font-size: 18px;
-}

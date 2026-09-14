@@ -1,7 +1,5 @@
 import React from "react";
 
-import { Button, Icon } from "@hsu-react/ui";
-import { Tooltip } from "antd";
 import { observer } from "mobx-react-lite";
 
 import { PortalTaskData } from "@/services/apis/portal";
@@ -52,27 +50,14 @@ const SessionStatePane: React.FC<SessionStatePaneProps> = observer((props) => {
 
   return (
     <div className={styles.SessionStatePane}>
-      <div className={styles.head}>
-        <span className={styles.title}>会话状态</span>
-        {/* 收起：只收本格这一栏，不动别的格。
-          **说明文字只能走 Tooltip / aria-label，不能走 `title`**：
-          hsu-ui 的 `Button` 把 `title` 当**按钮文案**用（`children ?? title`，
-          见 `@hsu-react/ui/es/components/Button/index.js:91`），不是原生的悬停
-          提示 —— 于是「收起这一格的会话状态栏」被原样印在叉号右边，
-          24px 宽的按钮里塞一整句话，溢出到栏外把标题挤没了。
-          这颗按钮只留图标，语义由 `aria-label` 承担、提示由 Tooltip 给。 */}
-        <Tooltip title="收起这一格的会话状态栏">
-          <Button
-            size="small"
-            type="text"
-            className={styles.close}
-            icon={<Icon icon="ph:x" className={styles.closeIcon} />}
-            aria-label="收起这一格的会话状态栏"
-            onClick={() => PortalStore.toggleRightPane(id)}
-          />
-        </Tooltip>
-      </div>
+      {/* **这一栏不再自带标题栏。** 它现在长在本格那一个横跨整格的头下面
+        （见 ChatPane 的 `.paneRow`）—— 头已经写着这是哪条会话，栏里再顶一条
+        「会话状态 ＋ ✕」就是同一格里的第二条栏，正是用户说的「像旁边浮着的一块」。
 
+        **关闭钮也一并去掉**：头上那颗右栏开关本来就管这件事，开着时它是亮的
+        （`.paneBtnOn`），再点一下就收 —— 同一个动作两个入口是噪音，而这两个入口
+        还离得很近（同一条头上）。栏里各分区自带标题（任务清单 / 后台任务 /
+        正在执行的子代理），「会话状态」四个字不写也不会不知道自己在看什么。 */}
       {/* `flat`：栏内分区交给这一层的发丝线，`SessionPanels` 不再自带描边卡。
         同一份内容在窄屏是**对话流末尾的一组独立卡片**（那儿没有白栏可依），
         在这儿是**一条白栏里的几块** —— 边框与圆角属于所处的位置，不属于内容。 */}
