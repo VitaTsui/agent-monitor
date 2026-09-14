@@ -503,23 +503,13 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
     }
   }
 
-  /* 一行的「量」靠右，与参照的 `.stepMeta` 同一处
-     （`VitaAgent/…/MessageList/index.module.scss:458`：`margin-left: auto` ＋ 左留 12）。
-     只用在空窗期那一行的耗时上 —— 它不是名字的一部分，不跟着名字用间隔点粘在一起。 */
-  .stepMeta {
-    display: flex;
-    flex: none;
-    align-items: center;
-    gap: 6px;
-    margin-left: auto;
-    padding-left: 12px;
-  }
-
-  .stepMetaText {
-    color: var(--muted-foreground);
-    font-size: var(--text-sm);
-    font-variant-numeric: tabular-nums;
-  }
+  /* 这里原来有一份右对齐的 `.stepMeta` / `.stepMetaText`（照参照
+     `MessageList/index.module.scss:455`），只给「正在思考…/正在处理…」那一行的耗时用。
+     **删掉了**：参照的 `stepMeta` 是**每一步都有**的一列量（步数、耗时），右对齐是在
+     排一张表；我们后端不下发每步耗时（见 `index.tsx` 末尾 TODO），这一列全项目只有
+     那一行用得上 —— 一列只有一个元素，右对齐就不是对齐：实测 1600 视口下正文列
+     768 宽，那一行的字在 x=646 结束、耗时从 x=1250 起，中间 604px 空白，两样东西
+     看着毫无关系。现在它走下面的 `.stepStatus`，与失败那一步的「失败」同一枚。 */
 
   // 工具名：一枚淡底小标，不与这次的入参抢字重
   .stepFrom {

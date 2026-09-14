@@ -157,6 +157,24 @@
     animation: amSheetUp 0.28s cubic-bezier(0.32, 0.72, 0.2, 1) !important;
   }
 
+  /* 「减少动态效果」下**直接就位**：换成同时长的纯淡入，把那 100% 的竖向位移
+     撤掉。移动端弹窗从屏幕底沿整高推上来，是这份样式里位移最大的一处。
+
+     **为什么不是 `animation: none`**：rc-motion 靠 `animationend` 收掉
+     `ant-zoom-enter` 这个类，没有动画就没有这个事件（见上面那条注释里
+     「WebKit 下弹窗卡住关不掉」的旧账）。留一段同时长的淡入，事件照常来，
+     位移没有了 —— 这比直接掐掉安全。
+
+     **这里的 `!important` 不是一刀切**：它只是跟上面那条同选择器、同权重的
+     规则对齐（那条本来就带 `!important`），不带就压不过去；作用域仍死死落在
+     这两个选择器上，不碰组件库的其它动效。 */
+  @media (prefers-reduced-motion: reduce) {
+    .ant-modal-root .ant-modal.ant-zoom-enter,
+    .ant-modal-root .ant-modal.ant-zoom-appear {
+      animation: amSheetFade 0.28s ease-out !important;
+    }
+  }
+
   // 遮罩：压暗 + 轻微模糊（原生 sheet 质感）
   .ant-modal-root .ant-modal-mask {
     background: color-mix(in srgb, var(--foreground) 42%, transparent);
@@ -245,5 +263,15 @@
   }
   to {
     transform: translateY(0);
+  }
+}
+
+/* reduce 用的那一份：同时长，只有淡入没有位移 */
+@keyframes amSheetFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }

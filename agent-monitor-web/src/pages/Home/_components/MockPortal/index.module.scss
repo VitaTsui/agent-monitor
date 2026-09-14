@@ -180,7 +180,17 @@
         .rLine { color: var(--term-dim); padding-left: 14px; }
         .working {
           display: flex; align-items: center; gap: 6px; color: var(--term-accent);
-          .star { display: inline-block; animation: spin 1.6s linear infinite; }
+          /* 「减少动态效果」下不转（口径同 `StatusIcon` 的 `.spin`，`transform`
+             回到 0°）。**信息不丢**：这颗 ✳ 右边紧跟着「执行中…」四个字，
+             状态本来就是写出来的，转圈只是官网首屏那张示意图的点缀。 */
+          .star {
+            display: inline-block;
+            animation: spin 1.6s linear infinite;
+
+            @media (prefers-reduced-motion: reduce) {
+              animation: none;
+            }
+          }
         }
       }
     }

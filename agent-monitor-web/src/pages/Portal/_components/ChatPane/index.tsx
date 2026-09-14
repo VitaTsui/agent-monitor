@@ -18,6 +18,7 @@ import {
 } from "../../_utils/sessionState";
 import { sessionTitle } from "../../_utils/sessionNote";
 import { useIsMobile } from "../../_hooks/useIsMobile";
+import { prefersReducedMotion } from "@/hooks/useReducedMotion";
 import styles from "./index.module.scss";
 
 interface ChatPaneProps {
@@ -456,7 +457,14 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     setAtBottom(true);
     const el = chatRef.current;
     if (el) {
-      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      /* 「减少动态效果」下直接落位，不做平滑滚动 —— 平滑滚是整屏内容连续位移，
+         正是前庭不适的典型触发源，而 CSS 的 `@media` 管不到 JS 发起的滚动，
+         只能在这儿现读一次（`hooks/useReducedMotion`）。
+         **信息不丢**：到底了就是到底了，位置本身就是结果，少的只是路上那段。 */
+      el.scrollTo({
+        top: el.scrollHeight,
+        behavior: prefersReducedMotion() ? "auto" : "smooth",
+      });
     }
   };
 
@@ -480,7 +488,11 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
     if (el) {
       stickBottomRef.current = false;
       setAtBottom(false);
-      el.scrollIntoView({ block: "center", behavior: "smooth" });
+      /* 同上：reduce 下直接跳到那张卡，不滚过去 */
+      el.scrollIntoView({
+        block: "center",
+        behavior: prefersReducedMotion() ? "auto" : "smooth",
+      });
       PortalStore.clearFocusAgent(seq);
       return;
     }
@@ -757,23 +769,36 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                     </span>
                   </Tooltip>
                 ) : null}
-                <Tooltip title="重新同步该终端的对话内容">
-                  <Button
-                    size="small"
-                    type="text"
-                    icon={
-                      /* 转圈自己驱动：antd 的 `spin` prop 只对 antd 图标生效，
-                         换成 Phosphor 之后要自己给类（周期与 `StatusIcon` 的
-                         执行中同为 1.1s linear —— 一屏之内只有一种转法） */
-                      <Icon
-                        icon="ph:arrow-clockwise"
-                        className={`${styles.headIcon} ${
-                          loading ? styles.syncSpin : ""
-                        }`}
-                      />
-                    }
-                    onClick={() => syncMessages(id)}
-                  />
+                {/* 同步中的状态**不能只由转圈来表达**：系统开了「减少动态效果」
+                    就没有转圈了，读屏的人也从来看不到它。所以置灰 ＋ 改口 ——
+                    这两条对所有人都在，转不转只是锦上添花。
+                    顺带把「同步中还能再点一次」也堵上（原来点两下发两次）。
+                    `disabled` 的钮不派发事件，Tooltip 要挂在外层 span 上才显示
+                    （与上面那枚右栏开关同一写法）。 */}
+                <Tooltip
+                  title={
+                    loading ? "正在重新同步…" : "重新同步该终端的对话内容"
+                  }
+                >
+                  <span>
+                    <Button
+                      size="small"
+                      type="text"
+                      disabled={loading}
+                      icon={
+                        /* 转圈自己驱动：antd 的 `spin` prop 只对 antd 图标生效，
+                           换成 Phosphor 之后要自己给类（周期与 `StatusIcon` 的
+                           执行中同为 1.1s linear —— 一屏之内只有一种转法） */
+                        <Icon
+                          icon="ph:arrow-clockwise"
+                          className={`${styles.headIcon} ${
+                            loading ? styles.syncSpin : ""
+                          }`}
+                        />
+                      }
+                      onClick={() => syncMessages(id)}
+                    />
+                  </span>
                 </Tooltip>
                 <Tooltip title={paused ? "恢复" : "暂停"}>
                   <Button
