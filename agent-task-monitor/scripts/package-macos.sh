@@ -97,6 +97,14 @@ echo "  零配置分发：用户安装后在窗口里登录账号即自动绑定
 
 # 应用内自更新用的 zip 产物：客户端下载后原地换包重启（见 desktop.rs self_update）。
 # 用 ditto 保留资源叉/签名；zip 内是完整 .app。文件名用 ASCII，客户端拼 URL 免编码。
+#
+# 别改成 `zip -r`：ditto 是保住上面那次 ad-hoc 深度签名的唯一办法，`zip` 丢资源叉、
+# 也不保留符号链接与扩展属性，解出来的 .app 签名直接失效，用户会看到「已损坏」。
+# 已知代价：ditto 写的条目名是 UTF-8，却不设 zip 的 UTF-8 标志位（通用位 bit 11），
+# 于是「终端任务监控.app」这个中文名在 Windows 资源管理器、以及部分严格按标志位
+# 解码的第三方解压工具里会显示成乱码。macOS 自己（Finder / Archive Utility / ditto）
+# 一律按 UTF-8 解，自更新链路走的也是 `ditto -x -k`，所以**自更新不受影响**。
+# 结论：签名正确 > 第三方解压工具里的显示，这个权衡是有意为之，别手痒换 zip。
 mkdir -p target/dist
 rm -f "target/dist/agent-monitor-mac.zip"
 ditto -c -k --keepParent "$OUT" "target/dist/agent-monitor-mac.zip"

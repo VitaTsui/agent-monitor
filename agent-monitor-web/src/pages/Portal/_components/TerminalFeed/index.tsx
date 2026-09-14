@@ -734,11 +734,19 @@ const summarizeChain = (items: ChainItem[]): string => {
  *
  * 耗时每秒走字：**「还在跑」与「卡住了」的唯一区别**就是它动不动。
  * 口径与 SessionPanels / SubAgentChip 共用 `fmtElapsed`，全项目只有这一套算法。
+ *
+ * **它待在「到此为止发生的最后一件事」后面**，位置由调用方给（见那边的 `tail`）：
+ *   链就是最后一件事 → 它作为链的**最后一格**渲染进 `.chainBody`，那根贯穿的竖线
+ *       直接穿下来、在它的图标槽处收住，与其它步骤一个节奏（间距 0）。
+ *   模型之后又写了话 → 它落在那段话后面。那里已经不是链了，`loose` 把竖线撤掉 ——
+ *       不撤的话就是一截连不到任何地方的线头（用户原话：「看着有点太割裂了」）。
  */
-const Working: React.FC<{ since?: string; thinking?: boolean }> = ({
-  since,
-  thinking,
-}) => {
+const Working: React.FC<{
+  since?: string;
+  thinking?: boolean;
+  /** 不在链里（后面没有链可接）：撤掉竖线，其余形制不变 */
+  loose?: boolean;
+}> = ({ since, thinking, loose }) => {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -749,7 +757,7 @@ const Working: React.FC<{ since?: string; thinking?: boolean }> = ({
   const text = thinking ? "正在思考…" : "正在处理…";
 
   return (
-    <div className={styles.step}>
+    <div className={`${styles.step} ${loose ? styles.stepLoose : ""}`}>
       <div className={styles.stepHead} role="status" aria-label={text}>
         <StepTile>
           <StatusIcon kind="running" className={styles.stepIcon} />
@@ -1258,6 +1266,19 @@ const ExecChain: React.FC<{
   picked: Record<string, string>;
   onPick: (itemKey: string, agentId: string) => void;
   renderNote: (m: PortalMessage, key: string) => React.ReactNode;
+  /**
+   * 接在链尾的那一格（「正在思考…/正在处理…」那一行）。
+   *
+   * **必须渲染在 `.chainBody` 里面**，它才是链上的一格：那根贯穿的竖线从上一格穿
+   * 下来、在它的图标槽处收住，间距与步骤之间一样是 0。此前它由调用方渲染在链的
+   * **外面**（`.agent` 的直接子元素），于是 `.agent` 的 gap 10 ＋ `.chain + *` 的
+   * margin-top 10 在中间撑出 20px 空当，线也接不上 —— 看着像另起的一块东西。
+   *
+   * **不进 `items`**：它不是链上的一步（没有调用、没有输出、不参与摘要计数与
+   * 「最近三步」窗口），只是钉在尾巴上的一个当前状态。混进 `items` 会把
+   * `summarizeChain` 与折叠窗口一起带偏。
+   */
+  tail?: React.ReactNode;
 }> = ({
   items,
   taskId,
@@ -1269,6 +1290,7 @@ const ExecChain: React.FC<{
   picked,
   onPick,
   renderNote,
+  tail,
 }) => {
   /* 留在外面的按「步」数，不按「链项」数：旁白是围着某一步说的话，
      跟着它一起留在外面。按链项切的话，一段长旁白就能把窗口占满，
@@ -1340,6 +1362,9 @@ const ExecChain: React.FC<{
           toggleExpand={toggleExpand}
           renderNote={renderNote}
         />
+        {/* 链尾那一格（理由见 `tail`）。摆在 `ChainNodes` **之后、同一个
+            `.chainBody` 里面** —— 它是链上的最后一格，不是链外面的另一块 */}
+        {tail}
       </div>
     </div>
   );
@@ -1523,6 +1548,19 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
         const { turn, keyed, inProgress, chain, body, ckey } = tc;
         /** 此刻挂起着的那一步。与末尾那一行互斥 —— 同一份判据，见 pendingCallKey */
         const pendingKey = inProgress ? pendingCallKey(chain) : "";
+        /* 「正在思考…/正在处理…」那一行**只有一个**，位置两选一（理由见下面那段注释
+           与 `Working` 的说明）：链是这一轮此刻的最后一件事 → 进链当最后一格；
+           否则（模型之后又写了话 / 这一轮压根没有链）→ 落在正文后面，不画竖线。 */
+        const liveInChain = chain.some(isStep) && body.length === 0;
+        const live =
+          inProgress && !pendingKey ? (
+            <Working
+              // 起点取这一轮的起始时刻：有用户消息就用它，否则退回首条产出
+              since={turn.user?.timestamp ?? turn.items[0]?.timestamp}
+              thinking={keyed.length === 0}
+              loose={!liveInChain}
+            />
+          ) : null;
         // 执行中也铺，但**过程一律折叠着**（ExecChain 会把它并成一行
         // 「执行过程 · N 步」）—— 一条条冒出来是噪音、还不停把视图往下推，
         // 但整段藏掉又会让人不知道它在干什么。折叠着实时长，想看点开即可。
@@ -1575,6 +1613,8 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                         picked={picked}
                         onPick={onPick}
                         renderNote={renderItem}
+                        // 链就是这一轮此刻的最后一件事 → 那一行进链，当它的最后一格
+                        tail={liveInChain ? live : null}
                       />,
                       ...body.map(({ m, k }) => renderItem(m, k)),
                     ]
@@ -1589,14 +1629,13 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                     不看文本长度、不看时间阈值。
                     改前这一行只在 `keyed.length === 0` 时出现 —— 实测那个窗口通常
                     只有一两秒，而「上一步已返回、下一步还没发起」的空当里屏幕上
-                    一个动的东西都没有，跑着的会话看起来和卡死的一模一样。 */}
-                {inProgress && !pendingKey ? (
-                  <Working
-                    // 起点取这一轮的起始时刻：有用户消息就用它，否则退回首条产出
-                    since={turn.user?.timestamp ?? turn.items[0]?.timestamp}
-                    thinking={keyed.length === 0}
-                  />
-                ) : null}
+                    一个动的东西都没有，跑着的会话看起来和卡死的一模一样。
+
+                    **位置**：它待在「到此为止发生的最后一件事」后面 —— 链是最后
+                    一件事就由 `ExecChain` 的 `tail` 把它渲染进链里（竖线接上、
+                    间距 0）；模型之后又写了话，或这一轮压根没有链，才落在这儿，
+                    那时它不属于任何一条链，`loose` 把那截连不到任何地方的线头撤掉。 */}
+                {liveInChain ? null : live}
                 {/* 落款：来源代理 + 时间。原先挂在终端卡的标题栏上，卡片撤掉之后
                     这两样仍要有地方待着 —— 时间是回看时定位用的。 */}
                 {keyed.length > 0 ? (
