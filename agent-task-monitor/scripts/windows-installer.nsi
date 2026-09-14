@@ -1,9 +1,16 @@
-; 终端任务监控 · Windows 安装向导（NSIS / MUI2，简体中文）
+﻿; 终端任务监控 · Windows 安装向导（NSIS / MUI2，简体中文）
 ; 用法（macOS/Linux 交叉打包）：
 ;   makensis -DEXE=target/x86_64-pc-windows-msvc/release/agent-monitor.exe \
 ;            -DICO=client/icons/icon.ico -DOUT=终端任务监控.exe \
 ;            scripts/windows-installer.nsi
 ; 产出即官网分发的安装程序：向导可选安装位置、是否创建桌面图标、是否开机自启。
+; 本文件必须保留开头的 UTF-8 BOM —— 别让编辑器「顺手」去掉。
+; Unicode true 只决定产出的安装器是 Unicode 的，**不决定 makensis 怎么读这个脚本**。
+; 没有 BOM 时 makensis 按所在系统的 ANSI 代码页解码源码：CI 的 windows runner 是
+; CP1252，"终端任务监控" 的 UTF-8 字节被当成 CP1252 读，整个安装器里的中文全变成
+; "ç»ˆç«¯ä»»åŠ¡ç›‘æŽ§"。后果最扎眼的是桌面快捷方式 —— 每次静默自更新都重建一个乱码图标。
+; （实测：0.12.0 的 CI 产物里 $DESKTOP 那条字符串就是乱码；加 BOM 后 makensis 无条件
+;   按 UTF-8 读，连显式 -INPUTCHARSET CP1252 都会被 BOM 覆盖。）
 Unicode true
 ManifestDPIAware true
 
@@ -122,7 +129,15 @@ Section "主程序（必装）" SecMain
 SectionEnd
 
 Section "桌面快捷方式" SecDesktop
+  ; 静默安装（/S，即客户端自更新走的那条路）不新建桌面图标：用户删掉过就是不想要它，
+  ; 一次后台更新把它塞回来只会让人反复删。图标还在时才刷新，保证它指向新的安装目录。
+  ; 向导安装（非静默）由用户在组件页勾选，照常创建。
+  IfSilent 0 make
+    IfFileExists "$DESKTOP\${APP_NAME}.lnk" make
+      Goto done
+  make:
   CreateShortCut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
+  done:
 SectionEnd
 
 Section /o "开机自动启动" SecAutostart
