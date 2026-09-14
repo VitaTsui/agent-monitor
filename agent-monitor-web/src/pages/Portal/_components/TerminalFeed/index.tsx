@@ -825,8 +825,9 @@ const stepFailed = (c: ChainCall) => c.results.some((r) => r.bad);
  * 分类只按工具名的形态，不做「哪个工具叫什么」的字面表；名字对不上就落到
  * 「调用了 N 次工具」这一档 —— 少说一句总好过说错。
  *
- * 接受**任意子集**而不是整条链：跑的时候这一行概括的是「已经收进去的那些」，
- * 跑完了才是整条链，两处同一套措辞。
+ * 传进来的**永远是整条链**：那一行描述的是「这条链干了什么」，与此刻摊开到哪一格
+ * 无关 —— 按「摊开到哪儿」切子集会让文字随展开状态变，而控件就住在这一行里
+ * （理由见 `ExecChain` 里的 `headText`）。
  */
 const summarizeChain = (items: ChainItem[]): string => {
   const calls = items.filter((i): i is ChainCall => i.kind === "call");
@@ -1500,8 +1501,25 @@ const ExecChain: React.FC<{
       : items.length; // 跑完了、也没有在跑的子代理 → 整条收起
   const hidden = open ? 0 : autoFrom;
   const shown = open ? items : items.slice(hidden);
-  /** 头一行概括谁：收起时是收进去的那些，展开了是整条链 */
-  const headText = summarizeChain(open ? items : items.slice(0, hidden));
+  /**
+   * 摘要行的文字。**两件事都不许沾 `open`**：摆不摆这一行、写什么。
+   *
+   * 收起/展开那枚控件就住在这一行里，而这一行只在有字时才摆 —— 所以文字一旦随
+   * `open` 变，控件就会被它自己的那一下点击点没。此前写的是
+   * `summarizeChain(open ? items : items.slice(0, hidden))`：展开态概括整条链
+   * （必有字，控件在），收起态只概括「收进去的那些」，而收进去的那些在
+   * `autoFrom` 落在链头附近时（链头那一格就有子代理在跑，或它前面只有几段旁白 ——
+   * `attachLooseAgents` 按时间落位时很常见）一个步骤都没有，概括出来是空串，
+   * 整行连同控件一起不渲染。后果是**收起之后再也展不开**，收进去的那段内容
+   * 对用户永久不可见（用户原话：「这种情况，上面这条收起来后没了，看不见了」）。
+   *
+   * 改成两条与 `open` 无关的判据：
+   *   **摆不摆** → `autoFrom > 0`，也就是「这一下点下去真能收起点什么」。收不动
+   *       （刚开跑、或链头那一格起就有子代理在跑）就不摆，不摆一枚点了没反应的控件。
+   *   **写什么** → 整条链的概括。它描述的是这条链干了什么，与此刻摊开到哪儿无关，
+   *       两个状态下同一句话，控件因此不可能自毁。
+   */
+  const headText = autoFrom > 0 ? summarizeChain(items) : "";
   /** 摘要行下面还留着东西 —— 那两块要拉开距离，理由见下面的 `chainLive` */
   const someOutside = !open && hidden > 0 && shown.length > 0;
 
@@ -1510,7 +1528,8 @@ const ExecChain: React.FC<{
 
   return (
     <div className={styles.chain}>
-      {/* 刚开跑、还没有东西可收的时候不摆这一行 */}
+      {/* 收不动就不摆这一行（刚开跑、或链头那一格起就有子代理在跑）。
+          判据里**没有 `open`** —— 理由见 `headText` */}
       {headText ? (
         <button
           type="button"
@@ -1530,7 +1549,7 @@ const ExecChain: React.FC<{
           贴着排的话看上去就成了「摘要展开后的内容」，正好是反的 */}
       <div
         className={`${styles.chainBody} ${
-          someOutside && headText ? styles.chainLive : ""
+          someOutside ? styles.chainLive : ""
         }`}
       >
         <ChainNodes
