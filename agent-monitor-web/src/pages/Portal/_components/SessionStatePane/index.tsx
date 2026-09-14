@@ -78,6 +78,7 @@ const SessionStatePane: React.FC<SessionStatePaneProps> = observer((props) => {
         在这儿是**一条白栏里的几块** —— 边框与圆角属于所处的位置，不属于内容。 */}
       <SessionPanels
         flat
+        taskId={id}
         messages={messages}
         subTasks={subTasks}
         running={task.status === "running"}

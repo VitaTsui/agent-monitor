@@ -910,6 +910,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                 紧凑卡片仍然不给 —— 它只有 320×260，摆下这些就没剩多少地方看内容了。 */}
               {!compact && isMobile && (
                 <SessionPanels
+                  taskId={id}
                   messages={messages}
                   subTasks={subTasks}
                   running={task.status === "running"}
