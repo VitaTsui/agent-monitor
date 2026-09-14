@@ -250,33 +250,38 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   const hasSessionState = !isEmptySessionState(
     sessionStateOf(messages, subTasks),
   );
+  /* 这台机器是不是别人共享给我的。是的话文件类接口（列目录/读文件/上传）后端一律
+     403 —— 入口亮着等于请君入瓮，所以直接进下面的 `filePaneUsable` 与 Composer。
+     判据是 `/monitor/devices` 的 `shared` 字段，不是等 403 回来再反推（见 PortalStore）。 */
+  const deviceShared = PortalStore.isSharedDevice(task.machineId);
+  /* 这一格的文件查看器。开关与右栏同一条规矩：**每格一份**、摆不下就置灰不渲染。
+     紧凑卡片与窄屏不给：那两处连第二列都摆不下。 */
+  const filePaneUsable =
+    !isMobile && !compact && filePaneFits && !!id && !deviceShared;
+  const filePaneOpen = filePaneUsable && PortalStore.isFilePaneOpen(id);
+  const filePaneHint = deviceShared
+    ? "这台设备是他人共享给你的，不提供文件访问"
+    : !filePaneFits
+      ? "这一格太窄，摆不下文件查看器；放大这一格后可用"
+      : filePaneOpen
+        ? "关闭文件查看"
+        : "查看这台机器上、这条会话目录里的文件";
   /* 这颗开关能不能点。**与「栏出不出得来」是同一个表达式的两半**，
      不许各写一遍：亮着却不出栏，人会以为功能坏了。 */
   const rightPaneUsable =
     !isMobile &&
     rightPaneFits &&
     hasSessionState &&
-    // 查看器开着时要么摆得下三列，要么右栏让位（按钮跟着灰，两者一致）
-    (!PortalStore.isFilePaneOpen(id) ||
-      !filePaneFits ||
-      rowW === 0 ||
-      rowW >= THREE_COL_MIN_W);
+    // 查看器开着时要么摆得下三列，要么右栏让位（按钮跟着灰，两者一致）。
+    // 吃的是 `filePaneOpen`（查看器那一列真的出不出得来），不是 store 里那个原始
+    // 开关位 —— 后者在「摆不下」「不是我的机器」时仍可能为真，右栏会跟着白让一格。
+    (!filePaneOpen || !filePaneFits || rowW === 0 || rowW >= THREE_COL_MIN_W);
   /* 这一格自己的右栏开着没有。**按格取**，不是全局一份 —— 四格并排时
      每一格的这颗按钮只管自己那一栏。
      紧凑卡片不给：那张卡只有 320×248，再切一栏就什么都看不见了；
-     窄屏也不给：那边没有第三栏，状态卡留在对话流末尾（见下方）。 */
-  /* 这一格的文件查看器。开关与右栏同一条规矩：**每格一份**、摆不下就置灰不渲染。
-     紧凑卡片与窄屏不给：那两处连第二列都摆不下。 */
-  const filePaneUsable = !isMobile && !compact && filePaneFits && !!id;
-  const filePaneOpen = filePaneUsable && PortalStore.isFilePaneOpen(id);
-  const filePaneHint = !filePaneFits
-    ? "这一格太窄，摆不下文件查看器；放大这一格后可用"
-    : filePaneOpen
-      ? "关闭文件查看"
-      : "查看这台机器上、这条会话目录里的文件";
-  /* 这一格自己的右栏开着没有。**按格取**，不是全局一份。
+     窄屏也不给：那边没有第三栏，状态卡留在对话流末尾（见下方）。
      多一条：**查看器开着、而格子摆不下三列时右栏让位** —— 理由见 THREE_COL_MIN_W。
-     它同时进 `rightPaneUsable`（下一行），所以按钮态与栏出不出来仍然是同一个表达式。 */
+     它同时进 `rightPaneUsable`（上面那行），所以按钮态与栏出不出来仍然是同一个表达式。 */
   const rightPaneOpen = !compact && rightPaneUsable && isRightPaneOpen(id);
   /** 右栏开关的提示语。灰掉时说清「为什么不能点、怎么才能点」 */
   const rightPaneHint = !hasSessionState
@@ -1264,6 +1269,9 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                       : "该会话无存活进程，无法发布"
                   }
                   machineId={task.machineId}
+                  // 别人共享给我的机器不提供文件访问：上传与「选择文件」一并置灰。
+                  // 与文件查看器那颗按钮同一个值，不会出现「这边能点那边不能」
+                  deviceShared={deviceShared}
                   // 会话此刻的工作目录优先：会话 cd 进子目录后，进程 cwd 还钉在启动目录，
                   // 拿它当上传落点就会「文件写在项目根、终端在子目录里找」（见 Task.liveCwd）。
                   cwd={task.liveCwd || task.process?.cwd}

@@ -65,6 +65,38 @@ const b64ToBytes = (b64: string): Uint8Array<ArrayBuffer> => {
 
 type Kind = "text" | "image" | "pdf" | "binary";
 
+/**
+ * 一次取件为什么没成。**三类分得开，靠的是结构化信号，不是文案**：
+ *
+ * - `deny`：服务端在信封里给了非 0 的 `code`（hub 的 `err()`：HTTP 恒 200，真正的状态
+ *   码在 body 的 `code` 上）。这是**明确的拒绝** —— 比如「该设备是他人共享给你的，
+ *   不提供文件访问」「该文件被安全策略拒绝」。重试一万次结果一样，所以**不给重试**。
+ * - `timeout`：取件阶梯（`POLL_DELAYS`，约 92 秒）走完，那台机器仍没把内容带回来。
+ *   下一轮上报就可能回来，**给重试**。
+ * - `network`：请求本身没打到 hub。也给重试。
+ *
+ * 从前这一层只有一个字符串：目录那一支把 `code !== 0` 直接当成超时、把 `msg` 丢了，
+ * 文件那一支用 `"timeout"` 当哨兵值混在真实文案里。两个毛病同一个根：
+ * **失败原因没有类型，只有一句话**。
+ */
+type FailKind = "deny" | "timeout" | "network";
+
+interface Fail {
+  kind: FailKind;
+  /** `deny` 时是服务端原文；另两类前端自己说 */
+  msg: string;
+}
+
+const timeoutFail = (what: "目录" | "文件"): Fail => ({
+  kind: "timeout",
+  msg: `这台机器还没把${what}送回来（一轮上报约 30 秒，最坏 60 秒）`,
+});
+
+const NETWORK_FAIL: Fail = {
+  kind: "network",
+  msg: "读取失败，请检查网络",
+};
+
 interface FileState {
   rel: string;
   name: string;
@@ -113,11 +145,13 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
   const [dirs, setDirs] = useState<string[]>([]);
   const [files, setFiles] = useState<string[]>([]);
   const [dirLoading, setDirLoading] = useState(false);
-  const [dirTimedOut, setDirTimedOut] = useState(false);
+  /** 这次列目录为什么没成（null = 没失败）。分类见 `Fail` */
+  const [dirFail, setDirFail] = useState<Fail | null>(null);
 
   const [file, setFile] = useState<FileState | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
-  const [fileErr, setFileErr] = useState("");
+  /** 这次取文件为什么没成（null = 没失败）。分类见 `Fail` */
+  const [fileFail, setFileFail] = useState<Fail | null>(null);
 
   /** 每一次取件的序号：切目录/切文件时旧的那条回来要丢掉，不能覆盖新的 */
   const dirSeq = useRef(0);
@@ -132,7 +166,7 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
       }
       const seq = attempt === 0 ? ++dirSeq.current : dirSeq.current;
       if (attempt === 0) {
-        setDirTimedOut(false);
+        setDirFail(null);
         setDirLoading(true);
       }
       getTaskDirs(taskId, next)
@@ -141,8 +175,10 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
             return;
           }
           if (res.code !== 0) {
+            // 服务端明确拒绝（访客访问他人共享设备的文件就是这一支）。
+            // **原文照出**：说成「还没送回来」等于告诉人再等等，而它永远不会来
             setDirLoading(false);
-            setDirTimedOut(true);
+            setDirFail({ kind: "deny", msg: res.msg || "读取目录失败" });
             return;
           }
           if (res.data?.pending && attempt < POLL_DELAYS.length) {
@@ -154,7 +190,7 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
           }
           if (res.data?.pending) {
             // 等不到就明说，别把它渲染成一个空目录
-            setDirTimedOut(true);
+            setDirFail(timeoutFail("目录"));
             setDirLoading(false);
             return;
           }
@@ -165,7 +201,7 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
         .catch(() => {
           if (seq === dirSeq.current) {
             setDirLoading(false);
-            setDirTimedOut(true);
+            setDirFail(NETWORK_FAIL);
           }
         });
     },
@@ -199,7 +235,7 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
     const full = rel ? `${rel}/${name}` : name;
     const seq = attempt === 0 ? ++fileSeq.current : fileSeq.current;
     if (attempt === 0) {
-      setFileErr("");
+      setFileFail(null);
       setFileLoading(true);
       setFile({ rel: full, name, kind: "text", size: 0 });
     }
@@ -209,8 +245,9 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
           return;
         }
         if (res.code !== 0) {
+          // 明确的拒绝：访客的 403、安全策略拦下的密钥类文件都走这里。原文照出、不给重试
           setFileLoading(false);
-          setFileErr(res.msg || "读取失败");
+          setFileFail({ kind: "deny", msg: res.msg || "读取失败" });
           return;
         }
         if (res.data?.pending && attempt < POLL_DELAYS.length) {
@@ -222,7 +259,7 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
         }
         if (res.data?.pending) {
           setFileLoading(false);
-          setFileErr("timeout");
+          setFileFail(timeoutFail("文件"));
           return;
         }
         const b64 = res.data?.contentB64 ?? "";
@@ -263,7 +300,7 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
       .catch(() => {
         if (seq === fileSeq.current) {
           setFileLoading(false);
-          setFileErr("读取失败，请检查网络");
+          setFileFail(NETWORK_FAIL);
         }
       });
   };
@@ -275,7 +312,7 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
       urlRef.current = "";
     }
     setFile(null);
-    setFileErr("");
+    setFileFail(null);
     setFileLoading(false);
   };
 
@@ -311,17 +348,20 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
         </>
       );
     }
-    if (dirTimedOut) {
+    if (dirFail) {
       return (
         <div className={styles.empty}>
-          <div>这台机器还没把目录送回来（一轮上报约 30 秒，最坏 60 秒）</div>
-          <button
-            type="button"
-            className={styles.retry}
-            onClick={() => loadDir(rel)}
-          >
-            重试
-          </button>
+          <div>{dirFail.msg}</div>
+          {/* 明确的拒绝不给重试：再点一次还是同一句话 */}
+          {dirFail.kind === "deny" ? null : (
+            <button
+              type="button"
+              className={styles.retry}
+              onClick={() => loadDir(rel)}
+            >
+              重试
+            </button>
+          )}
         </div>
       );
     }
@@ -368,21 +408,20 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
         </>
       );
     }
-    if (fileErr) {
+    if (fileFail) {
       return (
         <div className={styles.empty}>
-          <div>
-            {fileErr === "timeout"
-              ? "这台机器还没把文件送回来（一轮上报约 30 秒，最坏 60 秒）"
-              : fileErr}
-          </div>
-          <button
-            type="button"
-            className={styles.retry}
-            onClick={() => file && openFile(file.name)}
-          >
-            重试
-          </button>
+          <div>{fileFail.msg}</div>
+          {/* 同上：被安全策略拒掉的 `.env`、访客的 403，重试一万次结果一样 */}
+          {fileFail.kind === "deny" ? null : (
+            <button
+              type="button"
+              className={styles.retry}
+              onClick={() => file && openFile(file.name)}
+            >
+              重试
+            </button>
+          )}
         </div>
       );
     }

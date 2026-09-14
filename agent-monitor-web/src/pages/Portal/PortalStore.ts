@@ -874,6 +874,22 @@ class PortalStore {
     return this._devices.filter((d) => !d.trusted).length;
   }
 
+  /**
+   * 这台机器是不是「别人用协助码共享给我的」。
+   *
+   * **判据是结构化字段**：`/monitor/devices` 每条设备下发的 `shared`，不是拿报错文案
+   * 或权限码反推。后端自 `f70eb09` 起把文件类接口（列目录 / 读文件 / 上传）只对设备
+   * 主人开放，访客一律 403 —— 入口要在**发请求之前**就灰掉，只能靠这个字段。
+   *
+   * 设备列表还没回来时返回 false：宁可先亮着（点下去会收到明确的 403 原文），
+   * 也好过把主人自己的按钮先灰一下再亮回来。
+   */
+  isSharedDevice(machineId?: string): boolean {
+    return (
+      !!machineId && this._devices.some((d) => d.id === machineId && d.shared)
+    );
+  }
+
   /** 全量会话列表（分享接收等场景选目标用） */
   get tasks() {
     return this._tasks;
