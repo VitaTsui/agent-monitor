@@ -110,6 +110,23 @@ Section "主程序（必装）" SecMain
   Delete "$LOCALAPPDATA\${APP_NAME}\${APP_EXE_LEGACY}"
   Delete "$LOCALAPPDATA\${APP_NAME}\卸载.exe"
   RMDir "$LOCALAPPDATA\${APP_NAME}"
+
+  ; ---- 一次性历史清理：0.12.16 及更早的安装器留下的乱码名产物 ----
+  ; 那些包是在「.nsi 无 BOM」的 CI 上编出来的，makensis 按 CP1252 读源码，
+  ; 脚本里每一处「终端任务监控」都被写成「ç»ˆç«¯ä»»åŠ¡ç›‘æŽ§」。
+  ; 只删**精确已知**的那几个名字（下面五行就是全部），且只碰本安装器自己写过的
+  ; 位置；不做任何模糊匹配、不按「看着像乱码」扫目录、不递归删目录树
+  ; （RMDir 不带 /r，开始菜单目录里只要还有别的东西就原样留着）。
+  ; Delete / RMDir 失败只置错误标志、不中断安装：删不掉（被占用/权限不足）就跳过，
+  ; 下次更新再试；末尾 ClearErrors，免得这个标志被后面的逻辑误读。
+  ; TODO(agent-monitor): 一次性迁移代码。等所有用户都升过 0.12.17+（乱码产物已清干净），
+  ;   这一整段连同本注释可以整块删掉。
+  Delete "$INSTDIR\ç»ˆç«¯ä»»åŠ¡ç›‘æŽ§.exe"
+  Delete "$DESKTOP\ç»ˆç«¯ä»»åŠ¡ç›‘æŽ§.lnk"
+  Delete "$SMPROGRAMS\ç»ˆç«¯ä»»åŠ¡ç›‘æŽ§\ç»ˆç«¯ä»»åŠ¡ç›‘æŽ§.lnk"
+  Delete "$SMPROGRAMS\ç»ˆç«¯ä»»åŠ¡ç›‘æŽ§\å${U+008D}¸è½½ ç»ˆç«¯ä»»åŠ¡ç›‘æŽ§.lnk"
+  RMDir "$SMPROGRAMS\ç»ˆç«¯ä»»åŠ¡ç›‘æŽ§"
+  ClearErrors
   ; 开机自启项若已存在，改指向新路径（旧路径的程序已被清理）
   ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}"
   StrCmp $0 "" +2
