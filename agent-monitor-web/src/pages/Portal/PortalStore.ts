@@ -758,10 +758,34 @@ class PortalStore {
     const sections = [...byClient.values()];
     for (const sec of sections) {
       const rows = [...rowsByClient.get(sec.key)!.values()];
-      // 最近活动倒序：侧栏回答的是「我最近在弄什么」，字母序在这儿没有意义
-      rows.sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0));
 
       if (!sec.desktop) {
+        /**
+         * **CLI 这一列按「会话开始时刻」倒序，不按活动时刻。**
+         *
+         * 从前这里是 `rows.sort((a,b) => b.mtimeMs - a.mtimeMs)` —— `mtimeMs` 是
+         * 会话 jsonl 的最后写入时刻，**每轮上报（约 1.5~3 秒）都在变**。于是哪条
+         * 会话冒出一条新消息就窜到本组最上面，整列跟着上下跳（用户原话：
+         * 「侧边的会话位置不要跳上跳下的」）。而且下面那个项目分组是**按 `rows`
+         * 的顺序首次出现建组**的，所以项目之间也跟着一起跳。
+         *
+         * `startedAt` 是一条会话的起点，**它一生不变**。于是：
+         *   - 已经在列表里的会话，**无论收到多少新消息，位置纹丝不动**；
+         *   - 只有「新开一个终端」这种用户自己的动作才会改变顺序，新的排在最上面
+         *     （那正是你刚开的那个，本来就该一眼看到）。
+         * 拿不到 `startedAt` 的排到最后，再用 id 兜底，保证**完全确定**、
+         * 不依赖 sort 的稳定性实现。
+         *
+         * **没有用防抖/节流/动画去压住重排** —— 那是把抖动藏起来，滚动位置和
+         * 点击目标照样会错位。这里换的是排序键本身。
+         */
+        const startedMs = (t: PortalTaskData) =>
+          t.startedAt ? Date.parse(t.startedAt) || 0 : 0;
+        rows.sort(
+          (a, b) =>
+            startedMs(b) - startedMs(a) || (a.id ?? "").localeCompare(b.id ?? ""),
+        );
+
         /**
          * CLI：**按项目再分一层，不分桶、不翻页**。
          *
@@ -773,8 +797,9 @@ class PortalStore {
          * 的终端窗口没有意义 —— 一个开了三天没关的终端会被标成「过去 7 天」，
          * 而它就在眼前。`buckets` 在 CLI 这一侧恒为空，渲染层走 `projects`。
          *
-         * 项目内保持 `rows` 已有的「最近活动倒序」；项目之间也按各自最近活动的
-         * 那一条排 —— 刚动过的项目排在前面，与整列「我最近在弄什么」同一个口径。
+         * 项目内保持 `rows` 已有的顺序；项目之间按「组里最新开的那条会话」排 ——
+         * 建组是按 `rows` 顺序首次出现，所以这一条是白来的。**只有新开终端才会
+         * 改变项目顺序**，收消息不会。
          *
          * 计数换成**实际列出的条数**：历史总数（那台机器上攒下的 73 条 jsonl）
          * 与这一列没有关系，写上去就是标题说 73、列表只有 2 条。
@@ -799,6 +824,13 @@ class PortalStore {
         continue;
       }
       sec.projects = [];
+
+      /* 桌面那一列**仍按最近活动倒序**，这不是疏忽：`HistorySession.mtimeMs` 同时是
+         `/monitor/sessions/history` 的**翻页游标**（见 portal.ts 的字段说明），本地
+         改用别的键排，「加载更早」翻回来的那一页就会插到莫名其妙的位置。
+         而且这一列里绝大多数是已经结束的历史会话，`mtimeMs` 早就不动了 ——
+         它本来就不跳。两列的契约不同，排序键跟着不同，不是两套并存。 */
+      rows.sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0));
 
       const buckets = new Map<string, PortalTaskData[]>();
       for (const r of rows) {
