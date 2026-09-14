@@ -21,6 +21,13 @@
   border-right: 1px solid var(--border);
   transition: width 0.2s ease, min-width 0.2s ease;
 
+  /* 「减少动态效果」下直接就位。288 ↔ 52 是 236px 的边界移动，右边整片正文
+     跟着重排横移，与上面那道抽屉同属「大面积位移」，同样直接落位。
+     **信息不丢**：收起/展开看的是最终宽度与图标排布，不是中间那 0.2 秒。 */
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+  }
+
   // 52（参照实测值）。原来 60 —— 收起态一条竖轨只放 32 宽的按钮，
   // 两侧各留 14 就正好 60？不是：参照是 52，两侧各 10
   &.folded {

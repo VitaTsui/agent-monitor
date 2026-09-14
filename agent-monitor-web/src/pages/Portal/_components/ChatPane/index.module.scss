@@ -207,6 +207,19 @@
        —— 一屏之内只有一种转法。 */
     .syncSpin {
       animation: chat-pane-spin 1.1s linear infinite;
+
+      /* 系统开了「减少动态效果」：停转（口径同 `StatusIcon` 的 `.spin`，
+         `transform` 回到 0°，不是随机一帧）。
+
+         **停转之前先把「正在同步」补出来**：这枚钮原来只有转圈一个信号 ——
+         Tooltip 是固定文案、钮也不置灰，停掉动画这个状态就彻底看不见了。
+         补在 tsx 里（`index.tsx`：loading 时钮置灰 ＋ Tooltip 改口），
+         不在这儿用颜色凑：实测 `--primary` 是 #18181b、这排图标继承的
+         `--foreground` 是 #09090b，两个近黑并排看不出差别，染上去等于
+         「看着像补了」而已。 */
+      @media (prefers-reduced-motion: reduce) {
+        animation: none;
+      }
     }
 
     @keyframes chat-pane-spin {
@@ -458,6 +471,15 @@
       border-radius: 50%;
       background: var(--warning);
       animation: queuedPulse 1.4s ease-in-out infinite;
+
+      /* 「减少动态效果」下不闪。`queuedPulse` 的 0% 就是 `opacity: 1`，
+         停掉即停在满不透明那一帧。
+         **信息不丢**：这枚点只是排队卡里每一行的记号，「还没轮到」由这张卡
+         本身（标题 ＋ 每行的文案 ＋ 撤回标签）说清楚，点只负责起头对齐；
+         橙色 `--warning` 也照旧。 */
+      @media (prefers-reduced-motion: reduce) {
+        animation: none;
+      }
     }
 
     .queuedItemText {
@@ -548,6 +570,14 @@
     padding: 8px;
     // 出现时轻推一下，让人注意到「多了个要办的事」
     animation: pendingIn 0.18s ease-out;
+
+    /* 「减少动态效果」下**直接就位**（不是放慢）：换成同时长的纯淡入，
+       把那 6px 的位移撤掉。位移撤了、淡入留着 —— 透明度不是前庭刺激源，
+       而「多了个要办的事」正需要这一下提示，全撤掉就没人注意到它冒出来了。
+       换名不是换成 `none`：`none` 会让入场毫无痕迹，淡入是最小的保留。 */
+    @media (prefers-reduced-motion: reduce) {
+      animation: pendingFadeIn 0.18s ease-out;
+    }
   }
 }
 
@@ -559,6 +589,16 @@
   to {
     opacity: 1;
     transform: none;
+  }
+}
+
+/* reduce 用的那一份：同时长、同缓动，只有淡入没有位移 */
+@keyframes pendingFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }
 

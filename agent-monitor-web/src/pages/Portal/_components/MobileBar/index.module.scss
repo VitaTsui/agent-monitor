@@ -166,6 +166,18 @@
         &.running {
           background: var(--primary);
           animation: mobilePulse 1.4s ease-in-out infinite;
+
+          /* 「减少动态效果」下不闪（口径同 `StatusIcon` 的 `.spin`）。
+             `mobilePulse` 的 0% 是 `opacity: 1`，停掉即停在满不透明那一帧。
+
+             **停掉仍认得出「执行中」**：靠的是色，不是那一下呼吸。这枚点四态
+             四色，且 `--primary`（实测 #18181b 近黑）在本项目里**只给「在跑」**
+             这一档用 —— 邻居分别是 `--warning` #f59e0b 橙（等人输入）、
+             `--subtle-foreground` #a1a1aa 灰（暂停）、`--border` #e4e4e7 浅灰
+             （其余），明度与色相都分得开。 */
+          @media (prefers-reduced-motion: reduce) {
+            animation: none;
+          }
         }
         &.idle {
           background: var(--warning);

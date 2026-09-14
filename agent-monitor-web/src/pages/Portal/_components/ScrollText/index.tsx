@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 
+import useReducedMotion from "@/hooks/useReducedMotion";
 import styles from "./index.module.scss";
 
 interface ScrollTextProps {
@@ -35,28 +36,6 @@ const START_DELAY = "1.2s";
 const COPY_GAP = 40;
 
 /**
- * 系统是否开了「减少动态效果」。开了就**不滚**，退回省略号截断 ——
- * 前庭功能敏感的人看一行自己动的字会难受，而这一行的内容 `title` 里本来就有全文。
- */
-const useReducedMotion = () => {
-  const [reduced, setReduced] = useState(
-    () =>
-      typeof window !== "undefined" &&
-      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches,
-  );
-  useEffect(() => {
-    const mq = window.matchMedia?.("(prefers-reduced-motion: reduce)");
-    if (!mq) {
-      return;
-    }
-    const on = () => setReduced(mq.matches);
-    mq.addEventListener("change", on);
-    return () => mq.removeEventListener("change", on);
-  }, []);
-  return reduced;
-};
-
-/**
  * 过长文本自动滚动（marquee）：选中项且内容溢出容器时，循环滚动展示全文；
  * 其余情况维持省略号截断。滚动用两份内容首尾相接 + translateX(-50%)。
  *
@@ -69,6 +48,9 @@ const ScrollText: React.FC<ScrollTextProps> = (props) => {
   const measureRef = useRef<HTMLSpanElement>(null);
   /** 文字的实际宽度（px）。0 = 还没量到 / 没溢出 */
   const [textW, setTextW] = useState(0);
+  /* 系统开了「减少动态效果」就**不滚**，退回省略号截断 —— 前庭功能敏感的人
+     看一行自己动的字会难受，而这一行的内容 `title` 里本来就有全文。
+     判断落在 `hooks/useReducedMotion`（JS 侧唯一一份，ChatPane 的平滑滚动同源）。 */
   const reduced = useReducedMotion();
 
   useEffect(() => {

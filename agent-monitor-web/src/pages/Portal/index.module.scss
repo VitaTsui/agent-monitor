@@ -72,6 +72,14 @@
       transition: transform 0.25s ease, border-radius 0.25s ease;
       will-change: transform;
 
+      /* 「减少动态效果」下**直接就位**，不滑。这是全项目位移最大的一处 ——
+         整屏正文横移 `min(84vw, 320px)`，是前庭不适最典型的触发形态。
+         **信息不丢**：抽屉开没开看的是「侧栏露出来没有」这个结果状态，
+         不是路上那 0.25 秒；圆角也跟着一起瞬时切换，不留半圆的中间态。 */
+      @media (prefers-reduced-motion: reduce) {
+        transition: none;
+      }
+
       &.mainPushed {
         transform: translateX(var(--drawer-w));
         // 被推开后左侧两角保持设备圆角观感；不加描边/阴影，靠圆角与底色差自然区隔
