@@ -129,6 +129,23 @@
   min-width: 0;
 }
 
+/* 「正在执行的子代理」那一行是可点的（点了滚到链上那张卡）。
+   形制与别的条目**一模一样** —— 它不是一颗按钮，是一条会响应的条目：
+   按钮那套（描边、底色、内边距）会让这一节在同一栏里长得跟另外两节不一样。
+   「可点」由光标形状与悬停时名字走主色来说。 */
+.itemLink {
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover .itemName {
+    color: var(--primary);
+  }
+}
+
 .itemName {
   flex: 1;
   min-width: 0;
@@ -137,6 +154,7 @@
   white-space: nowrap;
   color: var(--foreground);
   font-size: var(--text-base);
+  transition: color 0.15s;
 }
 
 .itemStatus {

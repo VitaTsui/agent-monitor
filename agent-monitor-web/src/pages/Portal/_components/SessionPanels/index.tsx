@@ -2,9 +2,11 @@ import React, { useEffect, useState } from "react";
 
 import { Icon } from "@hsu-react/ui";
 import { Tooltip } from "antd";
+import { observer } from "mobx-react-lite";
 
 import { PortalMessage, SubTask } from "@/services/apis/portal";
-import StatusIcon, { statusOfOutcome } from "../StatusIcon";
+import PortalStore from "../../PortalStore";
+import StatusIcon, { CHAIN_ICON, statusOfOutcome } from "../StatusIcon";
 import {
   SUB_OUTCOME_LABEL,
   fmtSubTaskElapsed,
@@ -31,6 +33,14 @@ import styles from "./index.module.scss";
  * 后台命令在 `aliveBgCommands` 就被滤掉了，走不到这儿。
  */
 interface SessionPanelsProps {
+  /**
+   * 这一份状态说的是哪一条会话。
+   *
+   * **「正在执行的子代理」那一节点一条要滚的是本格的链**（`focusAgentCard(taskId,…)`
+   * 认这个 id，见 ChatPane 的 `focusMine`）—— 拆分视图下四格各有各的右栏，
+   * 不带主语就会滚错格。
+   */
+  taskId: string;
   messages: PortalMessage[];
   /**
    * 这条会话名下的子任务。取自 `PortalTaskData.subTasks`。
@@ -133,10 +143,53 @@ const TaskRow: React.FC<{ task: SubTask; now: number }> = ({ task, now }) => {
 };
 
 /**
- * 会话的「当前状态」：任务清单、后台命令两块。
+ * 「正在执行的子代理」的一行。**它是个入口，不是一份内容。**
  *
- * **子代理不在这儿**：它是执行链上的一步，就地画在正文里（见 `AgentCard`）。
- * 后台命令留下来是因为它**没有对应的执行链节点** —— 删了就没地方看了。
+ * 点它 = 让本格的执行链滚到派出它的那张智能体卡上并展开（`focusAgentCard`）——
+ * 正文仍然只在链里渲染一次。不在右栏里就地展开：同一份内容画两处是这一版
+ * 反复踩过的坑（子会话树那一套正是因此被推翻的）。
+ *
+ * **配不上的也照列。** 子代理与链上的卡靠 `toolUseId` 配对，起跑那条记录掉出正文
+ * 窗口时就配不上 —— 但「有个子代理正在跑」这件事本身仍然要看得见（这正是 0.12.14
+ * 那一版的主题）。所以列出来，点了定位不到时把原因**说在这一行上**
+ * （`PortalStore.focusMissId`，与侧栏那套同一份机制）：不许点了没反应，
+ * 也不弹一条飘过去的全局提示 —— 那得让人回头找刚才点的是哪条。
+ */
+const AgentRow: React.FC<{ taskId: string; task: SubTask; now: number }> =
+  observer(({ taskId, task, now }) => {
+    const elapsed = fmtSubTaskElapsed(task, now);
+    const missed = PortalStore.focusMissId === task.id;
+    return (
+      <li className={`${styles.item} ${styles.running}`}>
+        <button
+          type="button"
+          className={`${styles.itemHead} ${styles.itemLink}`}
+          onClick={() => PortalStore.focusAgentCard(taskId, task.id)}
+        >
+          <StatusIcon kind="running" className={styles.itemIcon} />
+          <Tooltip title={task.label}>
+            <span className={styles.itemName}>{task.label}</span>
+          </Tooltip>
+          {/* 「执行中」三个字不写：左边那枚 `ph:circle-notch` 正在转，右边的耗时在
+              走字，这一节的标题也写着「正在执行的子代理」—— 同一件事说三遍。
+              耗时留着：**「还在跑」与「卡死了」的唯一区别就是它动不动。** */}
+          {elapsed ? <span className={styles.itemMeta}>{elapsed}</span> : null}
+        </button>
+        {missed ? (
+          <span className={styles.itemReason}>
+            在当前加载的正文里找不到派出它的那一步，往上翻一段再点
+          </span>
+        ) : null}
+      </li>
+    );
+  });
+
+/**
+ * 会话的「当前状态」：任务清单、后台命令、正在执行的子代理三块。
+ *
+ * **子代理只给入口、不给内容**：正文是执行链上的一步，就地画在链里（见 `AgentCard`）；
+ * 这儿只列**还在跑的那几个**，点一条滚过去。后台命令留在这儿是另一个理由 ——
+ * 它**没有对应的执行链节点**，删了就没地方看了。
  *
  * **宽屏在右栏**（`SessionStatePane`）：与正文并排、不滚走、不挡任何东西。
  * **窄屏排在对话流末尾**：手机上摆不下第三栏，它跟着对话一起滚。
@@ -146,14 +199,14 @@ const TaskRow: React.FC<{ task: SubTask; now: number }> = ({ task, now }) => {
  * 这件最该被看到的事，反倒需要先点一下才看得见。
  */
 const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
-  const { messages, subTasks, running, className, flat } = props;
+  const { taskId, messages, subTasks, running, className, flat } = props;
 
   // 「有哪些东西要展示」只有一处定义（见 sessionStateOf）：右栏要先问同一个问题
   // 才知道该不该给这条会话一个标题，两边各写一遍筛选条件迟早会对不上。
-  const { todos, bgTasks } = sessionStateOf(messages, subTasks);
+  const { todos, bgTasks, agents } = sessionStateOf(messages, subTasks);
 
-  // 耗时要走字：只在真有后台任务时上表，且 tick 只驱动本组件重渲染。
-  const ticking = bgTasks.length > 0;
+  // 耗时要走字：后台任务与在跑的子代理都要，且 tick 只驱动本组件重渲染。
+  const ticking = bgTasks.length > 0 || agents.length > 0;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!ticking) {
@@ -163,7 +216,7 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
     return () => window.clearInterval(timer);
   }, [ticking]);
 
-  if (isEmptySessionState({ todos, bgTasks })) {
+  if (isEmptySessionState({ todos, bgTasks, agents })) {
     return null;
   }
 
@@ -224,6 +277,23 @@ const SessionPanels: React.FC<SessionPanelsProps> = (props) => {
               </li>
             );
           })}
+        </StateCard>
+      )}
+
+      {/* 正在执行的子代理。**摆在后台任务前面**：它是这一栏里唯一「点了会动」的一节，
+          而且用户找它的频率最高（一条长会话滚回去找那张卡是件苦差事）。
+          字形与执行链上智能体卡的卡头同一枚（`CHAIN_ICON.agents`）—— 点过去看到的
+          就是那张卡，两处必须是同一个记号。 */}
+      {agents.length > 0 && (
+        <StateCard
+          icon={<Icon icon={CHAIN_ICON.agents} />}
+          title="正在执行的子代理"
+          // 只列在跑的，所以这一行就是个数；不写「N 个进行中」——「进行中」由标题说了
+          meta={`${agents.length} 个`}
+        >
+          {agents.map((t) => (
+            <AgentRow key={t.id} taskId={taskId} task={t} now={now} />
+          ))}
         </StateCard>
       )}
 

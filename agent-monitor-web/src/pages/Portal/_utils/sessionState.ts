@@ -11,9 +11,10 @@ import { PortalMessage, SubTask, SubTaskOutcome } from "@/services/apis/portal";
  * `JSON.parse`，还得记着别把它渲染成聊天气泡。**后端已经把那条消息删掉了**，
  * 这里一并改读字段；旧的解析路径整条拆掉，不保留两套判断。
  *
- * **子代理不在这一份里**：它是执行链上的一步（谁派的、派了什么、跑成什么样），
- * 由正文里的智能体卡就地展示（见 `_components/AgentCard`）。这里只剩「没有对应
- * 执行链节点」的那两样 —— 任务清单与后台命令 —— 它们在链上无处可挂，才需要一块状态区。
+ * **子代理的正文不在这一份里**：它是执行链上的一步（谁派的、派了什么、跑成什么样），
+ * 由正文里的智能体卡就地展示（见 `_components/AgentCard`）。这里只取「正在跑的那几个」
+ * 当**入口**用（点一条滚到链上那张卡），内容一个字都不在状态区重画 ——
+ * 同一份东西渲染两处是这一版反复踩过的坑。
  */
 
 /**
@@ -82,14 +83,27 @@ export const aliveBgCommands = (list?: SubTask[]): SubTask[] =>
   (list ?? []).filter((t) => t.kind !== "agent" && t.outcome !== "completed");
 
 /**
- * 一条会话此刻的「当前状态」：未完成的清单条目、活着的后台命令。
+ * **正在跑的**子代理。右栏「正在执行的子代理」一节列的就是这些。
  *
- * **不含子代理** —— 它有自己的执行链节点（智能体卡），状态区再列一遍就是同一件事
- * 说两遍，而且那一份还得自己再定义一次「哪些算值得展示」。
+ * **只列 running，跑完的一个都不列**：右栏说的是「此刻在办什么」，不是历史 ——
+ * 派过谁、跑成什么样由执行链完整记着（`AgentCard`），那儿一条都不少。
+ * 这一节是个**入口**不是第二份内容：点一条 = 滚到链上那张卡并展开它
+ * （`PortalStore.focusAgentCard`），正文仍然只在链里渲染一次。
+ */
+export const runningSubAgents = (list?: SubTask[]): SubTask[] =>
+  (list ?? []).filter((t) => t.kind === "agent" && isSubTaskRunning(t));
+
+/**
+ * 一条会话此刻的「当前状态」：未完成的清单条目、活着的后台命令、正在跑的子代理。
+ *
+ * 三样的共同点是**「此刻」**：清单是每轮重算的状态，后台命令在链上压根没有节点，
+ * 子代理虽然链上有卡，但一条长会话滚回去找那张卡是件苦差事 —— 这一节只给入口
+ * （点一条滚过去），内容不在这儿画第二遍。
  */
 export interface SessionState {
   todos: TodoItem[];
   bgTasks: SubTask[];
+  agents: SubTask[];
 }
 
 /**
@@ -129,11 +143,18 @@ export const sessionStateOf = (
     (t) => t.status !== "completed",
   ),
   bgTasks: aliveBgCommands(subTasks),
+  agents: runningSubAgents(subTasks),
 });
 
-/** 这条会话此刻没有任何可展示的状态 —— 状态卡整块不渲染、右栏不给它标题 */
+/**
+ * 这条会话此刻没有任何可展示的状态 —— 状态卡整块不渲染、右栏不给它标题、开关置灰。
+ *
+ * **三样都空才算空。** 漏掉任何一样的后果都是同一种：那样东西明明有、右栏却打不开
+ * （子代理这一节刚补上时，`agents` 就必须一起进这个判据，否则会出现「有子代理在跑
+ * 但右栏点不开」）。
+ */
 export const isEmptySessionState = (s: SessionState): boolean =>
-  !s.todos.length && !s.bgTasks.length;
+  !s.todos.length && !s.bgTasks.length && !s.agents.length;
 
 /**
  * 耗时口语化：37秒 / 4分12秒 / 1小时3分。
