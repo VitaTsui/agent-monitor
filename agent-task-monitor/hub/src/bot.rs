@@ -829,7 +829,11 @@ async fn advance_monitor_ts(state: &SharedState, username: &str, task_id: &str, 
 }
 
 /// 监控推送只保留「对话内容」：用户提示、助手回复、方案、待选择；过滤掉执行过程
-/// （工具调用/结果、todos、后台任务）——用户要的是对话，不是一屏工具执行流水。
+/// （工具调用 `tool` / 工具结果 `tool_result` / 任务清单 `todos`）——用户要的是对话，
+/// 不是一屏工具执行流水。
+///
+/// 后台子任务不在这里出现：它早已不是消息，而是 `Task::sub_tasks` 上的结构化字段
+/// （原先那条 `role:"bgtasks"` 伪消息已删除）。
 fn is_monitor_content(role: &str) -> bool {
     matches!(role, "user" | "assistant" | "plan" | "select")
 }
@@ -2506,5 +2510,83 @@ mod tests {
                 "误伤了正常回复：{c}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod push_content_tests {
+    use super::*;
+    use am_core::model::{MessageBrief, ToolCall};
+
+    fn msg(role: &str, content: &str) -> MessageBrief {
+        MessageBrief {
+            role: role.into(),
+            content: content.into(),
+            timestamp: "2026-09-14T01:00:00.000Z".into(),
+            is_error: false,
+            tools: Vec::new(),
+            tool_use_id: String::new(),
+        }
+    }
+
+    fn tool_msg(calls: &[(&str, &str, &str)]) -> MessageBrief {
+        let mut m = msg("tool", "");
+        m.tools = calls
+            .iter()
+            .map(|(id, name, hint)| ToolCall {
+                id: (*id).into(),
+                name: (*name).into(),
+                hint: (*hint).into(),
+            })
+            .collect();
+        m
+    }
+
+    /// **工具调用的正文搬到 `tools[]` 之后，纯文本出口不能变成空白。**
+    ///
+    /// `role:"tool"` 的 `content` 现在是空串（正文在 `tools` 里），所有只能出文字的
+    /// 出口——钉钉推送、MCP 会话摘要——必须走 [`MessageBrief::text`]。直接读 `content`
+    /// 会推出一行空白，而且不报错。
+    #[test]
+    fn tool_call_is_not_blank_in_text_only_outputs() {
+        let m = tool_msg(&[
+            ("toolu_A", "Read", "/a.rs"),
+            ("toolu_B", "Bash", "cargo test"),
+        ]);
+        assert!(m.content.is_empty(), "结构化之后 content 就是空的");
+        assert_eq!(m.text(), "Read: /a.rs | Bash: cargo test");
+        assert!(!m.text().trim().is_empty(), "纯文本出口不能是空白");
+    }
+
+    /// 监控推送**只推对话内容**，工具调用/结果压根进不来 —— 这条要钉住：
+    /// 一旦哪天放开了过滤，上面那条 `text()` 就是唯一防线。
+    #[test]
+    fn monitor_push_keeps_only_conversation_roles() {
+        assert!(is_monitor_content("user"));
+        assert!(is_monitor_content("assistant"));
+        assert!(is_monitor_content("plan"));
+        assert!(is_monitor_content("select"));
+        for skipped in ["tool", "tool_result", "todos"] {
+            assert!(!is_monitor_content(skipped), "{skipped} 不该进监控推送");
+        }
+    }
+
+    /// 实际推出去的那条文本长什么样：每条一行、带角色前缀、不含空行与 undefined。
+    #[test]
+    fn monitor_push_body_is_well_formed() {
+        let msgs = [
+            msg("user", "把侧栏改一下"),
+            msg("assistant", "改完了，共动了 3 个文件"),
+        ];
+        let refs: Vec<&MessageBrief> = msgs.iter().collect();
+        let out = render_monitor_push(&refs);
+        assert!(out.starts_with("🔔 会话新动态："));
+        assert!(out.contains("🧑 把侧栏改一下"));
+        assert!(out.contains("🤖 改完了，共动了 3 个文件"));
+        assert!(!out.contains("undefined"));
+        assert!(
+            !out.lines().any(|l| l.trim() == "•"),
+            "不该出现只有前缀、没有正文的空行"
+        );
     }
 }
