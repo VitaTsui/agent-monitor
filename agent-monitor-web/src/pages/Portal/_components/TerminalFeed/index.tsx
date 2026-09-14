@@ -489,6 +489,24 @@ const hasLiveAgent = (it: ChainItem) =>
   it.kind === "agents" && it.agents.some(isSubTaskRunning);
 
 /**
+ * 这条链上**此刻挂起着的那一步**的 key（没有就是空串）。
+ *
+ * 判据是结构上的：调用与它的输出成对出现，最后一次调用还没有任何输出 = 它正跑着。
+ * 不拿时间戳猜「多久没动静了」—— 一条跑了十分钟的命令和一条卡死的命令，
+ * 时间戳上一模一样。
+ *
+ * **两处共用这一份**：链里据此让那一步走流光 ＋ 转圈，轮次那一层据此决定要不要在
+ * 末尾顶「正在思考…/正在处理…」那一行。两边各算一遍的话，迟早出现「两处都在动」
+ * 或者「两处都不动」。
+ */
+const pendingCallKey = (items: ChainItem[]): string => {
+  const lastCall = [...items]
+    .reverse()
+    .find((i): i is ChainCall => i.kind === "call");
+  return lastCall && !lastCall.results.length ? lastCall.key : "";
+};
+
+/**
  * 把一段消息排成执行链。
  *
  * 主会话与子代理**共用这一份**：后端下发的子代理正文与主会话结构完全一致
@@ -693,24 +711,34 @@ const summarizeChain = (items: ChainItem[]): string => {
 
 
 /**
- * **空窗期那一行**：任务刚发下去、这一轮还什么都没落盘时，顶在这儿的
- * `⟳ 正在处理… · 耗时`。
+ * **空当里那一行**：这一轮跑着、但此刻链上没有任何一步挂起时，顶在末尾的
+ * `⟳ 正在思考… · 耗时` / `⟳ 正在处理… · 耗时`。
  *
- * **它只在「这一轮一个节点都还没有」时出现**（判据见调用处的 `keyed.length === 0`），
- * 第一个节点一落盘就立刻消失。这正是 VitaAgent 那行的**原始条件**
- * （`MessageList/index.tsx:1676-1678` 的注释写明：原来是「且这一轮还没有任何内容」，
- * 后来才改成无条件）。他们改成无条件是为了**流式**场景下的连续感 —— 我们是轮询
- * 磁盘、不是流式，那个理由不成立，而「链上已经写着在干什么、底下再顶一句没有主语
- * 的正在处理」的代价对我们是实打实的（用户为此提过两次）。
+ * 它与「跑着的那一步」是**互斥**的两档，合起来保证这一轮跑着的每一刻屏幕上
+ * 都恰好有一处在动（判据见调用处的 `pendingCallKey`）：
  *
- * **这个场景下状态词是有信息量的**：它是屏幕上唯一的东西，不存在「占着位置重复
- * 别人已经说过的话」的问题。没有它，任务发下去之后到第一条记录落盘之间就是一片纯
- * 空白，用户不知道发没发出去。
+ *   有一步挂起着（最后一次调用还没有输出）→ 不摆这一行，
+ *       由那一步自己的名字走流光 ＋ 图标转圈。**不加状态词** —— 那一行已经写着
+ *       具体在干什么，再补三个字是同一件事说两遍（用户为此提过两次）。
+ *   一步都没挂起（刚发下去、或上一步已返回、下一步还没发起）→ 摆这一行。
+ *       此刻屏幕上**没有别的东西在动**，不存在「重复别人已经说过的话」的问题；
+ *       没有它，用户看到的就是一列跑完的步骤，分不清「还在想」与「卡死了」。
+ *
+ * 两句文案的分界也是结构性的，不是修辞：
+ *   `thinking`（这一轮一个节点都还没有）→ 「正在思考…」。模型收到任务、还没有
+ *       任何产出，此刻它就是在想；这一档是我们能对上 VitaAgent `ThinkingBlock`
+ *       （`MessageList/index.tsx:278`）的**唯一**一档 —— 它那边有流式的 thinking
+ *       正文，我们的 jsonl 里 99% 的 thinking 块是空串（详见文件末尾的 TODO），
+ *       写不出「它在想什么」，只说得出「它在想」。
+ *   `working`（已经有产出，此刻没有挂起的步）→ 「正在处理…」。
  *
  * 耗时每秒走字：**「还在跑」与「卡住了」的唯一区别**就是它动不动。
  * 口径与 SessionPanels / SubAgentChip 共用 `fmtElapsed`，全项目只有这一套算法。
  */
-const Working: React.FC<{ since?: string }> = ({ since }) => {
+const Working: React.FC<{ since?: string; thinking?: boolean }> = ({
+  since,
+  thinking,
+}) => {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -718,14 +746,17 @@ const Working: React.FC<{ since?: string }> = ({ since }) => {
   }, []);
 
   const elapsed = fmtElapsed(since, now);
+  const text = thinking ? "正在思考…" : "正在处理…";
 
   return (
     <div className={styles.step}>
-      <div className={styles.stepHead} role="status" aria-label="正在处理">
+      <div className={styles.stepHead} role="status" aria-label={text}>
         <StepTile>
           <StatusIcon kind="running" className={styles.stepIcon} />
         </StepTile>
-        <span className={styles.stepNameLive}>正在处理…</span>
+        <span className={`${styles.stepNameLive} ${styles.liveText}`}>
+          {text}
+        </span>
         {/* 耗时靠右，与参照的 `.stepMeta` 同一处：它是这一行的「量」，
             不是名字的一部分，所以不跟着名字用间隔点粘在一起 */}
         {elapsed ? (
@@ -832,7 +863,13 @@ const StepRow: React.FC<{
             「这是哪个工具」比它这次的入参更先要回答。
             没有入参提示时它就是这一行的全部内容，不再另摆一枚重复的标 */}
         {step.hint ? <span className={styles.stepFrom}>{human}</span> : null}
-        <span className={styles.stepName}>{step.hint || human}</span>
+        {/* 正跑着的那一步，名字走流光（见 `.liveText`）。**效果代替状态词**：
+            「它还在动」这件事由光走过去说，而这一行的字仍然写的是「它在干什么」 */}
+        <span
+          className={`${styles.stepName} ${running ? styles.liveText : ""}`}
+        >
+          {step.hint || human}
+        </span>
         {/* **跑着的时候不写「执行中…」**：这一行左边那枚 `ph:circle-notch` 正在转，
             状态已经由它说完了；再补三个字，是同一件事在 20px 内说两遍，
             而且它占的正是「这一步在干什么」该待的位置。
@@ -1261,13 +1298,8 @@ const ExecChain: React.FC<{
   /** 摘要行下面还留着东西 —— 那两块要拉开距离，理由见下面的 `chainLive` */
   const someOutside = !open && hidden > 0 && shown.length > 0;
 
-  /* 「还在跑的那一步」：跑着的这一轮里，最后一次调用还没有任何输出。
-     判据是结构上的（调用与它的输出成对出现），不是拿时间戳猜的 */
-  const lastCall = [...items]
-    .reverse()
-    .find((i): i is ChainCall => i.kind === "call");
-  const runningKey =
-    live && lastCall && !lastCall.results.length ? lastCall.key : "";
+  /** 还在跑的那一步（判据见 `pendingCallKey`；`Working` 那一行与它互斥） */
+  const runningKey = live ? pendingCallKey(items) : "";
 
   return (
     <div className={styles.chain}>
@@ -1485,6 +1517,8 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
     <div className={styles.TerminalFeed} ref={rootRef}>
       {turnChains.map((tc) => {
         const { turn, keyed, inProgress, chain, body, ckey } = tc;
+        /** 此刻挂起着的那一步。与末尾那一行互斥 —— 同一份判据，见 pendingCallKey */
+        const pendingKey = inProgress ? pendingCallKey(chain) : "";
         // 执行中也铺，但**过程一律折叠着**（ExecChain 会把它并成一行
         // 「执行过程 · N 步」）—— 一条条冒出来是噪音、还不停把视图往下推，
         // 但整段藏掉又会让人不知道它在干什么。折叠着实时长，想看点开即可。
@@ -1541,18 +1575,22 @@ const TerminalFeed: React.FC<TerminalFeedProps> = (props) => {
                       ...body.map(({ m, k }) => renderItem(m, k)),
                     ]
                   : keyed.map(({ m, k }) => renderItem(m, k))}
-                {/* **只有空窗期才顶这一行。**
-                    有内容的时候它是冗余噪音：链上最后那一步正写着具体在干什么、
-                    自己的图标也在转，底下再挂一句没有主语的「正在处理」就是同一件事
-                    说两遍（用户为此提过两次）。所以判据是**结构性**的
-                    —— `keyed.length === 0`，即这一轮的 `turn.items` 一条都还没有
-                    （正文、工具调用、旁白、智能体卡全都来自它）。第一个节点一落盘，
-                    这一行立刻消失；不看文本长度、不看时间阈值。
-                    没有它的话，任务发下去到第一条记录落盘之间是一片纯空白。 */}
-                {inProgress && keyed.length === 0 ? (
+                {/* **跑着的这一轮，屏幕上永远恰好有一处在动。**
+                    判据是结构性的、两档互斥（见 `pendingCallKey` 与 `Working`）：
+                      有一步挂起着 → 不摆这一行，由那一步的名字走流光 ＋ 图标转圈
+                                     （不加状态词：那一行已经写着在干什么）；
+                      一步都没挂起 → 摆这一行，此刻它是屏幕上唯一在动的东西。
+                    文案同样按结构分：这一轮一个节点都还没有 = 模型还没开始动手，
+                    写「正在思考…」；已经有产出 = 写「正在处理…」。
+                    不看文本长度、不看时间阈值。
+                    改前这一行只在 `keyed.length === 0` 时出现 —— 实测那个窗口通常
+                    只有一两秒，而「上一步已返回、下一步还没发起」的空当里屏幕上
+                    一个动的东西都没有，跑着的会话看起来和卡死的一模一样。 */}
+                {inProgress && !pendingKey ? (
                   <Working
                     // 起点取这一轮的起始时刻：有用户消息就用它，否则退回首条产出
                     since={turn.user?.timestamp ?? turn.items[0]?.timestamp}
+                    thinking={keyed.length === 0}
                   />
                 ) : null}
                 {/* 落款：来源代理 + 时间。原先挂在终端卡的标题栏上，卡片撤掉之后

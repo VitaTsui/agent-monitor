@@ -439,7 +439,7 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
     transition: color 0.15s;
   }
 
-  /* 空窗期那一行的名称走正文色：它是这一刻屏幕上唯一在动的东西 */
+  /* 空当里那一行的名称走正文色：它是这一刻屏幕上唯一在动的东西 */
   .stepNameLive {
     min-width: 0;
     overflow: hidden;
@@ -447,6 +447,60 @@ $tile-gap: 10px; // 图标到文字的距离（$tile + $tile-gap = 28，文字�
     text-overflow: ellipsis;
     font-size: var(--text-sm);
     color: var(--foreground);
+  }
+
+  /* **「它还在动」这件事由光走过去说。**
+     挂在两处、同一时刻只会命中一处（判据见 `pendingCallKey`）：正跑着的那一步的
+     名字、以及一步都没挂起时末尾那句「正在思考…/正在处理…」。
+
+     形制照 VitaAgent 的 shimmer 家族（`TaskCard/index.module.scss:226` 的
+     `task-card-shimmer`：linear、背景 200% 宽、`background-position` 从 200%
+     推到 -200%）。两处不同：
+       1. 它画在**骨架条**上（数据还没到时的占位灰条），我们画在**文字**上
+          （`background-clip: text`）—— 我们这一行的字是真内容，不能拿灰条替掉；
+       2. 周期取 **2.2s**，不是它的 1.4s。2.2 = 转圈图标 1.1s 的整两倍
+          （`StatusIcon/index.module.scss:23`），光走完一趟正好是图标转两圈，
+          两个动效每 2.2 秒对齐一次、不会互相打拍子。挑个无关的周期就会看出
+          「同屏两套节奏」。
+
+     **不是流式**：VitaAgent 那边正文是流里逐字吐出来的，我们是轮询读磁盘，
+     逐字效果只能靠伪造，不做（界面别骗人）。光走过去说的只有「它还在动」
+     这一件真事。 */
+  .liveText {
+    background: linear-gradient(
+        90deg,
+        var(--muted-foreground) 30%,
+        var(--foreground) 45%,
+        var(--foreground) 55%,
+        var(--muted-foreground) 70%
+      )
+      0 50% / 200% 100%;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    animation: chain-live-shimmer 2.2s linear infinite;
+  }
+
+  @keyframes chain-live-shimmer {
+    from {
+      background-position: 200% 50%;
+    }
+
+    to {
+      background-position: -200% 50%;
+    }
+  }
+
+  /* 系统开了「减少动态效果」：退成静态的正文色，连渐变底一起撤掉 ——
+     只停动画的话，那段字会停在渐变的某一帧上，一半深一半浅。
+     照 VitaAgent 对 reduce 的处理（`StatusDot/index.module.scss:48`：直接停掉）。 */
+  @media (prefers-reduced-motion: reduce) {
+    .liveText {
+      background: none;
+      color: var(--foreground);
+      -webkit-text-fill-color: currentcolor;
+      animation: none;
+    }
   }
 
   /* 一行的「量」靠右，与参照的 `.stepMeta` 同一处
