@@ -298,6 +298,17 @@ class PortalStore {
   /** 拆分视图中打开的会话（有序，全局跨设备） */
   private _openIds: string[] = [];
   /**
+   * 本页运行期间**见过它活着**的会话 id（在 `_tasks` 里出现过就算）。只增不减。
+   *
+   * 继任跟随的准入条件：只有「在本页确实活跃过、随后被接替」的会话才跟过去。
+   * 少了这道门，用户从历史里主动翻开一条早已被 `/clear` 接替的老会话时，
+   * 下一次推送就会把他拽到继任者身上 —— 他明明是想看那条老的。
+   *
+   * 之所以不拿「上一帧快照里有没有它」当条件（那是原先 pid 猜法的写法）：
+   * 那个条件**一帧就过期**，中间任何一帧真空都会让跟随永久失效，正是这个 bug 的成因。
+   */
+  private _seenLiveIds = new Set<string>();
+  /**
    * 「放大」模式下占据主区的那个会话。为空＝普通网格模式。
    *
    * 会话多了以后网格里每格都不够看，尤其在看某一个的长输出时。放大模式把它撑满主区，
@@ -467,6 +478,7 @@ class PortalStore {
       | "_deviceTimer"
       | "_wsClosing"
       | "_wsGen"
+      | "_seenLiveIds"
     >(this, {
       _ws: false,
       _wsRetry: false,
@@ -475,6 +487,8 @@ class PortalStore {
       _deviceTimer: false,
       _wsClosing: false,
       _wsGen: false,
+      // 纯记账，没有视图观测它；纳入 observable 只会让每轮推送多一堆无人订阅的变更
+      _seenLiveIds: false,
     });
   }
 
@@ -1538,41 +1552,60 @@ class PortalStore {
    * 落地一份会话列表快照。WS 推送与兜底轮询共用，保证两条通路行为一致。
    */
   private applyTasks = (list: PortalTaskData[]) => {
-    // 同一个终端进程换新会话（新 id/jsonl）时，pid 会从旧会话挪到新会话 —— /clear、
-    // compact 如此，占位任务头一回落盘配上会话文件也如此。先记下旧表里各会话的 pid，
-    // 换表后据此把打开的格子跟过去：否则要么卡在已失联（无 pid）的旧会话上「下发失败、
-    // 终端没这个任务」，要么整个格子被清掉退回空态。
-    const prevPidById = new Map<string, number | null | undefined>();
-    for (const t of this._tasks) prevPidById.set(t.id ?? "", t.pid);
-
     // 内容没变就不换引用，否则整棵会话树白重渲染一遍。
     if (JSON.stringify(list) !== JSON.stringify(this._tasks)) {
       this._tasks = list;
     }
+    // 记下「见过它活着」，供下面的跟随准入用（只增不减，见字段说明）
+    for (const t of this._tasks) {
+      if (t.id) {
+        this._seenLiveIds.add(t.id);
+      }
+    }
 
-    // pid 跟随：打开的格子原地跟到继任会话，靠 pid 认人（前后是同一个 agent 进程）。
-    // 两种换 id 的场景：
-    //   ① /clear、compact —— 旧会话还留在列表里，只是把 pid 让给了新会话；
-    //   ② 进程占位任务（只扫到进程、还没配上 jsonl，id 形如 `<machine>-pid-<pid>`）收到
-    //      第一条输入后落了盘、配上真会话 —— 旧任务整条从列表消失，换成真会话 id。
-    // ② 不跟随的话，刚给空终端下发完任务，格子就被下面的存活清理踢掉、退回空态，
-    // 用户还得再点一次新冒出来的会话才能接着看。
+    // 继任跟随：打开的格子原地跟到接替它的那条会话。
+    //
+    // **「谁接替了谁」是服务端直说的**（`Task.supersedes`，见 core 的 `supersession_map`），
+    // 前端不再拿「pid 在两帧快照之间从哪挪到哪」去猜。那个猜法有个一帧过期点：只要中间
+    // 出现一帧「没有任何会话认领该 pid」的真空（客户端 pin 缓存失效到重新配上之间，实测
+    // 能空 31 秒），跟随就永久放弃 —— 表现为 `/clear` 之后网页永远停在清空前的旧会话。
+    //
+    // 覆盖两种换 id 的场景，判据是同一个：
+    //   ① /clear —— Claude Code 另起一份 jsonl（新 sessionId），旧会话当轮就掉出活跃列表；
+    //   ② 进程占位任务（`<machine>-pid-<pid>`，还没配上 jsonl）收到第一条输入后落了盘，
+    //      换成真会话 id。不跟随的话，刚给空终端下发完任务，格子就被下面的存活清理踢掉、
+    //      退回空态，用户还得再点一次新冒出来的会话才能接着看。
+    const succById = new Map<string, string>();
+    for (const t of this._tasks) {
+      if (t.id && t.supersedes) {
+        succById.set(t.supersedes, t.id);
+      }
+    }
     const carried: Array<[string, string]> = [];
     const followed = this._openIds.map((id) => {
-      const prevPid = prevPidById.get(id);
-      if (!prevPid) {
+      // 还在活跃列表里 = 没换人（绝大多数刷新走这条）
+      if (this._tasks.some((t) => t.id === id)) {
         return id;
       }
-      // 还持有原 pid 就没换人（会话仍在，绝大多数刷新走这条）
-      if (this._tasks.find((t) => t.id === id)?.pid) {
+      // 没在本页活跃过 = 用户自己从历史里翻开的那条，别把他拽到继任者身上
+      if (!this._seenLiveIds.has(id)) {
         return id;
       }
-      const succ = this._tasks.find((t) => t.pid === prevPid && t.id !== id);
-      if (!succ?.id) {
+      // 一次推送里可能连跳两级（占位任务落盘后马上又 /clear、或连按两次 /clear），
+      // 顺着链走到还在列表里的那条为止；步数上限纯粹防环。
+      let cur = id;
+      for (let hop = 0; hop < 8; hop += 1) {
+        const next = succById.get(cur);
+        if (!next || this._tasks.some((t) => t.id === cur)) {
+          break;
+        }
+        cur = next;
+      }
+      if (cur === id) {
         return id;
       }
-      carried.push([id, succ.id]);
-      return succ.id;
+      carried.push([id, cur]);
+      return cur;
     });
     // 本地回显（刚发出、终端还没同步回来的那条）跟着搬家，否则存活清理连它一起丢，
     // 看着就像「刚发的消息凭空没了」。继任者已有内容时不覆盖，只清掉旧账。

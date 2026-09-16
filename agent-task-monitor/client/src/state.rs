@@ -528,30 +528,18 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         // /clear 会让同一个 claude 换到新会话，但换会话本身**不产生新 pin**（除非它随后又跑了
         // 工具）。累积表若还记着旧 sid，会以「第一优先」(scanner::build_tasks) 把进程粘回清空前
         // 的会话、压过 clear-follow 迁移层 —— 表现为网页/钉钉的标题内容定格在 /clear 之前。
-        // 判据同 clear-follow：同项目里出现了 created 更晚的 cleared 会话，就说明这条 pin 过期，
-        // 丢弃它、把配对交还给迁移层。查不到该会话时保守保留（信息不足，且 build_tasks 找不到
-        // sid 本来也不会用它）。
-        let sess_by_id: std::collections::HashMap<&str, &am_core::scanner::SessionSummary> =
-            sessions
-                .iter()
-                .map(|s| (s.session_id.as_str(), s))
-                .collect();
-        let superseded_by_clear = |sid: &str| -> bool {
-            let Some(cur) = sess_by_id.get(sid) else {
-                return false;
-            };
-            sessions.iter().any(|s| {
-                s.cleared
-                    && s.provider == cur.provider
-                    && s.project_key == cur.project_key
-                    && s.created_ms > cur.created_ms
-            })
-        };
+        // 判据直接问 am-core 的 [`superseded_sessions`]：**「谁被谁接替了」全项目只有那一份**。
+        // 这里原本手写过第二份（「同项目里出现了 created 更晚的 cleared 会话」），两份判据
+        // 各自漂移不说，它还建在 `cleared` 上 —— 那个标志的含义是「刚清空、还没输入」，
+        // 用户一敲字就翻回 false。于是淘汰只有几秒钟的窗口期，扫描周期（1.5 秒）稍微错过
+        // 一拍，这条陈旧 pin 就永久留在表里，把进程一直钉在清空前的旧会话上。
+        // 查不到就不淘汰（信息不足，且 build_tasks 找不到 sid 本来也不会用它）。
+        let superseded = am_core::scanner::superseded_sessions(&sessions);
         let mut guard = PIN_ACC.lock().await;
         let acc = guard.get_or_insert_with(std::collections::HashMap::new);
-        // 每轮淘汰（很便宜）：进程已退出 / pid 被重用 / 会话已被 /clear 取代
+        // 每轮淘汰（很便宜）：进程已退出 / pid 被重用 / 会话已被接替
         acc.retain(|pid, (sid, start)| {
-            alive.get(pid) == Some(&*start) && !superseded_by_clear(sid)
+            alive.get(pid) == Some(&*start) && !superseded.contains(sid.as_str())
         });
         // 采集节奏分两路，因为两个来源的开销差着数量级：
         //
@@ -821,6 +809,13 @@ pub fn attach_machine(tasks: &mut [Task], machine_id: &str, hostname: &str, plat
         t.platform_dsr = am_core::model::platform_dsr(platform);
         if t.id.starts_with("pid-") {
             t.id = format!("{machine_id}-{}", t.id);
+        }
+        // 继任指针若指向占位任务（`pid-<pid>`），得跟着一起加机器前缀 —— 否则它指的
+        // 是一个列表里根本不存在的 id，跟随就断在这儿。
+        if let Some(prev) = t.supersedes.as_deref() {
+            if prev.starts_with("pid-") {
+                t.supersedes = Some(format!("{machine_id}-{prev}"));
+            }
         }
     }
 }

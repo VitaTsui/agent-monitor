@@ -43,11 +43,28 @@ pub struct SessionSummary {
     pub last_action: String,
     /// 最后一条有效条目是否表示「回合结束」（助手纯文本收尾）
     pub turn_ended: bool,
-    /// 本会话是刚 `/clear` 出来、还没输入的「全新空会话」：内容只有 /clear 命令块、无真实
-    /// prompt。claude 执行 /clear 会另起这样一个会话，同一进程从旧会话转到它。build_tasks
-    /// 据此把进程从「被清空取代的旧会话」迁到本会话（clear-follow），否则进程会被 tier②
-    /// 「认领 created 最早的会话」粘回旧会话 → 网页内容/标题定格在清空前。
+    /// 本会话**此刻**是刚 `/clear` 出来、还没输入的空会话：内容只有 /clear 命令块、
+    /// 无真实 prompt。用户一敲字就翻回 false。
+    ///
+    /// **这个公开字段目前没有任何生产读取点**，留着只为对外把「此刻空着」这件事说清楚
+    /// （上报出去的快照里也带着它）。`turn_ended` 那处收口读的是 `parse_tail` 里的同名
+    /// 局部变量，不走这里。
+    ///
+    /// 进程跟着 `/clear` 迁移那件事**一概不看它** —— 它只活几秒，扫描周期（1.5 秒）错过
+    /// 一拍就永远观测不到，跟随会 100% 失效。那件事看的是 [`Self::clear_born`] 与
+    /// [`supersession_map`]。别再把任何判断挂回这个字段上。
     pub cleared: bool,
+    /// **这条会话是某次 `/clear` 生出来的**：它的记录里出现过 `/clear` 命令块。
+    ///
+    /// 与 [`Self::cleared`] 的区别只有一处，却是关键的一处：`cleared` 还要求「还没有真实
+    /// prompt」，用户一输入就翻回 false —— 等于给「我接替了谁」按了个几秒钟的保质期，
+    /// 用户手快一点，前端就永远错过那一帧。继任关系（`Task::supersedes`）因此建在这一条上：
+    /// 它只跟「/clear 命令块还在不在尾窗里」有关，与用户输入无关。
+    ///
+    /// 边界，别当成永久事实：判据取自 `parse_tail` 的尾窗（`TAIL_BYTES`，4 MiB），命令块
+    /// 在文件开头，会话正文涨过尾窗后它会翻回 false。无害 —— 那是几小时后的事，而跟随在
+    /// 换 id 后几秒内就完成了。
+    pub clear_born: bool,
     pub started_at: Option<String>,
     pub last_active_at: Option<String>,
     pub version: Option<String>,
@@ -95,6 +112,21 @@ pub struct SessionSummary {
     /// 24 小时 / 50 条的保留窗口（只服务「当前状态面板」），而这个是**总数、不设窗口**，
     /// 历史会话照样是真实值 —— 两个数字对不上是正常的。
     pub sub_agent_count: usize,
+}
+
+impl SessionSummary {
+    /// **空壳**：整份记录剥完只剩斜杠命令信封（`/clear`、`/model`…），一句人话都没有。
+    ///
+    /// 判据是「用户输入 **或** 助手回复 **或** 任何一处兜出来的提示词」三者全空，而不是
+    /// 「标题为空」——只发了图片、只有工具调用的会话标题也可能是空的，那种有内容。
+    /// `prompt` 在 `summarize` 里已经过 上一轮缓存 → 文件头部 两级兜底，所以长会话的尾窗
+    /// 里恰好没提示词也不会被误判。
+    ///
+    /// **空壳 ≠ 该丢**：`/clear` 刚生出来的新会话就是这个形状，而它是此刻活着的那一条。
+    /// 死壳子与活会话的差别在「有没有进程占着」，由 [`build_tasks`] 判（那里才有进程）。
+    pub fn is_empty_shell(&self) -> bool {
+        !self.has_content && self.prompt.is_empty()
+    }
 }
 
 /// 一个会话的「当前全貌」：对话消息 + 后台子任务。
@@ -658,6 +690,7 @@ impl SessionScanner {
             last_action,
             turn_ended,
             cleared: false,
+            clear_born: false,
             // Codex 会话没有斜杠命令信封那套，能解析出来就是有内容的
             has_content: true,
             // Codex 没有子代理这套机制
@@ -732,16 +765,17 @@ impl SessionScanner {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| summary.prompt.clone()),
         );
-        // **空壳会话不产出**：整份记录里只有斜杠命令信封（/clear、/model…），
-        // 剥完什么都不剩 —— 既没有用户说过的话，也没有助手回过的话。
-        // 这种会话在侧栏里是一串一模一样的空白行（实测本机 73 份里有 11 份）。
+        // 空壳会话（只有斜杠命令信封，见 [`SessionSummary::is_empty_shell`]）**此处不再拦**。
         //
-        // 判据是「用户输入 **或** 助手回复 **或** 任何一处兜出来的提示词」三者全空，
-        // 而不是「标题为空」：标题可能因为只发了图片、只有工具调用而为空，那种有内容。
-        // prompt 已经过 上一轮缓存 → 头部 两级兜底，所以长会话的尾窗里没提示词也不会误伤。
-        if !summary.has_content && summary.prompt.is_empty() {
-            return None;
-        }
+        // 原先这里是一句 `return None`。它把「这条记录现在什么都没有」当成了「这条记录
+        // 永远什么都不会有」—— 而 `/clear` 刚生出来的那份 jsonl 正好就是这个形状：只有一个
+        // `/clear` 信封，几秒后用户一输入就有正文了。于是那条**活着的**新会话在解析层就被
+        // 抹掉，后面所有依赖「看得见它」的环节（继任关系、进程迁移、状态判定）全部落空，
+        // 没装 hook 的机器上 `/clear` 跟随 100% 失效。
+        //
+        // 「死壳子 vs 活会话」的差别不在内容，在**有没有进程占着它**，而解析器看不到进程。
+        // 所以这道判断整体搬去 `build_tasks`（那里才同时握着会话与进程），此处一条不漏地
+        // 产出，由产出任务的那一层决定谁该进列表。
         // 会话开始时间以头部第一条为准
         if head.started_at.is_some() {
             summary.started_at = head.started_at.clone();
@@ -1068,6 +1102,73 @@ impl SessionScanner {
     }
 }
 
+/// 「谁接替了谁」：新会话 id → **被它取代的**旧会话 id。
+///
+/// 只读会话元数据，**不看进程最终配给了谁** —— hook 自报（`pinned`）会直接把 pid 重指到
+/// 新会话、从而跳过下面 clear-follow 那层配对，若靠配对结果回推，同一件事就会时有时无。
+///
+/// 判据：一条「生于 /clear」的会话（[`SessionSummary::clear_born`]），它的前任必然同时满足
+/// 三件事 —— 同一个 `(provider, 项目)`、创建更早，且**最后一次写入正好发生在新会话诞生那一刻**。
+/// 最后一条是 `/clear` 的副作用：它不往旧文件写正文，只顶一下 mtime（实测旧 jsonl 只多了一条
+/// 无 timestamp 的 `cost-state`），此后再没人碰那个文件，时间戳就永久冻在那个瞬间。所以取
+/// `|旧.mtime − 新.created|` 最小者即可，而且这个差值**不随时间漂移**：还在跑的旁路会话
+/// mtime 一直往前走，只会越离越远。
+fn supersession_map(sessions: &[SessionSummary]) -> HashMap<&str, &str> {
+    // 容差只用来「压根没有前任时给出 None」—— 新终端起手第一句就 `/clear`、或旧会话已被删/
+    // 落在扫描范围之外。**这道窗口必须窄**：认错前任的代价是把一条正跑着的兄弟会话判成
+    // superseded，随即被全部配对层封锁，用户眼看着自己那条会话变 Finished。
+    //
+    // 5 秒这个数出自实测，不是拍的：本机 `~/.claude/projects` 71 份记录里 10 份生于 `/clear`，
+    // 真前任的 `|旧.mtime − 新.created|` 分别是 4 / 4 / 7 / 27 / 33 / 34 / 40 / 42 / 60 毫秒，
+    // 极端一例 4023 毫秒。5 秒盖得住那个极端值，同时把「同项目里另一条正在写的会话恰好落进
+    // 窗口」的误判面收窄了 12 倍（原先是 60 秒 —— 一条活跃会话几乎必然在里面）。
+    //
+    // 真正区分多个候选的是下面那个「差值最小」，不是这道窗口。
+    const CLEAR_MTIME_TOL_MS: i64 = 5_000;
+    let mut out: HashMap<&str, &str> = HashMap::new();
+    for s_new in sessions
+        .iter()
+        .filter(|s| s.clear_born && s.created_ms != 0)
+    {
+        let born = s_new.created_ms as i64;
+        let mut best: Option<(i64, &SessionSummary)> = None;
+        for old in sessions {
+            if old.session_id == s_new.session_id
+                || old.provider != s_new.provider
+                || old.project_key != s_new.project_key
+                || old.created_ms == 0
+                || old.created_ms >= s_new.created_ms
+            {
+                continue;
+            }
+            let d = (old.mtime_ms as i64 - born).abs();
+            if d > CLEAR_MTIME_TOL_MS {
+                continue;
+            }
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, old));
+            }
+        }
+        if let Some((_, old)) = best {
+            out.insert(s_new.session_id.as_str(), old.session_id.as_str());
+        }
+    }
+    out
+}
+
+/// **已经被接替、因而已经死了的会话**（[`supersession_map`] 的值集）。
+///
+/// 一条会话被接替，意思就是那个终端已经换到新会话上去了 —— 它不该再被配上任何进程，
+/// 无论那个配对来自缓存、mtime 兜底，还是一条早已过期的 pin。
+///
+/// 对外暴露是因为客户端那边也要这个判断（累积 pin 表要据此淘汰陈旧条目）。**判断只有
+/// 这一份**：此前客户端自己手写过一遍「同项目里出现了 created 更晚的 cleared 会话」，
+/// 两套判据各自漂移，且都建在 `cleared` 上 —— 那个标志用户一输入就翻回 false，等于给
+/// 淘汰按了个几秒的保质期，错过就永久把进程粘在清空前的旧会话上。
+pub fn superseded_sessions(sessions: &[SessionSummary]) -> HashSet<&str> {
+    supersession_map(sessions).into_values().collect()
+}
+
 /// 把会话摘要与进程信息聚合成任务
 pub fn build_tasks(
     sessions: &[SessionSummary],
@@ -1137,12 +1238,28 @@ pub fn build_tasks(
         .iter()
         .map(|s| (s.session_id.as_str(), s))
         .collect();
+    // 继任关系：本函数里**唯一**的一份（下面的 clear-follow 迁移与产出的
+    // `Task::supersedes` 都读它），不许再各算一套。
+    let succ = supersession_map(sessions);
+    // 已经被接替、因而已经死了的会话。**贯穿全函数的一条硬规则：它们不配进程**。
+    //
+    // 这条规则取代了原先那套「谁迁走了就把谁记进 released」的写法。原写法只在迁移真的
+    // 发生时才封住旧会话，于是缓存一空（客户端刚重启）就没人封它，tier② 立刻按「created
+    // 最早」把进程粘回旧会话 —— 正是「网页停在清空前」的那一手。既然「被接替」这件事
+    // 只看会话元数据就能算出来（与配没配上进程无关），封锁就该无条件生效。
+    let superseded: HashSet<&str> = succ.values().copied().collect();
 
     // 第一优先：按「进程打开着哪个会话文件」得出的确定配对（pinned）。
     // 这能解决「关闭的会话 mtime 反而更新、抢走了活进程」——因为已关闭会话的文件
     // 没有活进程占着，压根不会出现在 pinned 里；闲置但仍开着的会话则会被正确配上。
+    //
+    // 被接替的会话连 pin 也不认：pin 表是累积的，`/clear` 换会话本身不产生新 pin
+    //（除非随后又跑了工具），表里那条旧 sid 会一直以最高优先级把进程拽回清空前的会话。
     if !pinned.is_empty() {
         for (pid, sid) in pinned {
+            if superseded.contains(sid.as_str()) {
+                continue;
+            }
             if let (Some(p), Some(s)) = (proc_by_pid.get(pid), sid_index.get(sid.as_str()).copied())
             {
                 pid_of_session.insert(s.session_id.as_str(), *p);
@@ -1151,44 +1268,62 @@ pub fn build_tasks(
         }
     }
 
-    // clear-follow：claude 执行 /clear 会另起一个「只含 /clear 命令、还没输入」的全新会话
-    // （cleared=true），同一进程从旧会话转到它。但下面 tier② 会按「created 最早」把进程粘回
-    // 它启动时创建的旧会话 → 网页内容/标题定格在清空前。这里据配对缓存把「上一轮配在同项目、
-    // 现被清空取代」的进程迁到新会话（进程还是同一个，只是会话号变了）。缓存是权威信号
-    //（上一轮该 pid 确实配在旧会话），单会话场景下无歧义；多进程同时 /clear 时按「旧会话
-    // mtime 最新」挑最可能刚清空的那个，至少不会更差。被迁走的旧会话记入 released，本轮不
-    // 再被其它 tier 抢配（它已结束）。
-    let mut released: HashSet<&str> = HashSet::new();
-    // clear-follow (a) 保持：上一轮已迁到 cleared 空会话的进程，本轮继续粘住它，抢在 tier②
-    // 之前。否则——缓存本轮已指向新会话、(b) 不会再迁，空闲的进程会被 tier② 按「created 最早」
+    // clear-follow：claude 执行 /clear 会另起一份全新的 jsonl（新 sessionId），同一进程从旧
+    // 会话转到它。但下面 tier② 会按「created 最早」把进程粘回它启动时创建的旧会话 → 网页
+    // 内容/标题定格在清空前。这两层负责把进程搬到继任会话上。
+    //
+    // **判据一律取 `succ`（继任关系），不再取 `cleared`。** `cleared` 的含义是「刚清空、
+    // 还没输入」，用户一敲字就翻回 false —— 等于给「跟着 /clear 走」按了个几秒钟的保质期，
+    // 扫描周期（1.5 秒）稍微错过一拍，这件事就再也不会发生了。继任关系没有保质期。
+    // clear-follow (a) 保持：上一轮已迁到继任会话的进程，本轮继续粘住它，抢在 tier② 之前。
+    // 否则——缓存本轮已指向新会话、(b) 不会再迁，空闲的进程会被 tier② 按「created 最早」
     // 又拽回旧会话；下一轮缓存又变回旧会话、(b) 再迁到新…… 于是进程在 旧↔新 间每轮抖动，
     // 表现为卡片标题/内容闪烁（旧会话有标题 ↔ 新空会话只剩项目名）。粘住即止住抖动。
+    //
+    // 它自己也被接替了（连着 /clear 两次）就不许再粘 —— 否则 (b) 见 pid 已配对直接跳过，
+    // 第二次 /clear 就跟不过去了。
     for (pid, sid) in cached {
         if paired_pids.contains(pid) || pid_of_session.contains_key(sid.as_str()) {
+            continue;
+        }
+        if !succ.contains_key(sid.as_str()) || superseded.contains(sid.as_str()) {
             continue;
         }
         let Some(s) = sid_index.get(sid.as_str()).copied() else {
             continue;
         };
-        if s.cleared {
-            if let Some(p) = proc_by_pid.get(pid) {
-                pid_of_session.insert(s.session_id.as_str(), *p);
-                paired_pids.insert(*pid);
-            }
+        if let Some(p) = proc_by_pid.get(pid) {
+            pid_of_session.insert(s.session_id.as_str(), *p);
+            paired_pids.insert(*pid);
         }
     }
-    // clear-follow (b) 迁移：收集本轮全新清空会话；没有就整层跳过，额外开销只落在真有 /clear 的轮次
+    // clear-follow (b) 迁移：收集本轮有前任、却还没配上进程的会话；没有就整层跳过，
+    // 额外开销只落在真发生过 /clear 的轮次。
+    //
+    // 这一层在「同项目开着多个终端」时不可替代：只有它知道「上一轮是**这台** pid 配在
+    // 前任身上」，而 tier② 只会按创建时间挑，两个终端一交叉就串台。
     let mut fresh: Vec<&SessionSummary> = sessions
         .iter()
-        .filter(|s| s.cleared && !pid_of_session.contains_key(s.session_id.as_str()))
+        .filter(|s| {
+            succ.contains_key(s.session_id.as_str())
+                && !pid_of_session.contains_key(s.session_id.as_str())
+        })
         .collect();
     if !fresh.is_empty() {
         fresh.sort_by_key(|s| s.created_ms); // 按 created 升序稳定处理
         for s_new in fresh {
-            // 候选：缓存里配在「同项目、更旧会话」的存活且未配对进程
-            let mut best: Option<(u32, &SessionSummary)> = None; // (pid, 被取代的旧会话)
-            for (pid, old_sid) in cached {
-                if old_sid == &s_new.session_id || paired_pids.contains(pid) {
+            // 前任是谁由 `succ` 说了算（上面独立算过一次，与 pid 配对无关）；
+            // 这一层只负责把**前任那台进程**搬过来。
+            let Some(old) = succ
+                .get(s_new.session_id.as_str())
+                .and_then(|sid| sid_index.get(*sid).copied())
+            else {
+                continue;
+            };
+            // 上一轮配在前任身上、此刻还活着且尚未被更强信号配走的那台进程
+            let mut pick: Option<u32> = None;
+            for (pid, sid) in cached {
+                if sid.as_str() != old.session_id || paired_pids.contains(pid) {
                     continue;
                 }
                 let Some(p) = proc_by_pid.get(pid) else {
@@ -1197,22 +1332,12 @@ pub fn build_tasks(
                 if p.agent != s_new.provider || encode_path(&p.cwd) != s_new.project_key {
                     continue;
                 }
-                // 旧会话须存在、且比新会话更早创建（确是被取代的前身）
-                let Some(old) = sid_index.get(old_sid.as_str()).copied() else {
-                    continue;
-                };
-                if old.created_ms >= s_new.created_ms {
-                    continue;
-                }
-                if best.is_none_or(|(_, b)| old.mtime_ms > b.mtime_ms) {
-                    best = Some((*pid, old));
-                }
+                pick = Some(*pid);
+                break;
             }
-            if let Some((pid, old)) = best {
+            if let Some(pid) = pick {
                 pid_of_session.insert(s_new.session_id.as_str(), proc_by_pid[&pid]);
                 paired_pids.insert(pid);
-                // 该 pid 的旧会话已被取代 → 释放，避免其它 tier 又把它配给别的进程
-                released.insert(old.session_id.as_str());
             }
         }
     }
@@ -1229,14 +1354,15 @@ pub fn build_tasks(
                 .collect();
             let mut free_sess: Vec<&SessionSummary> = sess
                 .iter()
-                .filter(|s| {
-                    !pid_of_session.contains_key(s.session_id.as_str())
-                        && !released.contains(s.session_id.as_str())
-                })
+                .filter(|s| !pid_of_session.contains_key(s.session_id.as_str()))
                 .copied()
                 .collect();
 
             // ① 命令行 --resume <id>：恢复指定会话（创建于很久前，靠命令行认出）。
+            //
+            // **这一层走在「被接替的会话不配进程」前面**：命令行是用户亲口说的，
+            // 「我要接着跑这条」压过任何由文件时间戳推出来的判断。被 /clear 甩掉的老会话
+            // 过几天照样能被 `--resume` 捞回来接着用，那一刻它就不再是死的了。
             free_procs.retain(|p| {
                 if let Some(rid) = resume_session_id(&p.command) {
                     if let Some(pos) = free_sess.iter().position(|s| s.session_id == rid) {
@@ -1248,6 +1374,8 @@ pub fn build_tasks(
                 }
                 true
             });
+            // ②③④ 之前统一封锁：已被接替的会话不再参与任何启发式配对（见 `superseded`）
+            free_sess.retain(|s| !superseded.contains(s.session_id.as_str()));
 
             // ② 进程只配「自己创建的会话」：进程一定先于它创建的会话，且 start_time 向下取整
             // ≤ 真实启动，故「会话 created_ms ≥ 进程 start」恒成立。回看窗口必须≈0，只留 0.5s
@@ -1308,12 +1436,17 @@ pub fn build_tasks(
             // 的会话（free_sess 是 mtime 降序）。没有 --resume/--continue、也没有自己新建会话
             // （created≈start）的进程 —— 如 Cursor 里刚开、还没发消息的空白终端 —— 就留作
             // 空白占位（会话尚未产生记录），绝不无差别按 mtime 硬配去抢旧会话。
+            //
+            // 空壳排除见下面 ④ 处的说明：③④ 是纯启发式，够不到「这台进程刚 /clear 过」这个
+            // 依据，挑中空壳只会给另一个终端一个空标题的格子。
             free_procs.retain(|p| {
-                if wants_continue(&p.command) && !free_sess.is_empty() {
-                    let s = free_sess.remove(0);
-                    pid_of_session.insert(s.session_id.as_str(), p);
-                    paired_pids.insert(p.pid);
-                    return false;
+                if wants_continue(&p.command) {
+                    if let Some(pos) = free_sess.iter().position(|s| !s.is_empty_shell()) {
+                        let s = free_sess.remove(pos);
+                        pid_of_session.insert(s.session_id.as_str(), p);
+                        paired_pids.insert(p.pid);
+                        return false;
+                    }
                 }
                 true
             });
@@ -1332,7 +1465,18 @@ pub fn build_tasks(
             // 不再额外卡「最近 30min 活跃」窗口：闲置的会话 mtime 会冻结，30min 一到它就掉出
             // ④、进程沦为空白占位、会话被判 Finished（表现为「闲太久被当关闭、又冒出空白终端」）。
             // 安全性完全由上面的 mtime>=启动 约束保证，与活跃间隔无关；会话集合本身已卡回溯窗口。
-            let mut free_sess: Vec<&SessionSummary> = free_sess.into_iter().collect();
+            //
+            // **空壳会话不参与 ③④**（见 [`SessionSummary::is_empty_shell`]）。空壳留在
+            // `sessions` 里是为了让「刚 /clear 出来的那条活会话」有落点，而它该被谁认领是有
+            // 明确依据的：pin 自报、clear-follow 按缓存迁移、tier② 的「进程只配自己创建的
+            // 会话」、或命令行 `--resume` 点名。③④ 是纯 mtime 启发式，拿不到那个依据 ——
+            // 同项目另开一个终端，就可能凭「mtime 最新」把这条空壳挑走，用户得到一个没有
+            // 标题、也不属于他那个终端的格子。这个口子是本次「不再在解析层丢空壳」新开的，
+            // 从前空壳压根不在 `sessions` 里，③④ 够不着它。
+            let mut free_sess: Vec<&SessionSummary> = free_sess
+                .into_iter()
+                .filter(|s| !s.is_empty_shell())
+                .collect();
             // 新进程优先认领新会话：按启动时间降序，避免老进程抢走更晚的会话文件
             free_procs.sort_by_key(|b| std::cmp::Reverse(b.start_time));
             for p in free_procs {
@@ -1358,6 +1502,9 @@ pub fn build_tasks(
             }
             if pid_of_session.contains_key(sid.as_str()) {
                 continue; // 该会话本轮已被别的进程配走（如 /clear 后进程改配新会话）
+            }
+            if superseded.contains(sid.as_str()) {
+                continue; // 已被接替 → 死的，别靠缓存把进程拽回去
             }
             if let (Some(p), Some(s)) = (
                 proc_by_pid.get(pid),
@@ -1391,7 +1538,9 @@ pub fn build_tasks(
             if s.mtime_ms < host_start_ms {
                 continue;
             }
-            if pid_of_session.contains_key(s.session_id.as_str()) {
+            if pid_of_session.contains_key(s.session_id.as_str())
+                || superseded.contains(s.session_id.as_str())
+            {
                 continue;
             }
             pid_of_session.insert(s.session_id.as_str(), h);
@@ -1404,6 +1553,21 @@ pub fn build_tasks(
         let proc_info = pid_of_session
             .get(s.session_id.as_str())
             .map(|p| (*p).clone());
+        // **空壳会话只在没有进程占着时才是垃圾**（见 [`SessionSummary::is_empty_shell`]）。
+        //
+        // 死壳子：用户 `/clear` 或 `/model` 之后直接关了终端，留下一份只有命令信封的 jsonl，
+        // 列在历史里就是一串一模一样的空白行（实测本机 `~/.claude/projects` 71 份记录里
+        // 有 10 份是这种壳子）。这种丢掉。
+        //
+        // 活会话：`/clear` 刚生出来的那一份长得一模一样，可它此刻正被一台 claude 占着，
+        // 用户下一句话就写进去了。这种必须留 —— 丢了它，继任关系、进程迁移、状态判定
+        // 全都没有落点，没装 hook 的机器上 `/clear` 跟随就整条断掉。
+        //
+        // 这道判断原先在 `summarize` 里（一句 `return None`），那一层看不见进程，只能按
+        // 「此刻有没有内容」一刀切，于是把活的和死的一起砍了。搬到这里才分得开。
+        if proc_info.is_none() && s.is_empty_shell() {
+            continue;
+        }
         let status = match &proc_info {
             None => TaskStatus::Finished,
             Some(p) => {
@@ -1449,6 +1613,20 @@ pub fn build_tasks(
                 .map(|p| p.ide_name.clone())
                 .unwrap_or_else(|| "—".into()),
             pid: proc_info.as_ref().map(|p| p.pid),
+            // 这条会话接替了谁：① `/clear` 的前任会话；② 没有前任、但配上了进程 —— 那它
+            // 顶掉的就是这个 pid 的占位任务（`pid-<pid>`，会话文件落盘前列表里的那条）。
+            // 两者都是「同一个终端换了任务 id」，消费方跟随的判据是同一个，不必分开处理。
+            // 共享宿主（桌面客户端的 app-server）排除在②之外：它一个进程托着多条会话，
+            // 本来就不会有占位任务，指过去只会得到一个列表里不存在的 id。
+            supersedes: succ
+                .get(s.session_id.as_str())
+                .map(|sid| (*sid).to_string())
+                .or_else(|| {
+                    proc_info
+                        .as_ref()
+                        .filter(|p| !p.shared_host)
+                        .map(|p| format!("pid-{}", p.pid))
+                }),
             project: s.cwd.clone(),
             project_name: short_name(&s.cwd),
             // 与 project 不同时才有意义（会话 cd 进了子目录）；相同就当没有，
@@ -1518,6 +1696,8 @@ pub fn build_tasks(
             status_dsr: status.dsr().to_string(),
             ide_dsr: p.ide_name.clone(),
             pid: Some(p.pid),
+            // 占位任务是这条链的**起点**，它没有前任
+            supersedes: None,
             project: p.cwd.clone(),
             project_name: short_name(&p.cwd),
             // 占位任务只有进程、没有会话记录，谈不上「会话此刻在哪」——
@@ -1575,7 +1755,9 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
     let mut prompt = String::new();
     let mut last_action = String::new();
     let mut turn_ended = false;
-    // 是否见过 /clear 命令块（尾窗内）。与「无真实 prompt」合起来 → cleared：刚清空、未输入。
+    // 尾窗里见过 /clear 命令块 —— 即「这条会话生于某次 /clear」，见 SessionSummary::clear_born。
+    // **只置位、不复位**：它是既成事实。「刚清空、还没输入」那个更窄的判断是
+    // `cleared = saw_clear && prompt.is_empty()`，由 prompt 那一半负责随输入翻掉。
     let mut saw_clear = false;
     // 这条会话里有没有任何实质内容（真实用户输入 / 助手回复），见 SessionSummary::has_content
     let mut has_content = false;
@@ -1667,7 +1849,6 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                     prompt = text;
                     last_action = "等待助手响应".into();
                     turn_ended = false;
-                    saw_clear = false; // 清空后又有真实输入 → 不再是「刚清空的空会话」
                 } else if content_has_tool_result(content) {
                     turn_ended = false;
                 }
@@ -1799,6 +1980,8 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         // cleared 会话没有进行中的回合 → 视为回合结束（显示 Idle 而非 Running）
         turn_ended: turn_ended || cleared,
         cleared,
+        // 「生于 /clear」是永久事实，与「此刻还空着」分开记（见字段说明）
+        clear_born: saw_clear,
         has_content,
         // 由 scan 在产出处现数（解析器只看文件内容，不知道这份 jsonl 躺在哪个根下）
         sub_agent_count: 0,
@@ -4920,10 +5103,20 @@ mod noise_filter_tests {
         );
         let mut sc = SessionScanner::new(tmp.clone());
         let meta = fs::metadata(&p).unwrap();
-        assert!(
-            sc.summarize(&p, meta.len(), now_ms()).is_none(),
-            "全是命令信封的空壳不该产出一条会话"
+        let sum = sc
+            .summarize(&p, meta.len(), now_ms())
+            .expect("解析层不再拦空壳 —— 它认不出这条空壳是死的还是刚 /clear 出来的");
+        assert!(sum.is_empty_shell(), "全是命令信封 → 空壳");
+        // 没有任何进程占着它 → 产出任务时丢掉，历史列表里不会多出一行空白
+        let tasks = build_tasks(
+            &[sum],
+            &[],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
         );
+        assert!(tasks.is_empty(), "没进程占着的空壳不该出现在任务列表里");
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -5024,6 +5217,7 @@ mod noise_filter_tests {
                 last_action: String::new(),
                 turn_ended: true,
                 cleared: false,
+                clear_born: false,
                 has_content: true,
                 sub_agent_count: 0,
                 started_at: None,
@@ -5226,6 +5420,7 @@ mod pairing_tests {
             last_action: String::new(),
             turn_ended: true,
             cleared: false,
+            clear_born: false,
             has_content: true,
             sub_agent_count: 0,
             started_at: Some(started.into()),
@@ -5277,6 +5472,7 @@ mod pairing_tests {
         );
         let s = parse_tail("s1", std::path::Path::new("/x/-proj/s1.jsonl"), tail).unwrap();
         assert!(s.cleared, "只含 /clear 的新会话应标记 cleared");
+        assert!(s.clear_born, "见过 /clear 命令块 → 生于 /clear");
         assert!(s.prompt.is_empty(), "cleared 会话不该有真实 prompt");
         assert!(s.turn_ended, "cleared 会话视为回合结束（Idle）");
     }
@@ -5362,6 +5558,10 @@ mod pairing_tests {
         );
         let s = parse_tail("s2", std::path::Path::new("/x/-proj/s2.jsonl"), tail).unwrap();
         assert!(!s.cleared, "清空后有真实输入 → 不再 cleared");
+        assert!(
+            s.clear_born,
+            "「生于 /clear」是既成事实，不该随用户输入消失（继任关系建在它上面）"
+        );
         assert_eq!(s.prompt, "hello world");
     }
 
@@ -5381,6 +5581,7 @@ mod pairing_tests {
         fresh.prompt = String::new();
         fresh.created_ms = now - 2000; // 刚 /clear 出来
         fresh.cleared = true;
+        fresh.clear_born = true; // 生于 /clear（继任关系据此算，与用户有没有输入无关）
         let p = proc(200, start_s);
         // 缓存：上一轮 P 配在 old
         let mut cached = HashMap::new();
@@ -5416,6 +5617,7 @@ mod pairing_tests {
         fresh.prompt = String::new();
         fresh.created_ms = now - 2000;
         fresh.cleared = true; // 用户还没输入，仍是空会话
+        fresh.clear_born = true;
         let p = proc(200, start_s);
         let mut cached = HashMap::new();
         cached.insert(200u32, "fresh".to_string()); // 上一轮已迁到 fresh
@@ -5431,6 +5633,398 @@ mod pairing_tests {
         let o = tasks.iter().find(|t| t.id == "old").unwrap();
         assert_eq!(f.pid, Some(200), "进程应继续粘在新会话（不回抖）");
         assert_eq!(o.pid, None, "旧会话不该被 tier② 又抢回进程");
+    }
+
+    /// `/clear` 的继任关系必须**作为数据**出现在 Task 上：新会话 `supersedes` 指向旧会话。
+    /// 这是「网页停在清空前的旧会话」那个 bug 的修法 —— 此前这层关系只有扫描器自己知道，
+    /// 算完配完进程就扔了，消费方只能拿 pid 在两帧之间的转移去猜。
+    #[test]
+    fn supersedes_names_the_cleared_predecessor() {
+        let now = now_ms();
+        let start_s = now / 1000 - 3600;
+        let mut old = sess("old", "2026-07-23T00:00:00Z", now - 1000); // /clear 只顶了一下 mtime
+        old.created_ms = start_s * 1000 + 1000;
+        let mut fresh = sess("fresh", "2026-07-23T09:00:00Z", now - 500);
+        fresh.title = String::new();
+        fresh.prompt = String::new();
+        fresh.created_ms = now - 1000; // 与旧会话最后一次写入同一瞬间
+        fresh.cleared = true;
+        fresh.clear_born = true;
+        let p = proc(200, start_s);
+        let mut cached = HashMap::new();
+        cached.insert(200u32, "old".to_string());
+
+        let tasks = build_tasks(
+            &[old, fresh],
+            &[p],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &cached,
+        );
+        let f = tasks.iter().find(|t| t.id == "fresh").unwrap();
+        let o = tasks.iter().find(|t| t.id == "old").unwrap();
+        assert_eq!(
+            f.supersedes.as_deref(),
+            Some("old"),
+            "新会话必须说得出它接替了谁"
+        );
+        assert_eq!(o.supersedes, None, "旧会话没有前任");
+    }
+
+    /// 继任关系**不依赖进程配到了谁**：hook 自报（pinned）会直接把 pid 指到新会话，
+    /// 从而整层跳过 clear-follow 的迁移；缓存也可能压根没有旧会话那条。若靠配对结果回推，
+    /// 同一件事就会时有时无 —— 而它必须每一轮都说得出口。
+    #[test]
+    fn supersedes_holds_when_hook_pins_pid_to_the_new_session() {
+        let now = now_ms();
+        let start_s = now / 1000 - 3600;
+        let mut old = sess("old", "2026-07-23T00:00:00Z", now - 1000);
+        old.created_ms = start_s * 1000 + 1000;
+        let mut fresh = sess("fresh", "2026-07-23T09:00:00Z", now - 500);
+        fresh.title = String::new();
+        fresh.prompt = String::new();
+        fresh.created_ms = now - 1000;
+        fresh.cleared = true;
+        fresh.clear_born = true;
+        let p = proc(200, start_s);
+        // hook 自报：pid 已经指在新会话上，clear-follow 迁移层无事可做
+        let mut pinned = HashMap::new();
+        pinned.insert(200u32, "fresh".to_string());
+
+        let tasks = build_tasks(
+            &[old, fresh],
+            &[p],
+            &|_| false,
+            &pinned,
+            &HashSet::new(),
+            &HashMap::new(), // 缓存为空：继任关系不该受它影响
+        );
+        let f = tasks.iter().find(|t| t.id == "fresh").unwrap();
+        assert_eq!(f.pid, Some(200));
+        assert_eq!(
+            f.supersedes.as_deref(),
+            Some("old"),
+            "配对走的是哪条路，与继任关系无关"
+        );
+    }
+
+    /// 用户在清空后已经输入了内容（`cleared` 翻回 false）——继任关系是既成事实，
+    /// 不该跟着消失。这正是不能把它建在 `cleared` 上的原因：那等于给它按了个几秒的保质期。
+    #[test]
+    fn supersedes_survives_after_user_types_in_the_new_session() {
+        let now = now_ms();
+        let start_s = now / 1000 - 3600;
+        let mut old = sess("old", "2026-07-23T00:00:00Z", now - 60_000);
+        old.created_ms = start_s * 1000 + 1000;
+        let mut fresh = sess("fresh", "2026-07-23T09:00:00Z", now - 500);
+        fresh.created_ms = now - 60_000; // 一分钟前 /clear 出来的
+        fresh.prompt = "接着干".into(); // 已经输入过 → cleared=false
+        fresh.cleared = false;
+        fresh.clear_born = true;
+        let p = proc(200, start_s);
+        let mut cached = HashMap::new();
+        cached.insert(200u32, "fresh".to_string());
+
+        let tasks = build_tasks(
+            &[old, fresh],
+            &[p],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &cached,
+        );
+        let f = tasks.iter().find(|t| t.id == "fresh").unwrap();
+        assert_eq!(f.supersedes.as_deref(), Some("old"));
+    }
+
+    /// 没发生过 /clear 的普通会话：继任指针指向**它顶掉的那条占位任务**（`pid-<pid>`），
+    /// 而不是隔壁那条同项目的老会话 —— 别把「同一个项目里还有别的会话」当成继任。
+    #[test]
+    fn supersedes_points_at_placeholder_when_no_clear_happened() {
+        let now = now_ms();
+        let start_s = now / 1000 - 60;
+        let mut a = sess("a", "2026-07-23T00:00:00Z", now - 1000);
+        a.created_ms = start_s * 1000 + 1000;
+        let p = proc(201, start_s);
+        let tasks = build_tasks(
+            &[a],
+            &[p],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        let t = tasks.iter().find(|t| t.id == "a").unwrap();
+        assert_eq!(t.supersedes.as_deref(), Some("pid-201"));
+    }
+
+    /// 刚 `/clear` 出来、还一个字都没输入的新会话，**从真实文件内容**解析出来长什么样。
+    /// 不手工摆 flag：这条链的第一环就是「这份 jsonl 里只有一个 /clear 信封」，
+    /// 手摆等于把要验的东西当前提。
+    fn shell_from_real_clear_jsonl(id: &str, created_ms: u64, mtime_ms: u64) -> SessionSummary {
+        let tail = format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "user", "cwd": "/proj", "isSidechain": false,
+                "message": { "role": "user", "content":
+                    "<command-name>/clear</command-name>\n<command-message>clear</command-message>" },
+                "timestamp": "2026-07-23T09:00:00.000Z"
+            }),
+            serde_json::json!({ "type": "system", "cwd": "/proj", "isMeta": false }),
+        );
+        let mut s = parse_tail(id, std::path::Path::new("/x/-proj/x.jsonl"), &tail).unwrap();
+        assert!(s.is_empty_shell(), "只有 /clear 信封 → 空壳");
+        assert!(s.clear_born, "它生于一次 /clear");
+        s.created_ms = created_ms;
+        s.mtime_ms = mtime_ms;
+        s
+    }
+
+    /// **没装 hook 的机器上，`/clear` 之后进程必须跟到新会话，而且新任务得真的发得出去。**
+    ///
+    /// 这是本轮修的那条断链的回归用例，四种起手式各验一遍 —— 它们在真机上都发生过：
+    /// ① 刚清空、还没输入（旧路径在这里就把新会话整个丢了，后面全线落空）；
+    /// ② 用户已经敲了字（旧路径里 `cleared` 已翻回 false，迁移层再不肯动）；
+    /// ③ 客户端刚重启、配对缓存是空的（没人封住旧会话，tier② 立刻把进程粘回去）；
+    /// ④ 累积 pin 表里还留着一条指向旧会话的陈旧 pin（它是最高优先级，直接压过一切）。
+    ///
+    /// 四种情况的验收是同一句话：进程在新会话上、新任务不是 Finished（否则 hub 那层
+    /// `status != Finished` 的过滤会把它拦下，前端根本收不到）、且它说得出接替了谁。
+    #[test]
+    fn clear_follow_without_hook_moves_process_to_the_successor() {
+        let now = now_ms();
+        let start_s = now / 1000 - 3600; // 进程一小时前起的
+        let clear_at = now - 2000; // 两秒前 /clear
+
+        struct Case {
+            name: &'static str,
+            /// 新会话里用户是否已经敲过字（敲过 → `cleared` 已翻回 false）
+            typed: bool,
+            /// 上一轮的配对缓存指向哪条会话（None = 客户端刚重启，缓存是空的）
+            cached: Option<&'static str>,
+            /// 累积 pin 表里那条陈旧记录指向哪条会话（None = 表里没有）
+            pinned: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                name: "刚清空、还没输入",
+                typed: false,
+                cached: Some("old"),
+                pinned: None,
+            },
+            Case {
+                name: "用户已经敲了字",
+                typed: true,
+                cached: Some("new"),
+                pinned: None,
+            },
+            Case {
+                name: "客户端刚重启、缓存为空",
+                typed: true,
+                cached: None,
+                pinned: None,
+            },
+            // 长命子进程（`npm start` 之类）env 里带的是它被拉起那一刻的会话号
+            Case {
+                name: "累积 pin 表里留着旧会话",
+                typed: true,
+                cached: None,
+                pinned: Some("old"),
+            },
+        ];
+
+        for Case {
+            name,
+            typed,
+            cached,
+            pinned,
+        } in cases
+        {
+            let one = |sid: Option<&str>| -> HashMap<u32, String> {
+                sid.into_iter().map(|s| (200u32, s.to_string())).collect()
+            };
+            let (cached, pinned) = (one(cached), one(pinned));
+            let mut old = sess("old", "2026-07-23T00:00:00Z", clear_at);
+            old.created_ms = start_s * 1000 + 1000;
+            // `/clear` 只往旧文件顶了一下 mtime，此后再没人碰它 → 时间戳冻在清空那一刻
+            let mut new = shell_from_real_clear_jsonl("new", clear_at, clear_at);
+            new.project_key = old.project_key.clone();
+            new.cwd = old.cwd.clone();
+            if typed {
+                // 用户敲了一句 → parse_tail 会把 cleared 翻回 false（见
+                // `parse_tail_cleared_reset_after_real_input`），clear_born 则原样留着。
+                new.prompt = "接着干".into();
+                new.has_content = true;
+                new.turn_ended = false;
+                new.cleared = false;
+                new.mtime_ms = now - 500;
+            }
+
+            let tasks = build_tasks(
+                &[old, new],
+                &[proc(200, start_s)],
+                &|_| false,
+                &pinned,
+                &HashSet::new(),
+                &cached,
+            );
+            let n = tasks
+                .iter()
+                .find(|t| t.id == "new")
+                .unwrap_or_else(|| panic!("[{name}] 继任任务必须在列表里"));
+            assert_eq!(n.pid, Some(200), "[{name}] 进程该跟到新会话");
+            assert_ne!(
+                n.status_dsr,
+                TaskStatus::Finished.dsr(),
+                "[{name}] Finished 会被 hub 的活跃列表过滤掉，前端收不到"
+            );
+            assert_eq!(
+                n.supersedes.as_deref(),
+                Some("old"),
+                "[{name}] 新任务要说得出它接替了谁"
+            );
+            let o = tasks.iter().find(|t| t.id == "old").unwrap();
+            assert_eq!(o.pid, None, "[{name}] 旧会话已经死了，不许再顶着进程");
+        }
+    }
+
+    /// **一条 `clear_born` 会话压根没有前任时，别把隔壁正在跑的会话拉来顶包。**
+    ///
+    /// 场景：用户新开一个终端，第一句就敲 `/clear` —— 这条新会话没有前任。而同项目里
+    /// 另一个终端正干着活，它的 mtime 一直在往前走。认错前任的代价是致命的：那条活会话
+    /// 会被判成「已被接替」，随即被全部配对层封锁，用户眼看着自己跑着的会话变 Finished，
+    /// 进程还被搬去了隔壁那个空会话。
+    ///
+    /// 这里把兄弟会话的最后写入摆在 18 秒前 —— 原先 60 秒的容差正好把它圈进去。
+    #[test]
+    fn a_running_sibling_is_not_mistaken_for_a_predecessor() {
+        let now = now_ms();
+        let busy_s = now / 1000 - 3600; // 干活的那个终端，一小时前起的
+        let fresh_s = now / 1000 - 3; // 刚开的新终端
+        let mut live = sess("live", "2026-07-23T00:00:00Z", now - 18_000);
+        live.created_ms = busy_s * 1000 + 1000;
+        // 新终端起手第一句就 /clear：没有前任
+        let shell = shell_from_real_clear_jsonl("shell-01", now - 2000, now - 2000);
+        let mut cached = HashMap::new();
+        cached.insert(200u32, "live".to_string());
+
+        let tasks = build_tasks(
+            &[live, shell],
+            &[proc(200, busy_s), proc(201, fresh_s)],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &cached,
+        );
+        let l = tasks.iter().find(|t| t.id == "live").expect("活会话得在");
+        assert_eq!(l.pid, Some(200), "正在跑的会话不许被误判成前任而丢掉进程");
+        assert_ne!(l.status_dsr, TaskStatus::Finished.dsr(), "更不许变成已结束");
+        let s = tasks.iter().find(|t| t.id == "shell-01").unwrap();
+        assert_eq!(s.pid, Some(201), "空会话归它自己那个新终端");
+        assert_eq!(s.supersedes.as_deref(), Some("pid-201"), "它没有前任");
+    }
+
+    /// **空壳会话不许被 tier③（`--continue`）/ tier④（mtime 兜底）挑走。**
+    ///
+    /// 空壳留在 `sessions` 里是为了给「刚 /clear 出来的活会话」一个落点，它该归谁有明确
+    /// 依据（pin / clear-follow / tier② 自建 / `--resume` 点名）。③④ 是纯 mtime 启发式，
+    /// 拿不到那个依据 —— 同项目另开一个终端就可能凭「mtime 最新」把它挑走，用户得到一个
+    /// 没标题、也不属于他那个终端的格子。这个口子是「不再在解析层丢空壳」新开的。
+    #[test]
+    fn empty_shell_is_not_grabbed_by_mtime_heuristics() {
+        let now = now_ms();
+        let busy_s = now / 1000 - 3600;
+        let mut live = sess("live", "2026-07-23T00:00:00Z", now - 30_000);
+        live.created_ms = busy_s * 1000 + 1000;
+        // 一分钟前留下、刚刚又被顶过 mtime 的空壳，它那个终端早没了
+        let shell = shell_from_real_clear_jsonl("shell-01", now - 60_000, now - 2000);
+        let mut cont = proc(202, now / 1000); // 刚起、带 --continue → 走 tier③
+        cont.command = "claude --continue".into();
+        let idle = proc(203, now / 1000 - 30); // 无命令行线索、创建窗口够不着 → 走 tier④
+
+        let tasks = build_tasks(
+            &[live, shell],
+            &[proc(200, busy_s), cont, idle],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        assert!(
+            !tasks.iter().any(|t| t.id == "shell-01"),
+            "没有明确依据的进程不该认领空壳，认了它就会作为任务冒出来"
+        );
+        assert_eq!(
+            tasks.iter().find(|t| t.id == "live").unwrap().pid,
+            Some(200),
+            "干活的那条不受影响"
+        );
+        for pid in [202u32, 203] {
+            assert!(
+                tasks.iter().any(|t| t.id == format!("pid-{pid}")),
+                "够不着任何会话的进程该留成占位任务，而不是去抢空壳"
+            );
+        }
+    }
+
+    /// 连着 `/clear` 两次：进程得一路跟到最后那条，不许被中间那条（它自己也被接替了）粘住。
+    #[test]
+    fn clear_follow_chains_through_a_second_clear() {
+        let now = now_ms();
+        let start_s = now / 1000 - 3600;
+        let mut a = sess("a", "2026-07-23T00:00:00Z", now - 10_000);
+        a.created_ms = start_s * 1000 + 1000;
+        let b = shell_from_real_clear_jsonl("b", now - 10_000, now - 2000);
+        let c = shell_from_real_clear_jsonl("c", now - 2000, now - 2000);
+        // 上一轮进程配在 b 上（第一次 /clear 之后），这一轮用户又清了一次
+        let mut cached = HashMap::new();
+        cached.insert(200u32, "b".to_string());
+
+        let tasks = build_tasks(
+            &[a, b, c],
+            &[proc(200, start_s)],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &cached,
+        );
+        let t = tasks.iter().find(|t| t.id == "c").expect("最后那条得在");
+        assert_eq!(t.pid, Some(200), "进程该跟到最后一条");
+        assert_eq!(t.supersedes.as_deref(), Some("b"));
+        assert!(
+            tasks.iter().all(|t| t.id == "c" || t.pid.is_none()),
+            "中间那条和最初那条都已经死了"
+        );
+    }
+
+    /// `--resume` 把一条早被 `/clear` 甩掉的老会话捞回来接着用 —— 命令行是用户亲口说的，
+    /// 压过「被接替 ⇒ 已死」这条由时间戳推出来的判断，否则这条会话再也配不上进程。
+    #[test]
+    fn explicit_resume_revives_a_superseded_session() {
+        let now = now_ms();
+        let start_s = now / 1000 - 10;
+        let mut old = sess("old-sess", "2026-07-23T00:00:00Z", now - 3_600_000);
+        old.created_ms = now - 7_200_000;
+        // 一小时前那次 /clear 留下的空壳，至今没人碰过
+        let shell = shell_from_real_clear_jsonl("shell-01", now - 3_600_000, now - 3_600_000);
+        let mut p = proc(300, start_s);
+        p.command = "claude --resume old-sess".into();
+
+        let tasks = build_tasks(
+            &[old, shell],
+            &[p],
+            &|_| false,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        let t = tasks.iter().find(|t| t.id == "old-sess").unwrap();
+        assert_eq!(t.pid, Some(300), "--resume 指名要它，就得配上");
+        assert!(
+            !tasks.iter().any(|t| t.id == "shell-01"),
+            "那条没人占的空壳不该冒出来"
+        );
     }
 
     /// clear-follow 不误伤：没有 /clear（无 cleared 会话）时，配对行为与既有一致。
@@ -5968,6 +6562,7 @@ mod codex_tests {
             last_action: String::new(),
             turn_ended: true,
             cleared: false,
+            clear_born: false,
             has_content: true,
             sub_agent_count: 0,
             started_at: None,
@@ -6302,6 +6897,7 @@ mod desktop_session_tests {
             last_action: String::new(),
             turn_ended: true,
             cleared: false,
+            clear_born: false,
             has_content: true,
             sub_agent_count: 0,
             started_at: None,

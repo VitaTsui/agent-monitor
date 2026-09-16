@@ -307,6 +307,29 @@ pub struct Task {
     pub ide_dsr: String,
     /// 进程 pid（无进程为 null）
     pub pid: Option<u32>,
+    /// **这条任务接替了哪一条任务**（前任的 id；没有前任就是 None）。
+    ///
+    /// 一个终端会在同一块「位置」上换任务 id，换完前任就从活跃列表里消失：
+    /// · `/clear` —— claude 不在原文件上打标记，而是**另起一份 jsonl**（新 sessionId），
+    ///   旧会话只被顶了一下 mtime。前后是同一个终端、同一件事的延续。
+    /// · 进程占位任务（`pid-<pid>`，只扫到进程还没配上会话文件）收到第一条输入后落了盘，
+    ///   换成真正的会话 id。
+    ///
+    /// 此前这层关系**只有扫描器自己知道**（clear-follow 算出来配完进程就扔了），
+    /// 消费方只能拿「pid 在两帧快照之间从哪挪到哪」去猜。猜法有个致命的一帧过期点：
+    /// 只要中间出现一帧「没有任何会话认领该 pid」的真空（pin 缓存失效到重新配上之间，
+    /// 实测能空 31 秒），跟随就永久放弃 —— 表现为 `/clear` 之后网页永远停在清空前的旧会话。
+    /// 所以它必须是**数据**：谁接替了谁，由算得出这件事的那一层直接说出来。
+    ///
+    /// 判据不依赖「进程最终配给了谁」：hook 自报（pinned）会直接把 pid 重指到新会话，
+    /// 从而跳过 clear-follow 那层配对，若靠配对结果回推就会时有时无。见 scanner 的
+    /// `supersession_map`。
+    ///
+    /// 有效期：`/clear` 那一支认的是会话尾窗里的 `/clear` 命令块（见 scanner 的
+    /// `SessionSummary::clear_born`），正文涨过尾窗后这个指针会消失、退回 `pid-<pid>`。
+    /// 不影响跟随 —— 换 id 后几秒内就跟过去了，那是几小时后的事。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
     /// 所属机器 ID
     #[serde(default)]
     pub machine_id: String,

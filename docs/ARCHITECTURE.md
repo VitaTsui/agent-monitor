@@ -229,7 +229,11 @@ graph LR
 3. **hub**：`scp` 覆盖 `/opt/agent-monitor/agent-task-monitor` → 重启 `agent-monitor.service`。
 4. **安装包**：mac zip + **固定名 `agent-monitor-setup.exe`** + 版本化 `AgentMonitor-X.Y.Z-setup.exe` 三份都传到 downloads；固定名 `cmp` 校验与版本化一致（客户端自更新拿固定名，漏同步会更新打转）。
 5. **版本对齐**：`/monitor/version` 的 `desktop` 由 `ready_desktop_version`（downloads 里最高的 `AgentMonitor-*-setup.exe`）决定；hub-only 改动不 bump 安装包时，advertised 保持上一版、客户端不被打扰。
-6. **桌面自更新版本 = hub 自身编译版本**：发桌面版必须重编 + 重部署 hub。
+6. **通告版本不由 hub 编译版本封顶**（`hub/src/server.rs` 的 `ready_desktop_version`）：
+   通告的 `desktop` = downloads 里最高版本的 `AgentMonitor-X.Y.Z-setup.exe`，hub 自身
+   `CARGO_PKG_VERSION` 只在 downloads 为空时兜底。所以**不要**再以「版本封顶」为由重部署 hub。
+   仍要重编 + 重部署 hub 的真实理由只有一个：**这一版改了扫描/协议层，hub 得能透传新增字段**
+   （如本版 `Task.supersedes`）。纯前端改动不满足这条，可以只替换 `web/`。
 7. **密钥配对**：build 前核对 `.env.prod` 的 CRYPTO_KEY/RSA_PUB_KEY 与 `deploy/` 一致。
 
 **分支流**：feature 分支 `session/*` → `develop`；`main` 只从 `develop`。
