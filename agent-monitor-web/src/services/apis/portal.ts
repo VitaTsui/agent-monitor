@@ -203,6 +203,20 @@ interface IPortalTaskData {
   statusDsr: string;
   ideDsr: string;
   pid: number | null;
+  /**
+   * **这条会话接替了哪一条**（前任的 id）。没有前任就不下发。
+   *
+   * 一个终端会在同一块「位置」上换会话 id，换完前任就从这份活跃列表里消失：
+   * · `/clear` —— Claude Code 不在原文件上打标记，而是**另起一份 jsonl**（新 sessionId），
+   *   旧会话只被顶了一下 mtime。前后是同一个终端、同一件事的延续。
+   * · 进程占位任务（`<machineId>-pid-<pid>`，只扫到进程、还没配上会话文件）收到第一条
+   *   输入后落了盘，换成真正的会话 id。
+   *
+   * 打开的格子要据此**原地跟到继任会话**。不要再拿「pid 在两帧快照之间从哪挪到哪」去猜：
+   * 中间只要出现一帧「没有任何会话认领该 pid」的真空（实测能空 31 秒），猜法就永久放弃
+   * 跟随 —— 表现为 `/clear` 之后网页永远停在清空前的旧会话，刷新页面才恢复。
+   */
+  supersedes?: string;
   machineId: string;
   hostname: string;
   platform: string;
