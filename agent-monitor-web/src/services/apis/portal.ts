@@ -187,14 +187,17 @@ interface IPortalTaskData {
    * 进程占位任务（会话记录还没生成）没有会话文件可判，一律按 CLI 算（`false`）。
    */
   desktop: boolean;
-  /** 项目根（归一化，不随会话内 cd 漂移）——分组、标题用 */
+  /**
+   * 项目根（归一化，不随会话内 cd 漂移）——分组、标题用，也是**目录树的根**：
+   * 文件查看器、上传落点、「选择文件」都以它为根，人看到的永远是项目全貌。
+   */
   project: string;
   projectName: string;
   /**
-   * 会话**此刻**的工作目录（会话内 cd 后跟着走；与 project 相同时后端不下发）。
+   * 终端**此刻**所在的目录（会话内 cd 后跟着走；与 project 相同时后端不下发）。
    *
-   * 凡是要和终端的相对路径对齐的地方都用它：上传落点、目录浏览根、`./x` 回填。
-   * 用 project 的话，会话 cd 进子目录后文件会写到项目根、终端却在子目录里找。
+   * 只决定回填路径怎么写：没有它 = 终端就在项目根，回填 `./相对路径`；有它 = 终端已
+   * `cd` 到别处，回填绝对路径 —— 相对路径会被终端按它所在的目录解析，指错地方。
    */
   liveCwd?: string;
   prompt: string;
@@ -708,14 +711,6 @@ export const uploadPortalFile = async (
    * 「回填进输入框的名字」出自同一处，不会各说各话。
    */
   asName?: string,
-  /**
-   * 会话 id + 相对该会话**当前**目录的子路径。
-   *
-   * 带上它们，落点就由 agent 在写盘那一刻现算（它现读会话记录拿到当前 cwd），
-   * 而不是用 `dir` 那份 hub 事先算好的绝对路径 —— 后者来自定期扫描的快照，
-   * 会话期间 `cd` 过就已经指向别处。`dir` 仍然要传，作旧客户端的兜底。
-   */
-  session?: { taskId: string; relDir: string },
 ) => {
   const url = `/monitor/devices/${id}/upload`;
   const total = file.size;
@@ -727,10 +722,6 @@ export const uploadPortalFile = async (
     // 显式传文件名（UTF-8 文本字段）：multipart 的 Content-Disposition filename 对非 ASCII
     // （如粘贴图片的「粘贴-xxx.png」）编码在服务端会被解歪，导致落盘名与回填名对不上。
     form.append("name", name);
-    if (session?.taskId) {
-      form.append("taskId", session.taskId);
-      form.append("relDir", session.relDir);
-    }
     form.append("file", file);
     const res = await post<{ path?: string; result?: string; size: number }>(url, form);
     onProgress?.(total, total);
@@ -747,10 +738,6 @@ export const uploadPortalFile = async (
     form.append("name", name);
     form.append("chunkIndex", String(i));
     form.append("chunkTotal", String(chunkTotal));
-    if (session?.taskId) {
-      form.append("taskId", session.taskId);
-      form.append("relDir", session.relDir);
-    }
     form.append("file", blob, name);
     last = await post<{ path?: string; result?: string; size: number }>(url, form);
     // 任一片失败即中止：继续传后面的只会在 agent 那边拼出一个残缺却"看着成功"的文件
@@ -877,10 +864,18 @@ export const claimDingtalkBind = async (token: string) => {
  * 异步：hub 向那台机器现要一次，所以第一次多半回 `pending`，隔一会儿再调即可。
  * hub 只在内存中转、交件即删，不落盘。
  */
-export const getTaskFile = async (id: string, rel: string) => {
+export const getTaskFile = async (
+  id: string,
+  rel: string,
+  /**
+   * `rel` 相对谁。缺省 = 终端此刻所在目录（会话正文里引用的 `./tmp/x.png` 是终端按它写的）；
+   * `"project"` = 项目根，即目录树的根（文件查看器点开树里的文件）。
+   */
+  base?: "project",
+) => {
   return await get<{ pending: boolean; mime?: string; contentB64?: string }>(
     `/monitor/tasks/${id}/file`,
-    { params: { rel } }
+    { params: base ? { rel, base } : { rel } }
   );
 };
 
@@ -906,13 +901,26 @@ export const termKeyTask = async (
   return await post<boolean>(`/monitor/tasks/${id}/termkey`, { key, count });
 };
 
-/** 会话目录下的子目录与文件（异步：pending=true 时轮询重试） */
-export const getTaskDirs = async (id: string, rel: string) => {
+/**
+ * 项目根下的子目录与文件（异步：pending=true 时轮询重试）。
+ *
+ * `refresh`：向设备重新要一次清单。**进入目录那一次必须带**，轮询等结果时不带 ——
+ * 不带的话 hub 只会给上次缓存的清单，目录里后来新增的文件永远看不到。
+ * 等新清单期间（pending=true）hub 会把上次的清单一并带回，可以先拿来显示。
+ */
+export const getTaskDirs = async (id: string, rel: string, refresh = false) => {
   return await get<{ dirs: string[]; files: string[]; cwd: string; pending: boolean }>(
     `/monitor/tasks/${id}/dirs`,
-    { params: { rel } },
+    { params: refresh ? { rel, refresh: true } : { rel } },
   );
 };
+
+/**
+ * 这份目录清单里有没有东西可显示。等新清单期间（pending）hub 若手里有上次的清单会一并带回，
+ * 没有就是两个空数组 —— 空的不值得先摆出来，接着等就是。
+ */
+export const hasListing = (d?: { dirs?: string[]; files?: string[] }) =>
+  (d?.dirs?.length ?? 0) + (d?.files?.length ?? 0) > 0;
 
 /** 会话目录内文件夹操作（新建/删除/重命名）：下发给 agent，返回 opId 后轮询结果 */
 export const fsopTask = async (

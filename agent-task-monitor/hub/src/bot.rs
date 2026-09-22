@@ -1293,8 +1293,8 @@ enum Taken {
 
 /// 问一次 agent：会话目录下 `rel` 里现在有哪些文件。
 ///
-/// 走网页目录浏览那套通道（pending_dir → agent 回报 → dir_cache），但这里要的是**新鲜**
-/// 结果：先把该目录的缓存清掉再下发查询，否则可能读到上一次的旧清单，算出来的名字照样撞。
+/// 走网页目录浏览那套通道（ask_dir → agent 回报 → dir_cache），要的是**新鲜**结果：
+/// 等到 `dir_waiting` 翻假才取，否则可能读到上一次的旧清单，算出来的名字照样撞。
 ///
 /// 返回 `None` 表示**没问到**（设备离线或没在窗口内回报），与「问到了、目录是空的」
 /// 是两回事：前者对目录一无所知，绝不能当成「不撞名」。
@@ -1312,22 +1312,7 @@ async fn dir_files_fresh(
             tracing::warn!("查目录清单：设备 {machine_id} 不在线，落盘名改用时间戳兜底");
             return None;
         };
-        entry.dir_cache.remove(&key);
-        if !entry
-            .pending_dir
-            .iter()
-            .any(|q| q.task_id == task_id && q.rel == rel)
-        {
-            entry.pending_dir.push_back(am_core::model::DirQuery {
-                // 钉钉这条**不按会话解析**：接收目录是按项目配的（见下面的 recv_dir），
-                // 落点就该钉在项目根。若这里按会话当前目录解析，「问到的目录」与
-                // 「文件实际落的目录」就成了两个，重名避让会全部落空。
-                by_session: false,
-                task_id: task_id.to_string(),
-                cwd: cwd.to_string(),
-                rel: rel.to_string(),
-            });
-        }
+        entry.ask_dir(task_id, cwd, rel);
     }
     // 一次往返要两轮上报：这轮取走查询、下轮才带回结果，agent 又是 1.5s 一轮，
     // 所以至少 3s。原来只等 4.8s，扫描一慢就超时（超时后名字必然对不上，正是本函数
@@ -1339,6 +1324,7 @@ async fn dir_files_fresh(
             .read()
             .await
             .get(machine_id)
+            .filter(|e| !e.dir_waiting(&key))
             .and_then(|e| e.dir_cache.get(&key).cloned());
         if let Some((_, files, _)) = hit {
             tracing::debug!("查目录清单：{rel} 下 {} 个文件", files.len());
@@ -1483,10 +1469,6 @@ async fn queue_pending_file(
     let wants_result = crate::server::agent_reports_file_path(&entry.version);
     entry.pending_files.push_back(am_core::model::FileTransfer {
         dir,
-        // 同上：钉钉的落点按项目根算，不随会话 cd 走
-        task_id: String::new(),
-        rel_dir: String::new(),
-        by_session: false,
         filename: safe.clone(),
         content_b64: B64.encode(&bytes),
         // 钉钉转发的附件一律整份下发：走的是钉钉自己的下载接口，文件已完整落在 hub 内存里，

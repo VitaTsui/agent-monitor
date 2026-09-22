@@ -22,8 +22,10 @@ pub struct Config {
 }
 
 /// 一次目录列举的结果：(子目录, 文件, agent 实际据以列举的绝对根)。
-/// 三元组含义写在 MachineEntry::dir_cache 上，这里只为给它一个名字。
 pub type DirListing = (Vec<String>, Vec<String>, String);
+
+/// 目录清单的键：(task_id, 相对项目根的子路径)
+pub type DirKey = (String, String);
 
 /// hub 侧维护的一台机器（含 hub 本机）
 pub struct MachineEntry {
@@ -83,22 +85,14 @@ pub struct MachineEntry {
     /// 落盘名的决定权在 agent 手里（撞名会改名），拼进任务正文的路径必须用这份回报里的
     /// 真实路径，否则指向的是目录里那个同名旧文件。等回报的那一侧见 bot::attach_pending_file。
     pub file_results: HashMap<String, (am_core::model::FileTransferResult, Instant)>,
-    /// 目录列举结果缓存：(task_id, rel) → 子目录名
-    /// (task_id, rel) → (子目录, 文件)。文件用于「选择文件回填相对路径」。
-    /// (task_id, rel) → (子目录, 文件, **agent 实际据以列举的绝对根**)。
+    /// 目录清单的**最近一次回报**：(task_id, rel) → (子目录, 文件, agent 据以列举的绝对根)。
     ///
-    /// root 必须一路带到网页：只有 agent 知道会话此刻在哪，hub 自己那份是旧快照。
-    /// 网页拿它当上传落点与相对路径的基准。
-    pub dir_cache: HashMap<(String, String), DirListing>,
-    /// task_id → (浏览期间**钉住**的根, 最近一次确认时间)。
-    ///
-    /// 根必须在一次浏览里保持不变：会话的 cwd 每一轮都在动（实测同一会话 60 条记录里
-    /// 出现过 4 个不同目录），若每次查询各自解析，用户点进子目录时根已经换了，
-    /// `<新根>/<刚点的子目录>` 不存在 → 列出来是空的，且没有任何提示。
-    ///
-    /// 只在 `rel == ""`（进弹窗那一次）按会话重新解析并改写这里，其余查询一律复用，
-    /// 于是「入口是终端当前目录」与「浏览过程自洽」两者兼得。
-    pub dir_roots: HashMap<String, (String, std::time::Instant)>,
+    /// 它只是「上次看到的样子」，不是「现在的样子」：要现状就走 [`Self::ask_dir`] 再问一次，
+    /// 等 [`Self::dir_waiting`] 翻假。此前命中缓存就直接返回、从不再问，于是目录里后来
+    /// 新增的文件在 hub 重启前永远看不到。
+    pub dir_cache: HashMap<DirKey, DirListing>,
+    /// 已发出、结果还没回来的目录查询。
+    pub dir_asked: std::collections::HashSet<DirKey>,
     /// 上次通知过的在线状态（钉钉推送用，边沿触发上线/离线，避免重复）
     pub notified_online: bool,
     /// 已推过「等待选择」提醒的会话 ID（边沿触发：进入 select 推一次，离开清除）
@@ -130,6 +124,48 @@ pub struct MachineEntry {
     /// 所以这里要缓存住 —— 中间轮次的 pull/push 全靠它算差异，才能每轮推进而不是 30s 一步。
     /// None = 该设备还没报过（旧客户端，或刚上线还没到第一次扫描）。
     pub config_manifest: Option<am_core::model::ConfigManifest>,
+}
+
+impl MachineEntry {
+    /// 向 agent 要一份 `rel` 目录的**新**清单（已有同一目录的查询在排队就不重复下发）。
+    ///
+    /// 结果回来之前 [`Self::dir_waiting`] 为真；旧清单留着，调用方可以先拿它顶着。
+    pub fn ask_dir(&mut self, task_id: &str, cwd: &str, rel: &str) {
+        self.dir_asked
+            .insert((task_id.to_string(), rel.to_string()));
+        if !self
+            .pending_dir
+            .iter()
+            .any(|q| q.task_id == task_id && q.rel == rel)
+        {
+            self.pending_dir.push_back(am_core::model::DirQuery {
+                task_id: task_id.to_string(),
+                cwd: cwd.to_string(),
+                rel: rel.to_string(),
+            });
+        }
+    }
+
+    /// agent 回报了一份清单。
+    ///
+    /// 同一目录若又有新查询还在排队（回报的是更早那次问的），就还不算等到 ——
+    /// 否则前一次的结果会冒充最新的，把等待提前结束掉。
+    pub fn dir_answered(&mut self, r: am_core::model::DirResult) {
+        let key = (r.task_id, r.rel);
+        if !self
+            .pending_dir
+            .iter()
+            .any(|q| q.task_id == key.0 && q.rel == key.1)
+        {
+            self.dir_asked.remove(&key);
+        }
+        self.dir_cache.insert(key, (r.dirs, r.files, r.root));
+    }
+
+    /// 问过、还没等到回报
+    pub fn dir_waiting(&self, key: &DirKey) -> bool {
+        self.dir_asked.contains(key)
+    }
 }
 
 /// 一次性图片外链的有效期。钉钉服务器通常几秒内就来拉，2 分钟足够；

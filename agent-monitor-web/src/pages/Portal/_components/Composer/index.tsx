@@ -13,6 +13,7 @@ import {
   getFsopResult,
   getPortalSlashCommands,
   getTaskDirs,
+  hasListing,
   uploadPortalFile,
 } from "@/services/apis/portal";
 import { CONFIRM_WORD, DangerHit, checkDanger } from "../../_utils/dangerCheck";
@@ -64,8 +65,13 @@ interface ComposerProps {
    * 值由 `ChatPane` 给（与那边文件查看器开关吃的是同一个），不在这里各算一遍。
    */
   deviceShared?: boolean;
-  /** 会话锚定目录（上传落点；回填的相对路径以此为基准） */
+  /** 项目根：目录树、上传落点的根 */
   cwd?: string;
+  /**
+   * 终端此刻所在目录，仅在它已离开项目根时才有值（见 `PortalTask.liveCwd`）。
+   * 有值时回填绝对路径：终端按自己所在的目录解析 `./x`，相对项目根的路径会指错地方。
+   */
+  liveCwd?: string;
 }
 
 /**
@@ -91,7 +97,7 @@ const DIR_POLL_DELAYS = [
 ];
 
 const Composer: React.FC<ComposerProps> = (props) => {
-  const { taskId, disabled, disabledHint, onSend, machineId, cwd, deviceShared } =
+  const { taskId, disabled, disabledHint, onSend, machineId, cwd, liveCwd, deviceShared } =
     props;
   const navigate = useNavigate();
   const offHint = disabledHint || "该会话无存活进程，无法发布";
@@ -264,12 +270,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
   /** 当前这个文件的分片进度百分比（大文件切片上传时才有意义） */
   const [uploadPct, setUploadPct] = useState(0);
   const [dirRel, setDirRel] = useState("");
-  /**
-   * agent 实际据以列举的**绝对根** —— 即会话此刻真正所在的目录，由它现读会话记录得出。
-   *
-   * 不要用 `cwd` prop 代替：那份来自定期扫描的快照，扫描循环在 macOS 后台被压到
-   * 一两分钟一轮，会话 `cd` 过之后就指向别处了。空 = 还没查过目录（或旧客户端没回报）。
-   */
+  /** agent 实际据以列举的绝对根（= 项目根）。空 = 还没查过目录（或旧客户端没回报） */
   const [dirRoot, setDirRoot] = useState("");
   const [dirList, setDirList] = useState<string[]>([]);
   const [dirFiles, setDirFiles] = useState<string[]>([]);
@@ -289,13 +290,14 @@ const Composer: React.FC<ComposerProps> = (props) => {
   /** 文件选择器里已勾选的相对路径（可跨子目录累积） */
   const [pickedRefs, setPickedRefs] = useState<string[]>([]);
 
-  // 拉取 rel 下的子目录；agent 异步回带，pending 时 1.2s 后重试（最多 8 次）
-  const loadDirs = (rel: string, attempt = 0) => {
+  // 拉取 rel 下的子目录；agent 异步回带，pending 时退避重试。
+  // `shown`：这一轮已经先显示了上次的清单（等新清单期间 hub 会一并带回）
+  const loadDirs = (rel: string, attempt = 0, shown = false) => {
     if (!taskId) return;
     const seq = ++dirPollRef.current;
     if (attempt === 0) setDirTimedOut(false);
     setDirLoading(true);
-    getTaskDirs(taskId, rel)
+    getTaskDirs(taskId, rel, attempt === 0)
       .then((res) => {
         if (seq !== dirPollRef.current) return;
         if (res.code !== 0) {
@@ -305,13 +307,24 @@ const Composer: React.FC<ComposerProps> = (props) => {
         }
         // 窗口必须盖得住一轮上报（实测约 31s，刚错过一轮 62s）。1.2s 起步逐步退避、
         // 总时长约 90s：前几次照顾「缓存已热、秒回」的情况，后面拉长避免空转。
+        const stale = res.data?.pending && hasListing(res.data);
+        if (stale) {
+          // 先把上次的样子摆出来，新的到了再换 —— 回到看过的目录不用干等一轮上报
+          setDirList(res.data?.dirs ?? []);
+          setDirFiles(res.data?.files ?? []);
+          if (res.data?.cwd) setDirRoot(res.data.cwd);
+          setDirLoading(false);
+        }
         if (res.data?.pending && attempt < DIR_POLL_DELAYS.length) {
-          window.setTimeout(() => loadDirs(rel, attempt + 1), DIR_POLL_DELAYS[attempt]);
+          window.setTimeout(
+            () => loadDirs(rel, attempt + 1, shown || !!stale),
+            DIR_POLL_DELAYS[attempt],
+          );
           return;
         }
         if (res.data?.pending) {
-          // 等不到就明说，别把它渲染成一个空目录
-          setDirTimedOut(true);
+          // 等不到就明说，别把它渲染成一个空目录；已经摆着上次的清单就留着它
+          setDirTimedOut(!shown && !stale);
           setDirLoading(false);
           return;
         }
@@ -339,7 +352,8 @@ const Composer: React.FC<ComposerProps> = (props) => {
     }
     for (let attempt = 0; attempt < 8; attempt += 1) {
       try {
-        const res = await getTaskDirs(taskId, rel);
+        // 要的是现状（撞名判断），第一次就让设备重新列
+        const res = await getTaskDirs(taskId, rel, attempt === 0);
         if (res.code !== 0) {
           break;
         }
@@ -495,7 +509,23 @@ const Composer: React.FC<ComposerProps> = (props) => {
     loadDirs("");
   };
 
-  // 选中某个文件 → 把相对会话目录的路径（正斜杠通用）插入输入框
+  /**
+   * 树里一个条目（相对项目根的路径，'/' 分隔）→ 回填进输入框的写法。
+   *
+   * 终端就在项目根（`liveCwd` 为空）时写 `./相对路径`；终端已 `cd` 到别处时写绝对路径 ——
+   * 终端按**自己所在**的目录解析 `./x`，此时相对项目根的路径指的是另一个位置
+   * （会话在 `doc` 里时，`./doc/a.xlsx` 会被读成 `doc/doc/a.xlsx`）。
+   */
+  const refFor = (relPath: string) => {
+    const base = dirRoot || cwd || "";
+    if (!liveCwd || !base) {
+      return `./${relPath}`;
+    }
+    const sep = base.includes("\\") ? "\\" : "/";
+    return `${base.replace(/[\\/]+$/, "")}${sep}${relPath.split("/").join(sep)}`;
+  };
+
+  // 选中某个文件 → 把路径插入输入框（写法见 refFor）
   /**
    * 勾选/取消一个条目（文件或文件夹都走这里 —— 对使用者而言都是「一个路径」）。
    *
@@ -503,10 +533,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
    * 跨目录的同名条目会互相顶掉，插入时也无从知道它当初在哪一层。
    */
   const toggleFileRef = (name: string) => {
-    // 相对路径在这里是**准确的**：目录树的根就是 agent 现读会话记录得到的「会话此刻所在
-    // 目录」，与终端解析 `./x` 用的是同一个位置。之前要退绝对路径，是因为那时的根来自
-    // hub 的旧快照、会话 cd 过就对不上；现在这个前提没有了。
-    const rel = `./${dirRel ? `${dirRel}/` : ""}${name}`;
+    const rel = refFor(dirRel ? `${dirRel}/${name}` : name);
     setPickedRefs((prev) =>
       prev.includes(rel) ? prev.filter((x) => x !== rel) : [...prev, rel],
     );
@@ -562,9 +589,7 @@ const Composer: React.FC<ComposerProps> = (props) => {
     if (!files.length || !machineId || !cwd) {
       return;
     }
-    // 设备侧绝对目录 = 会话目录 + 相对子路径（按设备的分隔符拼）
-    // 兜底用的绝对目录：优先 agent 回报的权威根（会话此刻真正所在），其次退回快照 cwd。
-    // 新客户端根本不看它 —— 落点由 agent 在写盘那一刻现算；它只为旧客户端保留。
+    // 设备侧绝对目录 = 项目根 + 用户在树里选的子路径（按设备的分隔符拼）
     const base = dirRoot || cwd;
     const sep = base.includes("\\") ? "\\" : "/";
     const dir = dirRel ? `${base}${sep}${dirRel.split("/").join(sep)}` : base;
@@ -598,8 +623,6 @@ const Composer: React.FC<ComposerProps> = (props) => {
               setUploadPct(total > 0 ? Math.round((sent / total) * 100) : 0);
             },
             name,
-            // 让 agent 在落盘那一刻按会话当前目录解析落点 —— 定位与终端永远同步
-            { taskId, relDir: dirRel },
           );
           if (res.code === 0) {
             // 落盘名以客户端回报的为准：上面那个 name 只是预判，而**决定权在客户端手里**
@@ -610,17 +633,17 @@ const Composer: React.FC<ComposerProps> = (props) => {
             const actual = abs.split(/[\\/]/).pop() || name;
             // 本批后续文件要避让的是**实际**占用的名字
             taken.add(actual);
-            // 回填相对路径（相对会话目录，正斜杠通用）——用最终名，不是本地文件名。
-            //
-            // 相对路径只在**能证明它对**的时候才用，否则退回绝对路径。判据变了：落点现在
-            // 由 agent 按会话**当前**目录解析（写盘那一刻现读会话记录），所以只要它回报的
-            // 绝对路径确实以我们要的子路径收尾，就说明 `./<子路径>` 从终端所在位置解析得到。
-            // 这比拿 hub 的旧快照去比对可靠得多，也不必再因为「会话漂移过」就一律退绝对
-            // 路径 —— 那恰恰是它最该用相对路径的时候。
+            // 回填用最终名，不是本地文件名。相对路径要两条都成立才用：① 终端就在项目根
+            // （写法见 refFor）；② 客户端回报的落盘路径确实以这个子路径收尾 —— 对不上说明
+            // 落点与所选不一致，那就给它回报的绝对路径，别给一条指向空气的相对路径。
             const expected = dirRel ? `${dirRel}/${actual}` : actual;
-            const provenRelative =
+            const landedHere =
               !!abs && abs.replace(/\\/g, "/").endsWith(`/${expected}`);
-            ok.push(provenRelative ? `./${expected}` : abs || `${dir}${sep}${actual}`);
+            ok.push(
+              landedHere && !liveCwd
+                ? `./${expected}`
+                : abs || `${dir}${sep}${actual}`,
+            );
           } else {
             failed.push(file.name);
           }
