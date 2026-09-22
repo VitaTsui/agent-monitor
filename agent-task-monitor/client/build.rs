@@ -16,6 +16,7 @@ fn main() {
             "terminal_set_excluded",
             "update_status",
             "update_start",
+            "page_log",
         ]),
     ))
     .expect("tauri_build 失败");

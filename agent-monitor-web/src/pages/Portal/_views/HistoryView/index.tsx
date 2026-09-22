@@ -5,6 +5,7 @@ import { Empty, Spin } from "antd";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { SessionHistoryItem, getSessionHistory } from "@/services/apis/portal";
+import { contentMarkdownComponents } from "../../_utils/contentLinks";
 import { HISTORY_LIST_PATH } from "../../_utils/portalNav";
 import { historyTitle } from "../../_utils/sessionNote";
 import views from "../views.module.scss";
@@ -141,7 +142,9 @@ const HistoryView: React.FC = () => {
                   >
                     {/* 结果里满是代码块/列表/表格，纯文本读不了，交给 markdown 渲染；
                         我发的指令通常是一句话，但也可能贴了代码，一并渲染保持一致 */}
-                    <Markdown.Views>{it.content}</Markdown.Views>
+                    <Markdown.Views components={contentMarkdownComponents}>
+                      {it.content}
+                    </Markdown.Views>
                   </div>
                   <div className={styles.time}>
                     {fmtTime(it.at)}

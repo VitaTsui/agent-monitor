@@ -16,6 +16,7 @@ import {
   inDesktopClient,
   localMachineId,
 } from "@/utils/clientAuth";
+import { reloadFor } from "@/utils/reloadTrace";
 import PortalStore from "./PortalStore";
 import { useApkUpdateCheck } from "./_hooks/useApkUpdateCheck";
 import { useClientUpdateToast } from "./_hooks/useClientUpdateToast";
@@ -134,7 +135,7 @@ const Portal: React.FC = observer(() => {
       if (inDesktopClient()) {
         clientSilentLogin().then((ok) => {
           if (ok) {
-            window.location.reload();
+            reloadFor("进入前台时本地没有登录令牌，设备令牌静默续登成功");
           } else {
             window.location.href = "/login?redirect=%2Fportal";
           }
@@ -192,7 +193,7 @@ const Portal: React.FC = observer(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === "r" || e.key === "R")) {
         e.preventDefault();
-        window.location.reload();
+        reloadFor("用户按 Cmd/Ctrl+R");
       }
     };
     window.addEventListener("keydown", onKey);

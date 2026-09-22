@@ -32,6 +32,7 @@
     "allow-terminals-get",
     "allow-terminal-set-excluded",
     "allow-update-status",
-    "allow-update-start"
+    "allow-update-start",
+    "allow-page-log"
   ]
 }

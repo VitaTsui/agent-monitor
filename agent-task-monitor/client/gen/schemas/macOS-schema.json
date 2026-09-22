@@ -201,6 +201,12 @@
           "markdownDescription": "Enables the local_machine_id command without any pre-configured scope."
         },
         {
+          "description": "Enables the page_log command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-page-log",
+          "markdownDescription": "Enables the page_log command without any pre-configured scope."
+        },
+        {
           "description": "Enables the terminal_set_excluded command without any pre-configured scope.",
           "type": "string",
           "const": "allow-terminal-set-excluded",
@@ -247,6 +253,12 @@
           "type": "string",
           "const": "deny-local-machine-id",
           "markdownDescription": "Denies the local_machine_id command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the page_log command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-page-log",
+          "markdownDescription": "Denies the page_log command without any pre-configured scope."
         },
         {
           "description": "Denies the terminal_set_excluded command without any pre-configured scope.",

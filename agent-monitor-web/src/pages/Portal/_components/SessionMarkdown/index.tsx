@@ -2,6 +2,8 @@ import React, { useEffect, useState } from "react";
 
 import { Markdown } from "@hsu-react/ui";
 
+import { contentMarkdownComponents } from "../../_utils/contentLinks";
+
 import {
   SessionImageCtx,
   resolveSessionImages,
@@ -39,7 +41,7 @@ const SessionMarkdown: React.FC<Props> = ({ content, imageCtx }) => {
     };
   }, [content, imageCtx]);
 
-  return <Markdown.Views>{resolved}</Markdown.Views>;
+  return <Markdown.Views components={contentMarkdownComponents}>{resolved}</Markdown.Views>;
 };
 
 export default SessionMarkdown;

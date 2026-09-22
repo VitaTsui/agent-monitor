@@ -10,6 +10,7 @@ import { debounce } from "lodash";
 import { getAccessToken, getAdminToken, removeAdminToken } from "@/utils/auth";
 import { notification } from "@hsu-react/ui";
 import wsCache from "@/utils/wsCache";
+import { reloadFor } from "@/utils/reloadTrace";
 import { getFileNameFromHeader } from "hsu-utils/lib/DownloadFile";
 
 /**
@@ -135,7 +136,7 @@ const reLogin = debounce(() => {
     if (inDesktopClient()) {
       const ok = await clientSilentLogin();
       if (ok) {
-        window.location.reload();
+        reloadFor("接口返回 401（未登录），设备令牌静默续登成功");
         return;
       }
     }
@@ -325,7 +326,7 @@ const onAdminTokenInvalid = debounce(() => {
     notification.error({
       title: "后管访问令牌已失效，请重新解锁",
       duration: 0.8,
-      onClose: () => window.location.reload(),
+      onClose: () => reloadFor("后管访问令牌失效"),
     });
   }
 });

@@ -344,6 +344,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             local_machine_id,
             read_session_image,
             clear_device_token,
+            page_log,
             terminals_get,
             terminal_set_excluded,
             update_status,
@@ -435,6 +436,18 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         reveal(w.app_handle(), want_visible);
                     }
+                })
+                // 「开新窗口」请求（内容里的外链带 target=_blank，见网页 contentLinks）一律交给
+                // 系统浏览器：这个窗口是应用本身，没有地址栏也没有后退，外部网页在这里打开
+                // 就把界面覆盖了、回不来。只放行 http(s)，其余协议（file:、javascript: 等）
+                // 来自会话内容，不替它们调系统打开器。
+                .on_new_window(|url, _features| {
+                    if matches!(url.scheme(), "http" | "https") {
+                        open_external(url.as_str());
+                    } else {
+                        ulog(&format!("拒绝打开非 http(s) 新窗口：{}", url.scheme()));
+                    }
+                    tauri::webview::NewWindowResponse::Deny
                 });
             // 仅 macOS 用 Overlay 融合式标题栏：保留原生红黄绿交通灯、隐藏标题文字，
             // 网页内容延伸到标题栏区域（对标 Claude / Codex 桌面端）。Windows/Linux 保持
@@ -539,7 +552,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                             });
                             show_main_with_pair(app, pair);
                         }
-                        "refresh" => reload_main(app),
+                        "refresh" => reload_main(app, "托盘菜单「刷新」"),
                         "browser" => open_external(&format!("{web_base_menu}/portal")),
                         // 更新推送入口：打开官网「客户端」下载区
                         "update" => spawn_self_update(app.clone(), web_base_menu.clone()),
@@ -621,7 +634,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                         // 用户在浏览器里点完授权，客户端那边毫无动静，得自己想起来切回去。
                         // 这里连带把窗口显示并聚焦，「回到客户端」这一步才是闭合的。
                         show_main(&handle_bg);
-                        reload_main(&handle_bg);
+                        reload_main(&handle_bg, "设备配对完成（拿到设备令牌）");
                     }
                     let (terminals, excluded, hub_err, upd) = tauri::async_runtime::block_on(async {
                         let t = state_bg.terminals.read().await.clone();
@@ -1060,6 +1073,15 @@ async fn clear_device_token(ctx: tauri::State<'_, std::sync::Arc<IpcCtx>>) -> Re
     Ok(())
 }
 
+/// 网页端 IPC：往 client.log 写一行（网页的 reloadTrace 用它记「页面为什么刷新了」）。
+///
+/// 截断到 500 字：内容来自页面，别让一条异常长的消息把日志撑大。
+#[tauri::command]
+fn page_log(msg: String) {
+    let msg: String = msg.chars().take(500).collect();
+    ulog(&format!("[page] {msg}"));
+}
+
 /// 网页端 IPC：本机探测到的终端列表（含排除状态），设置页「监控范围」用
 #[tauri::command]
 async fn terminals_get(
@@ -1309,9 +1331,16 @@ fn set_autostart(enable: bool) {
 
 /// 刷新主窗口（重载远端页面）：站点发新版后拉取最新前端。
 /// 用 location.reload 而非 navigate —— 保留当前路由与登录态。
-fn reload_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+///
+/// `reason` 先写进页面的 sessionStorage 再重载：页面起来后由网页的 reloadTrace 读出、
+/// 连同加载类型一起写回 client.log —— 与网页自己发起的刷新走同一条记录通道，
+/// 查「界面为什么刷新了」只看一处。
+fn reload_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>, reason: &str) {
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.eval("location.reload()");
+        let payload = serde_json::json!({ "reason": reason }).to_string();
+        let _ = w.eval(format!(
+            "try{{var r={payload};r.at=Date.now();sessionStorage.setItem('am_reload_reason',JSON.stringify(r))}}catch(e){{}};location.reload()"
+        ));
     }
 }
 
