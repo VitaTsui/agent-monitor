@@ -72,14 +72,12 @@ pub struct SessionSummary {
     pub line_count: u64,
     /// 近 5 小时滚动窗口内的 token 用量（input+output+cache_creation 估算）
     pub used_tokens_5h: u64,
-    /// 终端里 claude 原生排队、尚未被会话接受执行的输入（按入队顺序）。
-    /// 来自会话 jsonl 的 queue-operation 记录：enqueue 入列、remove 出列（被接受或取消），
-    /// 末态仍在列的即当前排队项。前端把它们挂在内容区底部显示。
+    /// 尾窗里 claude 原生输入队列的**原始操作**（按文件顺序，带时间戳），还没回放。
     ///
-    /// 带入队时刻：这条队列只活在**那一个** claude 进程的内存里，进程一退就连同队列一起
-    /// 没了，jsonl 里不会补任何 remove/dequeue。所以回放出来的项还算不算数，要拿进程的
-    /// 启动时刻去裁（见 `aggregate` 里的 `alive_queue`），解析器这一层看不见进程。
-    pub queued_inputs: Vec<QueuedInput>,
+    /// 不在解析时回放，是因为回放必须以进程为界，而解析器这一层看不见进程：队列只活在
+    /// **那一个** claude 进程的内存里，进程一退就连同队列一起没了，jsonl 里不补任何出列。
+    /// 回放放到知道进程启动时刻的 `build_tasks` 里做，见 [`alive_queue`]。
+    pub queue_ops: Vec<QueueOp>,
     /// 尾窗里**最后一次 AskUserQuestion 被了结**的时刻（epoch 毫秒）：作答落下 tool_result，
     /// 或这一轮被 Esc 中断。没见过就是 None。
     ///
@@ -700,7 +698,7 @@ impl SessionScanner {
             created_ms: 0,
             line_count: 0,
             used_tokens_5h: 0,
-            queued_inputs: Vec::new(),
+            queue_ops: Vec::new(),
             // codex 没有 AskUserQuestion 这套选择卡，也就无所谓了结
             select_answered_ms: None,
         };
@@ -1574,7 +1572,7 @@ pub fn build_tasks(
             }
         };
         let status_dsr = status.dsr().to_string();
-        let queued_inputs = alive_queue(&s.queued_inputs, proc_info.as_ref());
+        let queued_inputs = alive_queue(&s.queue_ops, proc_info.as_ref());
         tasks.push(Task {
             id: s.session_id.clone(),
             machine_id: String::new(),
@@ -1751,10 +1749,8 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
     let mut saw_clear = false;
     // 这条会话里有没有任何实质内容（真实用户输入 / 助手回复），见 SessionSummary::has_content
     let mut has_content = false;
-    // 忠实回放 claude 原生输入队列：(匹配键=原始 content, 展示文本=Some 时才是真实用户
-    // 输入)。通知类（task-notification 等）也占位（展示文本 None），这样按位置的「空
-    // content 出列」能对上正确的项，最终只把「真实用户输入」拿去展示。
-    let mut queue: Vec<(String, Option<String>, u64)> = Vec::new();
+    // claude 原生输入队列的原始操作，原样记下，回放见 alive_queue
+    let mut queue_ops: Vec<QueueOp> = Vec::new();
     let mut started_at: Option<String> = None;
     let mut last_active_at: Option<String> = None;
     let mut version: Option<String> = None;
@@ -1843,59 +1839,38 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                     turn_ended = false;
                 }
             }
-            "queue-operation" => match v.get("operation").and_then(Value::as_str) {
-                Some("enqueue") => {
-                    let key = v
-                        .get("content")
+            "queue-operation" => {
+                let at_ms = v
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .and_then(iso_to_ms)
+                    .unwrap_or(0);
+                let key = truncate(
+                    v.get("content")
                         .and_then(Value::as_str)
                         .unwrap_or("")
-                        .trim();
-                    let disp = queued_user_text(&v);
-                    if let Some(text) = &disp {
-                        prompt = text.clone();
-                        last_action = "等待助手响应".into();
-                        turn_ended = false;
-                    }
-                    let at_ms = v
-                        .get("timestamp")
-                        .and_then(Value::as_str)
-                        .and_then(iso_to_ms)
-                        .unwrap_or(0);
-                    queue.push((truncate(key, 500), disp, at_ms));
-                }
-                // 出列（被会话接受执行 或 取消）：content 有值→按内容精确移除（匹配不到
-                // 再退移队首）；content 为空→移除队首（FIFO，最旧的先被接受）。空 content
-                // 的 remove 之前被 queued_user_text 滤成 None、什么都不做，已接受/撤回的项
-                // 因此卡在队列里一直显示「排队中」不消失。
-                Some("remove") => {
-                    let key = v
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .trim();
-                    if !key.is_empty() {
-                        let k = truncate(key, 500);
-                        if let Some(pos) = queue.iter().position(|(c, _, _)| c == &k) {
-                            queue.remove(pos);
-                        } else if !queue.is_empty() {
-                            queue.remove(0);
+                        .trim(),
+                    500,
+                );
+                let kind = match v.get("operation").and_then(Value::as_str) {
+                    Some("enqueue") => {
+                        let disp = queued_user_text(&v);
+                        if let Some(text) = &disp {
+                            prompt = text.clone();
+                            last_action = "等待助手响应".into();
+                            turn_ended = false;
                         }
-                    } else if !queue.is_empty() {
-                        queue.remove(0);
+                        Some(QueueOpKind::Enqueue { key, disp })
                     }
+                    Some("remove") => Some(QueueOpKind::Remove { key }),
+                    Some("dequeue") => Some(QueueOpKind::Dequeue),
+                    Some("popAll") => Some(QueueOpKind::PopAll),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    queue_ops.push(QueueOp { at_ms, kind });
                 }
-                // 会话接受队首执行（content 恒空）：移除队首
-                Some("dequeue") => {
-                    if !queue.is_empty() {
-                        queue.remove(0);
-                    }
-                }
-                // 全部弹出（终端按 Esc 把排队全部插入会话）：清空
-                Some("popAll") => {
-                    queue.clear();
-                }
-                _ => {}
-            },
+            }
             "assistant" => {
                 has_content = true;
                 // 统计 5h 窗口内 token 用量（input+output+cache_creation）
@@ -1948,11 +1923,6 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         }
     }
 
-    // 只把真实用户排队输入（展示文本 Some）拿去上报；通知类占位项丢弃
-    let queued_inputs: Vec<QueuedInput> = queue
-        .into_iter()
-        .filter_map(|(_, d, at_ms)| d.map(|text| QueuedInput { text, at_ms }))
-        .collect();
     // 刚清空、未输入的空会话：见过 /clear 且没有真实 prompt
     let cleared = saw_clear && prompt.is_empty();
 
@@ -1989,7 +1959,7 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         created_ms: 0,
         line_count: 0,
         used_tokens_5h,
-        queued_inputs,
+        queue_ops,
         select_answered_ms,
     })
 }
@@ -2033,31 +2003,66 @@ fn wants_continue(command: &str) -> bool {
 }
 
 /// ISO8601 → epoch 毫秒
-/// 回放出来的一条排队项（见 [`SessionSummary::queued_inputs`]）
+/// 一条 queue-operation 记录（见 [`SessionSummary::queue_ops`]）
 #[derive(Debug, Clone, PartialEq)]
-pub struct QueuedInput {
-    pub text: String,
-    /// 入队时刻（epoch 毫秒）；记录没带时间戳就是 0
+pub struct QueueOp {
+    /// 记录时刻（epoch 毫秒）；没带时间戳就是 0
     pub at_ms: u64,
+    pub kind: QueueOpKind,
 }
 
-/// 只留**当前这个进程**入队的项。
+/// queue-operation 的四种语义（实测跨多会话统计确认）
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueueOpKind {
+    /// 入队（恒有 content）。`disp` = 真实用户输入的展示文本；通知类
+    /// （`<task-notification>` 等）为 None，但仍要占位 —— 空 content 的出列是按位置的
+    Enqueue { key: String, disp: Option<String> },
+    /// 出列（被接受或撤回）：有 content 按内容移除（匹配不到退移队首），空 content 移队首
+    Remove { key: String },
+    /// 会话接受队首执行（content 恒空）：移队首
+    Dequeue,
+    /// Esc 把排队全部插入会话：清空
+    PopAll,
+}
+
+/// 当前进程的输入队列：**从进程启动那一刻起**回放，只把真实用户输入拿去展示。
 ///
 /// claude 的原生输入队列是进程内存里的：关终端、`--resume` 重开，旧进程的队列就随它没了，
-/// 而 jsonl 里不会为此补 remove/dequeue —— 实测（2.1.280）排队中杀进程再 `--resume`，
-/// 文件末尾就停在那条 enqueue，新进程什么都不写。照单回放的话，这条就在「终端排队中」
-/// 永远挂着，哪怕新会话早已往下跑了。
+/// 而 jsonl 里不会为此补 remove/dequeue。所以新进程启动时队列就是空的，之前的操作一条都
+/// 不能进回放 —— 先回放、事后再按入队时刻筛是**不够的**：出列记录不带内容、按位置移除
+/// 队首，旧进程留下的一条死项压在队首，新进程的每次出列都会移走错的那条。线上实测
+/// （Windows，2.1.280）：17:48:39 旧进程入队一条通知后被关掉，17:48:47 新进程启动，
+/// 此后每 10 分钟的定时任务「入队＋出列」都把上一轮的留在队里，界面上永远挂着最新那条。
 ///
-/// 所以队列的生命期以进程为界：没有进程 = 没有队列；有进程就只认它启动之后入队的。
-fn alive_queue(queue: &[QueuedInput], proc_info: Option<&ProcessInfo>) -> Vec<String> {
+/// 没有进程 = 没有队列。
+fn alive_queue(ops: &[QueueOp], proc_info: Option<&ProcessInfo>) -> Vec<String> {
     let Some(p) = proc_info else {
         return Vec::new();
     };
     let born = born_ms(p);
+    // (匹配键=原始 content, 展示文本)
+    let mut queue: Vec<(&str, Option<&str>)> = Vec::new();
+    for op in ops.iter().filter(|op| op.at_ms >= born) {
+        match &op.kind {
+            QueueOpKind::Enqueue { key, disp } => queue.push((key, disp.as_deref())),
+            QueueOpKind::Remove { key } if !key.is_empty() => {
+                if let Some(pos) = queue.iter().position(|(k, _)| *k == key.as_str()) {
+                    queue.remove(pos);
+                } else if !queue.is_empty() {
+                    queue.remove(0);
+                }
+            }
+            QueueOpKind::Remove { .. } | QueueOpKind::Dequeue => {
+                if !queue.is_empty() {
+                    queue.remove(0);
+                }
+            }
+            QueueOpKind::PopAll => queue.clear(),
+        }
+    }
     queue
-        .iter()
-        .filter(|q| q.at_ms >= born)
-        .map(|q| q.text.clone())
+        .into_iter()
+        .filter_map(|(_, d)| d.map(str::to_string))
         .collect()
 }
 
@@ -5247,7 +5252,7 @@ mod noise_filter_tests {
                 created_ms: 0,
                 line_count: 0,
                 used_tokens_5h: 0,
-                queued_inputs: Vec::new(),
+                queue_ops: Vec::new(),
                 select_answered_ms: None,
             };
             s.title = format!("t{mtime}");
@@ -5449,7 +5454,7 @@ mod pairing_tests {
             created_ms: 0,
             line_count: 1,
             used_tokens_5h: 0,
-            queued_inputs: Vec::new(),
+            queue_ops: Vec::new(),
             select_answered_ms: None,
         }
     }
@@ -6590,7 +6595,7 @@ mod codex_tests {
             created_ms: now - 60_000,
             line_count: 1,
             used_tokens_5h: 0,
-            queued_inputs: Vec::new(),
+            queue_ops: Vec::new(),
             select_answered_ms: None,
         };
         let proc = |agent: &str, pid: u32, key: &str| ProcessInfo {
@@ -6900,7 +6905,7 @@ mod desktop_session_tests {
             created_ms: mtime_ms,
             line_count: 1,
             used_tokens_5h: 0,
-            queued_inputs: Vec::new(),
+            queue_ops: Vec::new(),
             select_answered_ms: None,
         }
     }
@@ -7220,10 +7225,10 @@ mod process_bound_queue_tests {
     #[test]
     fn orphan_enqueue_from_previous_process_is_dropped() {
         let s = parse_tail("s", Path::new("/x/-p/s.jsonl"), &tail_with_orphan_enqueue()).unwrap();
-        assert_eq!(s.queued_inputs.len(), 1, "解析层照实回放，裁剪在聚合层做");
+        assert_eq!(s.queue_ops.len(), 1, "解析层只记原始操作，回放在聚合层做");
         // 新进程在排队之后才启动（关终端 → 重开 → --resume）
         let reborn = proc_born(at("2026-09-22T18:05:00Z"));
-        assert!(alive_queue(&s.queued_inputs, Some(&reborn)).is_empty());
+        assert!(alive_queue(&s.queue_ops, Some(&reborn)).is_empty());
         assert!(
             predates(s.last_active_at.as_deref(), &reborn),
             "尾部那个进行中的回合也属于旧进程，新进程应判空闲"
@@ -7235,18 +7240,41 @@ mod process_bound_queue_tests {
         let s = parse_tail("s", Path::new("/x/-p/s.jsonl"), &tail_with_orphan_enqueue()).unwrap();
         let running = proc_born(at("2026-09-22T17:00:00Z"));
         assert_eq!(
-            alive_queue(&s.queued_inputs, Some(&running)),
+            alive_queue(&s.queue_ops, Some(&running)),
             vec!["排队的那句".to_string()]
         );
         assert!(!predates(s.last_active_at.as_deref(), &running));
         // 与入队同一秒启动也算本进程的（start_time 只有秒级）
         let same_sec = proc_born(at("2026-09-22T18:01:02Z"));
-        assert_eq!(alive_queue(&s.queued_inputs, Some(&same_sec)).len(), 1);
+        assert_eq!(alive_queue(&s.queue_ops, Some(&same_sec)).len(), 1);
     }
 
     #[test]
     fn no_process_means_no_queue() {
         let s = parse_tail("s", Path::new("/x/-p/s.jsonl"), &tail_with_orphan_enqueue()).unwrap();
-        assert!(alive_queue(&s.queued_inputs, None).is_empty());
+        assert!(alive_queue(&s.queue_ops, None).is_empty());
+    }
+
+    /// 线上原样（Windows，2.1.280，会话 cefeb140）：旧进程入队一条通知后被关掉，新进程
+    /// 启动后定时任务每 10 分钟「入队＋出列」一次。出列不带内容、按位置移队首 ——
+    /// 回放若不以进程为界，每次出列移走的都是上一条，界面上永远挂着最新那条定时任务。
+    #[test]
+    fn orphan_head_from_dead_process_does_not_shift_later_dequeues() {
+        let cron = "守候「模型直评」试验";
+        let tail = [
+            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-22T17:48:39.899Z","content":"<task-notification>\n<task-type>artifact-auto-react</task-type>"}"#.to_string(),
+            format!(r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-22T17:49:02.671Z","content":"{cron}"}}"#),
+            r#"{"type":"queue-operation","operation":"dequeue","timestamp":"2026-09-22T17:49:02.692Z"}"#.to_string(),
+            format!(r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-22T19:02:09.468Z","content":"{cron}"}}"#),
+            r#"{"type":"queue-operation","operation":"dequeue","timestamp":"2026-09-22T19:02:09.534Z"}"#.to_string(),
+        ]
+        .join("\n");
+        let s = parse_tail("s", Path::new("/x/-p/s.jsonl"), &tail).unwrap();
+        // 新进程 17:48:47 启动
+        let p = proc_born(at("2026-09-22T17:48:47Z"));
+        assert!(
+            alive_queue(&s.queue_ops, Some(&p)).is_empty(),
+            "每次定时任务都已入队又出列，队列应为空"
+        );
     }
 }
