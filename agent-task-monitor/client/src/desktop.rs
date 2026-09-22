@@ -1326,7 +1326,7 @@ fn set_autostart(enable: bool) {
 fn reload_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>, reason: &str) {
     if let Some(w) = app.get_webview_window("main") {
         let payload = serde_json::json!({ "reason": reason }).to_string();
-        let _ = w.eval(&format!(
+        let _ = w.eval(format!(
             "try{{var r={payload};r.at=Date.now();sessionStorage.setItem('am_reload_reason',JSON.stringify(r))}}catch(e){{}};location.reload()"
         ));
     }
