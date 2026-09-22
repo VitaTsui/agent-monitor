@@ -436,6 +436,18 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         reveal(w.app_handle(), want_visible);
                     }
+                })
+                // 「开新窗口」请求（内容里的外链带 target=_blank，见网页 contentLinks）一律交给
+                // 系统浏览器：这个窗口是应用本身，没有地址栏也没有后退，外部网页在这里打开
+                // 就把界面覆盖了、回不来。只放行 http(s)，其余协议（file:、javascript: 等）
+                // 来自会话内容，不替它们调系统打开器。
+                .on_new_window(|url, _features| {
+                    if matches!(url.scheme(), "http" | "https") {
+                        open_external(url.as_str());
+                    } else {
+                        ulog(&format!("拒绝打开非 http(s) 新窗口：{}", url.scheme()));
+                    }
+                    tauri::webview::NewWindowResponse::Deny
                 });
             // 仅 macOS 用 Overlay 融合式标题栏：保留原生红黄绿交通灯、隐藏标题文字，
             // 网页内容延伸到标题栏区域（对标 Claude / Codex 桌面端）。Windows/Linux 保持

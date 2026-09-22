@@ -6,6 +6,7 @@ import { Icon, Markdown } from "@hsu-react/ui";
 import { Tooltip, message } from "antd";
 
 import { getTaskDirs, getTaskFile, hasListing } from "@/services/apis/portal";
+import { contentMarkdownComponents } from "../../_utils/contentLinks";
 import CodeLines from "./CodeLines";
 import SheetView from "./SheetView";
 import styles from "./index.module.scss";
@@ -555,7 +556,9 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
          **markdown 里的裸 HTML 不会被当标签渲染**，正合这份「别人机器上的文件」的定位 */
       return (
         <div className={styles.md}>
-          <Markdown.Views>{file.text ?? ""}</Markdown.Views>
+          <Markdown.Views components={contentMarkdownComponents}>
+            {file.text ?? ""}
+          </Markdown.Views>
         </div>
       );
     }
