@@ -1,11 +1,14 @@
 import "./install-object-has-own-polyfill";
 
 import { installFreshnessGuard } from "./utils/freshness";
+import { traceBoot } from "./utils/reloadTrace";
 import { installKeyboardInset } from "./utils/keyboardInset";
 import { installSheetSwipe } from "./utils/sheetSwipe";
 import { hideSplashWhenReady } from "./utils/splash";
 
 // 一进站就把钉钉绑定 token 从 URL 摘出暂存（登录跳转会丢查询参数），登录后由 Portal 消费绑定
+// 先记「这次是不是一次重载、谁发起的」，再跑可能再次触发重载的新鲜度守卫
+traceBoot();
 installFreshnessGuard();
 installKeyboardInset();
 installSheetSwipe();
