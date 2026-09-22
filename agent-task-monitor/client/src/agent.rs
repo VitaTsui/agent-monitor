@@ -547,20 +547,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                             }),
                         _ => Vec::new(),
                     };
-                    for mut f in files {
-                        // 落盘那一刻现算目标目录：hub 排队 + 网络往返期间会话可能又 cd 了，
-                        // 事先算好的绝对路径就已经过时（见 model 的 FileTransfer::by_session）
-                        if f.by_session {
-                            match session_root_now(&state, &f.task_id).await {
-                                Some(root) => f.dir = join_rel(&root, &f.rel_dir),
-                                // 解析不出来（会话记录已删/读不到）就退回 hub 算的那份，
-                                // 总比整份传输直接失败强
-                                None => crate::state::client_log(&format!(
-                                    "下发文件按会话解析目录失败（task={}），退回 hub 给的 {}",
-                                    f.task_id, f.dir
-                                )),
-                            }
-                        }
+                    for f in files {
                         if let Some(r) = write_transfer(&f, &session_dirs) {
                             pending_file_results.push(r);
                         }
@@ -571,11 +558,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
                     for q in dir_queries {
-                        // 根以本机现读为准：hub 那份来自定期扫描的快照，会话 cd 过就偏了
-                        let root = match q.by_session {
-                            true => session_root_now(&state, &q.task_id).await.unwrap_or(q.cwd),
-                            false => q.cwd,
-                        };
+                        let root = q.cwd;
                         let (dirs, files) = list_entries(&root, &q.rel);
                         pending_dir_results.push(am_core::model::DirResult {
                             dirs,
@@ -590,13 +573,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         .pointer("/data/fsOps")
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
-                    for mut op in fs_ops {
-                        // 必须与目录浏览同一个根，否则「网页上看到的目录」与「操作落到的目录」是两个
-                        if op.by_session {
-                            if let Some(root) = session_root_now(&state, &op.task_id).await {
-                                op.cwd = root;
-                            }
-                        }
+                    for op in fs_ops {
                         let (ok, msg) = run_fs_op(&op);
                         pending_fs_op_results.push(am_core::model::FsOpResult {
                             op_id: op.op_id,
@@ -911,23 +888,6 @@ async fn session_root_now(state: &crate::state::AppState, task_id: &str) -> Opti
         return None;
     }
     state.scanner.lock().await.session_cwd_now(task_id)
-}
-
-/// `root` + 相对子路径（子路径用 '/' 分隔，按本机分隔符拼回去）。
-///
-/// 只做拼接，不做越界校验 —— 调用方随后走 `safe_upload_dir_within`，那里才是权威闸门。
-fn join_rel(root: &str, rel: &str) -> String {
-    let rel = rel.trim().trim_matches('/');
-    if rel.is_empty() {
-        return root.to_string();
-    }
-    let sep = if root.contains('\\') { '\\' } else { '/' };
-    let joined: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
-    format!(
-        "{}{sep}{}",
-        root.trim_end_matches(['/', '\\']),
-        joined.join(&sep.to_string())
-    )
 }
 
 /// 写入 hub 下发的文件到本机目标目录。
@@ -1788,10 +1748,6 @@ mod transfer_report_tests {
             chunk_index: 0,
             chunk_total: 0,
             transfer_id: id.into(),
-            // 同上：用例直接给绝对 dir，不走按会话解析
-            task_id: String::new(),
-            rel_dir: String::new(),
-            by_session: false,
         }
     }
 

@@ -1272,9 +1272,9 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
                   // 别人共享给我的机器不提供文件访问：上传与「选择文件」一并置灰。
                   // 与文件查看器那颗按钮同一个值，不会出现「这边能点那边不能」
                   deviceShared={deviceShared}
-                  // 会话此刻的工作目录优先：会话 cd 进子目录后，进程 cwd 还钉在启动目录，
-                  // 拿它当上传落点就会「文件写在项目根、终端在子目录里找」（见 Task.liveCwd）。
-                  cwd={task.liveCwd || task.process?.cwd}
+                  // 目录树的根 = 项目根；终端 cd 到别处（liveCwd 有值）时回填改用绝对路径
+                  cwd={task.project || task.process?.cwd}
+                  liveCwd={task.liveCwd}
                   onSend={(text) => {
                     sendInput(id, text);
                     // 发送后强制滚到底部：即使之前上滚看历史，发出内容也应带着滚回底部
@@ -1301,7 +1301,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
           <ViewerCol>
             <FilePane
               taskId={id}
-              cwd={task.liveCwd || task.process?.cwd}
+              cwd={task.project || task.process?.cwd}
               onClose={() => PortalStore.toggleFilePane(id)}
             />
           </ViewerCol>

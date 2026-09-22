@@ -5,7 +5,7 @@ import classNames from "classnames";
 import { Icon, Markdown } from "@hsu-react/ui";
 import { Tooltip, message } from "antd";
 
-import { getTaskDirs, getTaskFile } from "@/services/apis/portal";
+import { getTaskDirs, getTaskFile, hasListing } from "@/services/apis/portal";
 import CodeLines from "./CodeLines";
 import SheetView from "./SheetView";
 import styles from "./index.module.scss";
@@ -156,7 +156,7 @@ const RENDER_VIEW: Record<string, { label: string; icon: string }> = {
 
 interface FilePaneProps {
   taskId: string;
-  /** 会话锚定目录，只用来在头上显示「你在哪台机器的哪个目录里」 */
+  /** 项目根（即这棵树的根），只用来在头上显示「你在哪台机器的哪个目录里」 */
   cwd?: string;
   onClose: () => void;
 }
@@ -184,8 +184,11 @@ interface FilePaneProps {
  *      二进制。所以解完 base64 之后**看字节**：有 NUL 或控制字符过多就是二进制。
  *      （这条避免了为看一眼文件去动客户端。）
  *
- * 路径安全由客户端保证：`rel` 一律相对会话根，客户端 canonicalize 之后必须仍落在
- * `live_cwd` 内，越界直接回「越出会话目录」。前端这边不拼绝对路径、也不接受用户输入路径。
+ * **根是项目根**（`Task.project`），不随终端 `cd` 漂：会话 `cd doc` 之后树也还是整个项目。
+ * 读文件同样以项目根为基准（`getTaskFile(…, "project")`），与列目录是同一个根。
+ *
+ * 路径安全由客户端保证：`rel` 一律相对项目根，客户端 canonicalize 之后必须仍落在
+ * 根内，越界直接回「越出会话目录」。前端这边不拼绝对路径、也不接受用户输入路径。
  */
 const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
   /** 当前所在的相对目录（"" = 会话根） */
@@ -213,7 +216,8 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
   const urlRef = useRef("");
 
   const loadDir = useCallback(
-    (next: string, attempt = 0) => {
+    // `shown`：这一轮已经先摆出了上次的清单（等新清单期间 hub 会一并带回）
+    (next: string, attempt = 0, shown = false) => {
       if (!taskId) {
         return;
       }
@@ -222,7 +226,8 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
         setDirFail(null);
         setDirLoading(true);
       }
-      getTaskDirs(taskId, next)
+      // 进目录那一次让设备重新列：不然看到的永远是第一次打开时的样子
+      getTaskDirs(taskId, next, attempt === 0)
         .then((res) => {
           if (seq !== dirSeq.current) {
             return;
@@ -234,16 +239,25 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
             setDirFail({ kind: "deny", msg: res.msg || "读取目录失败" });
             return;
           }
+          const stale = res.data?.pending && hasListing(res.data);
+          if (stale) {
+            // 先摆上次的样子，新的到了再换 —— 回到看过的目录不用干等一轮上报
+            setDirs(res.data?.dirs ?? []);
+            setFiles(res.data?.files ?? []);
+            setDirLoading(false);
+          }
           if (res.data?.pending && attempt < POLL_DELAYS.length) {
             window.setTimeout(
-              () => loadDir(next, attempt + 1),
+              () => loadDir(next, attempt + 1, shown || !!stale),
               POLL_DELAYS[attempt],
             );
             return;
           }
           if (res.data?.pending) {
-            // 等不到就明说，别把它渲染成一个空目录
-            setDirFail(timeoutFail("目录"));
+            // 等不到就明说，别把它渲染成一个空目录；已经摆着上次的清单就留着它
+            if (!shown && !stale) {
+              setDirFail(timeoutFail("目录"));
+            }
             setDirLoading(false);
             return;
           }
@@ -293,7 +307,7 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
       setSource(false);
       setFile({ rel: full, name, kind: "text", size: 0 });
     }
-    getTaskFile(taskId, full)
+    getTaskFile(taskId, full, "project")
       .then((res) => {
         if (seq !== fileSeq.current) {
           return;

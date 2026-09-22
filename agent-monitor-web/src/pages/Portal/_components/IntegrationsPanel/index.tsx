@@ -78,7 +78,7 @@ const IntegrationsPanel: React.FC = () => {
     (taskId: string, rel: string, attempt = 0) => {
       const seq = ++pickSeq.current;
       setPickLoading(true);
-      getTaskDirs(taskId, rel)
+      getTaskDirs(taskId, rel, attempt === 0)
         .then((res) => {
           if (seq !== pickSeq.current) return;
           if (res.code !== 0) {

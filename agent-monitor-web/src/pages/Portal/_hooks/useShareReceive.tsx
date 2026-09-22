@@ -91,8 +91,8 @@ export const ShareReceiveModal: React.FC = observer(() => {
 
   useEffect(() => {
     const t = tasks.find((x) => x.id === taskId);
-    // 与 Composer 同一个根：会话 cd 过之后，进程 cwd 已不是「会话此刻在哪」
-    setDir(t?.liveCwd || t?.process?.cwd || "");
+    // 与 Composer 同一个根：项目根，不随终端 cd 漂
+    setDir(t?.project || t?.process?.cwd || "");
   }, [taskId, tasks]);
 
   const doUpload = () => {

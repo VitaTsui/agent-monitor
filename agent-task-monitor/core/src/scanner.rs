@@ -24,19 +24,13 @@ pub struct SessionSummary {
     /// 归一化后的项目根（`encode_path` 等于 `project_key` 的那个 cwd）。配对/分组用，
     /// 不随会话内 `cd` 漂移。
     pub cwd: String,
-    /// 会话的**锚定目录**：`shell_cwd` 所在的 git 仓库根（不在仓库里就是 `shell_cwd`
-    /// 本身，尾窗没读到就退回 `cwd`）。上传落点、目录浏览根都用它。
+    /// 终端此刻所在的目录：尾窗里**最后一条**记录的 cwd 原样（尾窗没读到就沿用上一轮，
+    /// 再退回 `cwd`）。只用来判断终端按哪个目录解析 `./x`，见 model 的 `Task::live_cwd`。
     ///
-    /// 之所以要往上收到仓库根：`shell_cwd` 随会话 `cd` 每一轮都在跳（实测同一会话几分钟内
-    /// 走过 `desktop`、`desktop/src-tauri`、`desktop/web/dist`），拿它当落点等于每次上传都
-    /// 不知道文件会落到哪，连构建产物目录都能落进去。仓库根则怎么 cd 都不变。
+    /// **不收到 git 仓库根**：0.11.51 曾经收，为的是让「上传落点」别随 cd 乱跳；可收完之后
+    /// 它就不再是终端真正所在，拿它判断「相对路径对不对」必然误判（仓库里 `cd doc` 后仍报
+    /// 「在根上」）。落点稳定的问题现在由「一律以项目根为根」解决，这里只管说实话。
     pub live_cwd: String,
-    /// 尾窗里**最后一条**记录的 cwd 原样（空 = 尾窗没读到）。
-    ///
-    /// 只有一个用途：判断会话是否已经漂到锚定目录之下。漂了就说明「终端此刻在哪」与
-    /// 「文件落在哪」不是同一个目录，相对路径是否解析得对取决于终端拿哪个当根 —— 那件事
-    /// 我们无从确证，于是这种时候前端改回填绝对路径，把不确定性绕开（见 web 的 doUpload）。
-    pub shell_cwd: String,
     /// 会话标题（首个用户提示词）
     pub title: String,
     pub prompt: String,
@@ -81,7 +75,11 @@ pub struct SessionSummary {
     /// 终端里 claude 原生排队、尚未被会话接受执行的输入（按入队顺序）。
     /// 来自会话 jsonl 的 queue-operation 记录：enqueue 入列、remove 出列（被接受或取消），
     /// 末态仍在列的即当前排队项。前端把它们挂在内容区底部显示。
-    pub queued_inputs: Vec<String>,
+    ///
+    /// 带入队时刻：这条队列只活在**那一个** claude 进程的内存里，进程一退就连同队列一起
+    /// 没了，jsonl 里不会补任何 remove/dequeue。所以回放出来的项还算不算数，要拿进程的
+    /// 启动时刻去裁（见 `aggregate` 里的 `alive_queue`），解析器这一层看不见进程。
+    pub queued_inputs: Vec<QueuedInput>,
     /// 尾窗里**最后一次 AskUserQuestion 被了结**的时刻（epoch 毫秒）：作答落下 tool_result，
     /// 或这一轮被 Esc 中断。没见过就是 None。
     ///
@@ -683,7 +681,6 @@ impl SessionScanner {
             // 于是「项目根」「锚定目录」「此刻在哪」本就是同一个 —— 也因此不收到 git 根：
             // codex 就在这个目录里跑，往上挪反而会让相对路径失准。
             live_cwd: cwd.clone(),
-            shell_cwd: cwd.clone(),
             cwd,
             title: prompt.clone(),
             prompt,
@@ -796,23 +793,13 @@ impl SessionScanner {
         // 尾窗一条 cwd 都没读到（增量扫描时新行里没有、或极短会话）：沿用上一轮的结果，
         // 再退回项目根。**不能就这么留空** —— 调用方一见空就退回 `project`，等于每隔
         // 几轮上传落点就在「当前目录」和「项目根」之间跳一次，比一直用错更难查。
-        if summary.shell_cwd.is_empty() {
-            summary.shell_cwd = prev
+        if summary.live_cwd.is_empty() {
+            summary.live_cwd = prev
                 .as_ref()
-                .map(|p| p.summary.shell_cwd.clone())
+                .map(|p| p.summary.live_cwd.clone())
                 .filter(|c| !c.is_empty())
-                .unwrap_or_default();
+                .unwrap_or_else(|| summary.cwd.clone());
         }
-        // 锚定目录 = shell_cwd 所在的 git 仓库根。收到仓库根是为了稳定：shell_cwd 每轮都在
-        // 跳，而仓库根怎么 cd 都不变。不在任何仓库里就用 shell_cwd 本身，再退项目根。
-        //
-        // 只在这里算（`summarize` 只有会话文件真变了才走到，缓存命中直接返回），
-        // 所以 stat 父链的开销只落在活跃会话上，不是每轮每会话。
-        summary.live_cwd = if summary.shell_cwd.is_empty() {
-            summary.cwd.clone()
-        } else {
-            git_root_of(&summary.shell_cwd).unwrap_or_else(|| summary.shell_cwd.clone())
-        };
         self.cache.insert(
             path.to_path_buf(),
             CacheEntry {
@@ -1577,7 +1564,9 @@ pub fn build_tasks(
                 } else if crate::process::is_stopped(p.pid) {
                     // 被系统挂起但非我方暂停（后台进程读终端被 SIGTTIN 停住）→ 孤儿，视为已结束
                     TaskStatus::Finished
-                } else if s.turn_ended {
+                } else if s.turn_ended || predates(s.last_active_at.as_deref(), p) {
+                    // 最后一条记录早于这个进程启动 = 新进程（`--resume` 重开）还什么都没做，
+                    // 尾部那个「回合进行中」属于已经死掉的旧进程，不能算到它头上
                     TaskStatus::Idle
                 } else {
                     TaskStatus::Running
@@ -1585,6 +1574,7 @@ pub fn build_tasks(
             }
         };
         let status_dsr = status.dsr().to_string();
+        let queued_inputs = alive_queue(&s.queued_inputs, proc_info.as_ref());
         tasks.push(Task {
             id: s.session_id.clone(),
             machine_id: String::new(),
@@ -1645,7 +1635,7 @@ pub fn build_tasks(
             recent_messages: Vec::new(),
             sub_tasks: Vec::new(),
             sub_task_count: s.sub_agent_count,
-            queued_inputs: s.queued_inputs.clone(),
+            queued_inputs,
             // hook 侧的实时信号，扫描器看不到；由客户端在配对后回填（见 client/state.rs）
             pending_select: None,
         });
@@ -1764,7 +1754,7 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
     // 忠实回放 claude 原生输入队列：(匹配键=原始 content, 展示文本=Some 时才是真实用户
     // 输入)。通知类（task-notification 等）也占位（展示文本 None），这样按位置的「空
     // content 出列」能对上正确的项，最终只把「真实用户输入」拿去展示。
-    let mut queue: Vec<(String, Option<String>)> = Vec::new();
+    let mut queue: Vec<(String, Option<String>, u64)> = Vec::new();
     let mut started_at: Option<String> = None;
     let mut last_active_at: Option<String> = None;
     let mut version: Option<String> = None;
@@ -1866,7 +1856,12 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                         last_action = "等待助手响应".into();
                         turn_ended = false;
                     }
-                    queue.push((truncate(key, 500), disp));
+                    let at_ms = v
+                        .get("timestamp")
+                        .and_then(Value::as_str)
+                        .and_then(iso_to_ms)
+                        .unwrap_or(0);
+                    queue.push((truncate(key, 500), disp, at_ms));
                 }
                 // 出列（被会话接受执行 或 取消）：content 有值→按内容精确移除（匹配不到
                 // 再退移队首）；content 为空→移除队首（FIFO，最旧的先被接受）。空 content
@@ -1880,7 +1875,7 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                         .trim();
                     if !key.is_empty() {
                         let k = truncate(key, 500);
-                        if let Some(pos) = queue.iter().position(|(c, _)| c == &k) {
+                        if let Some(pos) = queue.iter().position(|(c, _, _)| c == &k) {
                             queue.remove(pos);
                         } else if !queue.is_empty() {
                             queue.remove(0);
@@ -1954,7 +1949,10 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
     }
 
     // 只把真实用户排队输入（展示文本 Some）拿去上报；通知类占位项丢弃
-    let queued_inputs: Vec<String> = queue.into_iter().filter_map(|(_, d)| d).collect();
+    let queued_inputs: Vec<QueuedInput> = queue
+        .into_iter()
+        .filter_map(|(_, d, at_ms)| d.map(|text| QueuedInput { text, at_ms }))
+        .collect();
     // 刚清空、未输入的空会话：见过 /clear 且没有真实 prompt
     let cleared = saw_clear && prompt.is_empty();
 
@@ -1970,10 +1968,8 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         } else {
             canonical_cwd
         },
-        // 此处先原样放最后那个 cwd；收到仓库根是在 summarize 里做的（那儿才有 prev 兜底，
-        // 且只在会话文件真的变了时才走一次，不会每轮都去 stat 一遍父链）。
-        live_cwd: live_cwd.clone(),
-        shell_cwd: live_cwd,
+        // 尾窗没读到时的兜底在 summarize 里做（那儿才有上一轮结果可沿用）
+        live_cwd,
         title: String::new(),
         prompt,
         last_action,
@@ -2037,6 +2033,44 @@ fn wants_continue(command: &str) -> bool {
 }
 
 /// ISO8601 → epoch 毫秒
+/// 回放出来的一条排队项（见 [`SessionSummary::queued_inputs`]）
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueuedInput {
+    pub text: String,
+    /// 入队时刻（epoch 毫秒）；记录没带时间戳就是 0
+    pub at_ms: u64,
+}
+
+/// 只留**当前这个进程**入队的项。
+///
+/// claude 的原生输入队列是进程内存里的：关终端、`--resume` 重开，旧进程的队列就随它没了，
+/// 而 jsonl 里不会为此补 remove/dequeue —— 实测（2.1.280）排队中杀进程再 `--resume`，
+/// 文件末尾就停在那条 enqueue，新进程什么都不写。照单回放的话，这条就在「终端排队中」
+/// 永远挂着，哪怕新会话早已往下跑了。
+///
+/// 所以队列的生命期以进程为界：没有进程 = 没有队列；有进程就只认它启动之后入队的。
+fn alive_queue(queue: &[QueuedInput], proc_info: Option<&ProcessInfo>) -> Vec<String> {
+    let Some(p) = proc_info else {
+        return Vec::new();
+    };
+    let born = born_ms(p);
+    queue
+        .iter()
+        .filter(|q| q.at_ms >= born)
+        .map(|q| q.text.clone())
+        .collect()
+}
+
+/// 进程的出生线（epoch 毫秒）：`start_time` 是秒级，退 1 秒免得同一秒内的记录被误判为「更早」
+fn born_ms(p: &ProcessInfo) -> u64 {
+    p.start_time.saturating_sub(1).saturating_mul(1000)
+}
+
+/// 这条时间戳早于进程启动（取不到时间戳就不下结论）
+fn predates(ts: Option<&str>, p: &ProcessInfo) -> bool {
+    ts.and_then(iso_to_ms).is_some_and(|ms| ms < born_ms(p))
+}
+
 fn iso_to_ms(ts: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(ts)
         .ok()
@@ -3526,10 +3560,10 @@ fn extract_command_args(text: &str) -> Option<String> {
 
 /// 会话**此刻**的工作目录：现读 jsonl 尾部，取最后一条记录的 `cwd`。
 ///
-/// 与 [`SessionSummary::shell_cwd`] 同源，区别只在时机：那份来自定期扫描的快照，
+/// 与 [`SessionSummary::live_cwd`] 同源，区别只在时机：那份来自定期扫描的快照，
 /// 而扫描循环在 macOS 后台被 App Nap 压到一两分钟一轮；本函数是**按需现读**，
-/// 新鲜度等同于调用它的那一刻。目录浏览、文件夹操作、文件落盘都要用它 ——
-/// 定位差一个 `cd`，给会话的路径它自己去看就是错的。
+/// 新鲜度等同于调用它的那一刻。按会话相对路径取文件（会话里引用的 `./tmp/x.png`）
+/// 要用它 —— 那些路径是终端按自己当前目录写下的，定位差一个 `cd` 就是破图。
 ///
 /// 只读尾部 64KB：会话 jsonl 动辄几十 MB，这里要的只是最后一条记录，
 /// 而每次目录查询都会调用它，不能走完整解析。
@@ -3619,20 +3653,6 @@ fn count_lines_from(path: &Path, offset: u64) -> Result<u64> {
 }
 
 /// 与 Claude Code 的项目目录命名一致：非字母数字字符替换为 '-'
-/// 从 `dir` 向上找最近的 git 仓库根（含 `.git` 的目录），找不到返回 None。
-///
-/// `.git` 可能是目录（普通仓库）也可能是文件（worktree / submodule 里是一行 gitdir 指向），
-/// 所以只判存在、不判类型。`ancestors()` 走到根自然结束，不会无限向上。
-fn git_root_of(dir: &str) -> Option<String> {
-    if dir.is_empty() {
-        return None;
-    }
-    std::path::Path::new(dir)
-        .ancestors()
-        .find(|a| a.join(".git").exists())
-        .map(|a| a.to_string_lossy().to_string())
-}
-
 pub fn encode_path(p: &str) -> String {
     // 先去掉尾随分隔符再编码：Windows 上 sysinfo 上报的进程 cwd 常带尾随反斜杠
     // （D:\proj\），而 ~/.claude/projects 下的项目目录名由无尾随分隔符的 cwd
@@ -5211,7 +5231,6 @@ mod noise_filter_tests {
                 project_key: "k".into(),
                 cwd: "/p".into(),
                 live_cwd: String::new(),
-                shell_cwd: String::new(),
                 title: String::new(),
                 prompt: String::new(),
                 last_action: String::new(),
@@ -5414,7 +5433,6 @@ mod pairing_tests {
             project_key: "-proj".into(),
             cwd: "/proj".into(),
             live_cwd: "/proj".into(),
-            shell_cwd: "/proj".into(),
             title: id.into(),
             prompt: String::new(),
             last_action: String::new(),
@@ -6556,7 +6574,6 @@ mod codex_tests {
             project_key: key.into(),
             cwd: format!("/w/{key}"),
             live_cwd: format!("/w/{key}"),
-            shell_cwd: format!("/w/{key}"),
             title: id.into(),
             prompt: String::new(),
             last_action: String::new(),
@@ -6741,18 +6758,17 @@ mod live_cwd_tests {
         assert_eq!(sum.live_cwd, deep, "live_cwd 必须跟到最新的工作目录");
     }
 
-    /// 锚定到 git 仓库根：会话 `cd` 进仓库里的子目录后，`live_cwd` 收到仓库根（稳定，
-    /// 不随每一轮 cd 跳），`shell_cwd` 保留真实所在（前端据此决定要不要改用绝对路径）。
+    /// 在 git 仓库里 `cd` 进子目录：`live_cwd` 必须是子目录本身，**不能收到仓库根**。
     ///
-    /// 0.11.50 就是栽在这一步没做：直接拿最后那个 cwd 当上传落点，落点跟着会话在
-    /// `desktop`、`desktop/src-tauri`、`desktop/web/dist` 之间乱跳，连构建产物目录都能落进去。
+    /// 线上（Windows，仓库 `D:\Program\大优强评估技能`，会话 `cd doc`）：收到仓库根后
+    /// `live_cwd == cwd`，下发时被当成「没漂移」省掉，网页就以为终端在项目根、回填
+    /// `./doc/x.xlsx` 这种相对路径 —— 终端在 `doc` 里解析，指到 `doc/doc/x.xlsx`。
     #[test]
-    fn live_cwd_anchors_to_git_root() {
+    fn live_cwd_is_not_rounded_up_to_git_root() {
         let base = std::env::temp_dir().join(format!("am-git-{}", std::process::id()));
         let repo = base.join("repo");
-        let deep = repo.join("desktop/src-tauri");
+        let deep = repo.join("doc");
         let _ = fs::create_dir_all(&deep);
-        // 仓库标记：`.git` 是目录还是文件都算（worktree 里是文件）
         let _ = fs::create_dir_all(repo.join(".git"));
 
         let repo_s = repo.to_string_lossy().to_string();
@@ -6760,42 +6776,19 @@ mod live_cwd_tests {
         let dir = base.join("projects").join(encode_path(&repo_s));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("s.jsonl");
-        let mut f = fs::File::create(&path).unwrap();
-        f.write_all(line(&repo_s, "在仓库根").as_bytes()).unwrap();
-        f.write_all(line(&deep_s, "cd 进子目录").as_bytes())
-            .unwrap();
-        f.flush().unwrap();
+        fs::write(
+            &path,
+            line(&repo_s, "在仓库根") + &line(&deep_s, "cd 进子目录"),
+        )
+        .unwrap();
 
         let meta = fs::metadata(&path).unwrap();
         let mut sc = SessionScanner::new(dir.parent().unwrap().to_path_buf());
         let sum = sc.summarize(&path, meta.len(), 0).expect("应能解析出摘要");
-
-        assert_eq!(sum.live_cwd, repo_s, "锚定目录必须收到 git 仓库根");
-        assert_eq!(
-            sum.shell_cwd, deep_s,
-            "shell_cwd 保留真实所在，供前端判断漂移"
-        );
+        assert_eq!(sum.cwd, repo_s);
+        assert_eq!(sum.live_cwd, deep_s, "终端在哪就报哪，不往上收");
 
         let _ = fs::remove_dir_all(&base);
-    }
-
-    /// 不在任何 git 仓库里：没有仓库根可收，退回 shell_cwd 本身，不能凭空往上跳。
-    #[test]
-    fn live_cwd_falls_back_when_not_in_repo() {
-        let root = "/tmp/amlive3/proj";
-        let deep = "/tmp/amlive3/proj/sub";
-        let dir = std::env::temp_dir()
-            .join(format!("am-live3-{}", std::process::id()))
-            .join(encode_path(root));
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("s.jsonl");
-        fs::write(&path, line(root, "起点") + &line(deep, "进子目录")).unwrap();
-
-        let meta = fs::metadata(&path).unwrap();
-        let mut sc = SessionScanner::new(dir.parent().unwrap().to_path_buf());
-        let sum = sc.summarize(&path, meta.len(), 0).expect("应能解析出摘要");
-        assert_eq!(sum.live_cwd, deep, "不在仓库里就用 shell_cwd 本身");
-        assert_eq!(sum.shell_cwd, deep);
     }
 
     /// 按需现读：`current_cwd_of_session` 必须拿到**最后一条**记录的 cwd，
@@ -6891,7 +6884,6 @@ mod desktop_session_tests {
             project_key: encode_path(cwd),
             cwd: cwd.into(),
             live_cwd: cwd.into(),
-            shell_cwd: cwd.into(),
             title: id.into(),
             prompt: String::new(),
             last_action: String::new(),
@@ -7185,5 +7177,76 @@ mod desktop_session_tests {
             "Claude 桌面版"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod process_bound_queue_tests {
+    use super::*;
+
+    fn proc_born(start_time: u64) -> ProcessInfo {
+        ProcessInfo {
+            pid: 1,
+            agent: "claude".into(),
+            tty: String::new(),
+            cwd: "/p".into(),
+            ide: crate::model::IdeKind::Terminal,
+            ide_name: "Terminal".into(),
+            start_time,
+            cpu_usage: 0.0,
+            memory: 0,
+            command: "claude --resume x".into(),
+            shell_pid: None,
+            shell_start: None,
+            shared_host: false,
+        }
+    }
+
+    /// 实测形态（2.1.280）：排队中杀掉进程，文件就停在这条 enqueue；`--resume` 重开的新进程
+    /// 不补任何出列记录。回放出来它还在列，但它属于死掉的旧进程。
+    fn tail_with_orphan_enqueue() -> String {
+        [
+            r#"{"type":"user","timestamp":"2026-09-22T18:00:51.886Z","cwd":"/p","message":{"role":"user","content":"跑个长命令"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-09-22T18:00:54.716Z","cwd":"/p","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#,
+            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-22T18:01:02.925Z","content":"排队的那句"}"#,
+        ]
+        .join("\n")
+    }
+
+    fn at(iso: &str) -> u64 {
+        iso_to_ms(iso).unwrap() / 1000
+    }
+
+    #[test]
+    fn orphan_enqueue_from_previous_process_is_dropped() {
+        let s = parse_tail("s", Path::new("/x/-p/s.jsonl"), &tail_with_orphan_enqueue()).unwrap();
+        assert_eq!(s.queued_inputs.len(), 1, "解析层照实回放，裁剪在聚合层做");
+        // 新进程在排队之后才启动（关终端 → 重开 → --resume）
+        let reborn = proc_born(at("2026-09-22T18:05:00Z"));
+        assert!(alive_queue(&s.queued_inputs, Some(&reborn)).is_empty());
+        assert!(
+            predates(s.last_active_at.as_deref(), &reborn),
+            "尾部那个进行中的回合也属于旧进程，新进程应判空闲"
+        );
+    }
+
+    #[test]
+    fn enqueue_within_current_process_is_kept() {
+        let s = parse_tail("s", Path::new("/x/-p/s.jsonl"), &tail_with_orphan_enqueue()).unwrap();
+        let running = proc_born(at("2026-09-22T17:00:00Z"));
+        assert_eq!(
+            alive_queue(&s.queued_inputs, Some(&running)),
+            vec!["排队的那句".to_string()]
+        );
+        assert!(!predates(s.last_active_at.as_deref(), &running));
+        // 与入队同一秒启动也算本进程的（start_time 只有秒级）
+        let same_sec = proc_born(at("2026-09-22T18:01:02Z"));
+        assert_eq!(alive_queue(&s.queued_inputs, Some(&same_sec)).len(), 1);
+    }
+
+    #[test]
+    fn no_process_means_no_queue() {
+        let s = parse_tail("s", Path::new("/x/-p/s.jsonl"), &tail_with_orphan_enqueue()).unwrap();
+        assert!(alive_queue(&s.queued_inputs, None).is_empty());
     }
 }
