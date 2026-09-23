@@ -38,9 +38,20 @@ interface Parsed {
   sheets: Record<string, string[][]>;
   /** 最宽的那张表有多少列 */
   cols: Record<string, number>;
+  /** 表名 → 合并单元格，见 `Spans` */
+  spans: Record<string, Spans>;
   /** 有没有表被夹过 */
   clipped: boolean;
 }
+
+/**
+ * 合并单元格：`"行,列"`（相对解析起点，与 `sheets` 的下标一致）→ 该格的跨度。
+ *
+ * 合并区左上角那一格给真实跨度；区内其余格给 `0 × 0`，antd 据此不画它们。
+ * 不在表里的格子就是 1 × 1。表格的标题行、表头几乎都是合并出来的 —— 不还原的话，
+ * 「2025 年……评审表」这种标题被挤在第一格里显示成省略号，多级表头也对不上下面的列。
+ */
+type Spans = Map<string, { rowSpan: number; colSpan: number }>;
 
 /** 一行：`__k` 是 rowKey，`c0`/`c1`… 是各列 */
 type Row = Record<string, string | number>;
@@ -96,18 +107,24 @@ const SheetView: React.FC<SheetViewProps> = ({ bytes, textual }) => {
           : XLSX.read(bytes, { type: "array" });
         const sheets: Record<string, string[][]> = {};
         const cols: Record<string, number> = {};
+        const spans: Record<string, Spans> = {};
         let clipped = false;
         wb.SheetNames.forEach((nm) => {
           const ws = wb.Sheets[nm];
           // 先把取值范围夹到上限再转：整张表转成 JSON 再切，十万行的表在切之前就卡死了
           let range: string | undefined;
+          // 解析起点（表不一定从 A1 开始）：合并区的坐标是整张表的绝对位置，要换成相对它的
+          let origin = { r: 0, c: 0 };
+          let lastRow = Infinity;
           const ref = ws?.["!ref"];
           if (ref) {
             const r = XLSX.utils.decode_range(ref);
+            origin = { r: r.s.r, c: r.s.c };
             if (r.e.r - r.s.r + 1 > MAX_ROWS) {
               r.e.r = r.s.r + MAX_ROWS - 1;
               clipped = true;
             }
+            lastRow = r.e.r;
             range = XLSX.utils.encode_range(r);
           }
           const raw = XLSX.utils.sheet_to_json<unknown[]>(ws ?? {}, {
@@ -125,8 +142,30 @@ const SheetView: React.FC<SheetViewProps> = ({ bytes, textual }) => {
               r[i] == null ? "" : String(r[i]),
             ),
           );
+          const map: Spans = new Map();
+          (ws?.["!merges"] ?? []).forEach((m) => {
+            // 被行上限夹掉的部分不算：合并区整个在夹线以下就跳过，跨过夹线的截到夹线
+            if (m.s.r > lastRow) {
+              return;
+            }
+            const r0 = m.s.r - origin.r;
+            const c0 = m.s.c - origin.c;
+            const rows = Math.min(m.e.r, lastRow) - m.s.r + 1;
+            const colsN = m.e.c - m.s.c + 1;
+            for (let dr = 0; dr < rows; dr++) {
+              for (let dc = 0; dc < colsN; dc++) {
+                map.set(
+                  `${r0 + dr},${c0 + dc}`,
+                  dr === 0 && dc === 0
+                    ? { rowSpan: rows, colSpan: colsN }
+                    : { rowSpan: 0, colSpan: 0 },
+                );
+              }
+            }
+          });
+          spans[nm] = map;
         });
-        setParsed({ names: wb.SheetNames, sheets, cols, clipped });
+        setParsed({ names: wb.SheetNames, sheets, cols, spans, clipped });
         setActive(wb.SheetNames[0] ?? "");
       })
       .catch((e: unknown) => {
@@ -142,11 +181,14 @@ const SheetView: React.FC<SheetViewProps> = ({ bytes, textual }) => {
 
   const columns = useMemo<ColumnsType<Row>>(() => {
     const n = parsed ? (parsed.cols[active] ?? 0) : 0;
+    const spans = parsed?.spans[active];
     // 列宽写死，不用 `autoWidth`：那条会为每一格量一次字宽，25000 格量下来卡的是主线程
     return Array.from({ length: n }, (_, i) => ({
       title: colLabel(i),
       dataIndex: `c${i}`,
       width: 128,
+      // 按行号（`__k`）查，不按渲染下标：虚拟滚动下渲染下标不是数据下标
+      onCell: (row: Row) => spans?.get(`${row.__k},${i}`) ?? {},
     }));
   }, [parsed, active]);
 
