@@ -295,8 +295,13 @@ const Composer: React.FC<ComposerProps> = (props) => {
   const loadDirs = (rel: string, attempt = 0, shown = false) => {
     if (!taskId) return;
     const seq = ++dirPollRef.current;
-    if (attempt === 0) setDirTimedOut(false);
-    setDirLoading(true);
+    // 「读取中」只在第一次请求时亮：后面的轮询是后台在等新清单，不能每轮都把列表换成
+    // 「读取目录中…」—— 那会和下面「先摆上次的清单」来回切，列表每 1~2 秒重建一次、
+    // 滚回顶部，人刚要点的那一行就没了（与 FilePane 的 loadDir 同一个口径）
+    if (attempt === 0) {
+      setDirTimedOut(false);
+      setDirLoading(true);
+    }
     getTaskDirs(taskId, rel, attempt === 0)
       .then((res) => {
         if (seq !== dirPollRef.current) return;
