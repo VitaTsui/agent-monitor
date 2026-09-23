@@ -3481,7 +3481,9 @@ async fn report(
     }
     let online_secs = entry.online_since.elapsed().as_secs();
     let now_i = Instant::now();
-    let mut tasks = payload.tasks;
+    // 没带 = 客户端这一轮还不知道能不能报（刚启动、信任状态未确认），就当它原样重报了
+    // 上一轮：后面的状态比对、推送、基线全都照常走，不会把「不知道」误判成「会话全没了」
+    let mut tasks = payload.tasks.unwrap_or_else(|| entry.tasks.clone());
     for t in tasks.iter_mut() {
         if !t.recent_messages.is_empty() {
             entry

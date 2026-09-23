@@ -501,7 +501,14 @@ pub struct ReportPayload {
     #[serde(default)]
     pub owner: Option<String>,
     /// **热列表**：近期（见 scanner 的 `LIVE_WINDOW_MS`）有活动的会话，每轮全量重报。
-    pub tasks: Vec<Task>,
+    ///
+    /// `None` = 这一轮**不知道**（客户端刚启动，hub 还没回过话，不知道本机是否已被信任），
+    /// hub 沿用上一份。不能拿空表顶替：空表的意思是「这台机器一个会话都没有了」，网页据此
+    /// 当场关掉这台机器上所有打开的会话、清空对话缓存 —— 实测客户端每次重连（自更新、重启）
+    /// 第一轮都报 0 条、下一轮又报回来，用户看到的就是「断联后重连，界面整个刷新掉了」。
+    /// 与 `history_tasks` 的「不带 = 沿用上一份」同一套语义。
+    #[serde(default)]
+    pub tasks: Option<Vec<Task>>,
     /// **历史会话**：比热列表更老、但仍在回溯窗口（`AM_HISTORY_DAYS`，默认 30 天）内的会话。
     ///
     /// 为什么单开一条而不是并进 `tasks`：客户端 1.5s 一轮全量重报，实测 30 天窗口下
@@ -864,5 +871,29 @@ pub fn provider_dsr_desktop(provider: &str) -> String {
         "claude" => "Claude 桌面版".into(),
         "codex" => "ChatGPT 桌面版".into(),
         other => format!("{} 桌面版", provider_dsr(other)),
+    }
+}
+
+#[cfg(test)]
+mod report_payload_tests {
+    use super::ReportPayload;
+
+    fn parse(tasks: &str) -> ReportPayload {
+        serde_json::from_str(&format!(
+            r#"{{"machineId":"m","hostname":"h","platform":"macos","version":"0.12.0"{tasks}}}"#
+        ))
+        .unwrap()
+    }
+
+    /// 「不知道」与「没有会话」必须分得开：前者 hub 沿用上一份，后者是真的清空。
+    #[test]
+    fn tasks_absent_null_and_empty_are_distinct() {
+        assert!(parse("").tasks.is_none(), "不带 = 不知道");
+        assert!(parse(r#","tasks":null"#).tasks.is_none(), "null = 不知道");
+        assert_eq!(
+            parse(r#","tasks":[]"#).tasks.map(|t| t.len()),
+            Some(0),
+            "空表 = 确实没有会话（旧客户端也一直这么发）"
+        );
     }
 }
