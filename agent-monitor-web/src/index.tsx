@@ -30,7 +30,7 @@ import Routes from "./router/Routes";
 
 import { SingleRouter } from "@hsu-react/single-router";
 
-import { addCollection, type IconifyJSON } from "@iconify/react";
+import { addIconCollection } from "@hsu-react/ui";
 import iconCollections from "./assets/iconify/collections.generated.json";
 
 /* 精简 iconify 图标集，**构建期打进产物**。
@@ -39,9 +39,12 @@ import iconCollections from "./assets/iconify/collections.generated.json";
  * 逐字相同（见 `pages/Portal/_components/StatusIcon`）；此前在 antd 图标里挑「语义
  * 最近的那一个」，尺寸颜色对齐过三轮，形状始终对不上 —— 两套图标集的字形本就不同。
  *
- * **必须在这儿 `addCollection`，不能让它运行时去 Iconify 公共 API 拉。**
+ * **必须在这儿注册，不能让它运行时去 Iconify 公共 API 拉。**
  * 这是个要在内网/离线环境跑的监控工具：运行时依赖外部 CDN，断网就是一片空白图标。
- * 注册过的名字 `@iconify/react` 一律走本地，不发任何请求。
+ *
+ * **注册要走组件库的 `addIconCollection`，不能用 `@iconify/react` 的 `addCollection`。**
+ * 组件库 2.6.0 起用 offline 版渲染器，它与联网版各有一份互不相通的注册表 —— 注册进
+ * 联网版那一份等于没注册：升级到 2.8.5 时全站 `ph:*` 图标实测一片空白。
  *
  * 这个 JSON 是**生成物、不入库**：`scripts/genIconCollections.cjs` 在 `pnpm start`
  * / `pnpm build` 前扫 src 里写死的 `ph:` 图标名字面量，从 `@iconify/json`（devDep，
@@ -50,9 +53,9 @@ import iconCollections from "./assets/iconify/collections.generated.json";
  * `Icon icon="ph:图标名"`），下次启动/构建自动就位；删掉用法它也会自动消失。
  * 唯一的例外是「名字不是写死的」—— 拼接出来的或接口下发的图标名扫不到，得登记进
  * 那个脚本的 `EXTRA_ICONS`，脚本头部有说明。 */
-(iconCollections as unknown as IconifyJSON[]).forEach((collection) =>
-  addCollection(collection)
-);
+(
+  iconCollections as unknown as Parameters<typeof addIconCollection>[0][]
+).forEach((collection) => addIconCollection(collection));
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <BrowserRouter>
