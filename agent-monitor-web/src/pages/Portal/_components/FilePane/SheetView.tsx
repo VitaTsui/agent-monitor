@@ -8,26 +8,18 @@ import { Segmented } from "antd";
 import styles from "./index.module.scss";
 
 /**
- * 一次最多画多少格。与源码态的 `MAX_LINES` 是同一套表达：**超了就夹掉、并在顶上明说**。
+ * 一张表最多**解析**多少行。只防解析，不防渲染。
  *
- * **这两个数是量出来的，不是拍的**：组件库的 `Table` 不做虚拟滚动，每一格都是真的
- * DOM 节点，代价随格数线性涨。同一台机器、同一份 dev 构建实测（从点开到表体出行
- * ／随后一帧的耗时）：
+ * 渲染早已不是瓶颈：表格走组件库 `Table` 的虚拟滚动，只画看得见的那几十格，
+ * 1069 行 × 44 列实测首屏 67ms（不虚拟时同一份要 10 秒、再大直接卡死浏览器）。
+ * 此前这里是「200 行 × 20 列」的**渲染**上限，就是在替组件库那时失效的 `virtual`
+ * 兜底 —— 结果一份 44 列的评分表后 24 列（总分所在）整个看不到。组件库修好后那条
+ * 上限随之撤掉，列不再设限（列同样是虚拟的）。
  *
- *   |   格数 | 首次出行 | 每帧   |
- *   |-------:|---------:|-------:|
- *   |  2 121 |   541 ms | 122 ms |
- *   |  3 926 |   872 ms | 232 ms |
- *   | 12 341 |  2767 ms | 1242 ms|
- *   | 25 551 |  5706 ms | 2759 ms|
- *
- * 25 000 格那一档，页面整整**冻住五秒多**、之后每帧还要两秒半 —— 截图工具都拿不到
- * 一帧。200 × 20 = 4000 格落在「首次出行不到一秒、帧不到 250 毫秒」这一档里。
- *
- * 这一列实测最宽 441px、一列 128px，一屏也就看得见三四列 —— 再多给的不是信息，是卡顿。
+ * 剩下的开销是 `sheet_to_json` 把整张表读成数组，与行数成正比；这个数给得足够大，
+ * 只挡「几十万行的导出文件」这种点开就要卡住解析的极端情况，超了照样在顶上明说。
  */
-export const MAX_ROWS = 200;
-export const MAX_COLS = 20;
+export const MAX_ROWS = 10000;
 
 /** 列名照电子表格的习惯：0 → A、25 → Z、26 → AA。**不拿第一行当表头** —— 表里有没有表头只有人知道 */
 const colLabel = (i: number): string => {
@@ -116,10 +108,6 @@ const SheetView: React.FC<SheetViewProps> = ({ bytes, textual }) => {
               r.e.r = r.s.r + MAX_ROWS - 1;
               clipped = true;
             }
-            if (r.e.c - r.s.c + 1 > MAX_COLS) {
-              r.e.c = r.s.c + MAX_COLS - 1;
-              clipped = true;
-            }
             range = XLSX.utils.encode_range(r);
           }
           const raw = XLSX.utils.sheet_to_json<unknown[]>(ws ?? {}, {
@@ -131,7 +119,7 @@ const SheetView: React.FC<SheetViewProps> = ({ bytes, textual }) => {
             range,
           });
           const width = raw.reduce((m, r) => Math.max(m, r.length), 0);
-          cols[nm] = Math.min(width, MAX_COLS);
+          cols[nm] = width;
           sheets[nm] = raw.map((r) =>
             Array.from({ length: cols[nm] }, (_, i) =>
               r[i] == null ? "" : String(r[i]),
@@ -196,7 +184,7 @@ const SheetView: React.FC<SheetViewProps> = ({ bytes, textual }) => {
     <>
       {parsed.clipped ? (
         <div className={styles.clip}>
-          表格太大，只显示前 {MAX_ROWS} 行 × {MAX_COLS} 列
+          表格太大，只显示前 {MAX_ROWS} 行
         </div>
       ) : null}
       {/* 只有一张表就不摆切换器：一颗点不出第二个去处的按钮是噪声 */}
@@ -220,6 +208,8 @@ const SheetView: React.FC<SheetViewProps> = ({ bytes, textual }) => {
           /* 行号列由组件库给（`serialNumberColumn`），不自己糊一列 ——
              它与项目里所有列表的「序号」列是同一副长相 */
           serialNumberColumn
+          /* 虚拟滚动：只画看得见的行与列，整张表（几千行、几十列）都能看全 */
+          virtual
           /* 表头钉住、表体自己滚（横向 ＋ 纵向都在表里）。
              组件库的 `.Table` 是 `height: 100%` 的 flex 列，**父级必须有确定高度**，
              所以外面那层 `.sheet` 被摆进了一个 flex 的 `.body`（见 index.tsx 的

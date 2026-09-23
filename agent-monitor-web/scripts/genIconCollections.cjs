@@ -15,7 +15,7 @@
  *
  * 为什么不整集打进去：`ph.json` 单集就 4.3 MB，全量 `addCollection` 会整个进首屏。
  * 为什么不让运行时去 Iconify 公共 API 拉：这是要在内网/离线环境跑的监控工具，
- * 断网就是一片空白图标。注册过的名字 `@iconify/react` 一律走本地、不发请求。
+ * 断网就是一片空白图标。注册（经组件库的 `addIconCollection`，见 src/index.tsx）过的名字一律走本地。
  *
  * 只扫 `src`，不扫依赖：`@hsu-react/ui` 自己写死的那几十枚图标，从 2.5.11 起
  * 由库自己 `addCollection` 注册（`@hsu-react/ui/es/components/Icon/collections.generated`）。
