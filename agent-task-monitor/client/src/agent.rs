@@ -117,8 +117,12 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     let mut hub_ok = false;
     // 连续网络失败次数：用于给失败日志限流（首次必打，之后每 ~60s 一条）
     let mut net_fail_streak: u32 = 0;
-    // 未被 hub 信任前，只发送心跳（设备登记），绝不上报任何会话/终端数据
-    let mut trusted = false;
+    // 本机是否已被 hub 信任。`None` = 还不知道（刚启动、hub 还没回过话）。
+    //
+    // 未被信任前绝不上报任何会话/终端数据；而「还不知道」与「未信任」要分开：后者报空表
+    // （这台机器的会话确实不该出现），前者**不带**会话列表、让 hub 沿用上一份。此前两者
+    // 都是 false，重连后第一轮必报空表，网页随即关掉这台机器上所有打开的会话、清空缓存。
+    let mut trusted: Option<bool> = None;
     let mut pending_dir_results: Vec<am_core::model::DirResult> = Vec::new();
     let mut pending_fs_op_results: Vec<am_core::model::FsOpResult> = Vec::new();
     let mut pending_file_fetches: Vec<am_core::model::FileFetchResult> = Vec::new();
@@ -324,7 +328,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
         // 热列表 / 历史列表分流：只有近期有活动的会话才每轮全量重报（见 LIVE_WINDOW_MS）。
         // 更老的那批一动不动，却在 30 天窗口下占了一轮上报的 88%（实测 94 条里 86 条），
         // 每 1.5 秒重发一遍纯属搬运。
-        let (tasks, history) = if trusted {
+        let (tasks, history) = if trusted == Some(true) {
             attach_messages(&state, &mut scanned, &mut msg_cache).await;
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -343,7 +347,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
         let history_due = last_history_report
             .map(|t: std::time::Instant| t.elapsed().as_secs() >= HISTORY_REPORT_INTERVAL_SECS)
             .unwrap_or(true);
-        let history_tasks = if trusted && history_due {
+        let history_tasks = if trusted == Some(true) && history_due {
             last_history_report = Some(std::time::Instant::now());
             Some(history)
         } else {
@@ -352,7 +356,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
 
         // 配置清单：仅在设备已被信任后才扫、才发 —— 未信任设备一个字节的本机信息都不外发，
         // 而文件路径里带着用户自己起的 agent/skill 名字，同样算本机信息。
-        if trusted {
+        if trusted == Some(true) {
             let due = last_cfg_scan
                 .map(|t| t.elapsed().as_secs() >= CONFIG_SCAN_INTERVAL_SECS)
                 .unwrap_or(true);
@@ -370,7 +374,8 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             platform: state.config.platform.clone(),
             version: env!("CARGO_PKG_VERSION").into(),
             owner: owner.clone(),
-            tasks,
+            // 信任状态未知时不带（None），hub 沿用上一份；未信任时是空表
+            tasks: trusted.map(|_| tasks),
             history_tasks,
             dir_results: std::mem::take(&mut pending_dir_results),
             fs_op_results: std::mem::take(&mut pending_fs_op_results),
@@ -493,7 +498,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                         .pointer("/data/trusted")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    if now_trusted != trusted {
+                    if Some(now_trusted) != trusted {
                         tracing::info!(
                             "设备信任状态变更: {}",
                             if now_trusted {
@@ -502,7 +507,7 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                                 "未信任，仅登记设备"
                             }
                         );
-                        trusted = now_trusted;
+                        trusted = Some(now_trusted);
                     }
                     state
                         .hub_trusted
