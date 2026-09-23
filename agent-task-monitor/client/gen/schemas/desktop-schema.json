@@ -189,6 +189,12 @@
           "markdownDescription": "Enables the autostart_set command without any pre-configured scope."
         },
         {
+          "description": "Enables the clear_device_token command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-clear-device-token",
+          "markdownDescription": "Enables the clear_device_token command without any pre-configured scope."
+        },
+        {
           "description": "Enables the client_auth command without any pre-configured scope.",
           "type": "string",
           "const": "allow-client-auth",
@@ -205,6 +211,24 @@
           "type": "string",
           "const": "allow-page-log",
           "markdownDescription": "Enables the page_log command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the plugin_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-plugin-status",
+          "markdownDescription": "Enables the plugin_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the plugin_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-plugin-update",
+          "markdownDescription": "Enables the plugin_update command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the read_session_image command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-read-session-image",
+          "markdownDescription": "Enables the read_session_image command without any pre-configured scope."
         },
         {
           "description": "Enables the terminal_set_excluded command without any pre-configured scope.",
@@ -243,6 +267,12 @@
           "markdownDescription": "Denies the autostart_set command without any pre-configured scope."
         },
         {
+          "description": "Denies the clear_device_token command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-clear-device-token",
+          "markdownDescription": "Denies the clear_device_token command without any pre-configured scope."
+        },
+        {
           "description": "Denies the client_auth command without any pre-configured scope.",
           "type": "string",
           "const": "deny-client-auth",
@@ -259,6 +289,24 @@
           "type": "string",
           "const": "deny-page-log",
           "markdownDescription": "Denies the page_log command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the plugin_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-plugin-status",
+          "markdownDescription": "Denies the plugin_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the plugin_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-plugin-update",
+          "markdownDescription": "Denies the plugin_update command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the read_session_image command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-read-session-image",
+          "markdownDescription": "Denies the read_session_image command without any pre-configured scope."
         },
         {
           "description": "Denies the terminal_set_excluded command without any pre-configured scope.",
