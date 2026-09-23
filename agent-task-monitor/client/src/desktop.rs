@@ -337,6 +337,8 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
     });
     tauri::Builder::default()
         .manage(ipc_ctx)
+        // 网页能调的命令**只在这一处列**：build.rs 从这里读出清单生成 ACL 权限，并核对
+        // capabilities/default.json 逐个放行 —— 漏一处就编译失败，不再静默被拦。
         .invoke_handler(tauri::generate_handler![
             autostart_get,
             autostart_set,
@@ -350,9 +352,7 @@ pub fn run(state: SharedState, cfg: DesktopConfig) -> anyhow::Result<()> {
             update_status,
             update_start,
             plugin_status,
-            plugin_update,
-            win_minimize,
-            win_close
+            plugin_update
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -1186,27 +1186,6 @@ async fn plugin_update(
 /// 网页端 IPC：查询开机自启状态。
 /// 客户端窗口加载的是远端前台页；页面里的「开机自启」开关经这两个命令
 /// 操作本机（浏览器里打开同一页面时没有 __TAURI__，开关不渲染）。
-/// 无边框窗口的自绘顶栏用：最小化 / 关闭当前窗口（Windows 去掉系统边框后
-/// 没有原生按钮，靠网页顶栏按钮走 IPC 调这两个命令）。关闭沿用「收进托盘」
-/// 语义（隐藏窗口而非退出进程），与点原生关闭按钮一致。
-#[tauri::command]
-fn win_minimize(window: tauri::Window) {
-    let _ = window.minimize();
-}
-
-#[tauri::command]
-fn win_close(window: tauri::Window) {
-    // 与关闭按钮/托盘一致：隐藏到托盘，保持后台上报，不退出进程
-    let _ = window.hide();
-    #[cfg(target_os = "macos")]
-    {
-        use tauri::ActivationPolicy;
-        let _ = window
-            .app_handle()
-            .set_activation_policy(ActivationPolicy::Accessory);
-    }
-}
-
 #[tauri::command]
 fn autostart_get() -> bool {
     autostart_enabled()

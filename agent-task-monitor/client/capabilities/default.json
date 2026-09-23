@@ -33,6 +33,10 @@
     "allow-terminal-set-excluded",
     "allow-update-status",
     "allow-update-start",
-    "allow-page-log"
+    "allow-page-log",
+    "allow-read-session-image",
+    "allow-clear-device-token",
+    "allow-plugin-status",
+    "allow-plugin-update"
   ]
 }
