@@ -66,7 +66,7 @@ localStorage.setItem("FZXVM_ACCESS_TOKEN", JSON.stringify({
 sed -i 's/"owner": null,/"owner": "admin",/' /tmp/am-dev/registry.json
 ```
 
-**2. 必须持续上报心跳**。`OFFLINE_AFTER_SECS = 10`，超过 10 秒没上报即判离线，
+**2. 必须持续上报心跳**。`OFFLINE_AFTER_SECS = 30`（见 `am_core::heartbeat`），超过 30 秒没上报即判离线，
 设备会从列表里消失。所以要起个循环：
 
 ```bash
@@ -104,7 +104,7 @@ cd agent-monitor-web && yarn start     # http://localhost:3004
 | 登录点了没反应、网络面板无请求 | 前端 `.env.dev` 的 CRYPTO_KEY/RSA_PUB_KEY 与 hub 不配对，见第一节 |
 | 访问 /portal 被弹回 /login | token 格式不对（不是裸字符串），见第三节 |
 | 网页「暂无设备」但 API 查得到数据 | 设备 `owner` 为 null，见第四节 |
-| 设备出现几秒后消失 | 没有持续心跳，10 秒判离线 |
+| 设备出现几十秒后消失 | 没有持续心跳，30 秒判离线 |
 | 上报报 `invalid unicode code point` | 中文 payload 写在命令行里了，改用 `--data-binary @file` |
 
 ## 七、收尾
