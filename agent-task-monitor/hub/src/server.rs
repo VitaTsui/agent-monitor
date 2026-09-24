@@ -12,7 +12,6 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -3425,41 +3424,29 @@ async fn report(
         .entry(payload.machine_id.clone())
         .or_insert_with(|| {
             was_new = true;
-            MachineEntry {
-                hostname: payload.hostname.clone(),
-                platform: payload.platform.clone(),
-                version: payload.version.clone(),
-                is_hub: false,
-                tasks: Vec::new(),
-                last_report: Instant::now(),
-                pending: VecDeque::new(),
-                pending_files: VecDeque::new(),
-                messages: HashMap::new(),
-                pending_dir: VecDeque::new(),
-                pending_fsop: VecDeque::new(),
-                pending_file_fetch: VecDeque::new(),
-                history_tasks: Vec::new(),
-                history_reported: false,
-                pending_session_fetch: VecDeque::new(),
-                session_fetch_results: HashMap::new(),
-                file_fetch_results: HashMap::new(),
-                fsop_results: HashMap::new(),
-                file_results: HashMap::new(),
-                dir_cache: HashMap::new(),
-                dir_asked: Default::default(),
-                notified_online: false,
-                select_notified: std::collections::HashSet::new(),
-                select_diag: HashMap::new(),
-                online_since: Instant::now(),
-                known_sessions: HashMap::new(),
-                session_last_seen: HashMap::new(),
-                last_select_at: HashMap::new(),
-                new_session_pending: HashMap::new(),
-                config_manifest: None,
-            }
+            MachineEntry::new(
+                payload.hostname.clone(),
+                payload.platform.clone(),
+                payload.version.clone(),
+            )
         });
     // 设备上线边沿：新登记 或 之前已判离线（超阈值）
-    let was_offline = was_new || entry.last_report.elapsed().as_secs() >= OFFLINE_AFTER_SECS;
+    let gap_secs = entry.last_report.elapsed().as_secs();
+    let was_offline = was_new || gap_secs >= OFFLINE_AFTER_SECS;
+    // 上报断档留痕：断了多久、有没有被判离线。正常间隔 1.5s，超过 10s 就是链路卡过
+    // （10s 是旧门槛，现在门槛内的断档也记下来，才看得出门槛放得够不够）。
+    if !was_new && gap_secs >= 10 {
+        tracing::warn!(
+            "设备 {} ({}) 上报断档 {gap_secs}s 后恢复（离线门槛 {OFFLINE_AFTER_SECS}s，{}）",
+            payload.hostname,
+            payload.machine_id,
+            if was_offline {
+                "已判离线"
+            } else {
+                "未判离线"
+            }
+        );
+    }
     entry.hostname = payload.hostname.clone();
     entry.platform = payload.platform;
     entry.version = payload.version;
@@ -3958,28 +3945,17 @@ async fn report(
     // 输入指令一律即时下发到终端：点了发送就直接键入终端会话，是否「排队」由终端里
     // claude 自己的原生队列决定（会话跑着时新输入排在其后、被接收后才执行），hub 不再
     // 代为扣留。（撤回按「终端队列是否已接收」判定，见前端。）
-    let commands: Vec<ControlCmd> = entry.pending.drain(..).collect();
-    let files: Vec<am_core::model::FileTransfer> = entry.pending_files.drain(..).collect();
-    // drain 即交付：响应一发出，队列这边就没有了，agent 没收到也无从重来。所以这一步必须
-    // 留痕 —— 出过「钉钉回执说已下发、终端毫无反应」而两头日志都空白的情况，当时无法判断
+    let delivery = entry.next_delivery(&payload.machine_id, payload.delivery_ack);
+    // 留痕：出过「钉钉回执说已下发、终端毫无反应」而两头日志都空白的情况，当时无法判断
     // 命令是压根没入队、还是下发了却没落地。有这行，配合 agent 侧的执行日志即可二分。
-    if !commands.is_empty() || !files.is_empty() {
+    if !delivery.commands.is_empty() || !delivery.files.is_empty() {
         tracing::info!(
-            "下发给设备 {}：命令 {} 条 {:?}，文件 {} 个",
+            "下发给设备 {}（第 {} 批）：{}",
             payload.machine_id,
-            commands.len(),
-            commands
-                .iter()
-                .map(|c| (c.action, c.task_id.as_str()))
-                .collect::<Vec<_>>(),
-            files.len()
+            delivery.seq,
+            delivery.summary()
         );
     }
-    let dir_queries: Vec<am_core::model::DirQuery> = entry.pending_dir.drain(..).collect();
-    let fs_ops: Vec<am_core::model::FsOp> = entry.pending_fsop.drain(..).collect();
-    let file_fetches: Vec<am_core::model::FileFetch> = entry.pending_file_fetch.drain(..).collect();
-    let session_fetches: Vec<am_core::model::SessionFetch> =
-        entry.pending_session_fetch.drain(..).collect();
     // 还没收到过这台机器的历史列表（hub 刚重启 / 这台机器刚上线）→ 让它下一轮就补发，
     // 别干等客户端那 30 秒的定时器。见 MachineEntry::history_reported。
     let want_history = !entry.history_reported;
@@ -4022,12 +3998,14 @@ async fn report(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| state.config.data_dir.join("downloads"));
     ok(json!({
-        "commands": commands,
-        "files": files,
-        "dirQueries": dir_queries,
-        "fsOps": fs_ops,
-        "fileFetches": file_fetches,
-        "sessionFetches": session_fetches,
+        // 客户端执行完这一批后在下一轮上报里带回 deliveryAck；0 = 这批不用确认（空批或旧客户端）
+        "deliverySeq": delivery.seq,
+        "commands": delivery.commands,
+        "files": delivery.files,
+        "dirQueries": delivery.dir_queries,
+        "fsOps": delivery.fs_ops,
+        "fileFetches": delivery.file_fetches,
+        "sessionFetches": delivery.session_fetches,
         "wantHistory": want_history,
         // 配置同步：向源机索要的路径 / 向镜像机下发的内容（两者互斥，见 sync_configs）
         "configPulls": config_pulls,

@@ -541,6 +541,22 @@ pub struct ReportPayload {
     /// 上一轮 hub 通过 `configPulls` 点名索要的文件内容（回传）。
     #[serde(default)]
     pub config_bodies: Vec<ConfigFileBody>,
+    /// 下发确认：hub 见到才删那一批，没见到就重发。`None` = 旧客户端，不支持确认。
+    #[serde(default)]
+    pub delivery_ack: Option<DeliveryAck>,
+}
+
+/// 客户端对 hub 下发批次的确认
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryAck {
+    /// 这个客户端进程的启动标识（启动时刻毫秒数）。
+    ///
+    /// 必须单独带，不能拿「确认号为 0」冒充「刚重启」：启动后收到的第一批若响应丢了，
+    /// 下一轮确认号仍是 0，hub 会把本该重发的一批当成「重启前的旧批」作废 —— 联调实测过。
+    pub boot: u64,
+    /// 最后收到并执行完的批次编号（hub 响应里的 `deliverySeq`），0 = 本进程还没收过
+    pub seq: u64,
 }
 
 /// 配置同步：单个文件的指纹。

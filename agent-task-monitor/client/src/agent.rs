@@ -103,7 +103,9 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     // 而挂起，能尽快用新连接重连（自动恢复连接的关键）。
     fn build_client() -> reqwest::Client {
         reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(
+                am_core::heartbeat::REQUEST_TIMEOUT_SECS,
+            ))
             .connect_timeout(std::time::Duration::from_secs(4))
             .pool_idle_timeout(std::time::Duration::from_secs(15))
             .tcp_keepalive(std::time::Duration::from_secs(20))
@@ -115,8 +117,11 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
         inner: HashMap::new(),
     };
     let mut hub_ok = false;
-    // 连续网络失败次数：用于给失败日志限流（首次必打，之后每 ~60s 一条）
-    let mut net_fail_streak: u32 = 0;
+    let mut link = LinkHealth::default();
+    // 最后收到并执行完的下发批次编号，随每轮上报带回给 hub 作确认（见 hub 的 Delivery）
+    let mut delivered_seq: u64 = 0;
+    // 本进程的启动标识：hub 据此分辨「重启了」和「第一批没收到」（见 DeliveryAck::boot）
+    let boot = now_ms();
     // 本机是否已被 hub 信任。`None` = 还不知道（刚启动、hub 还没回过话）。
     //
     // 未被信任前绝不上报任何会话/终端数据；而「还不知道」与「未信任」要分开：后者报空表
@@ -386,6 +391,10 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
             // 一个扫描周期后重来——不值得为此在内存里长期挂一份待发清单。
             config_manifest: cfg_manifest.take(),
             config_bodies: std::mem::take(&mut pending_cfg_bodies),
+            delivery_ack: Some(am_core::model::DeliveryAck {
+                boot,
+                seq: delivered_seq,
+            }),
         };
 
         let mut req = client.post(format!("{hub}/monitor/report"));
@@ -407,7 +416,21 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
         if let Some(t) = &legacy_token {
             req = req.header("x-agent-token", t);
         }
+        let sent_at = std::time::Instant::now();
+        // 这一轮没确认送到 hub（网络失败、代理 5xx、响应体没读完）
+        let mut transport_failed = false;
         match req.json(&payload).send().await {
+            Ok(resp) if resp.status().is_server_error() => {
+                // 5xx 只会来自中间的 Caddy / Cloudflare：hub 自己的错误一律 HTTP 200 + 业务码
+                // （见下面 `Ok(resp)` 分支的注释）。hub 重启那几秒 Caddy 回 502、Cloudflare
+                // 回源超时回 524 —— 都是这一轮没送到 hub，与网络失败同一种处理。
+                let reason = format!("HTTP {}", resp.status());
+                transport_failed = true;
+                if link.on_fail(&reason, sent_at.elapsed()) {
+                    hub_ok = false;
+                    mark_disconnected(&state, format!("连不上 hub（{hub}）：{reason}")).await;
+                }
+            }
             Ok(resp) if !resp.status().is_success() => {
                 // 收到响应 ≠ 上报成功：413（负载过大）、401（令牌不对）等
                 // 都会走到这里。若照旧标记「已连接」，托盘会一直显示正常，
@@ -435,274 +458,381 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                 // 而这里过去无脑当成功：打一句「已连上 hub」、托盘标「已连接」，
                 // 然后设备根本没在 hub 上登记，网页设备列表永远空着。
                 // 实测就是这个组合把人坑住的：日志说连上了、手工 curl 同样参数却能登记成功。
-                let body = resp.json::<Value>().await.unwrap_or(Value::Null);
-                let biz = body.get("code").and_then(Value::as_i64).unwrap_or(0);
-                if biz != 0 {
-                    let msg = body.get("msg").and_then(Value::as_str).unwrap_or_default();
-                    tracing::warn!("上报被 hub 拒绝: code={biz} {msg}");
-                    hub_ok = false;
-                    state
-                        .hub_connected
-                        .store(false, std::sync::atomic::Ordering::Relaxed);
-                    // 托盘要显示人话原因：这类失败是配置错了，重试一万次也不会好
-                    *state.hub_error.write().await = Some(describe_reject(biz as u16, msg));
-                    // 设备令牌失效（设备被删/换绑）：清掉本地令牌，回到配对流程重新绑定。
-                    // 判据与上面 HTTP 分支保持一致，别在两处各写一套。
-                    if biz == 401 && legacy_token.is_none() {
-                        state.invalidate_device_token().await;
-                    }
-                } else {
-                    // 上报被接受 = hub 确认这张设备令牌绑的就是本机 machine_id，
-                    // 于是「暂用」的旧版共用令牌（钥匙串里不区分机器的那条）归属落实：
-                    // 迁进本机专属键并删掉旧条目。**这是本地唯一能判定归属的依据** ——
-                    // 令牌是 hub 侧的随机串，本地看不出属于谁。
-                    // 配了全局令牌时跳过：那种情况下放行的可能是全局令牌，证明不了什么。
-                    if legacy_token.is_none() && device_token.is_some() {
-                        state.adopt_device_token().await;
-                    }
-                    if !hub_ok {
-                        tracing::info!("已连上 hub: {hub}");
-                        hub_ok = true;
-                    }
-                    net_fail_streak = 0;
-                    state
-                        .hub_connected
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    // 上报成功即清掉旧的拒绝原因（例如用户刚把令牌改对了）
-                    if state.hub_error.read().await.is_some() {
-                        *state.hub_error.write().await = None;
-                    }
-                    // 更新推送：hub 版本比本机新 → 记录，托盘显示「新版本可用」
-                    if let Some(hv) = body.pointer("/data/hubVersion").and_then(Value::as_str) {
-                        let newer = version_newer(hv, env!("CARGO_PKG_VERSION"));
-                        let mut slot = state.hub_latest_version.write().await;
-                        let next = newer.then(|| hv.to_string());
-                        if *slot != next {
-                            if let Some(v) = &next {
-                                tracing::info!(
-                                    "检测到新版本可用: v{v}（当前 v{}）",
-                                    env!("CARGO_PKG_VERSION")
-                                );
-                            }
-                            *slot = next;
+                // 响应体没读完（慢链路上读到一半超时）≠ 成功：原先当成空响应、照「已连接」处理，
+                // 这一批下发就悄无声息地没了。现在按没送到算，hub 收不到确认会重发。
+                let body = match resp.json::<Value>().await {
+                    Ok(b) => Some(b),
+                    Err(e) => {
+                        let reason = format!("读响应失败：{}", error_chain(&e));
+                        transport_failed = true;
+                        if link.on_fail(&reason, sent_at.elapsed()) {
+                            hub_ok = false;
+                            mark_disconnected(&state, format!("连不上 hub（{hub}）：{reason}"))
+                                .await;
                         }
+                        None
                     }
-                    // 强制更新下限：低于它的客户端必须更新才能继续使用（desktop.rs 弹窗执行）
-                    if let Some(mv) = body.pointer("/data/minVersion").and_then(Value::as_str) {
-                        let mut slot = state.hub_min_version.write().await;
-                        if slot.as_deref() != Some(mv) {
-                            *slot = Some(mv.to_string());
+                };
+                if let Some(body) = body {
+                    let biz = body.get("code").and_then(Value::as_i64).unwrap_or(0);
+                    if biz != 0 {
+                        let msg = body.get("msg").and_then(Value::as_str).unwrap_or_default();
+                        tracing::warn!("上报被 hub 拒绝: code={biz} {msg}");
+                        hub_ok = false;
+                        state
+                            .hub_connected
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        // 托盘要显示人话原因：这类失败是配置错了，重试一万次也不会好
+                        *state.hub_error.write().await = Some(describe_reject(biz as u16, msg));
+                        // 设备令牌失效（设备被删/换绑）：清掉本地令牌，回到配对流程重新绑定。
+                        // 判据与上面 HTTP 分支保持一致，别在两处各写一套。
+                        if biz == 401 && legacy_token.is_none() {
+                            state.invalidate_device_token().await;
                         }
-                    }
-                    let now_trusted = body
-                        .pointer("/data/trusted")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    if Some(now_trusted) != trusted {
-                        tracing::info!(
-                            "设备信任状态变更: {}",
-                            if now_trusted {
-                                "已被信任，开始上报会话"
-                            } else {
-                                "未信任，仅登记设备"
-                            }
-                        );
-                        trusted = Some(now_trusted);
-                    }
-                    state
-                        .hub_trusted
-                        .store(now_trusted, std::sync::atomic::Ordering::Relaxed);
-                    // 解析失败必须出声。hub 那头是「drain 即交付」——响应发出时队列已经清空，
-                    // 这里再静默当成「没有命令」，那条命令就永久消失了：钉钉/网页显示「已下发」，
-                    // 终端什么也没收到，而两头都不会留下任何痕迹。宁可丢一批也要留下证据。
-                    let commands: Vec<ControlCmd> = match body.pointer("/data/commands") {
-                        Some(v) if !v.is_null() => serde_json::from_value(v.clone())
-                            .unwrap_or_else(|e| {
-                                crate::state::client_log(&format!(
-                                    "下发命令解析失败，本批 {} 条被丢弃：{e}；原文 {}",
-                                    v.as_array().map(|a| a.len()).unwrap_or(0),
-                                    v.to_string().chars().take(300).collect::<String>()
-                                ));
-                                Vec::new()
-                            }),
-                        _ => Vec::new(),
-                    };
-                    for cmd in commands {
-                        execute(
-                            &state,
-                            cmd,
-                            &known_pids,
-                            &ide_shell_of,
-                            &desktop_of,
-                            &sessions_per_host,
-                        )
-                        .await;
-                    }
-                    // 待写入文件（hub 下发的文件传输）。同样不能静默吞——文件丢了，
-                    // 回填进任务的路径却还在，agent 只会报「文件不存在」。
-                    let files: Vec<am_core::model::FileTransfer> = match body.pointer("/data/files")
-                    {
-                        Some(v) if !v.is_null() => serde_json::from_value(v.clone())
-                            .unwrap_or_else(|e| {
-                                crate::state::client_log(&format!(
-                                    "下发文件解析失败，本批 {} 个被丢弃：{e}",
-                                    v.as_array().map(|a| a.len()).unwrap_or(0)
-                                ));
-                                Vec::new()
-                            }),
-                        _ => Vec::new(),
-                    };
-                    for f in files {
-                        if let Some(r) = write_transfer(&f, &session_dirs) {
-                            pending_file_results.push(r);
+                    } else {
+                        // 上报被接受 = hub 确认这张设备令牌绑的就是本机 machine_id，
+                        // 于是「暂用」的旧版共用令牌（钥匙串里不区分机器的那条）归属落实：
+                        // 迁进本机专属键并删掉旧条目。**这是本地唯一能判定归属的依据** ——
+                        // 令牌是 hub 侧的随机串，本地看不出属于谁。
+                        // 配了全局令牌时跳过：那种情况下放行的可能是全局令牌，证明不了什么。
+                        if legacy_token.is_none() && device_token.is_some() {
+                            state.adopt_device_token().await;
                         }
-                    }
-                    // 目录列举请求（上传选目录）：列出 cwd/rel 下的子目录
-                    let dir_queries: Vec<am_core::model::DirQuery> = body
-                        .pointer("/data/dirQueries")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    for q in dir_queries {
-                        let root = q.cwd;
-                        let (dirs, files) = list_entries(&root, &q.rel);
-                        pending_dir_results.push(am_core::model::DirResult {
-                            dirs,
-                            files,
-                            task_id: q.task_id,
-                            rel: q.rel,
-                            root,
-                        });
-                    }
-                    // 文件夹操作（上传选目录弹窗里的新建/删除/重命名）
-                    let fs_ops: Vec<am_core::model::FsOp> = body
-                        .pointer("/data/fsOps")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    for op in fs_ops {
-                        let (ok, msg) = run_fs_op(&op);
-                        pending_fs_op_results.push(am_core::model::FsOpResult {
-                            op_id: op.op_id,
-                            ok,
-                            msg,
-                        });
-                    }
-                    // 现取文件（网页要看 agent 输出里引用的截图）
-                    let fetches: Vec<am_core::model::FileFetch> = body
-                        .pointer("/data/fileFetches")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    for mut f in fetches {
-                        // 会话内容里的相对图片路径也是终端按当前目录写下的，根同上
-                        if f.by_session {
-                            if let Some(root) = session_root_now(&state, &f.task_id).await {
-                                f.cwd = root;
+                        if !hub_ok {
+                            tracing::info!("已连上 hub: {hub}");
+                            hub_ok = true;
+                        }
+                        link.on_ok(&hub);
+                        state
+                            .hub_connected
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        // 上报成功即清掉旧的拒绝原因（例如用户刚把令牌改对了）
+                        if state.hub_error.read().await.is_some() {
+                            *state.hub_error.write().await = None;
+                        }
+                        // 更新推送：hub 版本比本机新 → 记录，托盘显示「新版本可用」
+                        if let Some(hv) = body.pointer("/data/hubVersion").and_then(Value::as_str) {
+                            let newer = version_newer(hv, env!("CARGO_PKG_VERSION"));
+                            let mut slot = state.hub_latest_version.write().await;
+                            let next = newer.then(|| hv.to_string());
+                            if *slot != next {
+                                if let Some(v) = &next {
+                                    tracing::info!(
+                                        "检测到新版本可用: v{v}（当前 v{}）",
+                                        env!("CARGO_PKG_VERSION")
+                                    );
+                                }
+                                *slot = next;
                             }
                         }
-                        pending_file_fetches.push(read_session_file(&f));
-                    }
-                    // 现读会话数据（历史会话正文、子会话正文、全量子任务清单）。
-                    // 活跃会话的那份是随上报捎带的，历史会话与子会话从来不捎带 ——
-                    // 全量推 422 份子会话记录是不可能的，所以走点名现取。
-                    let session_fetches: Vec<am_core::model::SessionFetch> = body
-                        .pointer("/data/sessionFetches")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    if !session_fetches.is_empty() {
-                        let mut scanner = state.scanner.lock().await;
-                        for f in session_fetches {
-                            let limit = f.limit.clamp(1, MSG_FETCH_MAX);
-                            let mut out = am_core::model::SessionFetchResult {
-                                fetch_id: f.fetch_id.clone(),
-                                err: String::new(),
-                                messages: Vec::new(),
-                                sub_tasks: Vec::new(),
+                        // 强制更新下限：低于它的客户端必须更新才能继续使用（desktop.rs 弹窗执行）
+                        if let Some(mv) = body.pointer("/data/minVersion").and_then(Value::as_str) {
+                            let mut slot = state.hub_min_version.write().await;
+                            if slot.as_deref() != Some(mv) {
+                                *slot = Some(mv.to_string());
+                            }
+                        }
+                        let now_trusted = body
+                            .pointer("/data/trusted")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        if Some(now_trusted) != trusted {
+                            tracing::info!(
+                                "设备信任状态变更: {}",
+                                if now_trusted {
+                                    "已被信任，开始上报会话"
+                                } else {
+                                    "未信任，仅登记设备"
+                                }
+                            );
+                            trusted = Some(now_trusted);
+                        }
+                        state
+                            .hub_trusted
+                            .store(now_trusted, std::sync::atomic::Ordering::Relaxed);
+                        // 下发批次：同一编号第二次到达 = 已经执行过（hub 没收到确认而重发），
+                        // 不能再执行一遍 —— 同一段话会往终端里敲两次、文件夹操作会重复做。
+                        let seq = body
+                            .pointer("/data/deliverySeq")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        if seq != 0 && seq == delivered_seq {
+                            crate::state::client_log(&format!(
+                                "下发第 {seq} 批已执行过（hub 重发），跳过"
+                            ));
+                        } else {
+                            // 解析失败必须出声。这一批照样会被确认掉 —— 格式对不上，重发多少遍都一样，
+                            // 静默当成「没有命令」的话，钉钉/网页显示「已下发」、终端什么也没收到，
+                            // 两头都不留痕迹。宁可丢一批也要留下证据。
+                            let commands: Vec<ControlCmd> = match body.pointer("/data/commands") {
+                                Some(v) if !v.is_null() => serde_json::from_value(v.clone())
+                                    .unwrap_or_else(|e| {
+                                        crate::state::client_log(&format!(
+                                            "下发命令解析失败，本批 {} 条被丢弃：{e}；原文 {}",
+                                            v.as_array().map(|a| a.len()).unwrap_or(0),
+                                            v.to_string().chars().take(300).collect::<String>()
+                                        ));
+                                        Vec::new()
+                                    }),
+                                _ => Vec::new(),
                             };
-                            let err = match f.want {
-                                am_core::model::SessionWant::Messages => scanner
-                                    .session_view(&f.task_id, limit, f.parent_ended)
-                                    .map(|v| out.messages = v.messages)
-                                    .err(),
-                                am_core::model::SessionWant::Subagent => scanner
-                                    .subagent_messages(&f.task_id, &f.agent_id, limit)
-                                    .map(|m| out.messages = m)
-                                    .err(),
-                                am_core::model::SessionWant::Subtasks => scanner
-                                    .sub_tasks_all(&f.task_id, f.parent_ended)
-                                    .map(|t| out.sub_tasks = t)
-                                    .err(),
-                            };
-                            if let Some(e) = err {
-                                out.err = e.to_string();
+                            for cmd in commands {
+                                execute(
+                                    &state,
+                                    cmd,
+                                    &known_pids,
+                                    &ide_shell_of,
+                                    &desktop_of,
+                                    &sessions_per_host,
+                                )
+                                .await;
                             }
-                            pending_session_fetches.push(out);
+                            // 待写入文件（hub 下发的文件传输）。同样不能静默吞——文件丢了，
+                            // 回填进任务的路径却还在，agent 只会报「文件不存在」。
+                            let files: Vec<am_core::model::FileTransfer> =
+                                match body.pointer("/data/files") {
+                                    Some(v) if !v.is_null() => serde_json::from_value(v.clone())
+                                        .unwrap_or_else(|e| {
+                                            crate::state::client_log(&format!(
+                                                "下发文件解析失败，本批 {} 个被丢弃：{e}",
+                                                v.as_array().map(|a| a.len()).unwrap_or(0)
+                                            ));
+                                            Vec::new()
+                                        }),
+                                    _ => Vec::new(),
+                                };
+                            for f in files {
+                                if let Some(r) = write_transfer(&f, &session_dirs) {
+                                    pending_file_results.push(r);
+                                }
+                            }
+                            // 目录列举请求（上传选目录）：列出 cwd/rel 下的子目录
+                            let dir_queries: Vec<am_core::model::DirQuery> = body
+                                .pointer("/data/dirQueries")
+                                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                                .unwrap_or_default();
+                            for q in dir_queries {
+                                let root = q.cwd;
+                                let (dirs, files) = list_entries(&root, &q.rel);
+                                pending_dir_results.push(am_core::model::DirResult {
+                                    dirs,
+                                    files,
+                                    task_id: q.task_id,
+                                    rel: q.rel,
+                                    root,
+                                });
+                            }
+                            // 文件夹操作（上传选目录弹窗里的新建/删除/重命名）
+                            let fs_ops: Vec<am_core::model::FsOp> = body
+                                .pointer("/data/fsOps")
+                                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                                .unwrap_or_default();
+                            for op in fs_ops {
+                                let (ok, msg) = run_fs_op(&op);
+                                pending_fs_op_results.push(am_core::model::FsOpResult {
+                                    op_id: op.op_id,
+                                    ok,
+                                    msg,
+                                });
+                            }
+                            // 现取文件（网页要看 agent 输出里引用的截图）
+                            let fetches: Vec<am_core::model::FileFetch> = body
+                                .pointer("/data/fileFetches")
+                                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                                .unwrap_or_default();
+                            for mut f in fetches {
+                                // 会话内容里的相对图片路径也是终端按当前目录写下的，根同上
+                                if f.by_session {
+                                    if let Some(root) = session_root_now(&state, &f.task_id).await {
+                                        f.cwd = root;
+                                    }
+                                }
+                                pending_file_fetches.push(read_session_file(&f));
+                            }
+                            // 现读会话数据（历史会话正文、子会话正文、全量子任务清单）。
+                            // 活跃会话的那份是随上报捎带的，历史会话与子会话从来不捎带 ——
+                            // 全量推 422 份子会话记录是不可能的，所以走点名现取。
+                            let session_fetches: Vec<am_core::model::SessionFetch> = body
+                                .pointer("/data/sessionFetches")
+                                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                                .unwrap_or_default();
+                            if !session_fetches.is_empty() {
+                                let mut scanner = state.scanner.lock().await;
+                                for f in session_fetches {
+                                    let limit = f.limit.clamp(1, MSG_FETCH_MAX);
+                                    let mut out = am_core::model::SessionFetchResult {
+                                        fetch_id: f.fetch_id.clone(),
+                                        err: String::new(),
+                                        messages: Vec::new(),
+                                        sub_tasks: Vec::new(),
+                                    };
+                                    let err = match f.want {
+                                        am_core::model::SessionWant::Messages => scanner
+                                            .session_view(&f.task_id, limit, f.parent_ended)
+                                            .map(|v| out.messages = v.messages)
+                                            .err(),
+                                        am_core::model::SessionWant::Subagent => scanner
+                                            .subagent_messages(&f.task_id, &f.agent_id, limit)
+                                            .map(|m| out.messages = m)
+                                            .err(),
+                                        am_core::model::SessionWant::Subtasks => scanner
+                                            .sub_tasks_all(&f.task_id, f.parent_ended)
+                                            .map(|t| out.sub_tasks = t)
+                                            .err(),
+                                    };
+                                    if let Some(e) = err {
+                                        out.err = e.to_string();
+                                    }
+                                    pending_session_fetches.push(out);
+                                }
+                            }
+                            if seq != 0 {
+                                delivered_seq = seq;
+                            }
                         }
-                    }
-                    // hub 说它手里没有本机的历史会话列表（它刚重启 / 本机刚上线）：
-                    // 下一轮立刻补发，不要干等本地那 30 秒定时器。只有 hub 知道自己的
-                    // 快照空了，客户端无从察觉 —— 干等的后果是最长半分钟内所有历史会话
-                    // 按 id 取数全是 404（/messages、/subtasks、/subagents/…）。
-                    if body
-                        .pointer("/data/wantHistory")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                    {
-                        last_history_report = None;
-                    }
-                    // 配置同步：hub 点名索要的文件内容（下一轮随上报回传）
-                    let cfg_pulls: Vec<String> = body
-                        .pointer("/data/configPulls")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    if !cfg_pulls.is_empty() {
-                        if let Some(home) = dirs::home_dir() {
-                            pending_cfg_bodies = crate::configsync::read_bodies(&home, &cfg_pulls);
+                        // hub 说它手里没有本机的历史会话列表（它刚重启 / 本机刚上线）：
+                        // 下一轮立刻补发，不要干等本地那 30 秒定时器。只有 hub 知道自己的
+                        // 快照空了，客户端无从察觉 —— 干等的后果是最长半分钟内所有历史会话
+                        // 按 id 取数全是 404（/messages、/subtasks、/subagents/…）。
+                        if body
+                            .pointer("/data/wantHistory")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                        {
+                            last_history_report = None;
                         }
-                    }
-                    // 配置同步：hub 下发的配置内容（备份 + 原子写，路径白名单在 configsync 内复验）
-                    let cfg_pushes: Vec<am_core::model::ConfigPush> = body
-                        .pointer("/data/configPushes")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    if !cfg_pushes.is_empty() {
-                        if let Some(home) = dirs::home_dir() {
-                            if crate::configsync::apply(&home, &cfg_pushes) > 0 {
-                                // 落盘改变了本机状态，立刻重扫一次报上去，
-                                // 否则 hub 手里的清单还是旧的，下一轮会把同样的文件再推一遍。
-                                last_cfg_scan = None;
+                        // 配置同步：hub 点名索要的文件内容（下一轮随上报回传）
+                        let cfg_pulls: Vec<String> = body
+                            .pointer("/data/configPulls")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
+                        if !cfg_pulls.is_empty() {
+                            if let Some(home) = dirs::home_dir() {
+                                pending_cfg_bodies =
+                                    crate::configsync::read_bodies(&home, &cfg_pulls);
+                            }
+                        }
+                        // 配置同步：hub 下发的配置内容（备份 + 原子写，路径白名单在 configsync 内复验）
+                        let cfg_pushes: Vec<am_core::model::ConfigPush> = body
+                            .pointer("/data/configPushes")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
+                        if !cfg_pushes.is_empty() {
+                            if let Some(home) = dirs::home_dir() {
+                                if crate::configsync::apply(&home, &cfg_pushes) > 0 {
+                                    // 落盘改变了本机状态，立刻重扫一次报上去，
+                                    // 否则 hub 手里的清单还是旧的，下一轮会把同样的文件再推一遍。
+                                    last_cfg_scan = None;
+                                }
                             }
                         }
                     }
                 }
             }
             Err(e) => {
-                // 连不上 hub 也必须留痕。原先只在 `hub_ok` 为真时打日志 ——
-                // 也就是「本来连着、突然断了」才记一条；而**从来没连上过**的客户端
-                // （hub_ok 恒为 false）一条都不打，托盘也没有原因可显示。
-                // 实际后果：换服务器后客户端拿着作废的设备令牌空转，日志里干干净净，
-                // 用户只看到网页上什么都没有，无从查起（这个 bug 就是这么被发现的）。
-                // 首次失败必打，之后每 ~60s 一条，既不刷屏也不至于全无痕迹。
-                if hub_ok || net_fail_streak == 0 || net_fail_streak.is_multiple_of(40) {
-                    tracing::warn!("上报 hub 失败（第 {} 次）: {e}", net_fail_streak + 1);
+                let reason = error_chain(&e);
+                transport_failed = true;
+                if link.on_fail(&reason, sent_at.elapsed()) {
+                    hub_ok = false;
+                    // 托盘要能说出「为什么连不上」，而不是永远停在「连接中…」
+                    mark_disconnected(&state, format!("连不上 hub（{hub}）：{e}")).await;
                 }
-                net_fail_streak = net_fail_streak.saturating_add(1);
-                hub_ok = false;
-                state
-                    .hub_connected
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
-                // 托盘要能说出「为什么连不上」，而不是永远停在「连接中…」
-                *state.hub_error.write().await = Some(format!("连不上 hub（{hub}）：{e}"));
             }
+        }
+
+        // 没确认送到：上一轮的执行结果放回去，下一轮重带。hub 按 id 收这些结果，
+        // 万一其实已经到了（只是响应丢了），重复到达无害；不放回的话，hub 那头等回报的
+        // 请求（传文件、列目录、现读正文）只能干等到超时。
+        if transport_failed {
+            pending_dir_results = payload.dir_results;
+            pending_fs_op_results = payload.fs_op_results;
+            pending_file_fetches = payload.file_fetch_results;
+            pending_session_fetches = payload.session_fetch_results;
+            pending_file_results = payload.file_results;
+            pending_cfg_bodies = payload.config_bodies;
         }
 
         // 正常等 1.5s；但会话文件一变就提前醒来立即上报。文件事件后稍等 150ms
         // 聚合连续写入（一次编辑常触发多条事件），避免同一动作触发多轮扫描。
         tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_millis(1500)) => {}
+            _ = tokio::time::sleep(std::time::Duration::from_millis(am_core::heartbeat::INTERVAL_MS)) => {}
             _ = file_changed.notified() => {
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             }
         }
     }
+}
+
+/// 上报链路的健康度：离线门槛内的网络抖动（请求超时、中间代理回 5xx）不算断联。
+///
+/// 托盘的「已连接」必须与 hub 的在线判定同一口径（[`am_core::heartbeat::OFFLINE_AFTER_SECS`]）。
+/// 原先一次失败就翻成「连不上」，而国内经 Cloudflare 的链路 5%–8% 的请求要超过 5s，
+/// 托盘和网页一样三天两头闪断。
+///
+/// 失败与恢复都写进 client.log：`tracing` 只打到终端，从 App 启动的客户端没有终端，
+/// 此前断联一次都查不到记录。
+#[derive(Default)]
+struct LinkHealth {
+    /// 本次启动以来最近一次上报成功的时刻；None = 还没成功过
+    last_ok: Option<std::time::Instant>,
+    /// 当前这段断档的起点（= 上一次成功的时刻）与连续失败次数
+    fail_since: Option<std::time::Instant>,
+    fail_count: u32,
+}
+
+impl LinkHealth {
+    fn on_ok(&mut self, hub: &str) {
+        if let Some(since) = self.fail_since.take() {
+            crate::state::client_log(&format!(
+                "上报恢复：连续失败 {} 次、断档 {:.1}s（{hub}）",
+                self.fail_count,
+                since.elapsed().as_secs_f32()
+            ));
+        }
+        self.fail_count = 0;
+        self.last_ok = Some(std::time::Instant::now());
+    }
+
+    /// 记一次没送到 hub 的上报；返回 true = 已超过离线门槛，该显示断联了。
+    /// 从没连上过的客户端（换了 hub、令牌作废）第一次失败就算断联，不等门槛。
+    fn on_fail(&mut self, reason: &str, took: std::time::Duration) -> bool {
+        let first = self.fail_since.is_none();
+        if first {
+            // 从上一次成功算起，与 hub 那边「上报断档 Ns」口径一致
+            self.fail_since = Some(self.last_ok.unwrap_or_else(std::time::Instant::now));
+        }
+        self.fail_count = self.fail_count.saturating_add(1);
+        // 每段断档的第一次必记，之后每 40 次（约 5 分钟）一条，长时间断网不刷屏
+        if first || self.fail_count.is_multiple_of(40) {
+            crate::state::client_log(&format!(
+                "上报 hub 失败（本段第 {} 次，本次耗时 {}ms）：{reason}",
+                self.fail_count,
+                took.as_millis()
+            ));
+        }
+        self.last_ok
+            .is_none_or(|t| t.elapsed().as_secs() >= am_core::heartbeat::OFFLINE_AFTER_SECS)
+    }
+}
+
+/// 把错误连同它的底层原因一起展开：reqwest 的 Display 只有一句「error sending request」，
+/// 超时、连接被重置、TLS 握手失败全藏在 source 链里。
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut s = e.to_string();
+    let mut src = e.source();
+    while let Some(c) = src {
+        s.push_str(" ← ");
+        s.push_str(&c.to_string());
+        src = c.source();
+    }
+    s
+}
+
+async fn mark_disconnected(state: &SharedState, reason: String) {
+    state
+        .hub_connected
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    *state.hub_error.write().await = Some(reason);
 }
 
 /// 发起配对：向 hub 领配对码，存进 state（窗口用 code 拼 ?pair= 参数）
@@ -1895,5 +2025,43 @@ mod file_policy_tests {
         assert!(!is_inside_vcs_dir("src/gitignore.ts"));
         assert!(!is_inside_vcs_dir("docs/git/README.md"));
         assert!(!is_inside_vcs_dir(".gitignore"));
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn never_connected_fails_immediately() {
+        let mut l = LinkHealth::default();
+        assert!(
+            l.on_fail("x", Duration::ZERO),
+            "从没连上过：第一次失败就该显示断联"
+        );
+    }
+
+    #[test]
+    fn jitter_within_threshold_stays_connected() {
+        let mut l = LinkHealth::default();
+        l.on_ok("hub");
+        for _ in 0..3 {
+            assert!(!l.on_fail("timeout", Duration::from_secs(5)));
+        }
+        l.on_ok("hub");
+        assert_eq!(l.fail_count, 0);
+        assert!(l.fail_since.is_none());
+    }
+
+    #[test]
+    fn past_threshold_reports_disconnected() {
+        let mut l = LinkHealth {
+            last_ok: Instant::now().checked_sub(Duration::from_secs(
+                am_core::heartbeat::OFFLINE_AFTER_SECS + 1,
+            )),
+            ..Default::default()
+        };
+        assert!(l.on_fail("timeout", Duration::from_secs(5)));
     }
 }

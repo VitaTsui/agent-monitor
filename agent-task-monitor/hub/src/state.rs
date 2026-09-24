@@ -124,9 +124,176 @@ pub struct MachineEntry {
     /// 所以这里要缓存住 —— 中间轮次的 pull/push 全靠它算差异，才能每轮推进而不是 30s 一步。
     /// None = 该设备还没报过（旧客户端，或刚上线还没到第一次扫描）。
     pub config_manifest: Option<am_core::model::ConfigManifest>,
+    /// 已发出、客户端还没确认收到的那一批（见 [`Self::next_delivery`]）
+    pub inflight: Option<Delivery>,
+}
+
+/// 随一轮上报响应下发给客户端的一批东西。
+///
+/// 按编号**确认后才删**：原先是「响应一发出就从队列里删掉」，响应在路上丢了（客户端请求
+/// 超时、读响应体失败）这一批就永久消失 —— 钉钉/网页显示「已下发」，终端毫无反应。国内经
+/// Cloudflare 的链路 5%–8% 的请求要超过客户端 5s 的超时，而那时 hub 这边早已处理完、清了队列。
+#[derive(Clone, Default)]
+pub struct Delivery {
+    /// 全局递增、跨 hub 重启不回退（起点是启动时刻的毫秒数），客户端据此去重
+    pub seq: u64,
+    /// 发给了哪一次启动的客户端（见 [`am_core::model::DeliveryAck::boot`]）
+    pub boot: u64,
+    pub commands: Vec<ControlCmd>,
+    pub files: Vec<am_core::model::FileTransfer>,
+    pub dir_queries: Vec<am_core::model::DirQuery>,
+    pub fs_ops: Vec<am_core::model::FsOp>,
+    pub file_fetches: Vec<am_core::model::FileFetch>,
+    pub session_fetches: Vec<am_core::model::SessionFetch>,
+}
+
+impl Delivery {
+    pub fn is_empty(&self) -> bool {
+        self.commands.is_empty()
+            && self.files.is_empty()
+            && self.dir_queries.is_empty()
+            && self.fs_ops.is_empty()
+            && self.file_fetches.is_empty()
+            && self.session_fetches.is_empty()
+    }
+
+    /// 日志用：这一批里有什么（只列非空的几类）
+    pub fn summary(&self) -> String {
+        let cmds: Vec<_> = self
+            .commands
+            .iter()
+            .map(|c| (c.action, c.task_id.as_str()))
+            .collect();
+        [
+            (
+                self.commands.len(),
+                format!("命令 {} 条 {cmds:?}", self.commands.len()),
+            ),
+            (self.files.len(), format!("文件 {} 个", self.files.len())),
+            (
+                self.dir_queries.len(),
+                format!("目录查询 {} 个", self.dir_queries.len()),
+            ),
+            (
+                self.fs_ops.len(),
+                format!("文件夹操作 {} 个", self.fs_ops.len()),
+            ),
+            (
+                self.file_fetches.len(),
+                format!("取文件 {} 个", self.file_fetches.len()),
+            ),
+            (
+                self.session_fetches.len(),
+                format!("读正文 {} 个", self.session_fetches.len()),
+            ),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(_, s)| s)
+        .collect::<Vec<_>>()
+        .join("，")
+    }
+}
+
+fn next_delivery_seq() -> u64 {
+    static SEQ: std::sync::LazyLock<std::sync::atomic::AtomicU64> =
+        std::sync::LazyLock::new(|| std::sync::atomic::AtomicU64::new(now_secs() * 1000));
+    SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }
 
 impl MachineEntry {
+    /// 第一次收到上报时登记
+    pub fn new(hostname: String, platform: String, version: String) -> Self {
+        MachineEntry {
+            hostname,
+            platform,
+            version,
+            is_hub: false,
+            tasks: Vec::new(),
+            last_report: Instant::now(),
+            pending: VecDeque::new(),
+            pending_files: VecDeque::new(),
+            messages: HashMap::new(),
+            pending_dir: VecDeque::new(),
+            pending_fsop: VecDeque::new(),
+            pending_file_fetch: VecDeque::new(),
+            history_tasks: Vec::new(),
+            history_reported: false,
+            pending_session_fetch: VecDeque::new(),
+            session_fetch_results: HashMap::new(),
+            file_fetch_results: HashMap::new(),
+            fsop_results: HashMap::new(),
+            file_results: HashMap::new(),
+            dir_cache: HashMap::new(),
+            dir_asked: Default::default(),
+            notified_online: false,
+            select_notified: std::collections::HashSet::new(),
+            select_diag: HashMap::new(),
+            online_since: Instant::now(),
+            known_sessions: HashMap::new(),
+            session_last_seen: HashMap::new(),
+            last_select_at: HashMap::new(),
+            new_session_pending: HashMap::new(),
+            config_manifest: None,
+            inflight: None,
+        }
+    }
+
+    /// 取本轮要下发的一批。`ack` = 客户端报上来的「最后收到并执行完的编号」。
+    ///
+    /// - `None`：旧客户端，不回确认 —— 只能照旧交出即删
+    /// - 确认号等于在途那批：确认收到，删掉在途、再取新的一批
+    /// - 启动标识变了：客户端重启过。在途那批可能已被上一个进程执行过，重发有把同一段话
+    ///   往终端里敲两遍的风险，所以作废并留痕，宁丢不重
+    /// - 其他：在途那批没送到，原样重发（客户端按编号去重）
+    pub fn next_delivery(
+        &mut self,
+        machine_id: &str,
+        ack: Option<am_core::model::DeliveryAck>,
+    ) -> Delivery {
+        if let (Some(a), Some(d)) = (ack, &self.inflight) {
+            if a.boot != d.boot {
+                tracing::warn!(
+                    "设备 {machine_id} 客户端已重启，未确认的第 {} 批作废：{}",
+                    d.seq,
+                    d.summary()
+                );
+                self.inflight = None;
+            } else if a.seq == d.seq {
+                self.inflight = None;
+            } else {
+                tracing::warn!(
+                    "设备 {machine_id} 未确认第 {} 批（客户端确认到 {}），重发：{}",
+                    d.seq,
+                    a.seq,
+                    d.summary()
+                );
+                return d.clone();
+            }
+        }
+        let d = Delivery {
+            seq: 0,
+            boot: 0,
+            commands: self.pending.drain(..).collect(),
+            files: self.pending_files.drain(..).collect(),
+            dir_queries: self.pending_dir.drain(..).collect(),
+            fs_ops: self.pending_fsop.drain(..).collect(),
+            file_fetches: self.pending_file_fetch.drain(..).collect(),
+            session_fetches: self.pending_session_fetch.drain(..).collect(),
+        };
+        let Some(a) = ack else { return d };
+        if d.is_empty() {
+            return d;
+        }
+        let d = Delivery {
+            seq: next_delivery_seq(),
+            boot: a.boot,
+            ..d
+        };
+        self.inflight = Some(d.clone());
+        d
+    }
+
     /// 向 agent 要一份 `rel` 目录的**新**清单（已有同一目录的查询在排队就不重复下发）。
     ///
     /// 结果回来之前 [`Self::dir_waiting`] 为真；旧清单留着，调用方可以先拿它顶着。
@@ -176,8 +343,8 @@ pub const PUB_IMAGE_TTL_SECS: u64 = 120;
 /// 取 60s —— 网页那边是轮询取件，一两秒就该来领；留久了等于变相「落存储」。
 pub const FETCH_RESULT_TTL_SECS: u64 = 60;
 
-/// 机器离线判定阈值
-pub const OFFLINE_AFTER_SECS: u64 = 10;
+/// 机器离线判定阈值：由客户端上报节奏推出，见 [`am_core::heartbeat`]
+pub use am_core::heartbeat::OFFLINE_AFTER_SECS;
 
 /// 「会话开始」推送沉降期：设备上线后这段时间内出现的会话视为「重连扫回的已有会话」，
 /// 不推。客户端重启/更新后分批扫回历史会话可能持续十几秒，取 30s 留足余量。
@@ -989,5 +1156,66 @@ mod dedup_tests {
         let b = dedup_by_id(m2.iter(), &mut seen);
         assert_eq!(a.len(), 1);
         assert!(b.is_empty(), "第二台机器上的同号会话不再出一条");
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+    use am_core::model::ControlAction;
+
+    fn entry_with(cmd: &str) -> MachineEntry {
+        let mut e = MachineEntry::new("h".into(), "macos".into(), "0".into());
+        e.pending.push_back(ControlCmd {
+            task_id: cmd.into(),
+            pid: None,
+            action: ControlAction::Input,
+            text: Some(cmd.into()),
+            id: None,
+            from_select: false,
+        });
+        e
+    }
+
+    fn ack(boot: u64, seq: u64) -> Option<am_core::model::DeliveryAck> {
+        Some(am_core::model::DeliveryAck { boot, seq })
+    }
+
+    #[test]
+    fn unacked_batch_is_resent_until_acked() {
+        let mut e = entry_with("a");
+        let d1 = e.next_delivery("m", ack(7, 0));
+        assert_eq!(d1.commands.len(), 1);
+        assert_ne!(d1.seq, 0);
+        // 响应丢了：确认号没跟上 → 原样重发，新入队的不混进来
+        e.pending.push_back(d1.commands[0].clone());
+        let again = e.next_delivery("m", ack(7, 0));
+        assert_eq!(again.seq, d1.seq);
+        assert_eq!(again.commands.len(), 1);
+        // 确认后才放出下一批
+        let d2 = e.next_delivery("m", ack(7, d1.seq));
+        assert!(d2.seq > d1.seq);
+        assert_eq!(d2.commands.len(), 1);
+        assert!(e.next_delivery("m", ack(7, d2.seq)).is_empty());
+        assert!(e.inflight.is_none());
+    }
+
+    #[test]
+    fn client_restart_drops_unacked_batch() {
+        let mut e = entry_with("a");
+        let d1 = e.next_delivery("m", ack(7, 0));
+        assert!(!d1.is_empty());
+        // 启动标识变了：宁丢不重
+        assert!(e.next_delivery("m", ack(8, 0)).is_empty());
+        assert!(e.inflight.is_none());
+    }
+
+    #[test]
+    fn legacy_client_keeps_drain_semantics() {
+        let mut e = entry_with("a");
+        let d = e.next_delivery("m", None);
+        assert_eq!(d.seq, 0);
+        assert_eq!(d.commands.len(), 1);
+        assert!(e.inflight.is_none());
     }
 }

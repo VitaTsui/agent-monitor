@@ -1576,8 +1576,8 @@ async fn fetch_attach_bytes(
 /// 躺在缓存里，后面几个立即返回 —— 总耗时仍是一次往返。
 ///
 /// 返回的 `bool` = **要了落盘回报却没等到**（不含「这个客户端本来就不回报」那种）。
-/// 它意味着 hub 这边其实不知道文件到底有没有落地 —— `pending_files` 是「响应一发出就从
-/// 队列里没了」的（见 server::report 的 drain），客户端没收到就无从重来。此前这里一律
+/// 它意味着 hub 这边其实不知道文件到底有没有落地 —— 下发虽然会重发到客户端确认为止
+/// （见 state::Delivery），但客户端重启时未确认的那批会作废，而等待本身也有上限。此前这里一律
 /// 返回 Ok，回执照样是「📤 已下发」，人拿着一条指向空气的路径去问 agent 为什么读不到。
 /// 所以要把这份「不确定」原样带回给调用方，由它写进回执。
 async fn resolve_queued(state: &SharedState, q: &QueuedFile) -> Result<(String, bool), String> {
