@@ -181,7 +181,9 @@ jobs:
         if: startsWith(matrix.os, 'windows')
         with:
           name: wsl-helper
-          path: agent-task-monitor/target/wsl-helper
+          # 不放 target/：后面的 rust-cache 恢复 Cargo 缓存时会重建 target，
+          # 把刚下载的发布输入删掉。
+          path: agent-task-monitor/.release-inputs/wsl-helper
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -213,7 +215,7 @@ jobs:
         if: startsWith(matrix.os, 'windows')
         run: |
           rustup target add x86_64-pc-windows-msvc
-          AM_WSL_AGENT=target/wsl-helper/agent-monitor bash scripts/package-windows.sh
+          AM_WSL_AGENT=.release-inputs/wsl-helper/agent-monitor bash scripts/package-windows.sh
           mkdir -p out
           # 同上，资产名统一成 README 里的那套；打包脚本产出的
           # AgentMonitor-<版本>-setup.exe 这个名字是部署侧（hub 的 ready_desktop_version）
