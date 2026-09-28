@@ -7054,7 +7054,7 @@ mod desktop_session_tests {
         for t in &tasks {
             assert_eq!(t.pid, Some(900), "{} 该配到桌面宿主", t.id);
             assert_eq!(t.status, TaskStatus::Idle);
-            assert_eq!(t.provider_dsr, "ChatGPT 桌面版");
+            assert_eq!(t.provider_dsr, "Codex");
             assert!(t.desktop, "ChatGPT 桌面版的会话 desktop 必须为真");
         }
     }

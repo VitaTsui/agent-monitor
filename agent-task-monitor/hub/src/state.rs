@@ -712,19 +712,11 @@ fn dedup_by_id<'a>(
 
 /// 一台设备上「有哪几个客户端、各有多少条会话」。
 ///
-/// **分组键是 `(provider, desktop)` 这一对，不是 `provider` 一个值**：同一台机器上
-/// `provider == "codex"` 既可能是 Codex CLI，也可能是 ChatGPT 桌面版 —— 它们是两个
-/// 不同的客户端，只是会话文件格式一样。只按 provider 聚合会把两者糊成一组，而组名
-/// 若再取「最近一条会话的展示名」，1 条桌面版会话就能把 32 条 CLI 会话的组改名成
-/// 「ChatGPT 桌面版」（实测本机就是这个比例）。用户要的是「单独显示每个客户端的会话」。
+/// 分组键表示「从哪种界面打开」，不是「里面跑了哪个代理」：
+/// 所有 CLI（包括 WSL 里的 Codex / Claude）合并为 `terminal/false` 的「普通终端」；
+/// 只有真正的桌面客户端才保留 provider，如 `codex/true` 的「Codex」。
 ///
-/// 展示名取 `(provider, desktop)` 算出的**规范名**（[`am_core::model::provider_dsr`] /
-/// [`am_core::model::provider_dsr_desktop`]，两个固定枚举），不取某一条会话上的值 ——
-/// 组名不该随最近那条漂。
-///
-/// 计数口径必须与 `/monitor/sessions/history?machineId=&provider=&desktop=` 的 `total`
-/// 一致，所以：① 热列表与历史列表都要数（会话总数含已结束，不是只数活跃的）；
-/// ② 排除进程占位任务（会话记录还没生成，它不是一条会话）——判据复用
+/// 计数包含热列表与历史列表，并排除进程占位任务（会话记录还没生成），判据复用
 /// [`crate::server::is_proc_placeholder`]，不在这里另写一份。
 ///
 /// 排序：会话数多的在前，同数按 provider 名、CLI 在桌面版之前 —— 侧栏的顺序得是
@@ -739,16 +731,13 @@ fn providers_of<'a>(tasks: impl Iterator<Item = &'a Task>) -> Vec<am_core::model
         if crate::server::is_proc_placeholder(t) {
             continue;
         }
-        *agg.entry((t.provider.as_str(), t.desktop)).or_insert(0) += 1;
+        let client_provider = am_core::model::client_group_provider(&t.provider, t.desktop);
+        *agg.entry((client_provider, t.desktop)).or_insert(0) += 1;
     }
     let mut out: Vec<am_core::model::ProviderStat> = agg
         .into_iter()
         .map(|((provider, desktop), n)| am_core::model::ProviderStat {
-            provider_dsr: if desktop {
-                am_core::model::provider_dsr_desktop(provider)
-            } else {
-                am_core::model::provider_dsr(provider)
-            },
+            provider_dsr: am_core::model::client_group_dsr(provider, desktop),
             provider: provider.to_string(),
             desktop,
             session_count: n,
@@ -1116,7 +1105,32 @@ mod dedup_tests {
         let history = [task("dup-2", None), task("dup-3", None)];
         let out = providers_of(hot.iter().chain(history.iter()));
         assert_eq!(out.len(), 1, "都是 claude CLI，一组");
+        assert_eq!(out[0].provider, "terminal");
+        assert_eq!(out[0].provider_dsr, "普通终端");
         assert_eq!(out[0].session_count, 3, "dup-2 同时在两张表里，只能算一条");
+    }
+
+    #[test]
+    fn cli_providers_share_terminal_group_while_desktop_keeps_client_group() {
+        let mut codex_cli = task("codex-cli", None);
+        codex_cli.provider = "codex".into();
+        let claude_cli = task("claude-cli", None);
+        let mut codex_desktop = task("codex-desktop", None);
+        codex_desktop.provider = "codex".into();
+        codex_desktop.desktop = true;
+
+        let tasks = [codex_cli, claude_cli, codex_desktop];
+        let out = providers_of(tasks.iter());
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].provider, "terminal");
+        assert_eq!(out[0].provider_dsr, "普通终端");
+        assert!(!out[0].desktop);
+        assert_eq!(out[0].session_count, 2);
+        assert_eq!(out[1].provider, "codex");
+        assert_eq!(out[1].provider_dsr, "Codex");
+        assert!(out[1].desktop);
+        assert_eq!(out[1].session_count, 1);
     }
 
     /// 跨机器同样去重：同一个会话号不该在两台机器上各出一条
@@ -1171,7 +1185,9 @@ mod dedup_tests {
         assert_eq!(devices.len(), 1, "WSL 运行端不能单列成设备");
         assert_eq!(devices[0].id, "win-1");
         assert_eq!(devices[0].platform, "windows");
-        assert!(devices[0].providers.iter().any(|p| p.provider == "codex"));
+        assert!(devices[0].providers.iter().any(|p| {
+            p.provider == "terminal" && p.provider_dsr == "普通终端" && !p.desktop
+        }));
 
         let tasks = state.tasks_for("admin").await;
         assert_eq!(tasks[0].device_id, "win-1", "页面归到 Windows 设备");

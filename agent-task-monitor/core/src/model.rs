@@ -444,7 +444,7 @@ pub struct ControlReq {
     pub pid: Option<u32>,
 }
 
-/// 一台设备上「有哪一类终端、各有多少条会话」。
+/// 一台设备上「有哪一类客户端、各有多少条会话」。
 ///
 /// 侧栏要按「设备 × 终端类型」分组，而在此之前没有任何接口能直接回答这个问题 ——
 /// 前端只能拉 `/monitor/sessions/history?limit=200`（接口上限）去数最近 200 条倒推。
@@ -453,20 +453,16 @@ pub struct ControlReq {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderStat {
-    /// claude / codex …（与会话上的 `Task::provider` 同一个取值）
+    /// 客户端分组键：终端 CLI 统一为 `terminal`，桌面客户端保留
+    /// `Task::provider`（claude / codex …）。
     pub provider: String,
     /// 终端 CLI 还是桌面客户端，见 [`Task::desktop`]。
     ///
-    /// **同一个 `provider` 会出现两项**（如 `codex/false` 与 `codex/true`）——
-    /// 它们是同一台机器上两个不同的客户端，用户要的是「单独显示每个客户端的会话」，
-    /// 糊成一项就不满足。分组键是 `(provider, desktop)` 这一对。
+    /// `false` 表示普通终端，`true` 表示桌面客户端。
     pub desktop: bool,
-    /// 展示名：由 `(provider, desktop)` 算出的**规范名**，不是某一条会话上的值。
-    /// 取某条会话的值会让组名随最近那条漂（1 条桌面版会话能把 32 条 CLI 会话的组
-    /// 改名成「ChatGPT 桌面版」）。
+    /// 展示名：CLI 统一为「普通终端」，桌面组显示实际客户端名。
     pub provider_dsr: String,
-    /// 该设备该 `(provider, desktop)` 下的会话总数，**含已结束**。
-    /// 与 `/monitor/sessions/history?machineId=&provider=&desktop=` 的 `total` 同口径。
+    /// 该设备该客户端分组下的会话总数，**含已结束**。
     pub session_count: usize,
 }
 
@@ -899,8 +895,27 @@ pub fn provider_dsr(provider: &str) -> String {
 pub fn provider_dsr_desktop(provider: &str) -> String {
     match provider {
         "claude" => "Claude 桌面版".into(),
-        "codex" => "ChatGPT 桌面版".into(),
+        "codex" => "Codex".into(),
         other => format!("{} 桌面版", provider_dsr(other)),
+    }
+}
+
+/// 侧栏的客户端分组键。CLI 在 Windows、WSL 或 macOS 终端里运行都是
+/// 「普通终端」；只有桌面应用才按实际 provider 分组。
+pub fn client_group_provider<'a>(provider: &'a str, desktop: bool) -> &'a str {
+    if desktop {
+        provider
+    } else {
+        "terminal"
+    }
+}
+
+/// 侧栏的客户端分组名。
+pub fn client_group_dsr(provider: &str, desktop: bool) -> String {
+    if desktop {
+        provider_dsr_desktop(provider)
+    } else {
+        "普通终端".into()
     }
 }
 
