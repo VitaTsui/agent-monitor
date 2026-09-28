@@ -1,8 +1,8 @@
+#[cfg(not(feature = "desktop"))]
+fn main() {}
+
+#[cfg(feature = "desktop")]
 fn main() {
-    // 仅在启用 desktop（Tauri）特性时生成 Tauri 上下文；无界面/服务器构建跳过。
-    if std::env::var("CARGO_FEATURE_DESKTOP").is_err() {
-        return;
-    }
     // 应用自定义命令必须生成 ACL 权限（allow-<command>）、并在 capabilities 里放行，否则远程页
     // invoke 一律被拦：「Command X not allowed by ACL」。
     //
@@ -29,6 +29,7 @@ fn main() {
 }
 
 /// desktop.rs 里 `tauri::generate_handler![...]` 列的命令名
+#[cfg(feature = "desktop")]
 fn handler_commands() -> Vec<String> {
     let src = std::fs::read_to_string("src/desktop.rs").expect("读 src/desktop.rs 失败");
     let start = src
@@ -51,6 +52,7 @@ fn handler_commands() -> Vec<String> {
 }
 
 /// 每个命令都得在 capabilities/default.json 里有 `allow-<命令名，下划线换连字符>`
+#[cfg(feature = "desktop")]
 fn check_capabilities(commands: &[String]) {
     let caps = std::fs::read_to_string("capabilities/default.json")
         .expect("读 capabilities/default.json 失败");

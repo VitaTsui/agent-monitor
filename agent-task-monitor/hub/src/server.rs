@@ -261,6 +261,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/pair/start", post(pair_start))
         .route("/monitor/pair/claim", post(pair_claim))
         .route("/monitor/pair/status", get(pair_status))
+        .route("/monitor/child-device/bind", post(child_device_bind))
         // ---- agent → hub 上报 ----
         // 单独放宽体积上限：axum 默认 2MB，一台机器会话多、消息长时很容易顶到，
         // 一旦 413 该设备就再也同步不上来了。
@@ -459,6 +460,53 @@ async fn pair_status(
         return ok(json!({ "claimed": true, "deviceToken": token }));
     }
     ok(json!({ "claimed": false, "expired": false }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChildDeviceBindReq {
+    parent_machine_id: String,
+    machine_id: String,
+    hostname: String,
+    platform: String,
+    version: String,
+}
+
+/// POST /monitor/child-device/bind —— 已绑定客户端为自己托管的运行环境领子设备令牌。
+/// 当前唯一调用方是 Windows 客户端启动的 WSL Linux 采集端。
+async fn child_device_bind(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<ChildDeviceBindReq>,
+) -> Json<Value> {
+    let parent_token = headers
+        .get("x-device-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if req.parent_machine_id.trim().is_empty() || req.machine_id.trim().is_empty() {
+        return err(400, "缺少父设备或子设备 machineId");
+    }
+    if parent_token.is_empty()
+        || !state
+            .registry
+            .read()
+            .await
+            .verify_device_token(req.parent_machine_id.trim(), parent_token)
+    {
+        return err(401, "父设备令牌无效");
+    }
+
+    let result = state.registry.write().await.bind_child_device(
+        req.parent_machine_id.trim(),
+        req.machine_id.trim(),
+        req.hostname.trim(),
+        req.platform.trim(),
+        req.version.trim(),
+    );
+    match result {
+        Ok(token) => ok(json!({ "deviceToken": token })),
+        Err(e) => err(400, &e),
+    }
 }
 
 /// 支持分片写入的最低 agent 版本。低于它的客户端不认识 FileTransfer 的 chunk_* 字段，

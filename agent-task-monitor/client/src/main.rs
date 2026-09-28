@@ -16,6 +16,10 @@ mod hookrec;
 mod openfiles;
 mod secrets;
 mod state;
+#[cfg(windows)]
+mod wsl;
+#[cfg(target_os = "linux")]
+mod wslinput;
 
 use anyhow::Result;
 use state::{AppState, Config};
@@ -31,10 +35,21 @@ fn main() -> Result<()> {
     // 这里从配置文件补齐（env 优先，配置文件兜底），使 .app / .exe 免启动器即可运行。
     load_config_file();
 
+    // WSL 普通用户被内核禁止 TIOCSTI 时，主采集端经 wsl.exe 拉起这个短命 root 子命令
+    // 写目标 TTY。必须在创建状态、启动上报线程之前分流。
+    #[cfg(target_os = "linux")]
+    if let Some(result) = wslinput::run_root_cli() {
+        return result;
+    }
+
     // machine_id：优先 AM_MACHINE_ID，其次数据目录持久化（首次由 hostname 派生），
     // 保证用户改电脑名后设备信任关系不丢；展示名优先用户给电脑设的名称
     let raw_hostname = hostname();
-    let hostname = device_name().unwrap_or_else(|| raw_hostname.clone());
+    let hostname = std::env::var("AM_DEVICE_NAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(device_name)
+        .unwrap_or_else(|| raw_hostname.clone());
     let platform = std::env::consts::OS.to_string();
 
     // 数据目录用平台规范位置（mac ~/Library/Application Support、

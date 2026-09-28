@@ -10,7 +10,16 @@ cd "$(dirname "$0")/.."
 HUB_URL="${AM_HUB_URL:-https://monitor.vita-llm.com}"
 OUT_DIR="target/dist"
 VERSION=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+WSL_AGENT="${AM_WSL_AGENT:-target/wsl-helper/agent-monitor}"
 mkdir -p "$OUT_DIR"
+
+if [[ ! -f "$WSL_AGENT" ]]; then
+  echo "缺少 WSL Linux 采集端: $WSL_AGENT" >&2
+  echo "先在 Linux/WSL 执行 cargo build -p am-client --release --no-default-features，" >&2
+  echo "再以 AM_WSL_AGENT=<产物路径> 调用本脚本。" >&2
+  exit 1
+fi
+WSL_AGENT_ABS="$(cd "$(dirname "$WSL_AGENT")" && pwd)/$(basename "$WSL_AGENT")"
 
 # 在 Windows 上跑（CI 的 windows runner、或本机就是 Windows）时没有「交叉」可言：
 # cargo-xwin 是给 macOS/Linux 拉 MSVC SDK 用的，本地已有 MSVC 时直接 cargo build。
@@ -36,6 +45,7 @@ fi
 echo "▸ makensis 生成安装向导"
 makensis \
   -DEXE="$(winpath "$PWD/target/x86_64-pc-windows-msvc/release/agent-monitor.exe")" \
+  -DWSL_AGENT="$(winpath "$WSL_AGENT_ABS")" \
   -DICO="$(winpath "$PWD/client/icons/icon.ico")" \
   -DAPP_VERSION="${VERSION}" \
   "-DOUT=$(winpath "$PWD/$OUT_DIR/AgentMonitor-${VERSION}-setup.exe")" \

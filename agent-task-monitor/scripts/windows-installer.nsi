@@ -26,6 +26,9 @@ ManifestDPIAware true
 !ifndef EXE
   !error "请以 -DEXE=<agent-monitor.exe 路径> 调用"
 !endif
+!ifndef WSL_AGENT
+  !error "请以 -DWSL_AGENT=<无界面 Linux agent-monitor 路径> 调用"
+!endif
 ; 版本号只有一个来源：Cargo.toml 的 [workspace.package] version，由
 ; scripts/package-windows.sh 读出后 -DAPP_VERSION 传进来。这里**不留默认值**：
 ; 之前写死的 "0.7.3" 跟着近 50 个版本一动不动，装完在「添加/删除程序」里
@@ -101,6 +104,8 @@ Section "主程序（必装）" SecMain
   nsExec::Exec 'taskkill /F /IM "${APP_EXE}"'
   nsExec::Exec 'taskkill /F /IM "${APP_EXE_LEGACY}"'
   File "/oname=${APP_EXE}" "${EXE}"
+  ; Windows 主程序自动把这份 Linux ELF 安装并保活到用户的 WSL 发行版里。
+  File "/oname=agent-monitor-wsl" "${WSL_AGENT}"
   ; 过渡兼容：旧版客户端的静默更新脚本按旧中文名重启，保留一个同内容副本；
   ; 旧「开机自启」注册表项指向旧名时也能继续工作。后续版本可移除。
   CopyFiles /SILENT "$INSTDIR\${APP_EXE}" "$INSTDIR\${APP_EXE_LEGACY}"
@@ -156,6 +161,7 @@ Section "Uninstall"
   nsExec::Exec 'taskkill /F /IM "${APP_EXE_LEGACY}"'
   Delete "$INSTDIR\${APP_EXE}"
   Delete "$INSTDIR\${APP_EXE_LEGACY}"
+  Delete "$INSTDIR\agent-monitor-wsl"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
   Delete "$DESKTOP\${APP_NAME}.lnk"

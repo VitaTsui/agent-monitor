@@ -128,5 +128,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Windows 安装包内携带的 WSL 采集端关闭 desktop/Tauri；这条形态会编译 Linux 专属的
+      # WSL root 输入代理，默认桌面构建覆盖不到它。
+      - name: WSL 无界面采集端检查
+        if: startsWith(matrix.os, 'ubuntu')
+        run: cargo check -p am-client --no-default-features
+
       - name: 测试
         run: cargo test --workspace

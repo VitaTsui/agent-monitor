@@ -13,7 +13,7 @@ path = "src/main.rs"
 [features]
 # 桌面 GUI（窗口 + 托盘）。默认开启；纯后台构建可 --no-default-features。
 default = ["desktop"]
-desktop = []
+desktop = ["dep:tauri", "dep:tauri-build"]
 
 [dependencies]
 am-core.workspace = true
@@ -33,10 +33,10 @@ base64 = "0.22"
 sha2 = "0.10"
 # 监听会话目录：文件一变（用户发了任务）立即扫描上报，不必等被系统节流的轮询定时器
 notify = "6"
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon"], optional = true }
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2", features = [], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
