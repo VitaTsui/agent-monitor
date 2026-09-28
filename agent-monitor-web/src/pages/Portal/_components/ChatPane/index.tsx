@@ -253,7 +253,7 @@ const ChatPane: React.FC<ChatPaneProps> = observer((props) => {
   /* 这台机器是不是别人共享给我的。是的话文件类接口（列目录/读文件/上传）后端一律
      403 —— 入口亮着等于请君入瓮，所以直接进下面的 `filePaneUsable` 与 Composer。
      判据是 `/monitor/devices` 的 `shared` 字段，不是等 403 回来再反推（见 PortalStore）。 */
-  const deviceShared = PortalStore.isSharedDevice(task.machineId);
+  const deviceShared = PortalStore.isSharedDevice(task.deviceId || task.machineId);
   /* 这一格的文件查看器。开关与右栏同一条规矩：**每格一份**、摆不下就置灰不渲染。
      紧凑卡片与窄屏不给：那两处连第二列都摆不下。 */
   const filePaneUsable =

@@ -220,7 +220,10 @@ interface IPortalTaskData {
    * 跟随 —— 表现为 `/clear` 之后网页永远停在清空前的旧会话，刷新页面才恢复。
    */
   supersedes?: string;
+  /** 实际执行命令的采集运行端 ID；普通设备等于 deviceId，WSL 时是内部运行端 ID */
   machineId: string;
+  /** 页面归属的物理设备 ID；WSL 会话据此归入 Windows 设备下的 Codex 分类 */
+  deviceId: string;
   hostname: string;
   platform: string;
   platformDsr: string;
@@ -489,6 +492,8 @@ interface IHistorySession {
   project: string;
   projectName: string;
   machineId: string;
+  /** 页面归属的物理设备 ID；命令路由仍使用 machineId */
+  deviceId: string;
   hostname: string;
   platform: string;
   platformDsr: string;

@@ -261,7 +261,9 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/pair/start", post(pair_start))
         .route("/monitor/pair/claim", post(pair_claim))
         .route("/monitor/pair/status", get(pair_status))
-        .route("/monitor/child-device/bind", post(child_device_bind))
+        .route("/monitor/runtime/bind", post(runtime_bind))
+        // 升级窗口兼容旧 Windows 客户端；两条路最终都落到“内部运行端”模型。
+        .route("/monitor/child-device/bind", post(runtime_bind))
         // ---- agent → hub 上报 ----
         // 单独放宽体积上限：axum 默认 2MB，一台机器会话多、消息长时很容易顶到，
         // 一旦 413 该设备就再也同步不上来了。
@@ -464,41 +466,43 @@ async fn pair_status(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ChildDeviceBindReq {
-    parent_machine_id: String,
-    machine_id: String,
+struct RuntimeBindReq {
+    #[serde(alias = "parentMachineId")]
+    host_machine_id: String,
+    #[serde(alias = "machineId")]
+    runtime_id: String,
     hostname: String,
     platform: String,
     version: String,
 }
 
-/// POST /monitor/child-device/bind —— 已绑定客户端为自己托管的运行环境领子设备令牌。
-/// 当前唯一调用方是 Windows 客户端启动的 WSL Linux 采集端。
-async fn child_device_bind(
+/// POST /monitor/runtime/bind —— 已绑定物理设备为内部采集运行端领取令牌。
+/// 运行端只用于鉴权和命令路由，不会成为页面上的独立设备。
+async fn runtime_bind(
     State(state): State<SharedState>,
     headers: HeaderMap,
-    Json(req): Json<ChildDeviceBindReq>,
+    Json(req): Json<RuntimeBindReq>,
 ) -> Json<Value> {
     let parent_token = headers
         .get("x-device-token")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if req.parent_machine_id.trim().is_empty() || req.machine_id.trim().is_empty() {
-        return err(400, "缺少父设备或子设备 machineId");
+    if req.host_machine_id.trim().is_empty() || req.runtime_id.trim().is_empty() {
+        return err(400, "缺少物理设备 ID 或运行端 ID");
     }
     if parent_token.is_empty()
         || !state
             .registry
             .read()
             .await
-            .verify_device_token(req.parent_machine_id.trim(), parent_token)
+            .verify_device_token(req.host_machine_id.trim(), parent_token)
     {
-        return err(401, "父设备令牌无效");
+        return err(401, "物理设备令牌无效");
     }
 
-    let result = state.registry.write().await.bind_child_device(
-        req.parent_machine_id.trim(),
-        req.machine_id.trim(),
+    let result = state.registry.write().await.bind_runtime(
+        req.host_machine_id.trim(),
+        req.runtime_id.trim(),
         req.hostname.trim(),
         req.platform.trim(),
         req.version.trim(),
@@ -904,7 +908,7 @@ async fn list_session_history(
                 return false;
             }
             if let Some(m) = &q.machine_id {
-                if !m.is_empty() && &t.machine_id != m {
+                if !m.is_empty() && &t.device_id != m {
                     return false;
                 }
             }
@@ -957,6 +961,7 @@ async fn list_session_history(
                 "project": t.project,
                 "projectName": t.project_name,
                 "machineId": t.machine_id,
+                "deviceId": t.device_id,
                 "hostname": t.hostname,
                 "platform": t.platform,
                 "platformDsr": t.platform_dsr,
@@ -3453,7 +3458,7 @@ async fn sync_configs(
 async fn report(
     State(state): State<SharedState>,
     headers: HeaderMap,
-    Json(payload): Json<ReportPayload>,
+    Json(mut payload): Json<ReportPayload>,
 ) -> Json<Value> {
     // 上报鉴权：agent 必须持有与 hub 相同的 X-Agent-Token，
     // 否则任何能连到端口的人都能伪造设备快照 / 窃取命令队列与待传文件
@@ -3508,6 +3513,29 @@ async fn report(
             &payload.platform,
             &payload.version,
         );
+    }
+
+    // 页面设备身份与上报运行端身份分开：普通客户端两者相同；WSL 运行端的任务归到
+    // Windows 物理设备下，但 MachineEntry 仍按 payload.machine_id 保存，命令才能回到 WSL。
+    let (device_id, device_meta) = {
+        let reg = state.registry.read().await;
+        let id = reg.physical_device_id(&payload.machine_id);
+        let meta = reg.device_meta(&id);
+        (id, meta)
+    };
+    let normalize_task = |t: &mut Task| {
+        t.device_id = device_id.clone();
+        if device_id != payload.machine_id {
+            t.hostname = device_meta.hostname.clone();
+            t.platform = device_meta.platform.clone();
+            t.platform_dsr = am_core::model::platform_dsr(&device_meta.platform);
+        }
+    };
+    if let Some(tasks) = payload.tasks.as_mut() {
+        tasks.iter_mut().for_each(&normalize_task);
+    }
+    if let Some(tasks) = payload.history_tasks.as_mut() {
+        tasks.iter_mut().for_each(&normalize_task);
     }
 
     // 钉钉推送：本次上报的归属者（用于状态变化推送）

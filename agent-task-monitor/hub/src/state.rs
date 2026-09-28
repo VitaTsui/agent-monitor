@@ -826,9 +826,11 @@ impl AppState {
             if !registry.can_view(id, username) {
                 continue;
             }
+            let device_id = registry.physical_device_id(id);
             let online = entry.last_report.elapsed().as_secs() < OFFLINE_AFTER_SECS;
             for t in &entry.tasks {
                 let mut t = t.clone();
+                t.device_id = device_id.clone();
                 if !online {
                     t.status = TaskStatus::Finished;
                     t.status_dsr = "已离线".into();
@@ -865,6 +867,7 @@ impl AppState {
             if !registry.can_view(id, username) {
                 continue;
             }
+            let device_id = registry.physical_device_id(id);
             let online = entry.last_report.elapsed().as_secs() < OFFLINE_AFTER_SECS;
             // **热列表优先**：同一个会话号可能同时出现在两张表里 —— 客户端每轮按
             // mtime 把会话分流给热列表/历史列表（disjoint），但历史列表每 30 秒才刷新
@@ -878,6 +881,7 @@ impl AppState {
                 &mut seen,
             ) {
                 let mut t = t.clone();
+                t.device_id = device_id.clone();
                 if !online {
                     t.status = TaskStatus::Finished;
                     t.status_dsr = "已离线".into();
@@ -894,48 +898,24 @@ impl AppState {
     pub async fn devices_for(&self, username: &str) -> Vec<MachineInfo> {
         let machines = self.machines.read().await;
         let registry = self.registry.read().await;
-        let mut out: Vec<MachineInfo> = machines
-            .iter()
-            .filter(|(id, _)| registry.owned_by(id, username))
-            .map(|(id, e)| {
-                let online = e.last_report.elapsed().as_secs() < OFFLINE_AFTER_SECS;
-                let meta = registry.device_meta(id);
-                MachineInfo {
-                    id: id.clone(),
-                    hostname: e.hostname.clone(),
-                    platform: e.platform.clone(),
-                    platform_dsr: am_core::model::platform_dsr(&e.platform),
-                    version: e.version.clone(),
-                    online,
-                    is_hub: e.is_hub,
-                    last_report_at: None,
-                    // 与侧栏设备计数一致：只数活跃会话（非 Finished），否则 7 天窗口里
-                    // 堆积的已结束会话会把「会话数」撑到几十条，跟左侧对不上。
-                    session_count: e
-                        .tasks
-                        .iter()
-                        .filter(|t| t.status != TaskStatus::Finished)
-                        .count(),
-                    running_count: e
-                        .tasks
-                        .iter()
-                        .filter(|t| online && t.status == TaskStatus::Running)
-                        .count(),
-                    owner: meta.owner,
-                    trusted: meta.trusted,
-                    shared: false,
-                    providers: providers_of(e.tasks.iter().chain(e.history_tasks.iter())),
-                }
-            })
-            .collect();
-        // 注册表兜底：hub 重启后实时表是空的，未在上报的设备（关机/客户端未开）
-        // 也必须留在列表里 —— 否则设备会随每次发版「凭空消失」，
-        // 用户既看不到它、也无法对它撤销信任或删除。
-        for (id, meta) in registry.devices_of(username) {
-            if machines.contains_key(&id) {
-                continue;
-            }
-            let last = (meta.last_seen > 0).then(|| {
+        let info = |id: String, meta: crate::registry::DeviceMeta, shared: bool| {
+            // 一台物理设备可以有多个采集运行端（Windows 本身 + 若干 WSL）。页面只出一台
+            // 设备，但会话、运行数和 provider 必须把这些运行端合起来。
+            let sources: Vec<&MachineEntry> = machines
+                .iter()
+                .filter(|(runtime_id, _)| registry.physical_device_id(runtime_id) == id)
+                .map(|(_, entry)| entry)
+                .collect();
+            let primary = machines.get(&id);
+            let online = sources
+                .iter()
+                .any(|e| e.last_report.elapsed().as_secs() < OFFLINE_AFTER_SECS);
+            let providers = providers_of(
+                sources
+                    .iter()
+                    .flat_map(|e| e.tasks.iter().chain(e.history_tasks.iter())),
+            );
+            let last_report_at = (!online && meta.last_seen > 0).then(|| {
                 chrono::DateTime::from_timestamp(meta.last_seen as i64, 0)
                     .map(|t| {
                         t.with_timezone(&chrono::Local)
@@ -944,76 +924,68 @@ impl AppState {
                     })
                     .unwrap_or_default()
             });
-            out.push(MachineInfo {
-                hostname: if meta.hostname.is_empty() {
-                    id.clone()
-                } else {
-                    meta.hostname.clone()
-                },
-                platform_dsr: am_core::model::platform_dsr(&meta.platform),
-                platform: meta.platform.clone(),
-                version: meta.version.clone(),
-                online: false,
-                is_hub: false,
-                last_report_at: last,
-                session_count: 0,
-                running_count: 0,
+            MachineInfo {
+                hostname: primary
+                    .map(|e| e.hostname.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        if meta.hostname.is_empty() {
+                            id.clone()
+                        } else {
+                            meta.hostname.clone()
+                        }
+                    }),
+                platform: primary
+                    .map(|e| e.platform.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| meta.platform.clone()),
+                platform_dsr: am_core::model::platform_dsr(
+                    primary
+                        .map(|e| e.platform.as_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(&meta.platform),
+                ),
+                version: primary
+                    .map(|e| e.version.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| meta.version.clone()),
+                online,
+                is_hub: primary.is_some_and(|e| e.is_hub),
+                last_report_at,
+                session_count: sources
+                    .iter()
+                    .flat_map(|e| e.tasks.iter())
+                    .filter(|t| t.status != TaskStatus::Finished)
+                    .count(),
+                running_count: sources
+                    .iter()
+                    .filter(|e| e.last_report.elapsed().as_secs() < OFFLINE_AFTER_SECS)
+                    .flat_map(|e| e.tasks.iter())
+                    .filter(|t| t.status == TaskStatus::Running)
+                    .count(),
                 owner: meta.owner.clone(),
-                trusted: meta.trusted,
-                shared: false,
-                // 本 hub 生命周期内它一次都没上报过（关机 / 客户端没开），
-                // 手里没有任何会话可数 —— 空数组，不是「没有会话」而是「还不知道」。
-                providers: Vec::new(),
+                trusted: if shared { true } else { meta.trusted },
+                shared,
+                providers,
                 id,
-            });
-        }
+            }
+        };
+
+        // 数据源只取物理设备；内部运行端由上面的 sources 聚合，不进入设备下拉框。
+        // 注册表同时承担离线兜底，因此 hub 重启或设备关机后也不会凭空消失。
+        let mut out: Vec<MachineInfo> = registry
+            .devices_of(username)
+            .into_iter()
+            .map(|(id, meta)| info(id, meta, false))
+            .collect();
+
         // 协助码共享给我的（他人）设备：作为只读+可控条目并入列表
         let mine: std::collections::HashSet<String> = out.iter().map(|m| m.id.clone()).collect();
         for (id, meta) in registry.shared_to(username) {
             if mine.contains(&id) {
                 continue;
             }
-            let live = machines.get(&id);
-            let online = live
-                .map(|e| e.last_report.elapsed().as_secs() < OFFLINE_AFTER_SECS)
-                .unwrap_or(false);
-            out.push(MachineInfo {
-                hostname: if meta.hostname.is_empty() {
-                    id.clone()
-                } else {
-                    meta.hostname.clone()
-                },
-                platform_dsr: am_core::model::platform_dsr(&meta.platform),
-                platform: meta.platform.clone(),
-                version: meta.version.clone(),
-                online,
-                is_hub: false,
-                last_report_at: None,
-                session_count: live
-                    .map(|e| {
-                        e.tasks
-                            .iter()
-                            .filter(|t| t.status != TaskStatus::Finished)
-                            .count()
-                    })
-                    .unwrap_or(0),
-                running_count: live
-                    .map(|e| {
-                        e.tasks
-                            .iter()
-                            .filter(|t| online && t.status == TaskStatus::Running)
-                            .count()
-                    })
-                    .unwrap_or(0),
-                owner: meta.owner.clone(),
-                trusted: true,
-                shared: true,
-                // 协助码共享给我的设备：它没上报到我这边时同样只能给空数组
-                providers: live
-                    .map(|e| providers_of(e.tasks.iter().chain(e.history_tasks.iter())))
-                    .unwrap_or_default(),
-                id,
-            });
+            out.push(info(id, meta, true));
         }
         out.sort_by(|a, b| {
             b.is_hub
@@ -1156,6 +1128,57 @@ mod dedup_tests {
         let b = dedup_by_id(m2.iter(), &mut seen);
         assert_eq!(a.len(), 1);
         assert!(b.is_empty(), "第二台机器上的同号会话不再出一条");
+    }
+
+    #[tokio::test]
+    async fn wsl_runtime_is_merged_into_windows_device_but_keeps_routing_id() {
+        let dir = std::env::temp_dir().join(format!("am-wsl-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut registry = Registry::load(dir.clone(), "admin", "admin123");
+        registry.bind_device("win-1", "admin");
+        registry
+            .bind_runtime("win-1", "win-1-wsl-ubuntu", "PC / WSL Ubuntu", "linux", "1")
+            .unwrap();
+        registry.update_device_info("win-1", "PC", "windows", "1");
+        let private_key = RsaPrivateKey::new(&mut rand::thread_rng(), 1024).unwrap();
+        let state = AppState::new(
+            Config {
+                port: 0,
+                crypto_key: String::new(),
+                private_key,
+                data_dir: dir,
+                admin_token: String::new(),
+                agent_token: String::new(),
+            },
+            registry,
+        );
+        let mut runtime_task = task("wsl-session", Some(42));
+        runtime_task.provider = "codex".into();
+        runtime_task.provider_dsr = "Codex".into();
+        runtime_task.machine_id = "win-1-wsl-ubuntu".into();
+        state
+            .machines
+            .write()
+            .await
+            .insert("win-1-wsl-ubuntu".into(), {
+                let mut entry =
+                    MachineEntry::new("PC / WSL Ubuntu".into(), "linux".into(), "1".into());
+                entry.tasks.push(runtime_task);
+                entry
+            });
+
+        let devices = state.devices_for("admin").await;
+        assert_eq!(devices.len(), 1, "WSL 运行端不能单列成设备");
+        assert_eq!(devices[0].id, "win-1");
+        assert_eq!(devices[0].platform, "windows");
+        assert!(devices[0].providers.iter().any(|p| p.provider == "codex"));
+
+        let tasks = state.tasks_for("admin").await;
+        assert_eq!(tasks[0].device_id, "win-1", "页面归到 Windows 设备");
+        assert_eq!(
+            tasks[0].machine_id, "win-1-wsl-ubuntu",
+            "控制命令仍路由到 WSL"
+        );
     }
 }
 

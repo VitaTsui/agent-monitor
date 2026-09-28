@@ -2,28 +2,28 @@
 //!
 //! Windows 进程无法读取 WSL 的 Linux 进程表、TTY 与信号。这里不把 WSL 会话文件硬塞进
 //! Windows 扫描器，而是在每个真实 WSL 发行版内启动同版本的无界面 am-client：文件、进程、
-//! 控制和输入都留在所属内核中处理，Windows 端只负责安装、签发子设备令牌与保活。
+//! 控制和输入都留在所属内核中处理，Windows 端只负责安装、签发运行端令牌与保活。
 
 #![cfg(windows)]
 
 use crate::state::SharedState;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::Write;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const SUPERVISE_INTERVAL_SECS: u64 = 30;
 
+/// 安装、更新令牌和宿主心跳，只判断采集端是否需要启动。这里故意不在 WSL 内后台启动：
+/// 当启动它的 `wsl.exe` 退出且发行版没有别的前台进程时，WSL 会把后台进程一起回收。
 const INSTALL_SCRIPT: &str = r#"
 set -eu
 src=$1
-hub=$2
-machine=$3
-display=$4
-version=$5
+version=$2
 data=${XDG_DATA_HOME:-$HOME/.local/share}/AgentMonitor
 bin_dir=$data/bin
 bin=$bin_dir/agent-monitor-wsl
@@ -65,25 +65,65 @@ if [ "$installed" != "$version" ] || [ ! -x "$bin" ]; then
   printf '%s' "$version" > "$version_file"
 fi
 
-if [ "$running" = 0 ]; then
-  nohup env \
-    AM_HEADLESS=1 \
-    AM_NO_TRAY=1 \
-    AM_HUB_URL="$hub" \
-    AM_MACHINE_ID="$machine" \
-    AM_DEVICE_NAME="$display" \
-    AM_DATA_DIR="$data" \
-    AM_PARENT_HEARTBEAT="$parent_heartbeat" \
-    "$bin" >> "$data/wsl-agent.log" 2>&1 </dev/null &
-  printf '%s' "$!" > "$pid_file"
+if [ "$running" = 1 ]; then
+  printf 'running\n'
+else
+  rm -f "$pid_file"
+  printf 'start\n'
 fi
 "#;
+
+/// 采集端作为 `wsl.exe` 的前台进程运行。Windows 客户端持有 Child，退出会被发现并重启。
+const RUN_SCRIPT: &str = r#"
+set -eu
+hub=$1
+machine=$2
+display=$3
+data=${XDG_DATA_HOME:-$HOME/.local/share}/AgentMonitor
+bin=$data/bin/agent-monitor-wsl
+pid_file=$data/wsl-agent.pid
+parent_heartbeat=$data/windows-parent.heartbeat
+mkdir -p "$data"
+touch "$parent_heartbeat"
+printf '%s' "$$" > "$pid_file"
+exec env \
+  AM_HEADLESS=1 \
+  AM_NO_TRAY=1 \
+  AM_HUB_URL="$hub" \
+  AM_MACHINE_ID="$machine" \
+  AM_DEVICE_NAME="$display" \
+  AM_DATA_DIR="$data" \
+  AM_PARENT_HEARTBEAT="$parent_heartbeat" \
+  "$bin" >> "$data/wsl-agent.log" 2>&1 </dev/null
+"#;
+
+struct ManagedRuntime {
+    child: Child,
+}
+
+impl Drop for ManagedRuntime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+    }
+}
 
 pub fn spawn_supervisor(state: SharedState, hub: String) {
     tokio::spawn(async move {
         let mut last_error: Option<String> = None;
+        let mut runtimes: HashMap<String, ManagedRuntime> = HashMap::new();
         loop {
-            match supervise_once(&state, &hub).await {
+            runtimes.retain(|distro, runtime| match runtime.child.try_wait() {
+                Ok(None) => true,
+                Ok(Some(status)) => {
+                    tracing::warn!("WSL {distro} 采集运行端退出（{status}），稍后重启");
+                    false
+                }
+                Err(e) => {
+                    tracing::warn!("无法读取 WSL {distro} 采集运行端状态: {e}");
+                    false
+                }
+            });
+            match supervise_once(&state, &hub, &mut runtimes).await {
                 Ok(()) => last_error = None,
                 Err(e) => {
                     if last_error.as_deref() != Some(e.as_str()) {
@@ -97,10 +137,14 @@ pub fn spawn_supervisor(state: SharedState, hub: String) {
     });
 }
 
-async fn supervise_once(state: &SharedState, hub: &str) -> Result<(), String> {
+async fn supervise_once(
+    state: &SharedState,
+    hub: &str,
+    runtimes: &mut HashMap<String, ManagedRuntime>,
+) -> Result<(), String> {
     let source = helper_source()
         .ok_or_else(|| "安装目录缺少 agent-monitor-wsl；当前安装包不含 WSL 采集端".to_string())?;
-    let parent_token = state
+    let host_token = state
         .device_token
         .read()
         .await
@@ -120,7 +164,8 @@ async fn supervise_once(state: &SharedState, hub: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let mut errors = Vec::new();
     for distro in distros {
-        if let Err(e) = supervise_distro(state, &client, hub, &source, &parent_token, &distro).await
+        if let Err(e) =
+            supervise_distro(state, &client, hub, &source, &host_token, &distro, runtimes).await
         {
             errors.push(e);
         }
@@ -137,32 +182,33 @@ async fn supervise_distro(
     client: &reqwest::Client,
     hub: &str,
     source: &Path,
-    parent_token: &str,
+    host_token: &str,
     distro: &str,
+    runtimes: &mut HashMap<String, ManagedRuntime>,
 ) -> Result<(), String> {
-    let child_id = child_machine_id(&state.config.machine_id, distro);
-    let display = format!("{} · WSL {distro}", state.config.hostname);
+    let runtime_id = runtime_id(&state.config.machine_id, distro);
+    let display = format!("{} / WSL {distro}", state.config.hostname);
     let body = serde_json::json!({
-        "parentMachineId": state.config.machine_id,
-        "machineId": child_id,
+        "hostMachineId": state.config.machine_id,
+        "runtimeId": runtime_id,
         "hostname": display,
         "platform": "linux",
         "version": env!("CARGO_PKG_VERSION"),
     });
     let response = client
-        .post(format!("{hub}/monitor/child-device/bind"))
-        .header("x-device-token", parent_token)
+        .post(format!("{hub}/monitor/runtime/bind"))
+        .header("x-device-token", host_token)
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("{distro}: 子设备绑定请求失败: {e}"))?;
+        .map_err(|e| format!("{distro}: 运行端绑定请求失败: {e}"))?;
     let value: Value = response
         .json()
         .await
-        .map_err(|e| format!("{distro}: 子设备绑定响应损坏: {e}"))?;
+        .map_err(|e| format!("{distro}: 运行端绑定响应损坏: {e}"))?;
     if value.get("code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
         return Err(format!(
-            "{distro}: 子设备绑定被拒绝: {}",
+            "{distro}: 运行端绑定被拒绝: {}",
             value
                 .get("msg")
                 .and_then(Value::as_str)
@@ -172,24 +218,23 @@ async fn supervise_distro(
     let token = value
         .pointer("/data/deviceToken")
         .and_then(Value::as_str)
-        .ok_or_else(|| format!("{distro}: 子设备绑定响应缺少令牌"))?
+        .ok_or_else(|| format!("{distro}: 运行端绑定响应缺少令牌"))?
         .to_string();
     let source = source.to_path_buf();
-    let hub = hub.to_string();
-    let distro_for_run = distro.to_string();
-    let display_for_run = display.clone();
-    tokio::task::spawn_blocking(move || {
-        install_and_start(
-            &distro_for_run,
-            &source,
-            &hub,
-            &child_id,
-            &display_for_run,
-            &token,
-        )
+    let distro_for_install = distro.to_string();
+    let needs_start = tokio::task::spawn_blocking(move || {
+        install_and_prepare(&distro_for_install, &source, &token)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    if needs_start {
+        // 安装脚本可能刚因版本升级杀掉旧 Linux 进程；此时 map 里的 wsl.exe 句柄要到
+        // 下一轮才会被 retain 发现已退出。现在就移除并重启，避免产生 30 秒离线窗口。
+        runtimes.remove(distro);
+        let child = start_runtime(distro, hub, &runtime_id, &display)?;
+        runtimes.insert(distro.to_string(), ManagedRuntime { child });
+    }
+    Ok(())
 }
 
 fn helper_source() -> Option<PathBuf> {
@@ -207,8 +252,6 @@ fn helper_source() -> Option<PathBuf> {
 
 fn list_distros() -> Result<Vec<String>, String> {
     let out = hidden(Command::new("wsl.exe"))
-        // 只接管已经启动的发行版；为了“监控”而把用户所有休眠发行版逐个唤醒，会常驻吃内存。
-        // 新发行版一旦被用户打开，最多一个检查周期就会被发现。
         .args(["--list", "--running", "--quiet"])
         .output()
         .map_err(|e| format!("无法执行 wsl.exe: {e}"))?;
@@ -222,20 +265,12 @@ fn list_distros() -> Result<Vec<String>, String> {
         .lines()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        // Docker Desktop 自己的系统发行版不承载用户终端会话，启动采集端只会制造噪音。
         .filter(|s| !s.to_ascii_lowercase().starts_with("docker-desktop"))
         .map(str::to_string)
         .collect())
 }
 
-fn install_and_start(
-    distro: &str,
-    source: &Path,
-    hub: &str,
-    machine_id: &str,
-    display: &str,
-    token: &str,
-) -> Result<(), String> {
+fn install_and_prepare(distro: &str, source: &Path, token: &str) -> Result<bool, String> {
     let source_wsl = windows_path_to_wsl(distro, source)?;
     let mut child = hidden(Command::new("wsl.exe"))
         .args([
@@ -247,9 +282,6 @@ fn install_and_start(
             INSTALL_SCRIPT,
             "wsl-agent-install",
             &source_wsl,
-            hub,
-            machine_id,
-            display,
             env!("CARGO_PKG_VERSION"),
         ])
         .stdin(Stdio::piped())
@@ -271,7 +303,37 @@ fn install_and_start(
             decode_output(&out.stderr).trim()
         ));
     }
-    Ok(())
+    match decode_output(&out.stdout).trim() {
+        "running" => Ok(false),
+        "start" => Ok(true),
+        other => Err(format!("{distro}: 安装脚本返回未知状态: {other}")),
+    }
+}
+
+fn start_runtime(
+    distro: &str,
+    hub: &str,
+    machine_id: &str,
+    display: &str,
+) -> Result<Child, String> {
+    hidden(Command::new("wsl.exe"))
+        .args([
+            "--distribution",
+            distro,
+            "--exec",
+            "sh",
+            "-c",
+            RUN_SCRIPT,
+            "wsl-agent-run",
+            hub,
+            machine_id,
+            display,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{distro}: 无法启动 WSL 采集运行端: {e}"))
 }
 
 fn windows_path_to_wsl(distro: &str, path: &Path) -> Result<String, String> {
@@ -296,7 +358,7 @@ fn windows_path_to_wsl(distro: &str, path: &Path) -> Result<String, String> {
     }
 }
 
-fn child_machine_id(parent: &str, distro: &str) -> String {
+fn runtime_id(host: &str, distro: &str) -> String {
     let suffix: String = distro
         .chars()
         .map(|c| {
@@ -307,11 +369,9 @@ fn child_machine_id(parent: &str, distro: &str) -> String {
             }
         })
         .collect();
-    // 只做字符替换会碰撞：`Ubuntu 22.04` 与 `Ubuntu-22.04` 会得到同一个 id，两边上报
-    // 就会互相覆盖。追加原名哈希，把展示友好与身份唯一两件事同时保住。
     let digest = Sha256::digest(distro.as_bytes());
     let short_hash = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
-    format!("{parent}-wsl-{}-{short_hash:08x}", suffix.trim_matches('-'))
+    format!("{host}-wsl-{}-{short_hash:08x}", suffix.trim_matches('-'))
 }
 
 fn hidden(mut cmd: Command) -> Command {
@@ -346,10 +406,10 @@ mod tests {
     }
 
     #[test]
-    fn child_id_is_stable_and_safe() {
-        let id = child_machine_id("desktop-123", "Ubuntu 22.04");
+    fn runtime_id_is_stable_and_safe() {
+        let id = runtime_id("desktop-123", "Ubuntu 22.04");
         assert!(id.starts_with("desktop-123-wsl-ubuntu-22-04-"));
-        assert_eq!(id, child_machine_id("desktop-123", "Ubuntu 22.04"));
-        assert_ne!(id, child_machine_id("desktop-123", "Ubuntu-22.04"));
+        assert_eq!(id, runtime_id("desktop-123", "Ubuntu 22.04"));
+        assert_ne!(id, runtime_id("desktop-123", "Ubuntu-22.04"));
     }
 }

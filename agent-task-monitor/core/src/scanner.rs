@@ -1580,6 +1580,7 @@ pub fn build_tasks(
         tasks.push(Task {
             id: s.session_id.clone(),
             machine_id: String::new(),
+            device_id: String::new(),
             hostname: String::new(),
             platform: String::new(),
             platform_dsr: String::new(),
@@ -1674,6 +1675,7 @@ pub fn build_tasks(
             // id 用 pid- 前缀：attach_machine 会给它加机器前缀防跨机冲突
             id: format!("pid-{}", p.pid),
             machine_id: String::new(),
+            device_id: String::new(),
             hostname: String::new(),
             platform: String::new(),
             platform_dsr: String::new(),

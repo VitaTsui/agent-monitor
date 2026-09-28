@@ -340,6 +340,13 @@ pub struct Task {
     /// 所属机器 ID
     #[serde(default)]
     pub machine_id: String,
+    /// 页面归属的物理设备 ID。
+    ///
+    /// 通常与 `machine_id` 相同。WSL 采集端是 Windows 客户端托管的内部运行端：
+    /// `machine_id` 保留运行端 ID，供 Hub 把控制命令发回正确内核；`device_id` 指向
+    /// Windows 物理设备，供页面把会话放进该设备的 Codex / Claude 分类。
+    #[serde(default)]
+    pub device_id: String,
     /// 所属机器主机名
     #[serde(default)]
     pub hostname: String,
