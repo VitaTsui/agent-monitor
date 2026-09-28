@@ -71,6 +71,10 @@ const WS_RETRY_MS = [1000, 2000, 5000, 10000];
  */
 const POLL_MS = 2000;
 
+/** 会话在页面上属于哪台物理设备；老 Hub 没有 deviceId 时保持原行为。 */
+const taskDeviceId = (t: PortalTaskData | HistorySession) =>
+  t.deviceId || t.machineId || t.hostname || "unknown";
+
 /**
  * 一个「客户端」= 一台机器上的一个终端程序。
  *
@@ -688,7 +692,7 @@ class PortalStore {
     /** 会话（活跃的 / 历史的）那一侧的入口：字段名一样，缺省口径也一样 */
     const ensureOf = (t: PortalTaskData | HistorySession): string =>
       ensure(
-        t.machineId || t.hostname || "unknown",
+        taskDeviceId(t),
         t.provider || "unknown",
         // `desktop` 是契约的一部分，热路径与历史两边都下发。**不给兜底** ——
         // 缺了就是后端的 bug，该暴露出来，不该在这儿遮成「按 CLI 算」
@@ -713,7 +717,7 @@ class PortalStore {
 
     /** 这条会话属于选中的那台设备吗。不属于就不进这一列 */
     const mine = (t: PortalTaskData | HistorySession) =>
-      (t.machineId || t.hostname || "unknown") === mid;
+      taskDeviceId(t) === mid;
 
     /**
      * 这条 CLI 会话的终端**还开着吗**。
@@ -1053,10 +1057,9 @@ class PortalStore {
     if (code === 500) {
       return "offline";
     }
-    const machineId =
-      this._tasks.find((t) => t.id === id)?.machineId ??
-      this._histById[id]?.machineId ??
-      "";
+    const machineId = taskDeviceId(
+      this._tasks.find((t) => t.id === id) ?? this._histById[id] ?? {},
+    );
     if (
       machineId &&
       this._devices.some((d) => d.id === machineId && !d.online)

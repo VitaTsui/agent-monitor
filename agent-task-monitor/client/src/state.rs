@@ -804,6 +804,7 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
 pub fn attach_machine(tasks: &mut [Task], machine_id: &str, hostname: &str, platform: &str) {
     for t in tasks.iter_mut() {
         t.machine_id = machine_id.to_string();
+        t.device_id = machine_id.to_string();
         t.hostname = hostname.to_string();
         t.platform = platform.to_string();
         t.platform_dsr = am_core::model::platform_dsr(platform);

@@ -98,13 +98,10 @@ pub struct DeviceMeta {
     /// 有它就不需要管理员发放全局令牌 —— 注册 + 安装即可用。
     #[serde(default)]
     pub device_token: Option<String>,
-    /// 自动托管此设备的父设备。当前用于 Windows 客户端在 WSL 内启动的 Linux 采集端。
-    /// 子设备的归属和信任跟随父设备，父设备删除后子设备令牌立即失效。
-    #[serde(default)]
-    pub parent_machine_id: Option<String>,
-    /// 用户主动删除过的自动托管子设备。保留墓碑，防 Windows 端下一次 30 秒保活又把它建回来。
-    #[serde(default)]
-    pub disabled_child_ids: Vec<String>,
+    /// 托管此采集运行端的物理设备。当前用于 Windows 内的 WSL Linux 采集端。
+    /// 有值的条目只负责鉴权和命令路由，不是页面上的独立设备；归属和信任跟随宿主。
+    #[serde(default, alias = "parent_machine_id")]
+    pub host_machine_id: Option<String>,
     /// 以下为展示信息（随上报刷新并持久化）：设备离线或 hub 重启后，
     /// 设备管理列表仍能显示这台机器，而不是从列表里凭空消失。
     #[serde(default)]
@@ -436,93 +433,75 @@ impl Registry {
         // 设备管理里的「撤销信任」保留，用于事后关停某台设备的监控。
         entry.trusted = true;
         entry.device_token = Some(token.clone());
-        entry.parent_machine_id = None;
-        entry.disabled_child_ids.clear();
-        // 父设备重新绑定账号时，自动托管的 WSL 子设备必须一起迁移；否则旧账号仍能
-        // 看到子设备，或者子设备拿着有效令牌却没有正确归属。
-        for child in self.devices.values_mut() {
-            if child.parent_machine_id.as_deref() == Some(machine_id) {
-                child.owner = Some(owner.to_string());
-                child.trusted = true;
+        entry.host_machine_id = None;
+        // 物理设备重新绑定账号时，内部 WSL 运行端必须一起迁移；否则旧账号仍能通过
+        // 运行端令牌访问会话。
+        for runtime in self.devices.values_mut() {
+            if runtime.host_machine_id.as_deref() == Some(machine_id) {
+                runtime.owner = Some(owner.to_string());
+                runtime.trusted = true;
             }
         }
         self.save();
         token
     }
 
-    /// 给已绑定设备自动托管的子设备签发令牌。重复调用沿用原令牌，客户端可以安全地
-    /// 每次启动都执行一次，不会让正在运行的 WSL 采集端突然掉线。
-    pub fn bind_child_device(
+    /// 给物理设备内部的采集运行端签发令牌。运行端不是页面设备；独立 ID 只用于把
+    /// 命令和文件请求送回正确内核。重复调用沿用原令牌。
+    pub fn bind_runtime(
         &mut self,
-        parent_machine_id: &str,
-        child_machine_id: &str,
+        host_machine_id: &str,
+        runtime_id: &str,
         hostname: &str,
         platform: &str,
         version: &str,
     ) -> Result<String, String> {
-        if parent_machine_id == child_machine_id {
-            return Err("子设备 machineId 不能与父设备相同".into());
+        if host_machine_id == runtime_id {
+            return Err("运行端 ID 不能与物理设备 ID 相同".into());
         }
-        if !child_machine_id.starts_with(&format!("{parent_machine_id}-wsl-")) {
-            return Err("WSL 子设备 machineId 不属于该父设备".into());
+        if !runtime_id.starts_with(&format!("{host_machine_id}-wsl-")) {
+            return Err("WSL 运行端 ID 不属于该物理设备".into());
         }
-        let parent = self
+        let host = self
             .devices
-            .get(parent_machine_id)
+            .get(host_machine_id)
             .cloned()
-            .ok_or_else(|| "父设备不存在或已被删除".to_string())?;
-        if parent.parent_machine_id.is_some() {
-            return Err("子设备不能继续创建下级设备".into());
+            .ok_or_else(|| "物理设备不存在或已被删除".to_string())?;
+        if host.host_machine_id.is_some() {
+            return Err("采集运行端不能继续创建下级运行端".into());
         }
-        if parent
-            .disabled_child_ids
-            .iter()
-            .any(|id| id == child_machine_id)
-        {
-            return Err("该 WSL 子设备已被用户删除；请重新绑定父设备后再启用".into());
-        }
-        let owner = parent
+        let owner = host
             .owner
             .clone()
-            .ok_or_else(|| "父设备尚未绑定账号".to_string())?;
+            .ok_or_else(|| "物理设备尚未绑定账号".to_string())?;
 
-        if let Some(existing) = self.devices.get(child_machine_id) {
-            if existing.parent_machine_id.as_deref() != Some(parent_machine_id) {
-                return Err("子设备 machineId 已被其它设备占用".into());
+        if let Some(existing) = self.devices.get(runtime_id) {
+            if existing.host_machine_id.as_deref() != Some(host_machine_id) {
+                return Err("运行端 ID 已被其它设备占用".into());
             }
         } else if self
             .devices
             .values()
-            .filter(|d| d.parent_machine_id.as_deref() == Some(parent_machine_id))
+            .filter(|d| d.host_machine_id.as_deref() == Some(host_machine_id))
             .count()
             >= 32
         {
-            return Err("单台父设备最多托管 32 个 WSL 子设备".into());
+            return Err("单台设备最多托管 32 个 WSL 运行端".into());
         }
 
-        let entry = self
-            .devices
-            .entry(child_machine_id.to_string())
-            .or_default();
-        let is_new = entry.device_token.is_none();
-        let trusted = if is_new {
-            parent.trusted
-        } else {
-            // 子设备自己的“撤销信任”要有粘性；父设备不可信时则无条件跟着关闭。
-            entry.trusted && parent.trusted
-        };
+        let entry = self.devices.entry(runtime_id.to_string()).or_default();
         let token = entry.device_token.clone().unwrap_or_else(random_token32);
         let dirty = entry.owner.as_deref() != Some(owner.as_str())
-            || entry.trusted != trusted
+            || entry.trusted != host.trusted
             || entry.device_token.as_deref() != Some(token.as_str())
-            || entry.parent_machine_id.as_deref() != Some(parent_machine_id)
+            || entry.host_machine_id.as_deref() != Some(host_machine_id)
             || entry.hostname != hostname
             || entry.platform != platform
             || entry.version != version;
         entry.owner = Some(owner);
-        entry.trusted = trusted;
+        entry.trusted = host.trusted;
         entry.device_token = Some(token.clone());
-        entry.parent_machine_id = Some(parent_machine_id.to_string());
+        entry.host_machine_id = Some(host_machine_id.to_string());
         entry.hostname = hostname.to_string();
         entry.platform = platform.to_string();
         entry.version = version.to_string();
@@ -544,11 +523,11 @@ impl Registry {
         {
             return false;
         }
-        // 子设备不是独立授权主体：父设备一旦删除或换到别的账号，旧子令牌立即失效。
-        device.parent_machine_id.as_deref().is_none_or(|parent_id| {
+        // 内部运行端不是独立授权主体：物理设备一旦删除或换账号，旧令牌立即失效。
+        device.host_machine_id.as_deref().is_none_or(|host_id| {
             self.devices
-                .get(parent_id)
-                .is_some_and(|parent| parent.owner.is_some() && parent.owner == device.owner)
+                .get(host_id)
+                .is_some_and(|host| host.owner.is_some() && host.owner == device.owner)
         })
     }
 
@@ -823,11 +802,11 @@ impl Registry {
         self.config_source.retain(|_, v| v != machine_id);
     }
 
-    /// 该用户名下全部设备（含离线；设备管理列表用）
+    /// 该用户名下全部物理设备（含离线；设备管理列表用）。内部采集运行端不对外展示。
     pub fn devices_of(&self, username: &str) -> Vec<(String, DeviceMeta)> {
         self.devices
             .iter()
-            .filter(|(_, m)| m.owner.as_deref() == Some(username))
+            .filter(|(_, m)| m.owner.as_deref() == Some(username) && m.host_machine_id.is_none())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
@@ -957,7 +936,7 @@ impl Registry {
     pub fn device_count_of(&self, username: &str) -> usize {
         self.devices
             .values()
-            .filter(|d| d.owner.as_deref() == Some(username))
+            .filter(|d| d.owner.as_deref() == Some(username) && d.host_machine_id.is_none())
             .count()
     }
 
@@ -967,6 +946,14 @@ impl Registry {
 
     pub fn device_meta(&self, machine_id: &str) -> DeviceMeta {
         self.devices.get(machine_id).cloned().unwrap_or_default()
+    }
+
+    /// 上报运行端在页面上归属哪台物理设备。普通客户端返回自身；WSL 返回 Windows 宿主。
+    pub fn physical_device_id(&self, runtime_id: &str) -> String {
+        self.devices
+            .get(runtime_id)
+            .and_then(|m| m.host_machine_id.clone())
+            .unwrap_or_else(|| runtime_id.to_string())
     }
 
     /// 首次见到设备时登记；已存在则仅在其尚无 owner 时补认领者
@@ -1011,39 +998,38 @@ impl Registry {
     }
 
     pub fn set_trust(&mut self, machine_id: &str, trusted: bool) -> bool {
-        if let Some(d) = self.devices.get_mut(machine_id) {
-            d.trusted = trusted;
-            for child in self.devices.values_mut() {
-                if child.parent_machine_id.as_deref() == Some(machine_id) {
-                    child.trusted = trusted;
-                }
-            }
-            self.save();
-            true
-        } else {
-            false
+        let Some(device) = self.devices.get(machine_id) else {
+            return false;
+        };
+        // 运行端不是可单独管理的设备；即使旧客户端传了它的 ID，也只修改物理宿主。
+        let physical_id = device
+            .host_machine_id
+            .clone()
+            .unwrap_or_else(|| machine_id.to_string());
+        if let Some(physical) = self.devices.get_mut(&physical_id) {
+            physical.trusted = trusted;
         }
+        for runtime in self.devices.values_mut() {
+            if runtime.host_machine_id.as_deref() == Some(physical_id.as_str()) {
+                runtime.trusted = trusted;
+            }
+        }
+        self.save();
+        true
     }
 
     pub fn delete_device(&mut self, machine_id: &str) -> bool {
         let removed = self.devices.remove(machine_id);
-        if let Some(removed_meta) = removed {
-            if let Some(parent_id) = removed_meta.parent_machine_id {
-                if let Some(parent) = self.devices.get_mut(&parent_id) {
-                    if !parent.disabled_child_ids.iter().any(|id| id == machine_id) {
-                        parent.disabled_child_ids.push(machine_id.to_string());
-                    }
-                }
-            }
-            let child_ids: Vec<String> = self
+        if removed.is_some() {
+            let runtime_ids: Vec<String> = self
                 .devices
                 .iter()
-                .filter(|(_, d)| d.parent_machine_id.as_deref() == Some(machine_id))
+                .filter(|(_, d)| d.host_machine_id.as_deref() == Some(machine_id))
                 .map(|(id, _)| id.clone())
                 .collect();
-            for child_id in child_ids {
-                self.devices.remove(&child_id);
-                self.clear_config_source_of_device(&child_id);
+            for runtime_id in runtime_ids {
+                self.devices.remove(&runtime_id);
+                self.clear_config_source_of_device(&runtime_id);
             }
             // 它可能正是某账号的配置源：留着就是一个永远不再上报的来源，
             // 其余设备会一直显示「同步中」却等不到任何东西。
@@ -1060,8 +1046,13 @@ impl Registry {
     /// - 协助访客：通过协助码接入（主人显式共享，绕过信任判定）。
     pub fn can_view(&self, machine_id: &str, username: &str) -> bool {
         let m = self.device_meta(machine_id);
+        let physical = m
+            .host_machine_id
+            .as_deref()
+            .map(|id| self.device_meta(id))
+            .unwrap_or_else(|| m.clone());
         (m.trusted && m.owner.as_deref() == Some(username))
-            || m.shared_with.iter().any(|u| u == username)
+            || physical.shared_with.iter().any(|u| u == username)
     }
 
     /// 该设备的**文件系统**是否允许被指定用户访问（浏览目录 / 取文件 / 新建删除重命名）。
@@ -1218,7 +1209,9 @@ impl Registry {
     pub fn shared_to(&self, username: &str) -> Vec<(String, DeviceMeta)> {
         self.devices
             .iter()
-            .filter(|(_, m)| m.shared_with.iter().any(|u| u == username))
+            .filter(|(_, m)| {
+                m.host_machine_id.is_none() && m.shared_with.iter().any(|u| u == username)
+            })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
@@ -1409,37 +1402,33 @@ mod share_tests {
 }
 
 #[cfg(test)]
-mod child_device_tests {
+mod runtime_tests {
     use super::*;
 
     fn registry(tag: &str) -> Registry {
-        let dir = std::env::temp_dir().join(format!("am-child-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("am-runtime-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         Registry::load(dir, "admin", "admin123")
     }
 
     #[test]
-    fn child_reuses_token_and_follows_parent_trust() {
+    fn runtime_reuses_token_and_follows_host_trust() {
         let mut r = registry("trust");
         let parent_token = r.bind_device("win-1", "admin");
         assert!(r.verify_device_token("win-1", &parent_token));
         let first = r
-            .bind_child_device("win-1", "win-1-wsl-ubuntu", "PC · WSL Ubuntu", "linux", "1")
+            .bind_runtime("win-1", "win-1-wsl-ubuntu", "PC / WSL Ubuntu", "linux", "1")
             .unwrap();
         let second = r
-            .bind_child_device("win-1", "win-1-wsl-ubuntu", "PC · WSL Ubuntu", "linux", "2")
+            .bind_runtime("win-1", "win-1-wsl-ubuntu", "PC / WSL Ubuntu", "linux", "2")
             .unwrap();
         assert_eq!(first, second, "重复托管不能轮换正在使用的令牌");
-        assert!(r.can_view("win-1-wsl-ubuntu", "admin"));
-
-        assert!(r.set_trust("win-1-wsl-ubuntu", false));
-        r.bind_child_device("win-1", "win-1-wsl-ubuntu", "PC · WSL Ubuntu", "linux", "2")
-            .unwrap();
-        assert!(
-            !r.can_view("win-1-wsl-ubuntu", "admin"),
-            "托管心跳不能把用户单独撤销的 WSL 信任重新打开"
+        assert_eq!(r.physical_device_id("win-1-wsl-ubuntu"), "win-1");
+        assert_eq!(
+            r.device_meta("win-1-wsl-ubuntu").host_machine_id.as_deref(),
+            Some("win-1")
         );
-        assert!(r.set_trust("win-1-wsl-ubuntu", true));
+        assert_eq!(r.devices_of("admin").len(), 1, "运行端不能成为独立设备");
 
         assert!(r.set_trust("win-1", false));
         assert!(!r.can_view("win-1-wsl-ubuntu", "admin"));
@@ -1450,11 +1439,11 @@ mod child_device_tests {
     }
 
     #[test]
-    fn deleting_parent_removes_child_and_invalidates_token() {
+    fn deleting_host_removes_runtime_and_invalidates_token() {
         let mut r = registry("delete");
         r.bind_device("win-1", "admin");
         let token = r
-            .bind_child_device("win-1", "win-1-wsl-ubuntu", "WSL", "linux", "1")
+            .bind_runtime("win-1", "win-1-wsl-ubuntu", "WSL", "linux", "1")
             .unwrap();
         assert!(r.delete_device("win-1"));
         assert!(!r.verify_device_token("win-1-wsl-ubuntu", &token));
@@ -1462,23 +1451,11 @@ mod child_device_tests {
     }
 
     #[test]
-    fn child_id_must_belong_to_parent_namespace() {
+    fn runtime_id_must_belong_to_host_namespace() {
         let mut r = registry("namespace");
         r.bind_device("win-a", "admin");
         assert!(r
-            .bind_child_device("win-a", "somebody-else-wsl-ubuntu", "WSL", "linux", "1")
-            .is_err());
-    }
-
-    #[test]
-    fn deleted_child_is_not_recreated_by_supervisor_heartbeat() {
-        let mut r = registry("child-tombstone");
-        r.bind_device("win-1", "admin");
-        r.bind_child_device("win-1", "win-1-wsl-ubuntu", "WSL", "linux", "1")
-            .unwrap();
-        assert!(r.delete_device("win-1-wsl-ubuntu"));
-        assert!(r
-            .bind_child_device("win-1", "win-1-wsl-ubuntu", "WSL", "linux", "1")
+            .bind_runtime("win-a", "somebody-else-wsl-ubuntu", "WSL", "linux", "1")
             .is_err());
     }
 }
