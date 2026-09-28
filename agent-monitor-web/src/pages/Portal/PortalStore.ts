@@ -76,11 +76,8 @@ const taskDeviceId = (t: PortalTaskData | HistorySession) =>
   t.deviceId || t.machineId || t.hostname || "unknown";
 
 /**
- * 一个「客户端」= 一台机器上的一个终端程序。
- *
- * **`provider` 一个字段不够**：Codex CLI 与 ChatGPT 桌面版同属 `provider === "codex"`，
- * 但它们是两个各跑各的客户端，会话也分别存在两处。只按 provider 分的话两边的会话
- * 糊成一组，组名还只能二选一。所以键是 `(machineId, provider, desktop)` 这一组。
+ * 一个「客户端分组」= 一台机器上的一种使用界面。CLI 统一归入「普通终端」，
+ * 不区分 Windows / WSL，也不按里面跑的 Claude / Codex 拆组；桌面应用才按 provider 分组。
  */
 export interface ClientKey {
   machineId: string;
@@ -113,7 +110,7 @@ export interface SessionProject {
 /** 侧栏里的一个客户端分组（可折叠，内含该客户端的全部会话） */
 export interface ClientSection extends ClientKey {
   /**
-   * `machineId|provider|desktop`，折叠态与历史分页都按它记。
+   * `machineId|provider|desktop`，CLI 的 provider 固定为 `terminal`。
    *
    * **第三段是 `desktop` 这个布尔量，不是展示名**：展示名是中文串，既不能当契约级的键，
    * 也不能当筛选参数回传给 `/monitor/sessions/history`。
@@ -602,11 +599,11 @@ class PortalStore {
   };
 
   /**
-   * 侧栏的**客户端分组**：一台机器上的一种终端（Claude / Codex 各算一个）一组。
+   * 侧栏的**客户端分组**：CLI 是「普通终端」，桌面应用是对应的客户端。
    *
    * **CLI 与桌面客户端铺的东西不一样**，判据是现成的 `desktop` 布尔量：
    *
-   *   - **`desktop === false`（Claude Code、Codex CLI）→ 只列「当前打开的」会话。**
+   *   - **`desktop === false`（普通终端，含 Windows / WSL）→ 只列「当前打开的」会话。**
    *     CLI 的一条会话就是一个终端窗口：窗口一关会话就结束了，磁盘上那些 jsonl
    *     只是残留记录，不是用户心智里「还在的那段对话」。所以这一列不拉历史、
    *     不分页、也不按时间分桶（都是开着的窗口，「昨天」这种标签只是噪音）。
@@ -615,7 +612,7 @@ class PortalStore {
    *     终端照样是打开的；也不是时间阈值，那是字面量式的猜测。
    *     （同一判据在 `am-client` 里就是 `t.process.is_none()` = 父会话已结束。）
    *
-   *   - **`desktop === true`（Claude 桌面版、ChatGPT 桌面版）→ 列全部历史**，
+   *   - **`desktop === true`（Claude 桌面版、Codex）→ 列全部历史**，
    *     按时间分桶（今天 / 昨天 / 过去 7 天 / 过去 30 天 / 更早）、游标翻页、
    *     搜索照旧。它的会话是持久的对话列表，回去翻、接着聊都成立。
    *
@@ -639,7 +636,7 @@ class PortalStore {
    *
    * **只铺 `selectedMachineId` 那一台设备的客户端。** 设备这一维被提到了侧栏顶部的
    * 选择器上（见 `DeviceSelect`），组标题里因此不再带主机名 —— 组名就是客户端名
-   * （`Claude Code` / `Codex` / `ChatGPT 桌面版`）。上一版是「设备 × 客户端」二合一，
+   * （`普通终端` / `Codex` / `Claude 桌面版`）。上一版是「设备 × 客户端」二合一，
    * 组标题形如 `MacBook Pro · Claude Code`：机器一多，同一个客户端名在一列里重复
    * 出现好几遍，而「我现在在看哪台机器」没有任何一处说得清。两套分组判断不并存 ——
    * 顶部选设备之后，这里就只按客户端分。
@@ -689,16 +686,19 @@ class PortalStore {
       }
       return key;
     };
-    /** 会话（活跃的 / 历史的）那一侧的入口：字段名一样，缺省口径也一样 */
-    const ensureOf = (t: PortalTaskData | HistorySession): string =>
-      ensure(
+    /** 会话里的 provider 是代理类型；侧栏要的是客户端类型。 */
+    const ensureOf = (t: PortalTaskData | HistorySession): string => {
+      const desktop = !!t.desktop;
+      return ensure(
         taskDeviceId(t),
-        t.provider || "unknown",
-        // `desktop` 是契约的一部分，热路径与历史两边都下发。**不给兜底** ——
-        // 缺了就是后端的 bug，该暴露出来，不该在这儿遮成「按 CLI 算」
-        !!t.desktop,
-        t,
+        desktop ? t.provider || "unknown" : "terminal",
+        desktop,
+        {
+          ...t,
+          providerDsr: desktop ? t.providerDsr : "普通终端",
+        },
       );
+    };
 
     /* 先把**选中那台设备**的客户端全集建出来：**有没有会话可铺是另一回事**，
        组本身必须先在。组内顺序照后端给的 `providers` 原样来 ——

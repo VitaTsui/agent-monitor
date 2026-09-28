@@ -35,6 +35,12 @@ pub struct SessionSummary {
     pub title: String,
     pub prompt: String,
     pub last_action: String,
+    /// Codex TUI 配对指纹：最近一条助手文本的尾部。
+    ///
+    /// Codex 的 app-server 是多会话共享进程，打开会话文件的不是 TUI；同项目并发时不能再按
+    /// 文件时间猜。客户端用这段文本与 Codex 自己的 `markdown_stream` 日志做精确匹配。
+    /// Claude 有 hook/env 这类直接身份源，不使用此字段。
+    pub pairing_fingerprint: String,
     /// 最后一条有效条目是否表示「回合结束」（助手纯文本收尾）
     pub turn_ended: bool,
     /// 本会话**此刻**是刚 `/clear` 出来、还没输入的空会话：内容只有 /clear 命令块、
@@ -635,6 +641,7 @@ impl SessionScanner {
         // 尾部：最近动作 + 回合是否结束（最后一条有效项是否助手文本）
         let tail = read_tail(path, TAIL_BYTES).ok()?;
         let mut last_action = String::new();
+        let mut pairing_fingerprint = String::new();
         let mut turn_ended = false;
         let mut last_active = None;
         for line in tail.lines() {
@@ -652,6 +659,19 @@ impl SessionScanner {
                 Some("message") => {
                     let role = p.and_then(|p| p.get("role")).and_then(Value::as_str);
                     if role == Some("assistant") {
+                        if let Some(brief) = codex_entry_to_brief(&v) {
+                            let text = brief.content.trim();
+                            if text.chars().count() >= 24 {
+                                pairing_fingerprint = text
+                                    .chars()
+                                    .rev()
+                                    .take(512)
+                                    .collect::<Vec<_>>()
+                                    .into_iter()
+                                    .rev()
+                                    .collect();
+                            }
+                        }
                         // Codex 把过程播报和最终答复都写成 assistant message，区别只在 phase。
                         // commentary 后面还会继续调用工具，不能把它当成回合结束。
                         // 老版记录没有 phase，保留旧口径，避免历史会话永远显示 Running。
@@ -686,6 +706,7 @@ impl SessionScanner {
             title: prompt.clone(),
             prompt,
             last_action,
+            pairing_fingerprint,
             turn_ended,
             cleared: false,
             clear_born: false,
@@ -1949,6 +1970,7 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
         title: String::new(),
         prompt,
         last_action,
+        pairing_fingerprint: String::new(),
         // cleared 会话没有进行中的回合 → 视为回合结束（显示 Idle 而非 Running）
         turn_ended: turn_ended || cleared,
         cleared,
@@ -5266,6 +5288,7 @@ mod noise_filter_tests {
                 title: String::new(),
                 prompt: String::new(),
                 last_action: String::new(),
+                pairing_fingerprint: String::new(),
                 turn_ended: true,
                 cleared: false,
                 clear_born: false,
@@ -5468,6 +5491,7 @@ mod pairing_tests {
             title: id.into(),
             prompt: String::new(),
             last_action: String::new(),
+            pairing_fingerprint: String::new(),
             turn_ended: true,
             cleared: false,
             clear_born: false,
@@ -6638,6 +6662,7 @@ mod codex_tests {
             title: id.into(),
             prompt: String::new(),
             last_action: String::new(),
+            pairing_fingerprint: String::new(),
             turn_ended: true,
             cleared: false,
             clear_born: false,
@@ -6948,6 +6973,7 @@ mod desktop_session_tests {
             title: id.into(),
             prompt: String::new(),
             last_action: String::new(),
+            pairing_fingerprint: String::new(),
             turn_ended: true,
             cleared: false,
             clear_born: false,
@@ -7054,7 +7080,7 @@ mod desktop_session_tests {
         for t in &tasks {
             assert_eq!(t.pid, Some(900), "{} 该配到桌面宿主", t.id);
             assert_eq!(t.status, TaskStatus::Idle);
-            assert_eq!(t.provider_dsr, "ChatGPT 桌面版");
+            assert_eq!(t.provider_dsr, "Codex");
             assert!(t.desktop, "ChatGPT 桌面版的会话 desktop 必须为真");
         }
     }

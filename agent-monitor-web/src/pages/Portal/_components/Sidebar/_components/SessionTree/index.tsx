@@ -340,8 +340,11 @@ const SessionTree: React.FC<SessionTreeProps> = observer((props) => {
                 aria-expanded={!collapsed}
                 onClick={() => toggleClient(sec.key)}
               >
-                <Icon icon="ph:laptop" className={styles.groupIcon} />
-                {/* **组名只写客户端名**（`Claude Code` / `Codex` / `ChatGPT 桌面版`）。
+                <Icon
+                  icon={sec.desktop ? "ph:laptop" : "ph:terminal-window"}
+                  className={styles.groupIcon}
+                />
+                {/* **组名只写客户端名**（`普通终端` / `Codex` / `Claude 桌面版`）。
                     主机名与「本机」徽标都搬到了顶部的设备选择器上 ——
                     这一列铺的就是那台机器的会话，每一行组标题再重复一遍机器名
                     纯属占地方，机器一多还会让同一个客户端名出现好几遍。 */}

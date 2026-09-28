@@ -556,6 +556,7 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
         let maintain = tick == 1 || tick.is_multiple_of(20);
         let mut env_n = 0usize;
         let mut file_n = 0usize;
+        let mut codex_n = 0usize;
         let mut added = 0usize;
         // 并入累积表：只收当前存活进程的 pin，顺手记下启动时间当身份。
         // 同一 pid 再次抓到就以最新为准（同一进程换会话 = /clear 后新建了会话）。
@@ -589,6 +590,26 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
             }
             if acc.insert(r.claude_pid, (r.session_id, start)).is_none() {
                 added += 1;
+            }
+        }
+        // **Codex 权威来源**：rollout 助手原文与对应 TUI 的 markdown_stream 原文精确匹配。
+        // 同项目开多个 Codex 时，按文件时间猜会话顺序必然可能互换；这里用内容指纹还原
+        // thread ↔ TUI pid，并覆盖此前的缓存/启发式结果。只在未配对或维护轮查询 SQLite。
+        if unpaired || maintain {
+            match tokio::task::block_in_place(|| {
+                crate::codexpins::session_pins(&processes, &sessions)
+            }) {
+                Ok(codex_pins) => {
+                    codex_n = codex_pins.len();
+                    // 这条比累积表中任何旧值都新且直接，同一 pid 必须覆盖。
+                    merge(acc, codex_pins, &mut added);
+                }
+                Err(e) => {
+                    // Codex 版本尚未创建日志库或短暂锁库时，保留现有配对源；维护轮会重试。
+                    if maintain {
+                        client_log(&format!("读取 Codex TUI 配对失败：{e:#}"));
+                    }
+                }
             }
         }
         // 权威来源：claude 派生子进程的 env 里带 CLAUDE_PID + CLAUDE_CODE_SESSION_ID，
@@ -644,10 +665,11 @@ pub async fn local_scan(state: &SharedState) -> Vec<Task> {
             if now.saturating_sub(*l) > 30 {
                 *l = now;
                 client_log(&format!(
-                    "配对来源 pinned={} 条（累积 · 本轮新增 {} · hook自报={} env权威={} 文件句柄={} · 未配对={}）：{:?}（进程数 {}）",
+                    "配对来源 pinned={} 条（累积 · 本轮新增 {} · hook自报={} codex日志={} env权威={} 文件句柄={} · 未配对={}）：{:?}（进程数 {}）",
                     acc.len(),
                     added,
                     hook_n,
+                    codex_n,
                     env_n,
                     file_n,
                     unpaired,

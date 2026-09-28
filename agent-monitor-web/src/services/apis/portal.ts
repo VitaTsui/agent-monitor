@@ -180,9 +180,7 @@ interface IPortalTaskData {
    * 这条会话属于**终端 CLI（`false`）还是桌面客户端（`true`）** ——
    * 与 {@link DeviceProvider.desktop}、{@link HistorySession.desktop} 是同一个键。
    *
-   * 侧栏分组直接用 `(provider, desktop)` 这一对判，**不要**再去「拿历史快照反查」或
-   * 「按该设备该 provider 只有唯一一项」推断：同机同时跑 Codex CLI 与 ChatGPT 桌面版、
-   * 且这条会话还没进历史列表时，反查会把它落到隔壁组。
+   * 侧栏根据 `desktop` 把 CLI 统一归入「普通终端」，桌面会话才按 provider 分组。
    *
    * 进程占位任务（会话记录还没生成）没有会话文件可判，一律按 CLI 算（`false`）。
    */
@@ -565,24 +563,20 @@ export const getHistorySessionList = async (params?: {
 
 /** 一台设备上「有哪几个客户端、各有多少条会话」——侧栏按「设备 × 客户端」分组用 */
 export interface DeviceProvider {
-  /** `claude` / `codex`，与 {@link HistorySession.provider} 同一套取值 */
+  /** CLI 组固定为 `terminal`；桌面组是 `claude` / `codex` 等 provider */
   provider: string;
   /**
    * 终端 CLI（`false`）还是桌面客户端（`true`）。
    *
-   * **同一个 `provider` 会出现两项**（如 `codex/false` = Codex CLI、
-   * `codex/true` = ChatGPT 桌面版）：它们是同一台机器上两个不同的客户端，
-   * 只是会话文件格式一样。分组键是 `(provider, desktop)` 这一对，别只按 provider 分。
+   * `terminal/false` 是所有普通终端；`codex/true` 才是 Codex 桌面客户端。
    */
   desktop: boolean;
   /**
-   * 组名：由 `(provider, desktop)` 算出的**规范名**（服务端两个固定枚举），
-   * 不是某一条会话上的值 —— 组名不会随最近那条会话漂。直接当分组标题用。
+   * 组名：CLI 为「普通终端」，桌面组为实际客户端名。
    */
   providerDsr: string;
   /**
-   * 该设备该 `(provider, desktop)` 下的会话总数，**含已结束**。
-   * 与 `getHistorySessionList({ machineId, provider, desktop })` 的 `total` 同口径。
+   * 该设备该客户端分组下的会话总数，**含已结束**。
    */
   sessionCount: number;
 }
