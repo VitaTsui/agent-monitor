@@ -321,13 +321,11 @@ fn hidden(mut cmd: Command) -> Command {
 
 /// wsl.exe 在不同 Windows/控制台配置下会输出 UTF-8 或 UTF-16LE，两种都接。
 fn decode_output(bytes: &[u8]) -> String {
-    let looks_utf16 = bytes.len() >= 2
-        && bytes.chunks_exact(2).filter(|pair| pair[1] == 0).count() * 2 >= bytes.len() / 2;
+    let (pairs, _) = bytes.as_chunks::<2>();
+    let looks_utf16 =
+        bytes.len() >= 2 && pairs.iter().filter(|pair| pair[1] == 0).count() * 2 >= bytes.len() / 2;
     if looks_utf16 {
-        let words: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect();
+        let words: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
         String::from_utf16_lossy(&words)
     } else {
         String::from_utf8_lossy(bytes).into_owned()
