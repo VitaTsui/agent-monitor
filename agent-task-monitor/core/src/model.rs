@@ -116,6 +116,13 @@ pub struct MessageBrief {
     /// user 提示词 / assistant 文本 / 工具名
     pub content: String,
     pub timestamp: String,
+    /// 上游明确标记这条 assistant 文本是**本轮最终答复**。
+    ///
+    /// Codex 同一个回合会写很多 `phase=commentary` 的过程播报，最后才写一条
+    /// `phase=final_answer`。此前把两者都压成普通 assistant，hub 无法区分，任一过程停顿
+    /// 都可能被钉钉当作「任务完成」推出去。这里只保存语义，不让消费方再猜文案。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_final_answer: bool,
     /// **这一步跑砸了**：`tool_result` 块上的 `is_error`。
     ///
     /// 原始记录里一直带着（实测本机 `~/.claude/projects` 25222 个块里 997 个为真），

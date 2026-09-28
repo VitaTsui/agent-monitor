@@ -2505,6 +2505,7 @@ mod push_content_tests {
             role: role.into(),
             content: content.into(),
             timestamp: "2026-09-14T01:00:00.000Z".into(),
+            is_final_answer: false,
             is_error: false,
             tools: Vec::new(),
             tool_use_id: String::new(),
