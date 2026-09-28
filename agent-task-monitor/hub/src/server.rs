@@ -3840,18 +3840,17 @@ async fn report(
                 // 同上：空壳占位会话消失不推，只清基线
                 if !is_placeholder(task)
                     && worth_finish_notice(task.mtime_ms, crate::state::now_secs())
+                    && finish_has_notification_value(&task.provider, task.status)
                 {
-                    if finish_has_notification_value(&task.provider, task.status) {
-                        if let Some((res, full)) = result(task) {
-                            history_records.push(make_reply(task, owner, full.as_deref(), &res));
-                            events.push(NotifyEvent {
-                                owner: owner.clone(),
-                                kind: EventKind::Finished,
-                                task_id: Some(id.clone()),
-                                text: format!("**✅ 会话已结束**\n\n{}{}", body(task), res),
-                                full_content: full,
-                            });
-                        }
+                    if let Some((res, full)) = result(task) {
+                        history_records.push(make_reply(task, owner, full.as_deref(), &res));
+                        events.push(NotifyEvent {
+                            owner: owner.clone(),
+                            kind: EventKind::Finished,
+                            task_id: Some(id.clone()),
+                            text: format!("**✅ 会话已结束**\n\n{}{}", body(task), res),
+                            full_content: full,
+                        });
                     }
                 }
                 known_removes.push(id.clone());
