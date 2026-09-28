@@ -7,6 +7,8 @@ mod agent;
 mod appinject;
 /// Cursor/VSCode 扩展桥接（文件 IPC）——全平台内嵌终端都靠它下发
 mod bridge;
+/// Codex rollout 与 TUI 输出日志的权威配对
+mod codexpins;
 /// Claude Code / Codex 配置的跨设备同步（白名单扫描 + 备份原子写）
 mod configsync;
 #[cfg(feature = "desktop")]

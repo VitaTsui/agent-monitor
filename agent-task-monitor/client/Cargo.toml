@@ -28,6 +28,7 @@ tracing-subscriber.workspace = true
 rand.workspace = true
 uuid.workspace = true
 reqwest.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
 base64 = "0.22"
 # 配置同步：算文件指纹（与 hub 同一版本，差异判定只认哈希不认 mtime）
 sha2 = "0.10"
