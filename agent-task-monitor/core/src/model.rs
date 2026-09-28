@@ -902,7 +902,7 @@ pub fn provider_dsr_desktop(provider: &str) -> String {
 
 /// 侧栏的客户端分组键。CLI 在 Windows、WSL 或 macOS 终端里运行都是
 /// 「普通终端」；只有桌面应用才按实际 provider 分组。
-pub fn client_group_provider<'a>(provider: &'a str, desktop: bool) -> &'a str {
+pub fn client_group_provider(provider: &str, desktop: bool) -> &str {
     if desktop {
         provider
     } else {
