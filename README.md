@@ -79,7 +79,11 @@
   里面是 arm64 + x86_64 的 universal 二进制（`lipo` 合的），Apple 芯片与 Intel 共用一个包。
 - **Windows**：`bash scripts/package-windows.sh` 产出 `target/dist/AgentMonitor-<版本>-setup.exe`
   （NSIS 中文安装向导，可选安装位置 / 桌面图标 / 开机自启；在 mac 上交叉构建需
-  `cargo install cargo-xwin` 与 `brew install makensis`）。
+  `cargo install cargo-xwin` 与 `brew install makensis`）。安装包同时携带无界面 Linux
+  采集端：Windows 客户端会为每个用户 WSL 发行版自动安装、绑定并保活；WSL 会作为
+  「电脑名 · WSL 发行版」独立设备展示，进程状态与暂停/恢复/终止都在 Linux 内执行。
+  输入注入在 WSL 内通过一次性 root 子命令写目标 TTY（Windows 用户本就拥有自己 WSL
+  发行版的 root 权限），主采集端仍以普通 Linux 用户运行。
 - 无 GUI 环境（服务器/CI）：`AM_NO_TRAY=1` 或用 `--no-default-features` 编译纯服务版。
 - hub 检测到前端构建产物（`AM_WEB_DIST` > exe 旁 `web/` > `../agent-monitor-web/dist`）时
   会直接托管，浏览器访问 `http://localhost:8383/portal` 无需单独起前端。

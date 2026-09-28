@@ -652,7 +652,10 @@ impl SessionScanner {
                 Some("message") => {
                     let role = p.and_then(|p| p.get("role")).and_then(Value::as_str);
                     if role == Some("assistant") {
-                        turn_ended = true;
+                        // Codex 把过程播报和最终答复都写成 assistant message，区别只在 phase。
+                        // commentary 后面还会继续调用工具，不能把它当成回合结束。
+                        // 老版记录没有 phase，保留旧口径，避免历史会话永远显示 Running。
+                        turn_ended = p.is_some_and(codex_assistant_is_final);
                     } else if role == Some("user") && codex_user_text(&v).is_some() {
                         turn_ended = false;
                     }
@@ -869,6 +872,7 @@ impl SessionScanner {
                 role: "todos".into(),
                 content: m,
                 timestamp: ts,
+                is_final_answer: false,
                 is_error: false,
                 tools: Vec::new(),
                 tool_use_id: String::new(),
@@ -2216,6 +2220,16 @@ fn codex_user_text(v: &Value) -> Option<String> {
     Some(truncate(t, FLOW_TEXT_MAX))
 }
 
+/// Codex assistant message 的结构化阶段。当前记录明确给出 `commentary` / `final_answer`；
+/// 旧版记录没有 phase，只能沿用「assistant 文本即收尾」的兼容口径。
+fn codex_assistant_is_final(payload: &Value) -> bool {
+    match payload.get("phase").and_then(Value::as_str) {
+        Some("final_answer") => true,
+        Some(_) => false,
+        None => true,
+    }
+}
+
 /// 把一行 Codex 会话记录转为简要消息（与 Claude 的 entry_to_brief 对应）。
 /// 覆盖：用户/助手消息、function_call / custom_tool_call（工具行）及其输出（结果行）。
 fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
@@ -2234,6 +2248,7 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 role: "user".into(),
                 content: t,
                 timestamp: ts,
+                is_final_answer: false,
                 is_error: false,
                 tools: Vec::new(),
                 tool_use_id: String::new(),
@@ -2252,6 +2267,7 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                     role: "assistant".into(),
                     content: truncate(t, FLOW_TEXT_MAX),
                     timestamp: ts,
+                    is_final_answer: codex_assistant_is_final(p),
                     is_error: false,
                     tools: Vec::new(),
                     tool_use_id: String::new(),
@@ -2271,6 +2287,7 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 role: "tool".into(),
                 content: String::new(),
                 timestamp: ts,
+                is_final_answer: false,
                 is_error: false,
                 // Codex 一条记录就是一次调用，但形状要与 Claude 那边一致 ——
                 // 前端只认一套结构，不为来源分叉。它的 id 叫 call_id。
@@ -2292,6 +2309,7 @@ fn codex_entry_to_brief(v: &Value) -> Option<MessageBrief> {
                 role: "tool_result".into(),
                 content: truncate(out.trim(), 400),
                 timestamp: ts,
+                is_final_answer: false,
                 is_error: false,
                 tools: Vec::new(),
                 tool_use_id: p
@@ -2350,6 +2368,7 @@ fn parse_entry(v: &Value, skip_sidechain: bool) -> Option<MessageBrief> {
                     role: "user".into(),
                     content: text,
                     timestamp: ts,
+                    is_final_answer: false,
                     is_error: false,
                     tools: Vec::new(),
                     tool_use_id: String::new(),
@@ -2364,6 +2383,7 @@ fn parse_entry(v: &Value, skip_sidechain: bool) -> Option<MessageBrief> {
                             role: "tool_result".into(),
                             content: truncate(&text, 400),
                             timestamp: ts,
+                            is_final_answer: false,
                             tools: Vec::new(),
                             // 它回应的是哪一次调用 —— 记录里本来就有，前端据此把结果
                             // 贴回执行链上对应那一步，不必按先后顺序猜。
@@ -2441,6 +2461,7 @@ fn parse_entry(v: &Value, skip_sidechain: bool) -> Option<MessageBrief> {
                     role: "plan".into(),
                     content: truncate(p.trim(), FLOW_TEXT_MAX),
                     timestamp: ts,
+                    is_final_answer: false,
                     is_error: false,
                     tools: Vec::new(),
                     tool_use_id: String::new(),
@@ -2452,6 +2473,7 @@ fn parse_entry(v: &Value, skip_sidechain: bool) -> Option<MessageBrief> {
                     role: "select".into(),
                     content: truncate(&inp.to_string(), 4000),
                     timestamp: ts,
+                    is_final_answer: false,
                     is_error: false,
                     tools: Vec::new(),
                     tool_use_id: String::new(),
@@ -2462,6 +2484,7 @@ fn parse_entry(v: &Value, skip_sidechain: bool) -> Option<MessageBrief> {
                     role: "assistant".into(),
                     content: truncate(text_buf.trim(), FLOW_TEXT_MAX),
                     timestamp: ts,
+                    is_final_answer: false,
                     is_error: false,
                     tools: Vec::new(),
                     tool_use_id: String::new(),
@@ -2473,6 +2496,7 @@ fn parse_entry(v: &Value, skip_sidechain: bool) -> Option<MessageBrief> {
                     // 纯文本出口统一走 MessageBrief::text()。
                     content: String::new(),
                     timestamp: ts,
+                    is_final_answer: false,
                     is_error: false,
                     tools,
                     tool_use_id: String::new(),
@@ -3492,6 +3516,7 @@ impl TodoTracker {
             role: "todos".into(),
             content: serde_json::to_string(&self.items).ok()?,
             timestamp: ts.to_string(),
+            is_final_answer: false,
             is_error: false,
             tools: Vec::new(),
             tool_use_id: String::new(),
@@ -6539,9 +6564,12 @@ mod codex_tests {
     fn assistant_and_tools_map_to_feed_roles() {
         let a = line(serde_json::json!({
             "type": "message", "role": "assistant",
+            "phase": "final_answer",
             "content": [{ "type": "output_text", "text": "改好了" }]
         }));
-        assert_eq!(codex_entry_to_brief(&a).unwrap().role, "assistant");
+        let answer = codex_entry_to_brief(&a).unwrap();
+        assert_eq!(answer.role, "assistant");
+        assert!(answer.is_final_answer);
 
         let f = line(serde_json::json!({
             "type": "function_call", "name": "spawn_agent", "call_id": "call_7",
@@ -6565,6 +6593,32 @@ mod codex_tests {
 
         let r = line(serde_json::json!({ "type": "reasoning", "summary": [] }));
         assert!(codex_entry_to_brief(&r).is_none(), "思考过程不进流");
+    }
+
+    #[test]
+    fn assistant_phase_distinguishes_progress_from_result() {
+        let commentary = serde_json::json!({
+            "type": "message", "role": "assistant", "phase": "commentary",
+            "content": [{ "type": "output_text", "text": "继续检查中" }]
+        });
+        let final_answer = serde_json::json!({
+            "type": "message", "role": "assistant", "phase": "final_answer",
+            "content": [{ "type": "output_text", "text": "最终结论" }]
+        });
+        let legacy = serde_json::json!({
+            "type": "message", "role": "assistant",
+            "content": [{ "type": "output_text", "text": "旧版结果" }]
+        });
+
+        assert!(!codex_assistant_is_final(&commentary));
+        assert!(codex_assistant_is_final(&final_answer));
+        assert!(
+            codex_assistant_is_final(&legacy),
+            "没有 phase 的旧记录维持原口径"
+        );
+
+        let brief = codex_entry_to_brief(&line(commentary)).unwrap();
+        assert!(!brief.is_final_answer, "过程消息可以展示，但不能冒充结果");
     }
 
     /// 多 provider 配对：codex 会话配 codex 进程；claude 会话不会被 codex 进程抢走；

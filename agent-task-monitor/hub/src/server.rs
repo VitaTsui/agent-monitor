@@ -49,6 +49,58 @@ fn worth_finish_notice(mtime_ms: u64, now_secs: u64) -> bool {
     idle_secs <= STALE_FINISH_SECS
 }
 
+/// Codex 的 `Idle` 已经代表「这一轮结果已产出」：Running→Idle 时会推一次任务完成，
+/// 随后关掉终端产生的 Idle→Finished/消失没有新结果，再推只是在重复上一条正文。
+///
+/// 其它 provider 保留原有的会话结束通知；Codex 若从 Running 直接结束，仍要推，避免
+/// 进程退出太快、来不及经过 Idle 时漏掉唯一一条结果。
+fn finish_has_notification_value(provider: &str, previous: TaskStatus) -> bool {
+    provider != "codex" || previous == TaskStatus::Running
+}
+
+/// Codex 启动会话本身不需要用户处理。它真正值得打断人的边沿只有「有结果」和「等选择」。
+fn start_has_notification_value(provider: &str) -> bool {
+    provider != "codex"
+}
+
+/// Codex 的长结果不再整篇拆成多条聊天消息。聊天里留一段预览，原文放附件：信息不丢，
+/// 但一份长报告不会占满整个钉钉会话。
+fn notification_result(content: &str, compact: bool) -> (String, Option<String>) {
+    const CODEX_PREVIEW_CHARS: usize = 1_200;
+    let full = content.trim();
+    if full.is_empty() {
+        return (String::new(), None);
+    }
+
+    let shown = md_headings_to_bold(full);
+    if compact && shown.chars().count() > crate::mdfmt::DINGTALK_MAX_LEN {
+        let preview: String = shown.chars().take(CODEX_PREVIEW_CHARS).collect();
+        return (
+            format!(
+                "\n\n**最后结果**\n\n{}\n\n_内容较长，完整结果见附件。_",
+                preview.trim_end()
+            ),
+            Some(full.to_string()),
+        );
+    }
+
+    const HUGE: usize = crate::mdfmt::DINGTALK_MAX_LEN * 3;
+    let file = (full.chars().count() > HUGE).then(|| full.to_string());
+    (format!("\n\n**最后结果**\n\n{shown}"), file)
+}
+
+/// 钉钉的“最后结果”只能取真正的最终答复。Codex 的 commentary 仍留在网页对话流里，
+/// 但不允许从这个出口漏成通知；其它 provider 没有 phase 字段，沿用最近 assistant 文本。
+fn latest_notification_message<'a>(
+    provider: &str,
+    messages: &'a [am_core::model::MessageBrief],
+) -> Option<&'a am_core::model::MessageBrief> {
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role.as_str() == "assistant" && (provider != "codex" || m.is_final_answer))
+}
+
 /// 「进程占位任务」：只扫到 agent 进程、还没配上会话文件时，客户端先造一条空壳任务占位
 ///（见 core `scanner::build_tasks` 尾部：id 为 `pid-<pid>`，再由 `attach_machine` 加机器前缀）。
 ///
@@ -209,6 +261,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/monitor/pair/start", post(pair_start))
         .route("/monitor/pair/claim", post(pair_claim))
         .route("/monitor/pair/status", get(pair_status))
+        .route("/monitor/child-device/bind", post(child_device_bind))
         // ---- agent → hub 上报 ----
         // 单独放宽体积上限：axum 默认 2MB，一台机器会话多、消息长时很容易顶到，
         // 一旦 413 该设备就再也同步不上来了。
@@ -407,6 +460,53 @@ async fn pair_status(
         return ok(json!({ "claimed": true, "deviceToken": token }));
     }
     ok(json!({ "claimed": false, "expired": false }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChildDeviceBindReq {
+    parent_machine_id: String,
+    machine_id: String,
+    hostname: String,
+    platform: String,
+    version: String,
+}
+
+/// POST /monitor/child-device/bind —— 已绑定客户端为自己托管的运行环境领子设备令牌。
+/// 当前唯一调用方是 Windows 客户端启动的 WSL Linux 采集端。
+async fn child_device_bind(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<ChildDeviceBindReq>,
+) -> Json<Value> {
+    let parent_token = headers
+        .get("x-device-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if req.parent_machine_id.trim().is_empty() || req.machine_id.trim().is_empty() {
+        return err(400, "缺少父设备或子设备 machineId");
+    }
+    if parent_token.is_empty()
+        || !state
+            .registry
+            .read()
+            .await
+            .verify_device_token(req.parent_machine_id.trim(), parent_token)
+    {
+        return err(401, "父设备令牌无效");
+    }
+
+    let result = state.registry.write().await.bind_child_device(
+        req.parent_machine_id.trim(),
+        req.machine_id.trim(),
+        req.hostname.trim(),
+        req.platform.trim(),
+        req.version.trim(),
+    );
+    match result {
+        Ok(token) => ok(json!({ "deviceToken": token })),
+        Err(e) => err(400, &e),
+    }
 }
 
 /// 支持分片写入的最低 agent 版本。低于它的客户端不认识 FileTransfer 的 chunk_* 字段，
@@ -3549,28 +3649,17 @@ async fn report(
         // 「最后结果」：取该会话最近一条 assistant 文本（本身是 markdown）。返回
         // (推送里展示的截断版, 若被截断则给出完整原文供 OTO 作为文件补发)。
         let msgs_map = &entry.messages;
-        let result = |id: &str| -> (String, Option<String>) {
-            // 正文不再硬截断：完整结果整段交给 dingtalk::push_*，那边按钉钉 4000 上限**分片**
-            // 逐条发进聊天里（chunk_text 尽量断在换行/空格）。此前这里 take(LIMIT) 把话砍掉、
-            // 只在下面附个 .txt——长结果在聊天里看不全，正是要修的「最后结果太长被砍掉」。
-            //
-            // 只有极长（会被分成很多条、刷屏）才额外附一份完整 .txt 兜底，既不刷屏也留个整档。
-            const HUGE: usize = crate::mdfmt::DINGTALK_MAX_LEN * 3;
-            msgs_map
-                .get(id)
-                .and_then(|ms| ms.iter().rev().find(|m| m.role.as_str() == "assistant"))
-                .map(|m| {
-                    let full = m.content.trim();
-                    // 结果正文里的 markdown 标题转成加粗，避免推送里出现大字号 heading
-                    let s = md_headings_to_bold(full);
-                    if s.is_empty() {
-                        (String::new(), None)
-                    } else {
-                        let file = (full.chars().count() > HUGE).then(|| full.to_string());
-                        (format!("\n\n**最后结果**\n\n{s}"), file)
-                    }
-                })
-                .unwrap_or((String::new(), None))
+        let result = |task: &am_core::model::Task| -> Option<(String, Option<String>)> {
+            let message = msgs_map
+                .get(&task.id)
+                .and_then(|ms| latest_notification_message(&task.provider, ms));
+            match message {
+                Some(m) => Some(notification_result(&m.content, task.provider == "codex")),
+                // Codex 明确区分过程与结果：没看到 final_answer 就没有可推的结果。
+                None if task.provider == "codex" => None,
+                // 其它 provider 没有这个结构化标记，保留既有的纯状态通知。
+                None => Some((String::new(), None)),
+            }
         };
         // 「占位会话」：没有真实内容可看的空壳，结束时推一条「会话已结束」纯属噪音
         //（认不出是哪个、也没有任何结果可看），所以不推。两种形态：
@@ -3628,30 +3717,36 @@ async fn report(
                         && t.status == TaskStatus::Idle
                         && !now_selecting.contains(&t.id)
                     {
-                        let (res, full) = result(&t.id);
-                        // 任务完成的结果进历史的 assistant 侧 —— 这是「我发了什么→它回了什么」
-                        // 里最有价值的一半，不能只在会话结束时才记。
-                        history_records.push(make_reply(t, owner, full.as_deref(), &res));
-                        events.push(NotifyEvent {
-                            owner: owner.clone(),
-                            kind: EventKind::Waiting,
-                            task_id: Some(t.id.clone()),
-                            text: format!("**🔔 任务完成 · 等待你的操作**\n\n{}{}", body(t), res),
-                            full_content: full,
-                        });
-                    } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
-                        // 空壳占位会话结束不推（噪音）；基线照常清理
-                        if !is_placeholder(t) {
-                            let (res, full) = result(&t.id);
-                            // 留一条历史：终端关了、机器关机后仍能回看这个会话最后出了什么
+                        if let Some((res, full)) = result(t) {
+                            // 任务完成的结果进历史的 assistant 侧 —— 这是「我发了什么→它回了什么」
+                            // 里最有价值的一半，不能只在会话结束时才记。
                             history_records.push(make_reply(t, owner, full.as_deref(), &res));
                             events.push(NotifyEvent {
                                 owner: owner.clone(),
-                                kind: EventKind::Finished,
+                                kind: EventKind::Waiting,
                                 task_id: Some(t.id.clone()),
-                                text: format!("**✅ 会话已结束**\n\n{}{}", body(t), res),
+                                text: format!(
+                                    "**🔔 任务完成 · 等待你的操作**\n\n{}{}",
+                                    body(t),
+                                    res
+                                ),
                                 full_content: full,
                             });
+                        }
+                    } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
+                        // 空壳占位会话结束不推（噪音）；基线照常清理
+                        if !is_placeholder(t) && finish_has_notification_value(&t.provider, prev) {
+                            if let Some((res, full)) = result(t) {
+                                // 留一条历史：终端关了、机器关机后仍能回看这个会话最后出了什么
+                                history_records.push(make_reply(t, owner, full.as_deref(), &res));
+                                events.push(NotifyEvent {
+                                    owner: owner.clone(),
+                                    kind: EventKind::Finished,
+                                    task_id: Some(t.id.clone()),
+                                    text: format!("**✅ 会话已结束**\n\n{}{}", body(t), res),
+                                    full_content: full,
+                                });
+                            }
                         }
                         known_removes.push(t.id.clone()); // 已结束：移出基线，别再被「消失」判一次
                     }
@@ -3685,13 +3780,15 @@ async fn report(
                                 >= crate::state::NEW_SESSION_PAIR_SETTLE_SECS =>
                     {
                         pending_removes.push(t.id.clone());
-                        events.push(NotifyEvent {
-                            owner: owner.clone(),
-                            kind: EventKind::NewSession,
-                            task_id: Some(t.id.clone()),
-                            text: format!("**🆕 会话开始**\n\n{}", body(t)),
-                            full_content: None,
-                        });
+                        if start_has_notification_value(&t.provider) {
+                            events.push(NotifyEvent {
+                                owner: owner.clone(),
+                                kind: EventKind::NewSession,
+                                task_id: Some(t.id.clone()),
+                                text: format!("**🆕 会话开始**\n\n{}", body(t)),
+                                full_content: None,
+                            });
+                        }
                     }
                     // 锚相同但还没到时间 → 继续等（不重置计时）
                     Some((_, a)) if a == &anchor => continue,
@@ -3743,16 +3840,18 @@ async fn report(
                 // 同上：空壳占位会话消失不推，只清基线
                 if !is_placeholder(task)
                     && worth_finish_notice(task.mtime_ms, crate::state::now_secs())
+                    && finish_has_notification_value(&task.provider, task.status)
                 {
-                    let (res, full) = result(id);
-                    history_records.push(make_reply(task, owner, full.as_deref(), &res));
-                    events.push(NotifyEvent {
-                        owner: owner.clone(),
-                        kind: EventKind::Finished,
-                        task_id: Some(id.clone()),
-                        text: format!("**✅ 会话已结束**\n\n{}{}", body(task), res),
-                        full_content: full,
-                    });
+                    if let Some((res, full)) = result(task) {
+                        history_records.push(make_reply(task, owner, full.as_deref(), &res));
+                        events.push(NotifyEvent {
+                            owner: owner.clone(),
+                            kind: EventKind::Finished,
+                            task_id: Some(id.clone()),
+                            text: format!("**✅ 会话已结束**\n\n{}{}", body(task), res),
+                            full_content: full,
+                        });
+                    }
                 }
                 known_removes.push(id.clone());
             }
@@ -4359,6 +4458,7 @@ mod selecting_tests {
             role: role.into(),
             content: String::new(),
             timestamp: String::new(),
+            is_final_answer: false,
             is_error: false,
             tools: Vec::new(),
             tool_use_id: String::new(),
@@ -4547,6 +4647,74 @@ mod finish_notice_tests {
         assert!(
             worth_finish_notice((NOW + 60) * 1000, NOW),
             "时钟偏差不该吞掉通知"
+        );
+    }
+}
+
+#[cfg(test)]
+mod notification_noise_tests {
+    use super::{
+        finish_has_notification_value, latest_notification_message, notification_result,
+        start_has_notification_value,
+    };
+    use am_core::model::{MessageBrief, TaskStatus};
+
+    fn assistant(content: &str, is_final_answer: bool) -> MessageBrief {
+        MessageBrief {
+            role: "assistant".into(),
+            content: content.into(),
+            timestamp: String::new(),
+            is_final_answer,
+            is_error: false,
+            tools: Vec::new(),
+            tool_use_id: String::new(),
+        }
+    }
+
+    #[test]
+    fn codex_only_interrupts_for_new_information() {
+        assert!(!start_has_notification_value("codex"));
+        assert!(start_has_notification_value("claude"));
+
+        assert!(
+            !finish_has_notification_value("codex", TaskStatus::Idle),
+            "Idle 时结果已经推过，结束通知不能再重复一遍"
+        );
+        assert!(
+            finish_has_notification_value("codex", TaskStatus::Running),
+            "直接退出没有经过 Idle，必须保留唯一一次结果通知"
+        );
+        assert!(finish_has_notification_value("claude", TaskStatus::Idle));
+    }
+
+    #[test]
+    fn long_codex_result_is_one_preview_plus_attachment() {
+        let source = "结".repeat(crate::mdfmt::DINGTALK_MAX_LEN + 1);
+        let (shown, full) = notification_result(&source, true);
+
+        assert!(shown.chars().count() < 1_500, "聊天正文只留短预览");
+        assert!(shown.contains("完整结果见附件"));
+        assert_eq!(full.as_deref(), Some(source.as_str()), "原文不能丢");
+    }
+
+    #[test]
+    fn short_codex_result_stays_inline() {
+        let (shown, full) = notification_result("## 完成\n改了 2 个文件。", true);
+        assert!(shown.contains("**完成**"));
+        assert!(shown.contains("改了 2 个文件。"));
+        assert!(full.is_none());
+    }
+
+    #[test]
+    fn codex_notification_ignores_commentary_even_when_it_is_newest() {
+        let messages = vec![assistant("真正结果", true), assistant("继续检查中", false)];
+        let got = latest_notification_message("codex", &messages).expect("应找到最终答复");
+        assert_eq!(got.content, "真正结果");
+
+        let commentary_only = vec![assistant("还在处理", false)];
+        assert!(
+            latest_notification_message("codex", &commentary_only).is_none(),
+            "只有过程消息时不允许产生钉钉结果"
         );
     }
 }

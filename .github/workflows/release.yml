@@ -116,9 +116,40 @@ jobs:
           # 都不会再被静默吞掉。
           include-hidden-files: true
 
+  wsl-helper:
+    name: WSL 采集端
+    needs: version
+    if: needs.version.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-task-monitor
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent-task-monitor
+      - name: 准备静态 Linux 目标
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+      - name: 构建无界面 Linux 采集端
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build -p am-client --release --no-default-features --target x86_64-unknown-linux-musl
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wsl-helper
+          # 静态 musl：不依赖发行版的 glibc 版本，Ubuntu 20.04/22.04/24.04 共用一份。
+          path: agent-task-monitor/target/x86_64-unknown-linux-musl/release/agent-monitor
+          retention-days: 1
+
   package:
     name: 安装包 (${{ matrix.target }})
-    needs: [version, web]
+    needs: [version, web, wsl-helper]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -145,6 +176,12 @@ jobs:
         with:
           name: web-dist
           path: agent-monitor-web/dist
+
+      - uses: actions/download-artifact@v8
+        if: startsWith(matrix.os, 'windows')
+        with:
+          name: wsl-helper
+          path: agent-task-monitor/target/wsl-helper
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -176,7 +213,7 @@ jobs:
         if: startsWith(matrix.os, 'windows')
         run: |
           rustup target add x86_64-pc-windows-msvc
-          bash scripts/package-windows.sh
+          AM_WSL_AGENT=target/wsl-helper/agent-monitor bash scripts/package-windows.sh
           mkdir -p out
           # 同上，资产名统一成 README 里的那套；打包脚本产出的
           # AgentMonitor-<版本>-setup.exe 这个名字是部署侧（hub 的 ready_desktop_version）

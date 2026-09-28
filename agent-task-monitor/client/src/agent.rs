@@ -66,6 +66,8 @@ const MSG_FETCH_MAX: usize = 500;
 /// hub 重启后不靠这个定时器补 —— 它会在下发响应里带 `wantHistory` 主动索要，
 /// 收到就把计时清零、下一轮立刻补发。
 const HISTORY_REPORT_INTERVAL_SECS: u64 = 30;
+/// Windows 父客户端退出后，WSL 子采集端最多继续存活多久。父端每 30 秒 touch 一次。
+const PARENT_HEARTBEAT_TTL_SECS: u64 = 90;
 
 const RESUBMIT_WAIT_MS: u64 = 2000;
 /// 最多补几次回车，仍不提交就放弃（避免无限补）
@@ -76,6 +78,17 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn parent_heartbeat_alive() -> bool {
+    let Some(path) = std::env::var_os("AM_PARENT_HEARTBEAT") else {
+        return true;
+    };
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() <= PARENT_HEARTBEAT_TTL_SECS)
 }
 
 /// 判断会话最新用户提示词是否就是刚下发的这条文本（= 已提交）。
@@ -93,6 +106,10 @@ fn submit_landed(prompt: &str, dispatched: &str) -> bool {
 
 pub async fn report_loop(state: SharedState, hub_url: String) {
     let hub = hub_url.trim_end_matches('/').to_string();
+    // Windows 看不到 WSL 的 Linux 进程表/TTY。由同版本 Linux 采集端在 WSL 内处理，
+    // 本进程只负责安装、绑定和保活；两边用不同 machine_id，不会互相覆盖快照。
+    #[cfg(windows)]
+    crate::wsl::spawn_supervisor(state.clone(), hub.clone());
     let owner = std::env::var("AM_USER").ok().filter(|s| !s.is_empty());
     // 全局令牌仅在显式配置时使用（内部部署/兼容旧客户端）；
     // 普通用户走「配对绑定 → 每设备令牌」，无需任何预置密钥。
@@ -187,6 +204,10 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
     // 上一轮循环结束的时刻：用于检测系统睡眠/唤醒（间隔远超预期即刚恢复）
     let mut last_tick = std::time::Instant::now();
     loop {
+        if !parent_heartbeat_alive() {
+            tracing::info!("父客户端心跳已停止，WSL 采集端退出");
+            return;
+        }
         // 开机/唤醒检测：距上一轮已过去远超正常 1.5s（阈值 8s），大概率系统
         // 刚从睡眠/休眠恢复 —— 连接池里可能全是死 socket，重建客户端并强制
         // 下一轮当作断线重连，尽快恢复连接。
@@ -1208,6 +1229,28 @@ fn desktop_session_ref(p: &am_core::model::ProcessInfo) -> crate::appinject::Ses
     }
 }
 
+fn platform_send_input(pid: u32, text: &str, submit: bool) -> anyhow::Result<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::wslinput::send_input(pid, text, submit)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        am_core::process::send_input_ex(pid, text, submit)
+    }
+}
+
+fn platform_send_keys(pid: u32, spec: &str) -> anyhow::Result<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::wslinput::send_keys(pid, spec)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        am_core::process::send_terminal_keys(pid, spec)
+    }
+}
+
 /// 执行 hub 下发的控制命令。
 /// `known_pids` 是本轮本机扫描出的会话 pid 集合——只对这些 pid 动手，
 /// 不无条件信任 hub 响应（响应链路若被中间人篡改，否则可对任意进程发信号）。
@@ -1376,10 +1419,8 @@ async fn execute(
         }
         // send_input 在 macOS 上走 osascript，会遍历 Terminal/iTerm 的每个窗口与标签页，
         // 常态就要数秒，终端处于模态/无响应时还可能一直挂着 —— 绝不能占住 async worker。
-        let res = tokio::task::spawn_blocking(move || {
-            am_core::process::send_input_ex(pid, &text, submit)
-        })
-        .await;
+        let res =
+            tokio::task::spawn_blocking(move || platform_send_input(pid, &text, submit)).await;
         match res {
             Ok(Ok(m)) => {
                 crate::state::client_log(&format!("注入输入成功：pid={pid} {m}（{preview}…）"))
@@ -1419,9 +1460,7 @@ async fn execute(
             }
         }
         let spec_log = spec.clone();
-        let res =
-            tokio::task::spawn_blocking(move || am_core::process::send_terminal_keys(pid, &spec))
-                .await;
+        let res = tokio::task::spawn_blocking(move || platform_send_keys(pid, &spec)).await;
         let spec = spec_log;
         match res {
             Ok(Ok(m)) => crate::state::client_log(&format!("注入按键成功：pid={pid} {spec} {m}")),
@@ -1450,6 +1489,27 @@ async fn execute(
                     "中断当前任务：经 Cursor/VSCode 扩展桥接发 Esc（终端 pid={shell_pid}）"
                 ));
                 return;
+            }
+        }
+        // WSL 的终端输入同样被普通用户的 TIOCSTI 限制；中断 TUI 要发 Esc，而不是给
+        // 代理进程发 SIGINT。platform_send_keys 会只为这次注入启动短命 root 代理。
+        #[cfg(target_os = "linux")]
+        if crate::wslinput::is_wsl() {
+            let res = tokio::task::spawn_blocking(move || platform_send_keys(pid, "esc")).await;
+            match res {
+                Ok(Ok(label)) => {
+                    crate::state::client_log(&format!(
+                        "中断当前任务成功：pid={pid} {label}（任务 {}）",
+                        cmd.task_id
+                    ));
+                    return;
+                }
+                Ok(Err(e)) => crate::state::client_log(&format!(
+                    "WSL Esc 注入失败，继续尝试 SIGINT：pid={pid} {e}"
+                )),
+                Err(e) => crate::state::client_log(&format!(
+                    "WSL Esc 输入代理异常，继续尝试 SIGINT：pid={pid} {e}"
+                )),
             }
         }
     }
