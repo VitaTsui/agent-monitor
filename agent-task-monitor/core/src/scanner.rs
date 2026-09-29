@@ -638,7 +638,9 @@ impl SessionScanner {
                 .map(String::from)
         })?;
 
-        // 尾部：最近动作 + 回合是否结束（最后一条有效项是否助手文本）
+        // 尾部：最近动作 + 回合是否结束。
+        // 新版 Codex 会写 task_started / task_complete / turn_aborted 生命周期事件；它们是
+        // 回合状态的权威来源。消息 phase 只给不写这些事件的旧记录兜底。
         let tail = read_tail(path, TAIL_BYTES).ok()?;
         let mut last_action = String::new();
         let mut pairing_fingerprint = String::new();
@@ -651,10 +653,23 @@ impl SessionScanner {
             if let Some(ts) = v.get("timestamp").and_then(Value::as_str) {
                 last_active = Some(ts.to_string());
             }
-            if v.get("type").and_then(Value::as_str) != Some("response_item") {
+            let record_type = v.get("type").and_then(Value::as_str);
+            let p = v.get("payload");
+            if record_type == Some("event_msg") {
+                match p.and_then(|p| p.get("type")).and_then(Value::as_str) {
+                    Some("task_started") => turn_ended = false,
+                    Some("task_complete") => turn_ended = true,
+                    Some("turn_aborted") => {
+                        turn_ended = true;
+                        last_action = "已中断".into();
+                    }
+                    _ => {}
+                }
                 continue;
             }
-            let p = v.get("payload");
+            if record_type != Some("response_item") {
+                continue;
+            }
             match p.and_then(|p| p.get("type")).and_then(Value::as_str) {
                 Some("message") => {
                     let role = p.and_then(|p| p.get("role")).and_then(Value::as_str);
@@ -6557,6 +6572,63 @@ mod codex_tests {
             "type": "response_item",
             "payload": payload
         })
+    }
+
+    #[test]
+    fn interrupted_turn_is_idle_from_lifecycle_event() {
+        let dir = std::env::temp_dir().join(format!("am-codex-abort-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rollout-test-01a0e5df-464a-7912-8a1c-e101aa4c41de.jsonl");
+        let records = [
+            serde_json::json!({
+                "timestamp": "2026-09-28T12:54:58.500Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "01a0e5df-464a-7912-8a1c-e101aa4c41de",
+                    "timestamp": "2026-09-28T10:36:50.000Z",
+                    "cwd": "/work/project",
+                    "originator": "codex-tui"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-09-28T12:54:58.624Z",
+                "type": "event_msg",
+                "payload": { "type": "task_started", "turn_id": "turn-23" }
+            }),
+            line(serde_json::json!({
+                "type": "message", "role": "user",
+                "content": [{ "type": "input_text", "text": "中断会话，开个新会话测试" }]
+            })),
+            // Codex 中断时会先落一条 developer 提示，再落结构化 turn_aborted；
+            // developer 不是助手收尾，真正决定状态的是后一条生命周期事件。
+            line(serde_json::json!({
+                "type": "message", "role": "developer",
+                "content": [{ "type": "input_text", "text": "<turn_aborted>" }]
+            })),
+            serde_json::json!({
+                "timestamp": "2026-09-28T12:55:10.008Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "turn_aborted", "turn_id": "turn-23", "reason": "interrupted"
+                }
+            }),
+        ];
+        let body = records
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, format!("{body}\n")).unwrap();
+
+        let meta = std::fs::metadata(&path).unwrap();
+        let mut scanner = SessionScanner::new(dir.clone());
+        let summary = scanner
+            .summarize_codex(&path, meta.len(), file_mtime_ms(&path))
+            .expect("真实 Codex 中断记录应能解析");
+
+        assert!(summary.turn_ended, "turn_aborted 后不该继续显示正在思考");
+        assert_eq!(summary.last_action, "已中断");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// 用户消息：真实输入进流；<permissions> 等注入块滤掉（与真实文件格式一致）

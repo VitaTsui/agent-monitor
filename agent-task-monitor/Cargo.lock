@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "am-client"
-version = "0.12.32"
+version = "0.12.33"
 dependencies = [
  "am-core",
  "anyhow",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "am-core"
-version = "0.12.32"
+version = "0.12.33"
 dependencies = [
  "anyhow",
  "chrono",
@@ -122,7 +122,7 @@ dependencies = [
 
 [[package]]
 name = "am-hub"
-version = "0.12.32"
+version = "0.12.33"
 dependencies = [
  "aes",
  "aes-gcm",
