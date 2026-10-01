@@ -1531,14 +1531,31 @@ fn inject_tiocsti(tty: &str, text: &str, submit: bool) -> Result<&'static str> {
             anyhow!("注入失败：无法打开终端 {tty}（{e}）。跨会话注入通常需以 root 运行监控端，或使用 Terminal/iTerm。")
         })?;
     let fd = file.as_raw_fd();
-    // 多行内容用 bracketed paste 包裹：TUI（Claude Code 等）会把块内换行当
-    // 文本而非提交键，否则第一个 \n 就提交了前半句、剩余卡在输入框里出不去
+    let bytes = tiocsti_input_bytes(text, submit);
+    for b in bytes {
+        let c = b as libc::c_char;
+        let ret = unsafe { libc::ioctl(fd, libc::TIOCSTI, &c) };
+        if ret != 0 {
+            return Err(anyhow!("注入失败：TIOCSTI 被系统禁用或权限不足"));
+        }
+    }
+    Ok("已发送")
+}
+
+/// 构造 TIOCSTI 的输入字节。
+///
+/// 发布任务时即使只有一行也必须用 bracketed paste。Codex 会把短时间内逐字到达的普通
+/// KeyEvent 猜成粘贴流；若回车紧跟其后，它也会被吞进这段猜测里，表现为文字已经出现在
+/// 输入框、光标却另起一行，直到用户再次按回车才真正提交。显式的粘贴起止标记消除了这层
+/// 猜测，标记外的 CR 才稳定地表示「提交」。
+#[cfg(unix)]
+fn tiocsti_input_bytes(text: &str, submit: bool) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(text.len() + 16);
     // 先清空输入框：Ctrl+U(0x15) 删到行首。「全部撤回」会把原文调回终端输入框，
     // 不清的话下一条注入就直接接在残留后面，两段文字黏成一句。顺带也挡住了
     // 「人在终端里打了一半」的半截输入。输入框本来就空时这一下无副作用。
     bytes.push(0x15);
-    if text.contains('\n') {
+    if submit || text.contains('\n') {
         bytes.extend_from_slice(b"\x1b[200~");
         bytes.extend_from_slice(text.as_bytes());
         bytes.extend_from_slice(b"\x1b[201~");
@@ -1551,14 +1568,7 @@ fn inject_tiocsti(tty: &str, text: &str, submit: bool) -> Result<&'static str> {
     if submit {
         bytes.push(b'\r');
     }
-    for b in bytes {
-        let c = b as libc::c_char;
-        let ret = unsafe { libc::ioctl(fd, libc::TIOCSTI, &c) };
-        if ret != 0 {
-            return Err(anyhow!("注入失败：TIOCSTI 被系统禁用或权限不足"));
-        }
-    }
-    Ok("已发送")
+    bytes
 }
 
 /// macOS：按 tty 匹配 Terminal.app / iTerm2 的会话并写入文本（等价于键入并回车）
@@ -2054,6 +2064,32 @@ mod bridge_key_tests {
         assert!(key_spec_to_chars("f5").is_none());
         assert!(key_spec_to_chars("tab:2,f5").is_none());
         assert!(key_spec_to_chars("").is_none());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tiocsti_input_tests {
+    use super::tiocsti_input_bytes;
+
+    #[test]
+    fn submitted_single_line_is_an_explicit_paste_then_enter() {
+        assert_eq!(
+            tiocsti_input_bytes("线上开个新会话", true),
+            b"\x15\x1b[200~\xe7\xba\xbf\xe4\xb8\x8a\xe5\xbc\x80\xe4\xb8\xaa\xe6\x96\xb0\xe4\xbc\x9a\xe8\xaf\x9d\x1b[201~\r"
+        );
+    }
+
+    #[test]
+    fn selection_keys_remain_raw_and_unsubmitted() {
+        assert_eq!(tiocsti_input_bytes("14", false), b"\x1514");
+    }
+
+    #[test]
+    fn enter_stays_outside_multiline_paste() {
+        assert_eq!(
+            tiocsti_input_bytes("first\nsecond", true),
+            b"\x15\x1b[200~first\nsecond\x1b[201~\r"
+        );
     }
 }
 
