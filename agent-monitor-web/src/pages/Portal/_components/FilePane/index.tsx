@@ -5,9 +5,11 @@ import classNames from "classnames";
 import { Icon, Markdown } from "@hsu-react/ui";
 import { Tooltip, message } from "antd";
 
-import { getTaskDirs, getTaskFile, hasListing } from "@/services/apis/portal";
+import { getTaskDirs, getTaskFile } from "@/services/apis/portal";
 import { contentMarkdownComponents } from "../../_utils/contentLinks";
 import CodeLines from "./CodeLines";
+import HtmlView from "./HtmlView";
+import PptxView from "./PptxView";
 import SheetView from "./SheetView";
 import styles from "./index.module.scss";
 
@@ -59,8 +61,13 @@ const IMAGE_EXT = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico"];
 
 const MD_EXT = ["md", "markdown"];
 
+const HTML_EXT = ["html", "htm"];
+
 /** 表格。前两个是二进制（没有源码态），后两个本身就是文本（有） */
 const SHEET_EXT = ["xlsx", "xls", "csv", "tsv"];
+
+/** 浏览器端能本地解析的是 OOXML 的 `.pptx`；旧 `.ppt` 会给出明确说明 */
+const PRESENTATION_EXT = ["pptx", "ppt"];
 
 /** base64 → 字节。`atob` 一次性拿到二进制字符串，再逐字节转（文件上限 10 MB） */
 const b64ToBytes = (b64: string): Uint8Array<ArrayBuffer> => {
@@ -77,13 +84,15 @@ const b64ToBytes = (b64: string): Uint8Array<ArrayBuffer> => {
  * 这份文件**按什么方式画**。扩的是这一个枚举，不是在 `text` 旁边再挂开关：
  * 「是不是 markdown」这件事只该有一个判据，两套判断并存迟早对不上。
  *
- * 其中 `markdown` / `svg` / `sheet` 有**渲染态与源码态两态**（见 `hasTwoViews`）：
+ * 其中 `markdown` / `html` / `svg` / `sheet` 有**渲染态与源码态两态**（见 `hasTwoViews`）：
  * 默认渲染态，头部那颗按钮切到源码。`text` 只有源码一态，`image` / `pdf` /
  * `binary` 连源码都没有。
  */
 type Kind =
   | "markdown"
+  | "html"
   | "sheet"
+  | "presentation"
   | "svg"
   | "text"
   | "image"
@@ -132,7 +141,7 @@ interface FileState {
   size: number;
   /** 行数超过 `MAX_LINES` 被夹过 */
   clipped?: boolean;
-  /** 原始字节，只有 `sheet` 留 —— 表格要交给解析器，文本那份没法回推 */
+  /** 原始字节，表格 / PPTX 要交给解析器，文本那份没法回推 */
   bytes?: Uint8Array<ArrayBuffer>;
 }
 
@@ -146,11 +155,15 @@ interface FileState {
 const hasTwoViews = (f: FileState | null): boolean =>
   !!f &&
   f.text !== undefined &&
-  (f.kind === "markdown" || f.kind === "svg" || f.kind === "sheet");
+  (f.kind === "markdown" ||
+    f.kind === "html" ||
+    f.kind === "svg" ||
+    f.kind === "sheet");
 
 /** 两态里「渲染那一态」叫什么、用哪枚图标 —— 按钮显示的是**点了会去哪**，不是当前在哪 */
 const RENDER_VIEW: Record<string, { label: string; icon: string }> = {
   markdown: { label: "渲染", icon: "ph:eye" },
+  html: { label: "页面", icon: "ph:browser" },
   svg: { label: "预览", icon: "ph:eye" },
   sheet: { label: "表格", icon: "ph:table" },
 };
@@ -160,6 +173,11 @@ interface FilePaneProps {
   /** 项目根（即这棵树的根），只用来在头上显示「你在哪台机器的哪个目录里」 */
   cwd?: string;
   onClose: () => void;
+}
+
+interface DirSnapshot {
+  dirs: string[];
+  files: string[];
 }
 
 /**
@@ -197,6 +215,8 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
   const [dirs, setDirs] = useState<string[]>([]);
   const [files, setFiles] = useState<string[]>([]);
   const [dirLoading, setDirLoading] = useState(false);
+  /** 已有稳定快照时，后台仍在取最新目录；列表不动，只在头部给状态 */
+  const [dirRefreshing, setDirRefreshing] = useState(false);
   /** 这次列目录为什么没成（null = 没失败）。分类见 `Fail` */
   const [dirFail, setDirFail] = useState<Fail | null>(null);
 
@@ -213,19 +233,31 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
   /** 每一次取件的序号：切目录/切文件时旧的那条回来要丢掉，不能覆盖新的 */
   const dirSeq = useRef(0);
   const fileSeq = useRef(0);
+  /** 每个目录最后一次完整结果。pending 返回的半成品永远不写进这里 */
+  const dirCache = useRef(new Map<string, DirSnapshot>());
   /** 上一个 objectURL，切走时 revoke —— 不放会一直占着内存 */
   const urlRef = useRef("");
 
   const loadDir = useCallback(
-    // `shown`：这一轮已经先摆出了上次的清单（等新清单期间 hub 会一并带回）
-    (next: string, attempt = 0, shown = false) => {
+    // `snapshotVisible`：这一轮屏幕上已有本机确认过的完整快照。
+    (next: string, attempt = 0, snapshotVisible = false) => {
       if (!taskId) {
         return;
       }
       const seq = attempt === 0 ? ++dirSeq.current : dirSeq.current;
+      const cached = attempt === 0 ? dirCache.current.get(next) : undefined;
+      const hasSnapshot = attempt === 0 ? !!cached : snapshotVisible;
       if (attempt === 0) {
         setDirFail(null);
-        setDirLoading(true);
+        if (cached) {
+          setDirs(cached.dirs);
+          setFiles(cached.files);
+        } else {
+          setDirs([]);
+          setFiles([]);
+        }
+        setDirLoading(!cached);
+        setDirRefreshing(!!cached);
       }
       // 进目录那一次让设备重新列：不然看到的永远是第一次打开时的样子
       getTaskDirs(taskId, next, attempt === 0)
@@ -237,39 +269,49 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
             // 服务端明确拒绝（访客访问他人共享设备的文件就是这一支）。
             // **原文照出**：说成「还没送回来」等于告诉人再等等，而它永远不会来
             setDirLoading(false);
+            setDirRefreshing(false);
+            dirCache.current.delete(next);
+            setDirs([]);
+            setFiles([]);
             setDirFail({ kind: "deny", msg: res.msg || "读取目录失败" });
             return;
           }
-          const stale = res.data?.pending && hasListing(res.data);
-          if (stale) {
-            // 先摆上次的样子，新的到了再换 —— 回到看过的目录不用干等一轮上报
-            setDirs(res.data?.dirs ?? []);
-            setFiles(res.data?.files ?? []);
-            setDirLoading(false);
-          }
           if (res.data?.pending && attempt < POLL_DELAYS.length) {
-            window.setTimeout(
-              () => loadDir(next, attempt + 1, shown || !!stale),
-              POLL_DELAYS[attempt],
-            );
+            window.setTimeout(() => {
+              if (seq === dirSeq.current) {
+                loadDir(next, attempt + 1, hasSnapshot);
+              }
+            }, POLL_DELAYS[attempt]);
             return;
           }
           if (res.data?.pending) {
-            // 等不到就明说，别把它渲染成一个空目录；已经摆着上次的清单就留着它
-            if (!shown && !stale) {
+            // pending 里的 dirs/files 只是传输中的旧结果，拿它替换列表就是目录跳动的根因。
+            // 有完整快照就原样保留；第一次打开则明确超时，不把半成品冒充最终目录。
+            if (!hasSnapshot) {
               setDirFail(timeoutFail("目录"));
             }
             setDirLoading(false);
+            setDirRefreshing(false);
             return;
           }
-          setDirs(res.data?.dirs ?? []);
-          setFiles(res.data?.files ?? []);
+          const snapshot = {
+            dirs: res.data?.dirs ?? [],
+            files: res.data?.files ?? [],
+          };
+          dirCache.current.set(next, snapshot);
+          // 目录和文件在同一次提交里原子替换，屏幕只会从一个完整快照变成另一个。
+          setDirs(snapshot.dirs);
+          setFiles(snapshot.files);
           setDirLoading(false);
+          setDirRefreshing(false);
         })
         .catch(() => {
           if (seq === dirSeq.current) {
             setDirLoading(false);
-            setDirFail(NETWORK_FAIL);
+            setDirRefreshing(false);
+            if (!hasSnapshot) {
+              setDirFail(NETWORK_FAIL);
+            }
           }
         });
     },
@@ -277,9 +319,14 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
   );
 
   useEffect(() => {
-    loadDir("");
+    dirCache.current.clear();
     setRel("");
+    loadDir("");
     // 换会话就整个重来
+    return () => {
+      dirSeq.current += 1;
+      fileSeq.current += 1;
+    };
   }, [taskId, loadDir]);
 
   // 走掉的时候把 objectURL 放掉
@@ -294,8 +341,6 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
 
   const openDir = (next: string) => {
     setRel(next);
-    setDirs([]);
-    setFiles([]);
     loadDir(next);
   };
 
@@ -320,10 +365,11 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
           return;
         }
         if (res.data?.pending && attempt < POLL_DELAYS.length) {
-          window.setTimeout(
-            () => openFile(name, attempt + 1),
-            POLL_DELAYS[attempt],
-          );
+          window.setTimeout(() => {
+            if (seq === fileSeq.current) {
+              openFile(name, attempt + 1);
+            }
+          }, POLL_DELAYS[attempt]);
           return;
         }
         if (res.data?.pending) {
@@ -349,8 +395,14 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
           kind = "image";
         } else if (SHEET_EXT.includes(ext)) {
           kind = "sheet";
+        } else if (PRESENTATION_EXT.includes(ext)) {
+          kind = "presentation";
         } else if (isText) {
-          kind = MD_EXT.includes(ext) ? "markdown" : "text";
+          kind = MD_EXT.includes(ext)
+            ? "markdown"
+            : HTML_EXT.includes(ext)
+              ? "html"
+              : "text";
         }
         // 能给出源码的都把文本解出来：源码态要它，复制也要它。
         // `.xlsx` 这种走不到这儿（`isText` 为假），它那颗切换按钮也就不会出现
@@ -358,7 +410,11 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
           const whole = new TextDecoder("utf-8").decode(bytes);
           const lines = whole.split("\n");
           clipped = lines.length > MAX_LINES;
-          text = clipped ? lines.slice(0, MAX_LINES).join("\n") : whole;
+          // 页面渲染必须拿完整 HTML；行数限制只作用在代码显示上。
+          text =
+            kind === "html" || !clipped
+              ? whole
+              : lines.slice(0, MAX_LINES).join("\n");
         }
         if (kind === "image" || kind === "pdf" || kind === "svg") {
           const mime =
@@ -383,7 +439,8 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
           size: bytes.length,
           clipped,
           // 表格态要原始字节喂解析器；别的类型留着只是白占内存
-          bytes: kind === "sheet" ? bytes : undefined,
+          bytes:
+            kind === "sheet" || kind === "presentation" ? bytes : undefined,
         });
         setFileLoading(false);
       })
@@ -523,6 +580,19 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
          多背一个几百 KB 的解析器只为显示一份只读文档不值当）——照参照 */
       return <iframe className={styles.pdf} src={file.url} title={file.name} />;
     }
+    if (file.kind === "presentation") {
+      if (extOf(file.name) === "ppt") {
+        return (
+          <div className={styles.empty}>
+            <div>旧版 .ppt 不能在浏览器里直接解析</div>
+            <div className={styles.dim}>请另存为 .pptx 后预览</div>
+          </div>
+        );
+      }
+      return file.bytes ? (
+        <PptxView bytes={file.bytes} fileName={file.name} />
+      ) : null;
+    }
     if (file.kind === "binary") {
       return (
         <div className={styles.empty}>
@@ -550,6 +620,9 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
         <SheetView bytes={file.bytes} textual={file.text !== undefined} />
       ) : null;
     }
+    if (file.kind === "html" && !source) {
+      return <HtmlView source={file.text ?? ""} title={file.name} />;
+    }
     if (file.kind === "markdown" && !source) {
       /* 渲染走组件库的 `Markdown.Views` —— 与会话正文（`SessionMarkdown`）同一条路径，
          排版也套同一份基线（`styles/_chatMarkdown.scss`）。它不带 `rehype-raw`，
@@ -565,18 +638,27 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
     return (
       <>
         {file.clipped ? (
-          <div className={styles.clip}>
-            文件太长，只显示前 {MAX_LINES} 行
-          </div>
+          <div className={styles.clip}>文件太长，只显示前 {MAX_LINES} 行</div>
         ) : null}
-        <CodeLines text={file.text ?? ""} lang={extOf(file.name)} />
+        <CodeLines
+          text={
+            file.clipped && file.kind === "html"
+              ? (file.text ?? "").split("\n").slice(0, MAX_LINES).join("\n")
+              : (file.text ?? "")
+          }
+          lang={extOf(file.name)}
+        />
       </>
     );
   };
 
-  /** 此刻正在画表格（不是骨架屏、不是失败态、也不是切到了源码） */
-  const sheetView =
-    !fileLoading && !fileFail && file?.kind === "sheet" && !source;
+  /** 这些预览自己管理内部滚动，父级要把整列高度交给它们 */
+  const fillView =
+    !fileLoading &&
+    !fileFail &&
+    ((file?.kind === "sheet" && !source) ||
+      (file?.kind === "html" && !source) ||
+      file?.kind === "presentation");
 
   const copyText = () => {
     if (!file?.text) {
@@ -593,7 +675,11 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
       <div className={styles.head}>
         {file ? (
           <Tooltip title="回到文件列表">
-            <button type="button" className={styles.headBtn} onClick={backToTree}>
+            <button
+              type="button"
+              className={styles.headBtn}
+              onClick={backToTree}
+            >
               <Icon icon="ph:caret-left" />
             </button>
           </Tooltip>
@@ -601,6 +687,15 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
         <span className={styles.headPath} title={cwd ? `${cwd}/${rel}` : rel}>
           {file ? file.name : rel || "会话目录"}
         </span>
+        {!file ? (
+          <span className={styles.syncSlot}>
+            {dirRefreshing ? (
+              <Tooltip title="正在后台获取最新目录，当前列表保持不动">
+                <Icon icon="ph:arrows-clockwise" className={styles.syncIcon} />
+              </Tooltip>
+            ) : null}
+          </span>
+        ) : null}
         {/* 两态切换：与复制、关闭同一排、同一规格（`.headBtn`）。
             只在真有两态的类型下出现 —— `.xlsx` 给不出源码，就没有这颗按钮 */}
         {hasTwoViews(file) && file ? (
@@ -645,9 +740,7 @@ const FilePane: React.FC<FilePaneProps> = ({ taskId, cwd, onClose }) => {
 
       {/* 表格态要把高度**钉死**交给表自己滚（组件库的 Table 是 height:100% 的 flex 列，
           父级没有确定高度就画不出表体）。其余形态仍是「内容多高就多高、这一层滚」 */}
-      <div
-        className={classNames(styles.body, { [styles.bodyFill]: sheetView })}
-      >
+      <div className={classNames(styles.body, { [styles.bodyFill]: fillView })}>
         {file ? renderFile() : renderTree()}
       </div>
     </div>
