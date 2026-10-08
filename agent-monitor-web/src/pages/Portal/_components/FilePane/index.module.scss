@@ -50,11 +50,35 @@
   color: var(--muted-foreground);
   font-size: 14px;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 
   &:hover {
     background: var(--overlay-2);
     color: var(--foreground);
+  }
+}
+
+/* 目录后台刷新只占一个固定槽位：图标显隐不会挤动路径和按钮，目录行更不会位移 */
+.syncSlot {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+}
+
+.syncIcon {
+  color: var(--muted-foreground);
+  font-size: 14px;
+  animation: file-sync 1.2s linear infinite;
+}
+
+@keyframes file-sync {
+  to {
+    transform: rotate(360deg);
   }
 }
 
@@ -88,7 +112,7 @@
   overflow: auto;
 }
 
-/* 表格态：这一层不滚，改成 flex 列把高度交给表自己（见 SheetView 的 `scroll`） */
+/* 表格 / HTML / PPTX：这一层不滚，改成 flex 列把高度交给预览器自己 */
 .bodyFill {
   display: flex;
   overflow: hidden;
@@ -197,7 +221,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .skelLine {
+  .skelLine,
+  .syncIcon,
+  .pptxSpinner {
     animation: none;
   }
 }
@@ -348,6 +374,114 @@
   height: 100%;
   min-height: 320px;
   border: none;
+}
+
+/* HTML 只在 sandbox iframe 里显示；白底是浏览器页面的默认画布，不跟应用暗色主题混色 */
+.htmlPreview {
+  width: 100%;
+  height: 100%;
+  min-height: 320px;
+  border: none;
+  background: #fff;
+}
+
+/* ---------- 演示文稿 ---------- */
+
+.pptxPreview {
+  overflow: auto;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 12px;
+  background: var(--muted);
+}
+
+.pptxStatus {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+}
+
+.pptxSpinner {
+  animation: file-sync 1s linear infinite;
+}
+
+.pptxPage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin: 0 auto 16px;
+}
+
+.pptxPageLabel {
+  width: 100%;
+  max-width: 960px;
+  color: var(--subtle-foreground);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.pptxSlideFrame {
+  overflow: hidden;
+  flex: none;
+  border-radius: var(--radius-sm);
+  background: #fff;
+  box-shadow: 0 2px 10px rgb(0 0 0 / 12%);
+}
+
+.pptxSlide {
+  position: relative;
+  overflow: hidden;
+  transform-origin: left top;
+}
+
+.pptxShape,
+.pptxImage,
+.pptxTableWrap {
+  position: absolute;
+  box-sizing: border-box;
+}
+
+.pptxShape {
+  display: flex;
+  overflow: hidden;
+  flex-direction: column;
+  border-style: solid;
+  line-height: 1.2;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.pptxImage {
+  object-fit: fill;
+}
+
+.pptxTableWrap {
+  overflow: hidden;
+  background: rgb(255 255 255 / 92%);
+}
+
+.pptxTable {
+  width: 100%;
+  height: 100%;
+  border-spacing: 0;
+  border-collapse: collapse;
+  color: #1f2937;
+  font-size: 16px;
+  table-layout: fixed;
+
+  td {
+    overflow: hidden;
+    padding: 4px 6px;
+    border: 1px solid #94a3b8;
+    vertical-align: middle;
+    overflow-wrap: anywhere;
+  }
 }
 
 /* ---------- 渲染态：markdown ---------- */
