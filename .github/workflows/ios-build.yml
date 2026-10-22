@@ -1,0 +1,38 @@
+name: iOS sideload IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'build/ios-*'
+    paths:
+      - 'mobile-app/**'
+      - '.github/workflows/ios-build.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios:
+    name: Build iPhone IPA
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: mobile-app/package-lock.json
+      - name: Build unsigned IPA for Sideloadly
+        run: bash mobile-app/scripts/build-ios.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: agent-monitor-ios
+          path: dist/ios/*
+          if-no-files-found: error
+          retention-days: 30
