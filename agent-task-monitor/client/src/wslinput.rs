@@ -36,6 +36,9 @@ fn root_call(mode: &str, pid: u32, extra: Option<&str>, body: &str) -> Result<()
     let distro = std::env::var("WSL_DISTRO_NAME")?;
     let exe = std::env::current_exe()?;
     let mut cmd = Command::new("wsl.exe");
+    // 长驻采集端继承的 Windows 工作目录可能变成不可达的 drvfs 挂载路径。
+    // 此时 wsl.exe 会在启动 Linux 子命令前静默退出 1；固定到发行版根目录再跨端调用。
+    cmd.current_dir("/");
     cmd.args(["--distribution", distro.trim(), "--user", "root", "--exec"])
         .arg(exe)
         .arg(mode)
