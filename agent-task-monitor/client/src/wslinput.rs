@@ -45,7 +45,7 @@ fn root_call(mode: &str, pid: u32, extra: Option<&str>, body: &str) -> Result<()
     }
     let mut child = cmd
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| anyhow!("无法启动 WSL root 输入代理: {e}"))?;
@@ -55,11 +55,33 @@ fn root_call(mode: &str, pid: u32, extra: Option<&str>, body: &str) -> Result<()
     let out = child.wait_with_output()?;
     if !out.status.success() {
         return Err(anyhow!(
-            "WSL root 输入代理失败: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            "WSL root 输入代理失败: mode={mode} pid={pid} distro={} status={} stdout={:?} stderr={:?}",
+            distro.trim(),
+            out.status,
+            decode_output(&out.stdout).trim(),
+            decode_output(&out.stderr).trim()
         ));
     }
     Ok(())
+}
+
+/// Windows 的 wsl.exe 错误可能写在 stdout，且使用 UTF-16LE；Linux 子代理则使用 UTF-8。
+fn decode_output(bytes: &[u8]) -> String {
+    let (bytes, utf16) = match bytes.strip_prefix(b"\xff\xfe") {
+        Some(rest) => (rest, true),
+        None => (bytes, bytes.contains(&0)),
+    };
+    if utf16 {
+        let words: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
+            .collect();
+        String::from_utf16_lossy(&words)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
 }
 
 /// root 短命子命令入口。返回 Some 表示当前进程就是输入代理，不应继续启动采集服务。
@@ -85,4 +107,28 @@ pub fn run_root_cli() -> Option<Result<()>> {
         Ok(())
     })();
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_linux_agent_error() {
+        assert_eq!(
+            decode_output("Error: 非法 pid: 0\n".as_bytes()),
+            "Error: 非法 pid: 0\n"
+        );
+    }
+
+    #[test]
+    fn decodes_windows_error_with_or_without_bom() {
+        let message = "找不到发行版\r\nWsl/Service/WSL_E_DISTRO_NOT_FOUND\r\n";
+        let bytes: Vec<u8> = message.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(decode_output(&bytes), message);
+        let mut with_bom = vec![0xff, 0xfe];
+        with_bom.extend_from_slice(&bytes);
+        assert_eq!(decode_output(&with_bom), message);
+        assert_eq!(decode_output(b""), "");
+    }
 }
