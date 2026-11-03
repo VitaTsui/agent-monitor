@@ -3785,6 +3785,7 @@ async fn report(
                                     ),
                                     full_content: full,
                                 });
+                            }
                         }
                     } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
                         // 空壳占位会话结束不推（噪音）；基线照常清理
