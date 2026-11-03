@@ -342,15 +342,9 @@ pub async fn report_loop(state: SharedState, hub_url: String) {
                 *m.entry(hp).or_insert(0) += 1;
                 m
             });
-        // 活跃会话的项目目录：文件上传允许写进这些目录（项目常不在家目录下，
-        // 见 safe_upload_dir_within）
-        let session_dirs: Vec<std::path::PathBuf> = scanned
-            .iter()
-            .filter_map(|t| t.process.as_ref())
-            .map(|p| p.cwd.clone())
-            .filter(|c| !c.is_empty())
-            .map(std::path::PathBuf::from)
-            .collect();
+        // 目录树以会话 project 为根。进程 cwd 会随 cd 改变，共享宿主的 cwd
+        // 也可能与项目无关，不能用它代替会话项目根。
+        let session_dirs = session_upload_roots(&scanned);
         // 热列表 / 历史列表分流：只有近期有活动的会话才每轮全量重报（见 LIVE_WINDOW_MS）。
         // 更老的那批一动不动，却在 30 天窗口下占了一轮上报的 88%（实测 94 条里 86 条），
         // 每 1.5 秒重发一遍纯属搬运。
@@ -1044,6 +1038,18 @@ async fn session_root_now(state: &crate::state::AppState, task_id: &str) -> Opti
         return None;
     }
     state.scanner.lock().await.session_cwd_now(task_id)
+}
+
+/// 允许写入本机扫描到的会话项目及进程当前目录。
+fn session_upload_roots(tasks: &[Task]) -> Vec<std::path::PathBuf> {
+    tasks
+        .iter()
+        .flat_map(|t| {
+            std::iter::once(t.project.as_str()).chain(t.process.as_ref().map(|p| p.cwd.as_str()))
+        })
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect()
 }
 
 /// 写入 hub 下发的文件到本机目标目录。
@@ -1951,6 +1957,31 @@ mod transfer_report_tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn uploads_to_session_project_without_matching_process() {
+        let project = workdir("project-root");
+        let task: Task = serde_json::from_value(serde_json::json!({
+            "id": "session", "provider": "codex", "project": project,
+            "projectName": "project", "prompt": "", "lastAction": "",
+            "status": "idle", "statusDsr": "", "providerDsr": "", "ideDsr": "",
+            "mtimeMs": 0, "lineCount": 0
+        }))
+        .unwrap();
+        let roots = session_upload_roots(&[task]);
+        assert!(
+            roots.contains(&project),
+            "会话没有匹配进程时也必须保留项目根"
+        );
+        let target = project.join("tmp");
+        let r = write_transfer(&transfer(&target, "image.jpg", b"NEW", "project"), &roots).unwrap();
+        assert!(r.ok, "{}", r.err);
+        assert_eq!(std::fs::read(target.join("image.jpg")).unwrap(), b"NEW");
+        // 临时目录在 Windows 家目录内，旁边仍是合法落点；用文件系统根验证边界。
+        let outside = project.ancestors().last().unwrap();
+        assert!(crate::state::safe_upload_dir_within(&outside.to_string_lossy(), &roots).is_err());
+        std::fs::remove_dir_all(project).unwrap();
     }
 
     /// 回报的必须是**改名后**的真实路径。
