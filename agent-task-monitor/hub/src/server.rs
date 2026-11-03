@@ -101,6 +101,14 @@ fn latest_notification_message<'a>(
         .find(|m| m.role.as_str() == "assistant" && (provider != "codex" || m.is_final_answer))
 }
 
+/// 稳定识别同一条 Codex 最终答复，避免状态边沿重复消费历史结果。
+fn notification_message_key(message: &am_core::model::MessageBrief) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    message.content.hash(&mut hasher);
+    format!("{}:{:016x}", message.timestamp, hasher.finish())
+}
+
 /// 「进程占位任务」：只扫到 agent 进程、还没配上会话文件时，客户端先造一条空壳任务占位
 ///（见 core `scanner::build_tasks` 尾部：id 为 `pid-<pid>`，再由 `attach_machine` 加机器前缀）。
 ///
@@ -3745,21 +3753,37 @@ async fn report(
                         && t.status == TaskStatus::Idle
                         && !now_selecting.contains(&t.id)
                     {
-                        if let Some((res, full)) = result(t) {
-                            // 任务完成的结果进历史的 assistant 侧 —— 这是「我发了什么→它回了什么」
-                            // 里最有价值的一半，不能只在会话结束时才记。
-                            history_records.push(make_reply(t, owner, full.as_deref(), &res));
-                            events.push(NotifyEvent {
-                                owner: owner.clone(),
-                                kind: EventKind::Waiting,
-                                task_id: Some(t.id.clone()),
-                                text: format!(
-                                    "**🔔 任务完成 · 等待你的操作**\n\n{}{}",
-                                    body(t),
-                                    res
-                                ),
-                                full_content: full,
-                            });
+                        let codex_message = (t.provider == "codex")
+                            .then(|| {
+                                msgs_map
+                                    .get(&t.id)
+                                    .and_then(|ms| latest_notification_message("codex", ms))
+                            })
+                            .flatten();
+                        let codex_result_key = codex_message.map(notification_message_key);
+                        let duplicate_codex_result = codex_result_key.as_ref().is_some_and(|key| {
+                            entry.notified_codex_results.get(&t.id) == Some(key)
+                        });
+                        if !duplicate_codex_result {
+                            if let Some((res, full)) = result(t) {
+                                if let Some(key) = codex_result_key {
+                                    entry.notified_codex_results.insert(t.id.clone(), key);
+                                }
+                                // 任务完成的结果进历史的 assistant 侧 —— 这是「我发了什么→它回了什么」
+                                // 里最有价值的一半，不能只在会话结束时才记。
+                                history_records.push(make_reply(t, owner, full.as_deref(), &res));
+                                events.push(NotifyEvent {
+                                    owner: owner.clone(),
+                                    kind: EventKind::Waiting,
+                                    task_id: Some(t.id.clone()),
+                                    text: format!(
+                                        "**🔔 任务完成 · 等待你的操作**\n\n{}{}",
+                                        body(t),
+                                        res
+                                    ),
+                                    full_content: full,
+                                });
+                            }
                         }
                     } else if prev != TaskStatus::Finished && t.status == TaskStatus::Finished {
                         // 空壳占位会话结束不推（噪音）；基线照常清理
@@ -4069,6 +4093,9 @@ async fn report(
     let alive: std::collections::HashSet<&str> =
         entry.tasks.iter().map(|t| t.id.as_str()).collect();
     entry.messages.retain(|k, _| alive.contains(k.as_str()));
+    entry
+        .notified_codex_results
+        .retain(|id, _| alive.contains(id.as_str()));
     // 输入指令一律即时下发到终端：点了发送就直接键入终端会话，是否「排队」由终端里
     // claude 自己的原生队列决定（会话跑着时新输入排在其后、被接收后才执行），hub 不再
     // 代为扣留。（撤回按「终端队列是否已接收」判定，见前端。）

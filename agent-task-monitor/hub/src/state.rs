@@ -58,6 +58,11 @@ pub struct MachineEntry {
     pub pending_files: VecDeque<am_core::model::FileTransfer>,
     /// 会话 ID → 最近消息（agent 上报时缓存，供前端查看远程会话）
     pub messages: HashMap<String, Vec<MessageBrief>>,
+    /// 会话 ID → 最近一次已推送的 Codex 最终答复指纹。
+    ///
+    /// Codex 状态可能因子智能体收尾而再次经过 Running → Idle；只看状态会把仍留在
+    /// 消息尾部的旧 final_answer 再推一遍。记录消息指纹后，同一答复只产生一次推送。
+    pub notified_codex_results: HashMap<String, String>,
     /// 待下发的目录列举请求（上传选目录）
     pub pending_dir: VecDeque<am_core::model::DirQuery>,
     /// 待下发的文件夹操作（新建/删除/重命名）
@@ -214,6 +219,7 @@ impl MachineEntry {
             pending: VecDeque::new(),
             pending_files: VecDeque::new(),
             messages: HashMap::new(),
+            notified_codex_results: HashMap::new(),
             pending_dir: VecDeque::new(),
             pending_fsop: VecDeque::new(),
             pending_file_fetch: VecDeque::new(),
