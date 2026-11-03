@@ -101,7 +101,6 @@ fn latest_notification_message<'a>(
         .find(|m| m.role.as_str() == "assistant" && (provider != "codex" || m.is_final_answer))
 }
 
-
 /// 稳定识别同一条 Codex 最终答复，避免状态边沿重复消费历史结果。
 fn notification_message_key(message: &am_core::model::MessageBrief) -> String {
     use std::hash::{Hash, Hasher};
@@ -109,7 +108,6 @@ fn notification_message_key(message: &am_core::model::MessageBrief) -> String {
     message.content.hash(&mut hasher);
     format!("{}:{:016x}", message.timestamp, hasher.finish())
 }
-
 
 /// 「进程占位任务」：只扫到 agent 进程、还没配上会话文件时，客户端先造一条空壳任务占位
 ///（见 core `scanner::build_tasks` 尾部：id 为 `pid-<pid>`，再由 `attach_machine` 加机器前缀）。
