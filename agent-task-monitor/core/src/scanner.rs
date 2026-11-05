@@ -5666,7 +5666,8 @@ mod pairing_tests {
     #[test]
     fn parse_tail_interim_text_before_tool_is_not_turn_end() {
         let path = std::path::Path::new("/x/-proj/s1.jsonl");
-        let user = r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"修个 bug"}}"#;
+        let user =
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"修个 bug"}}"#;
         let interim = r#"{"type":"assistant","cwd":"/proj","message":{"id":"m1","role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"我先看一下代码。"}]}}"#;
         let s = parse_tail("s1", path, &format!("{user}\n{interim}\n")).unwrap();
         assert!(!s.turn_ended, "后面还有工具调用，回合没完");
@@ -5688,7 +5689,8 @@ mod pairing_tests {
     #[test]
     fn parse_tail_api_error_marks_connection_lost() {
         let path = std::path::Path::new("/x/-proj/s1.jsonl");
-        let user = r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"导入备份"}}"#;
+        let user =
+            r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"导入备份"}}"#;
         let err = r#"{"type":"assistant","cwd":"/proj","isApiErrorMessage":true,"message":{"model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error: Connection lost mid-response."}]}}"#;
         let s = parse_tail("s1", path, &format!("{user}\n{err}\n")).unwrap();
         assert!(s.turn_ended);

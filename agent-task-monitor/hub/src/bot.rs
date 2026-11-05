@@ -952,9 +952,7 @@ pub async fn monitor_loop(state: SharedState) {
             }
             // 会话还在跑、最新一条又是助手文本：它可能是工具调用前的过程话，下一行
             // tool_use 还没上报上来。这一轮先不推也不动游标，下轮再定（最多晚 20s）。
-            if trailing_assistant_pending(&all_new)
-                && state.bot_task_running(&mon.task_id).await
-            {
+            if trailing_assistant_pending(&all_new) && state.bot_task_running(&mon.task_id).await {
                 continue;
             }
             // 游标推进到「本轮见到的最后一条」，含被过滤的执行过程 —— 否则下轮反复重扫
@@ -2613,7 +2611,10 @@ mod push_content_tests {
             .map(|i| refs[i].content.as_str())
             .collect();
         assert_eq!(kept, ["修个 bug", "改好了。"]);
-        assert!(trailing_assistant_pending(&refs), "todos 不算下文，末尾仍是助手文本");
+        assert!(
+            trailing_assistant_pending(&refs),
+            "todos 不算下文，末尾仍是助手文本"
+        );
         assert!(!trailing_assistant_pending(&refs[..3]));
         let ask = [msg("assistant", "两种方案，选一个："), msg("select", "{}")];
         let ask: Vec<&MessageBrief> = ask.iter().collect();

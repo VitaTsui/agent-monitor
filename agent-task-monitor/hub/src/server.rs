@@ -4811,9 +4811,15 @@ mod notification_noise_tests {
     fn claude_interrupted_turn_has_no_result() {
         let messages = vec![
             brief("user", "恢复数据库"),
-            brief("assistant", "Database initialized. Importing the backup now."),
+            brief(
+                "assistant",
+                "Database initialized. Importing the backup now.",
+            ),
             brief("tool", ""),
-            brief("tool_result", "The user doesn't want to proceed with this tool use."),
+            brief(
+                "tool_result",
+                "The user doesn't want to proceed with this tool use.",
+            ),
         ];
         assert!(latest_notification_message("claude", &messages).is_none());
     }
