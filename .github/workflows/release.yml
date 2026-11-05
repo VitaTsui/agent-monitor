@@ -147,6 +147,45 @@ jobs:
           path: agent-task-monitor/target/x86_64-unknown-linux-musl/release/agent-monitor
           retention-days: 1
 
+  # 服务器上的 hub。以前要在本机 `cargo zigbuild` 交叉编译再手动传上去（见 deploy/DEPLOY.md）；
+  # 现在随 Release 一起出一份静态 musl 二进制，服务器直接下载替换即可，不必再在哪台机器上
+  # 备一套交叉编译工具链。产物名带 package- 前缀，下面的 release 作业按通配符自动挂上。
+  hub-linux:
+    name: 服务器 hub (linux-x64)
+    needs: version
+    if: needs.version.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-task-monitor
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent-task-monitor
+      - name: 准备静态 Linux 目标
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+      - name: 构建 hub
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build -p am-hub --release --target x86_64-unknown-linux-musl
+      - name: 整理产物并生成 sha256
+        run: |
+          mkdir -p out
+          f="agent-task-monitor-${{ needs.version.outputs.version }}-linux-x64"
+          cp target/x86_64-unknown-linux-musl/release/agent-task-monitor "out/$f"
+          cd out && sha256sum "$f" > "$f.sha256" && ls -la
+      - uses: actions/upload-artifact@v7
+        with:
+          name: package-linux-hub
+          path: agent-task-monitor/out/*
+          if-no-files-found: error
+
   package:
     name: 安装包 (${{ matrix.target }})
     needs: [version, web, wsl-helper]
@@ -246,7 +285,7 @@ jobs:
 
   release:
     name: 打 tag 并发布
-    needs: [version, package]
+    needs: [version, package, hub-linux]
     if: needs.version.outputs.skip != 'true' && inputs.dry_run != true
     runs-on: ubuntu-latest
     steps:

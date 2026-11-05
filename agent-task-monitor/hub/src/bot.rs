@@ -838,6 +838,39 @@ fn is_monitor_content(role: &str) -> bool {
     matches!(role, "user" | "assistant" | "plan" | "select")
 }
 
+/// 这条助手文本是不是**过程话**：同一回合里后面还跟着工具调用 / 结果 / 下一段回复。
+/// 最终答复后面要么是用户的下一句、要么什么都没有。紧挨着选择卡 / 方案的那句话
+/// 是在交代「为什么要你选」，照推。
+///
+/// 用消息顺序判而不是靠上游标记：老客户端上报的 Claude 消息不带任何「最终答复」标记，
+/// 这样新旧客户端口径一致。`todos` 是追加在尾部的状态快照，不算下文。
+pub(crate) fn is_interim_reply<M: std::borrow::Borrow<am_core::model::MessageBrief>>(
+    msgs: &[M],
+    i: usize,
+) -> bool {
+    msgs[i].borrow().role == "assistant"
+        && msgs[i + 1..]
+            .iter()
+            .map(|m| m.borrow())
+            .find(|m| m.role != "todos")
+            .is_some_and(|m| matches!(m.role.as_str(), "tool" | "tool_result" | "assistant"))
+}
+
+/// Claude Code 与 API 的连接中途断开时，往会话里写的那条合成消息
+///（`model: "<synthetic>"`、`isApiErrorMessage: true`），正文固定以 `API Error` 开头。
+/// 它不是答复，不能当「最后结果」推出去。按正文认，老客户端上报的数据也认得出。
+pub(crate) fn is_api_error_reply(m: &am_core::model::MessageBrief) -> bool {
+    m.role == "assistant" && m.content.trim_start().starts_with("API Error")
+}
+
+/// 本批最后一条有效消息是助手文本 —— 它是不是过程话，要等下一条到了才知道。
+fn trailing_assistant_pending(msgs: &[&am_core::model::MessageBrief]) -> bool {
+    msgs.iter()
+        .rev()
+        .find(|m| m.role != "todos")
+        .is_some_and(|m| m.role == "assistant")
+}
+
 fn split_cmd(text: &str) -> (String, String) {
     let text = text.trim();
     match text.split_once(char::is_whitespace) {
@@ -863,7 +896,7 @@ fn help_text() -> String {
      • 撤回 N —— 撤回 N 号会话最近一条排队中的任务\n\
      \n\
      【监控】\n\
-     • 监控 N —— 把 N 号会话的对话内容持续推到这里（可多个，跳过执行过程）\n\
+     • 监控 N —— 把 N 号会话的对话内容持续推到这里（可多个，跳过执行过程与过程话）\n\
      • 停止监控 [N] —— 停某个会话；不带号位停全部\n\
      \n\
      【文件】\n\
@@ -917,6 +950,11 @@ pub async fn monitor_loop(state: SharedState) {
             if all_new.is_empty() {
                 continue;
             }
+            // 会话还在跑、最新一条又是助手文本：它可能是工具调用前的过程话，下一行
+            // tool_use 还没上报上来。这一轮先不推也不动游标，下轮再定（最多晚 20s）。
+            if trailing_assistant_pending(&all_new) && state.bot_task_running(&mon.task_id).await {
+                continue;
+            }
             // 游标推进到「本轮见到的最后一条」，含被过滤的执行过程 —— 否则下轮反复重扫
             let new_last = all_new
                 .last()
@@ -925,8 +963,9 @@ pub async fn monitor_loop(state: SharedState) {
             // 只推对话内容，跳过执行过程（工具/todos/后台任务）
             let content: Vec<&am_core::model::MessageBrief> = all_new
                 .iter()
-                .copied()
-                .filter(|m| is_monitor_content(&m.role))
+                .enumerate()
+                .filter(|(i, m)| is_monitor_content(&m.role) && !is_interim_reply(&all_new, *i))
+                .map(|(_, m)| *m)
                 .collect();
             if content.is_empty() {
                 // 本轮全是执行过程：不推送，但推进游标
@@ -2552,6 +2591,34 @@ mod push_content_tests {
         for skipped in ["tool", "tool_result", "todos"] {
             assert!(!is_monitor_content(skipped), "{skipped} 不该进监控推送");
         }
+    }
+
+    /// 工具调用之间的过程话不推，只推每个回合的最终答复。
+    #[test]
+    fn monitor_push_skips_interim_replies() {
+        let all = [
+            msg("user", "修个 bug"),
+            msg("assistant", "我先看一下代码。"),
+            tool_msg(&[("toolu_A", "Read", "/a.rs")]),
+            msg("tool_result", "..."),
+            msg("assistant", "找到原因了，改一下。"),
+            msg("assistant", "改好了。"),
+            msg("todos", "[]"),
+        ];
+        let refs: Vec<&MessageBrief> = all.iter().collect();
+        let kept: Vec<&str> = (0..refs.len())
+            .filter(|&i| is_monitor_content(&refs[i].role) && !is_interim_reply(&refs, i))
+            .map(|i| refs[i].content.as_str())
+            .collect();
+        assert_eq!(kept, ["修个 bug", "改好了。"]);
+        assert!(
+            trailing_assistant_pending(&refs),
+            "todos 不算下文，末尾仍是助手文本"
+        );
+        assert!(!trailing_assistant_pending(&refs[..3]));
+        let ask = [msg("assistant", "两种方案，选一个："), msg("select", "{}")];
+        let ask: Vec<&MessageBrief> = ask.iter().collect();
+        assert!(!is_interim_reply(&ask, 0), "选择卡前的说明要留着");
     }
 
     /// 实际推出去的那条文本长什么样：每条一行、带角色前缀、不含空行与 undefined。
