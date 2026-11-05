@@ -661,7 +661,7 @@ impl SessionScanner {
                     Some("task_complete") => turn_ended = true,
                     Some("turn_aborted") => {
                         turn_ended = true;
-                        last_action = "已中断".into();
+                        last_action = LAST_ACTION_INTERRUPTED.into();
                     }
                     _ => {}
                 }
@@ -1871,7 +1871,7 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                     // 最后一条是 assistant 带 tool_use，即 false，于是会话永远停在
                     // 「正在调用工具」，界面一直显示执行中，而终端早已在等你。
                     turn_ended = true;
-                    last_action = "已中断".into();
+                    last_action = LAST_ACTION_INTERRUPTED.into();
                 } else if let Some(text) = user_text(content) {
                     has_content = true;
                     prompt = text;
@@ -1955,9 +1955,20 @@ fn parse_tail(session_id: &str, path: &Path, tail: &str) -> Option<SessionSummar
                     if !tool_names.is_empty() {
                         last_action = format!("正在调用工具: {}", tool_names.join(", "));
                         turn_ended = false;
+                    } else if v.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true) {
+                        // 连接中途断开：Claude Code 写一条合成的「API Error」消息后停下等人。
+                        // 回合确实停了，但不是答完了 —— 标出来，推送才不会写成「任务完成」。
+                        last_action = LAST_ACTION_API_ERROR.into();
+                        turn_ended = true;
                     } else if has_text {
                         last_action = "助手已回复".into();
-                        turn_ended = true;
+                        // Claude Code 把一条回复按内容块拆成多行写盘：工具调用前那句
+                        // 「我先看一下…」是单独一行纯文本，紧跟着才是 tool_use 那行。
+                        // 只看块类型会在两行之间判回合结束 → 会话闪成 Idle → 钉钉把这句
+                        // 过程话当「任务完成」推出去。stop_reason 是整条消息的收尾原因，
+                        // 每一行都带着：`tool_use` = 后面还有工具调用，回合没完。
+                        // 缺这个键（老版本 / 被中断时落的半截）按原口径算结束。
+                        turn_ended = !claude_more_to_come(&v);
                     }
                 }
             }
@@ -2261,6 +2272,18 @@ fn codex_user_text(v: &Value) -> Option<String> {
 
 /// Codex assistant message 的结构化阶段。当前记录明确给出 `commentary` / `final_answer`；
 /// 旧版记录没有 phase，只能沿用「assistant 文本即收尾」的兼容口径。
+/// `Task::last_action` 的两个特殊值：回合停了但**不是答完了**。hub 据此改推送标题。
+pub const LAST_ACTION_INTERRUPTED: &str = "已中断";
+pub const LAST_ACTION_API_ERROR: &str = "连接中断";
+
+/// Claude 的这条 assistant 记录后面是不是还有下文（`message.stop_reason == "tool_use"`）。
+///
+/// 同一条回复被拆成多行写盘时，每一行都带着整条消息的 stop_reason，所以纯文本那行
+/// 也能认出「后面紧跟工具调用」。真正的结尾是 `end_turn` / `stop_sequence` / `max_tokens`。
+pub(crate) fn claude_more_to_come(v: &Value) -> bool {
+    v.pointer("/message/stop_reason").and_then(Value::as_str) == Some("tool_use")
+}
+
 fn codex_assistant_is_final(payload: &Value) -> bool {
     match payload.get("phase").and_then(Value::as_str) {
         Some("final_answer") => true,
@@ -5634,6 +5657,42 @@ mod pairing_tests {
             // 中断标记不是用户输入，不能顶掉原来的 prompt
             assert_eq!(s.prompt, "跑一下测试", "中断标记不该被当成新输入: {marker}");
         }
+    }
+
+    /// 工具调用前的那句过程话（纯文本行，`stop_reason: "tool_use"`）不是回合结束。
+    ///
+    /// Claude Code 把一条回复按内容块拆成多行写盘，扫描正好落在「文本行已写、tool_use 行
+    /// 未写」之间时，若判成结束，会话会闪成 Idle，钉钉就把这句过程话当「任务完成」推出去。
+    #[test]
+    fn parse_tail_interim_text_before_tool_is_not_turn_end() {
+        let path = std::path::Path::new("/x/-proj/s1.jsonl");
+        let user = r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"修个 bug"}}"#;
+        let interim = r#"{"type":"assistant","cwd":"/proj","message":{"id":"m1","role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"我先看一下代码。"}]}}"#;
+        let s = parse_tail("s1", path, &format!("{user}\n{interim}\n")).unwrap();
+        assert!(!s.turn_ended, "后面还有工具调用，回合没完");
+
+        for reason in [r#""end_turn""#, r#""stop_sequence""#, "null"] {
+            let fin = format!(
+                r#"{{"type":"assistant","cwd":"/proj","message":{{"id":"m2","role":"assistant","stop_reason":{reason},"content":[{{"type":"text","text":"改好了。"}}]}}}}"#
+            );
+            let s = parse_tail("s1", path, &format!("{user}\n{interim}\n{fin}\n")).unwrap();
+            assert!(s.turn_ended, "最终答复应判回合结束: {reason}");
+        }
+        // 老记录没有 stop_reason 键：沿用原口径，纯文本即结束
+        let old = r#"{"type":"assistant","cwd":"/proj","message":{"role":"assistant","content":[{"type":"text","text":"好了"}]}}"#;
+        let s = parse_tail("s1", path, &format!("{user}\n{old}\n")).unwrap();
+        assert!(s.turn_ended);
+    }
+
+    /// API 连接中途断开：回合停了（等人发「继续」），但要标成「连接中断」而不是「已回复」。
+    #[test]
+    fn parse_tail_api_error_marks_connection_lost() {
+        let path = std::path::Path::new("/x/-proj/s1.jsonl");
+        let user = r#"{"type":"user","cwd":"/proj","message":{"role":"user","content":"导入备份"}}"#;
+        let err = r#"{"type":"assistant","cwd":"/proj","isApiErrorMessage":true,"message":{"model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error: Connection lost mid-response."}]}}"#;
+        let s = parse_tail("s1", path, &format!("{user}\n{err}\n")).unwrap();
+        assert!(s.turn_ended);
+        assert_eq!(s.last_action, LAST_ACTION_API_ERROR);
     }
 
     /// 反例：清空后又输入了真实内容 → 不再是空会话，cleared=false。

@@ -90,15 +90,54 @@ fn notification_result(content: &str, compact: bool) -> (String, Option<String>)
 }
 
 /// 钉钉的“最后结果”只能取真正的最终答复。Codex 的 commentary 仍留在网页对话流里，
-/// 但不允许从这个出口漏成通知；其它 provider 没有 phase 字段，沿用最近 assistant 文本。
+/// 但不允许从这个出口漏成通知。
+///
+/// 其它 provider（Claude）没有 phase 字段，按消息顺序认：只在**本回合**（最近一句用户
+/// 发言之后）里找，跳过工具调用前的过程话与连接断开时的 `API Error` 合成消息。
+/// 回合被中断（终端里拒了工具 / 按 Esc）或连接断了，本回合往往只有过程话 ——
+/// 此时没有结果可推，宁可只推状态，也不把「我先导入备份…」当结果发出去。
 fn latest_notification_message<'a>(
     provider: &str,
     messages: &'a [am_core::model::MessageBrief],
 ) -> Option<&'a am_core::model::MessageBrief> {
-    messages
+    if provider == "codex" {
+        return messages
+            .iter()
+            .rev()
+            .find(|m| m.role.as_str() == "assistant" && m.is_final_answer);
+    }
+    let turn_start = messages
         .iter()
+        .rposition(|m| m.role == "user")
+        .map_or(0, |i| i + 1);
+    (turn_start..messages.len())
         .rev()
-        .find(|m| m.role.as_str() == "assistant" && (provider != "codex" || m.is_final_answer))
+        .find(|&i| {
+            let m = &messages[i];
+            m.role == "assistant"
+                && !crate::bot::is_api_error_reply(m)
+                && !crate::bot::is_interim_reply(messages, i)
+        })
+        .map(|i| &messages[i])
+}
+
+/// 回合停下来的原因，决定推送标题。正常答完是「任务完成」；被中断 / 连接断开时
+/// 写「任务完成」会让人以为活干完了。
+fn waiting_headline(
+    task: &am_core::model::Task,
+    messages: Option<&Vec<am_core::model::MessageBrief>>,
+) -> &'static str {
+    if task.last_action == am_core::scanner::LAST_ACTION_INTERRUPTED {
+        return "**⏹ 任务已中断 · 等待你的操作**";
+    }
+    let api_error = task.last_action == am_core::scanner::LAST_ACTION_API_ERROR
+        || messages
+            .and_then(|ms| ms.iter().rev().find(|m| m.role != "todos"))
+            .is_some_and(crate::bot::is_api_error_reply);
+    if api_error {
+        return "**⚠️ 连接中断 · 等待你的操作**\n\nClaude 与 API 的连接中途断开，回复可能不完整，可以发「继续」接着做。";
+    }
+    "**🔔 任务完成 · 等待你的操作**"
 }
 
 /// 稳定识别同一条 Codex 最终答复，避免状态边沿重复消费历史结果。
@@ -3777,7 +3816,8 @@ async fn report(
                                     kind: EventKind::Waiting,
                                     task_id: Some(t.id.clone()),
                                     text: format!(
-                                        "**🔔 任务完成 · 等待你的操作**\n\n{}{}",
+                                        "{}\n\n{}{}",
+                                        waiting_headline(t, msgs_map.get(&t.id)),
                                         body(t),
                                         res
                                     ),
@@ -4758,6 +4798,53 @@ mod notification_noise_tests {
         assert!(shown.contains("**完成**"));
         assert!(shown.contains("改了 2 个文件。"));
         assert!(full.is_none());
+    }
+
+    fn brief(role: &str, content: &str) -> MessageBrief {
+        let mut m = assistant(content, false);
+        m.role = role.into();
+        m
+    }
+
+    /// 截图里的那一幕：过程话之后工具被拒、回合中断。本回合没有最终答复 → 不带结果。
+    #[test]
+    fn claude_interrupted_turn_has_no_result() {
+        let messages = vec![
+            brief("user", "恢复数据库"),
+            brief("assistant", "Database initialized. Importing the backup now."),
+            brief("tool", ""),
+            brief("tool_result", "The user doesn't want to proceed with this tool use."),
+        ];
+        assert!(latest_notification_message("claude", &messages).is_none());
+    }
+
+    /// 连接断开的合成消息不是结果；也不能越过本回合去拿上一轮的答复。
+    #[test]
+    fn claude_api_error_is_not_a_result() {
+        let messages = vec![
+            brief("user", "第一件事"),
+            brief("assistant", "第一件事做完了。"),
+            brief("user", "第二件事"),
+            brief("assistant", "我先看一下。"),
+            brief("tool", ""),
+            brief("tool_result", "ok"),
+            brief("assistant", "API Error: Connection lost mid-response."),
+        ];
+        assert!(latest_notification_message("claude", &messages).is_none());
+    }
+
+    #[test]
+    fn claude_final_answer_is_the_result() {
+        let messages = vec![
+            brief("user", "修 bug"),
+            brief("assistant", "我先看一下。"),
+            brief("tool", ""),
+            brief("tool_result", "ok"),
+            brief("assistant", "改好了。"),
+            brief("todos", "[]"),
+        ];
+        let got = latest_notification_message("claude", &messages).expect("应找到最终答复");
+        assert_eq!(got.content, "改好了。");
     }
 
     #[test]
