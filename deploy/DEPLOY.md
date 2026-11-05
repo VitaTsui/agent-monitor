@@ -97,6 +97,10 @@ cat /opt/agent-monitor/data/registry.json   # 用户/设备注册表（唯一需
 
 ## 更新版本（以后改了代码）
 
+**推荐**：合到 main 发版后，Release 里自带服务器用的静态二进制 `agent-task-monitor-<版本>-linux-x64`（附 `.sha256`），在服务器上直接下载、校验、替换 `/opt/agent-monitor/agent-task-monitor`（先备份旧的、属主改回 agentmon），再 `systemctl restart agent-monitor`。
+
+手动交叉编译（老办法）：
+
 1. 本机重新交叉编译：`cd agent-task-monitor && cargo zigbuild -p am-hub --release --target x86_64-unknown-linux-musl`
 2. 前端（若改了）：用生产密钥的 `.env.prod` 跑 `yarn build`
 3. 传新的 `agent-task-monitor` 和 `web/` 覆盖 `/opt/agent-monitor/` 下同名文件（属主改回 agentmon）

@@ -812,6 +812,16 @@ impl AppState {
         Vec::new()
     }
 
+    /// 某会话此刻是否还在执行（回合未结束）。找不到按「不在执行」算。
+    pub async fn bot_task_running(&self, task_id: &str) -> bool {
+        let machines = self.machines.read().await;
+        machines
+            .values()
+            .flat_map(|e| e.tasks.iter())
+            .find(|t| t.id == task_id)
+            .is_some_and(|t| t.status == TaskStatus::Running)
+    }
+
     /// 聚合指定用户「可见」的任务（信任 + 归属；超级管理员看全部）
     pub async fn tasks_for(&self, username: &str) -> Vec<Task> {
         let machines = self.machines.read().await;
