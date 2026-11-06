@@ -3468,32 +3468,87 @@ impl SubAgentDir {
     ///
     /// 只读尾部 256KB：一条记录再大也进得来，而整份记录可达数 MB，每轮全读吃不消。
     /// 末尾那行可能正被写入（只有半截）——解析不了就说明它此刻正在写，算半路。
+    ///
+    /// 请求副本（`api-request*`，见 [`is_request_copy`]）不是子会话自己的一步，跳过。
     fn tail(&self, id: &str) -> Option<SubAgentTail> {
         let text = read_tail(&self.file_of(id), 256 * 1024).ok()?;
-        let mut lines = text.lines().rev();
-        let last = lines.next()?;
-        let v: Value = match serde_json::from_str(last) {
-            Ok(v) => v,
-            // 半截行 = 正在写，就是还在跑
-            Err(_) => return Some(SubAgentTail::Midflight),
+        let mut records = text.lines().rev();
+        let last = loop {
+            let line = records.next()?;
+            let v: Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                // 半截行 = 正在写，就是还在跑
+                Err(_) => return Some(SubAgentTail::Midflight),
+            };
+            if !is_request_copy(&v) {
+                break v;
+            }
         };
-        if v.get("type").and_then(Value::as_str) != Some("assistant") {
-            return Some(SubAgentTail::Midflight);
+        match last.get("type").and_then(Value::as_str) {
+            Some("assistant") => Some(if tool_uses(&last).next().is_some() {
+                SubAgentTail::Midflight
+            } else {
+                SubAgentTail::Finished
+            }),
+            // 新版的收尾方式：调 `SubagentHandback` 交回报告，「这一调用就结束本次运行」，
+            // 末条因此是它的工具结果（user），不再是一句无工具的 assistant。
+            // 实测 `65c2dfbc-…/subagents/` 里 8 个跑完的子会话全是这个形态；
+            // 不认它的话，父记录一旦没写下完成通知，就只能挂在执行中等 2 小时兜底，
+            // 最后还被错判成 stopped。
+            Some("user") => Some(if delivered_handback(&last, records) {
+                SubAgentTail::Finished
+            } else {
+                SubAgentTail::Midflight
+            }),
+            _ => Some(SubAgentTail::Midflight),
         }
-        let has_tool_use = v
-            .pointer("/message/content")
-            .and_then(Value::as_array)
-            .is_some_and(|blocks| {
-                blocks
-                    .iter()
-                    .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
-            });
-        Some(if has_tool_use {
-            SubAgentTail::Midflight
-        } else {
-            SubAgentTail::Finished
-        })
     }
+}
+
+/// 一条记录 content 里的 tool_use 块。
+fn tool_uses(v: &Value) -> impl Iterator<Item = &Value> {
+    v.pointer("/message/content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+}
+
+/// 末条（`last`，一条 user 记录）是不是**成功交回报告**的那次 `SubagentHandback` 的结果。
+///
+/// 只认三件事同时成立：结果没标 `is_error`、它配对的 tool_use 就在紧挨着的上一条
+/// assistant 里、那次调用的工具名是 `SubagentHandback`。交回失败时上游会追一句
+/// 「Your report has not been delivered」再让它重调 —— 那一轮的结果带 is_error 或
+/// 后面还有记录，都不会落到这里。`earlier` 是末条之前的记录（倒序）。
+fn delivered_handback<'a>(last: &Value, earlier: impl Iterator<Item = &'a str>) -> bool {
+    let Some(blocks) = last.pointer("/message/content").and_then(Value::as_array) else {
+        return false;
+    };
+    let ok_ids: Vec<&str> = blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .filter(|b| !b.get("is_error").and_then(Value::as_bool).unwrap_or(false))
+        .filter_map(|b| b.get("tool_use_id").and_then(Value::as_str))
+        .collect();
+    if ok_ids.is_empty() {
+        return false;
+    }
+    // 上一条真正的 assistant（跳过请求副本）
+    let prev = earlier
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| !is_request_copy(v));
+    let Some(prev) = prev.filter(|v| v.get("type").and_then(Value::as_str) == Some("assistant"))
+    else {
+        return false;
+    };
+    // 先收成 Vec：`impl Iterator` 的临时值若留在尾表达式里，会活过 `prev`（E0597）
+    let calls: Vec<&Value> = tool_uses(&prev).collect();
+    calls.iter().any(|b| {
+        b.get("name").and_then(Value::as_str) == Some("SubagentHandback")
+            && b.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| ok_ids.contains(&id))
+    })
 }
 
 /// 重放 TaskCreate / TaskUpdate，还原终端里那份「任务清单」。
@@ -4991,6 +5046,51 @@ mod subagent_tests {
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].status, "running");
+    }
+
+    /// SubagentHandback 收尾：末条是它的成功结果 ⇒ 已收尾；交回失败、别的工具结果、
+    /// 停在 handback 调用本身 ⇒ 仍在半路。末尾的请求副本（`api-request*`）不算一步。
+    /// 形态取自 `65c2dfbc-…/subagents/agent-a1f5d423f91579e32.jsonl`。
+    #[test]
+    fn handback_result_counts_as_finished() {
+        let root = std::env::temp_dir().join(format!("am-hb-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("s").join("subagents");
+        fs::create_dir_all(&dir).unwrap();
+        let write = |id: &str, lines: &[&str]| {
+            fs::write(
+                dir.join(format!("agent-{id}.jsonl")),
+                lines.join("\n") + "\n",
+            )
+            .unwrap();
+        };
+        let call = |name: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"h1","name":"{name}","input":{{}}}}]}}}}"#
+            )
+        };
+        let ok = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"h1","content":"{\"success\":true}"}]}}"#;
+        let err = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"h1","is_error":true,"content":"failed"}]}}"#;
+        let req = r#"{"type":"api-request","agentId":"x","timestamp":"2026-11-06T02:51:39.593Z"}"#;
+        let hb = call("SubagentHandback");
+        let hb = hb.as_str();
+        let bash = call("Bash");
+        let bash = bash.as_str();
+        write("adeliv", &[req, hb, ok]);
+        write("areq", &[hb, ok, req]);
+        write("afail", &[hb, err]);
+        write("abash", &[bash, ok]);
+        write("acall", &[hb]);
+        write("aorphan", &[ok]);
+
+        let d = SubAgentDir::scan(&root.join("s.jsonl"));
+        assert_eq!(d.tail("adeliv"), Some(SubAgentTail::Finished));
+        assert_eq!(d.tail("areq"), Some(SubAgentTail::Finished), "副本不算一步");
+        assert_eq!(d.tail("afail"), Some(SubAgentTail::Midflight));
+        assert_eq!(d.tail("abash"), Some(SubAgentTail::Midflight));
+        assert_eq!(d.tail("acall"), Some(SubAgentTail::Midflight));
+        assert_eq!(d.tail("aorphan"), Some(SubAgentTail::Midflight));
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// 目录扫描 + 四种收尾形态的判定。
