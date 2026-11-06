@@ -317,3 +317,111 @@ jobs:
             --target "${{ github.sha }}" \
             --latest \
             release-assets/*
+
+  # 把安装包传到服务器的下载目录 —— 客户端自更新与官网下载都从那里拿。
+  #
+  # 以前这一步靠人在 Release 之后手动 scp，0.12.40/0.12.41 都漏过：GitHub 上有新版，
+  # 客户端「检查更新」却一直说没有；mac 的固定名包更是没人记得换。
+  #
+  # **上传顺序就是发布顺序**：hub 一看到 `AgentMonitor-<v>-setup.exe` 就对外宣布新版
+  # （hub 的 ready_desktop_version），所以它必须最后一个落地 —— 先把 mac 包、Windows
+  # 固定名包都换好，宣布那一刻所有平台要下的包已经就位。
+  # 每个文件都先传 `.part`、在服务器上校验 sha256、再同目录 rename：rename 是原子的，
+  # 正在下载的客户端拿不到半截文件；校验不过就停，不会把坏包换上去。
+  #
+  # 需要的配置（仓库 Settings → Secrets and variables → Actions）：
+  #   secrets.DEPLOY_SSH_KEY      部署用私钥（服务器上对应公钥只需能写下载目录）
+  #   vars.DEPLOY_HOST_FINGERPRINT 服务器 ed25519 主机公钥指纹（`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
+  #                               的 SHA256:… 那段），连接前比对，防中间人
+  #   vars.DEPLOY_HOST            如 167.179.111.80
+  #   vars.DEPLOY_USER            如 amdeploy
+  #   vars.DEPLOY_DIR             可选，默认 /opt/agent-monitor/data/downloads
+  #   vars.HUB_URL                可选，默认 https://monitor.vita-llm.com（核对宣布版本用）
+  # 缺配置时作业**报错**而不是静默跳过：Release 已经发出去了，红叉才会有人去补传。
+  deploy-downloads:
+    name: 上传安装包到服务器
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: 准备 SSH
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          FP: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+          HOST: ${{ vars.DEPLOY_HOST }}
+          USER_: ${{ vars.DEPLOY_USER }}
+        run: |
+          if [ -z "$KEY" ] || [ -z "$FP" ] || [ -z "$HOST" ] || [ -z "$USER_" ]; then
+            echo "::error::缺少部署配置（DEPLOY_SSH_KEY / DEPLOY_HOST_FINGERPRINT / DEPLOY_HOST / DEPLOY_USER），安装包没有传到服务器，客户端收不到更新"
+            exit 1
+          fi
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          # 现场取主机公钥，但只有指纹对得上才写进 known_hosts —— 对不上就是连错了机器
+          ssh-keyscan -t ed25519 "$HOST" 2>/dev/null > /tmp/hostkey
+          got=$(ssh-keygen -lf /tmp/hostkey | awk '{print $2}')
+          if [ "$got" != "$FP" ]; then
+            echo "::error::服务器主机公钥指纹不符：期望 $FP，实际 ${got:-（没取到）}"
+            exit 1
+          fi
+          mv /tmp/hostkey ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<CFG
+          Host deploy
+            HostName $HOST
+            User $USER_
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 15
+            ServerAliveCountMax 8
+            ConnectTimeout 20
+          CFG
+          ssh deploy true
+
+      - name: 上传并替换
+        env:
+          V: ${{ needs.version.outputs.version }}
+          DIR: ${{ vars.DEPLOY_DIR || '/opt/agent-monitor/data/downloads' }}
+          HUB_URL: ${{ vars.HUB_URL || 'https://monitor.vita-llm.com' }}
+        run: |
+          set -euo pipefail
+          a=release-assets
+          mac="$a/agent-monitor-$V-macos-universal.zip"
+          win="$a/agent-monitor-$V-windows-x64.exe"
+          test -f "$mac" && test -f "$win"
+
+          # 本地文件 → 服务器上的名字。scp 断线（大包跨境偶发）就重试，最多 3 次。
+          put() {
+            src=$1; name=$2
+            sum=$(sha256sum "$src" | cut -d' ' -f1)
+            for i in 1 2 3; do
+              if scp -q "$src" "deploy:$DIR/$name.part" \
+                && ssh deploy "cd '$DIR' && printf '%s  %s\n' '$sum' '$name.part' | sha256sum -c --quiet - \
+                     && chmod 0644 '$name.part' \
+                     && { [ ! -e '$name' ] || cp -p '$name' '$name.bak-pre-$V'; } \
+                     && mv -f '$name.part' '$name'"; then
+                echo "✓ $name ($sum)"
+                return 0
+              fi
+              echo "::warning::$name 第 $i 次上传/校验失败，30s 后重试"
+              sleep 30
+            done
+            echo "::error::$name 上传失败"
+            return 1
+          }
+
+          # 顺序见作业上方说明：宣布新版的那个文件最后传
+          put "$mac" "AgentMonitor-$V-mac.zip"
+          put "$mac" "agent-monitor-mac.zip"
+          put "$win" "agent-monitor-setup.exe"
+          put "$win" "AgentMonitor-$V-setup.exe"
+
+          # 宣布的版本必须就是刚传的这个
+          got=$(curl -fsS "$HUB_URL/monitor/version" | jq -r .data.desktop)
+          echo "hub 宣布的桌面版本：$got"
+          [ "$got" = "$V" ] || { echo "::error::hub 宣布的是 $got，不是 $V"; exit 1; }
