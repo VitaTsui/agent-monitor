@@ -3541,7 +3541,9 @@ fn delivered_handback<'a>(last: &Value, earlier: impl Iterator<Item = &'a str>) 
     else {
         return false;
     };
-    tool_uses(&prev).any(|b| {
+    // 先收成 Vec：`impl Iterator` 的临时值若留在尾表达式里，会活过 `prev`（E0597）
+    let calls: Vec<&Value> = tool_uses(&prev).collect();
+    calls.iter().any(|b| {
         b.get("name").and_then(Value::as_str) == Some("SubagentHandback")
             && b.get("id")
                 .and_then(Value::as_str)
@@ -5071,12 +5073,14 @@ mod subagent_tests {
         let err = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"h1","is_error":true,"content":"failed"}]}}"#;
         let req = r#"{"type":"api-request","agentId":"x","timestamp":"2026-11-06T02:51:39.593Z"}"#;
         let hb = call("SubagentHandback");
+        let hb = hb.as_str();
         let bash = call("Bash");
-        write("adeliv", &[req, &hb, ok]);
-        write("areq", &[&hb, ok, req]);
-        write("afail", &[&hb, err]);
-        write("abash", &[&bash, ok]);
-        write("acall", &[&hb]);
+        let bash = bash.as_str();
+        write("adeliv", &[req, hb, ok]);
+        write("areq", &[hb, ok, req]);
+        write("afail", &[hb, err]);
+        write("abash", &[bash, ok]);
+        write("acall", &[hb]);
         write("aorphan", &[ok]);
 
         let d = SubAgentDir::scan(&root.join("s.jsonl"));
