@@ -5136,18 +5136,24 @@ mod replay_state_tests {
         let subs = dir.join("s").join("subagents");
         fs::create_dir_all(&subs).unwrap();
         let path = dir.join("s.jsonl");
+        // 时间都取此刻附近：子会话文件的 mtime 就是此刻，通知若早于它 5 分钟以上，
+        // 本身就该判成续跑，测不出副本的问题。
+        let at = |secs_ago: i64| {
+            (chrono::Utc::now() - chrono::Duration::seconds(secs_ago))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        };
         let notif = "<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>tu1</tool-use-id>\n\
                      <status>completed</status>\n<summary>Agent \"x\" finished</summary>\n</task-notification>";
         let mut body = String::new();
         body += &line(serde_json::json!({
-            "type": "assistant", "timestamp": "2026-11-05T23:50:00.000Z",
+            "type": "assistant", "timestamp": at(60),
             "message": { "content": [
                 { "type": "tool_use", "id": "tu1", "name": "Agent",
                   "input": { "description": "Match report page fixes" } }
             ]}
         }));
         body += &line(serde_json::json!({
-            "type": "user", "timestamp": "2026-11-05T23:50:01.000Z",
+            "type": "user", "timestamp": at(59),
             "toolUseResult": { "isAsync": true, "status": "async_launched", "agentId": "a1" },
             "message": { "content": [
                 { "type": "tool_result", "tool_use_id": "tu1", "content": "launched" }
@@ -5155,7 +5161,7 @@ mod replay_state_tests {
         }));
         body += &line(serde_json::json!({
             "type": "queue-operation", "operation": "enqueue",
-            "timestamp": "2026-11-05T23:58:44.703Z", "content": notif
+            "timestamp": at(1), "content": notif
         }));
         // 副本：正文包装不同（指纹不同），且没有 timestamp
         body += &line(serde_json::json!({
