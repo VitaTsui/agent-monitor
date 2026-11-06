@@ -1030,6 +1030,9 @@ impl SessionScanner {
                 let Ok(v) = serde_json::from_str::<Value>(line) else {
                     continue;
                 };
+                if is_request_copy(&v) {
+                    continue;
+                }
                 st.todos.observe(&v);
                 st.bg.observe(&v);
             }
@@ -3117,6 +3120,24 @@ impl BgTracker {
     }
 }
 
+/// 这条记录是不是「发给模型的请求副本」（`api-request` / `api-request-blob` /
+/// `api-request-shape`，统一按 `api-request` 前缀认）。
+///
+/// 上游新版会把每次 API 请求的内容也落进会话 jsonl，里面整段抄着历史消息
+/// （旧的 tool_use、旧的 `<task-notification>`……）。`-blob` **没有 `timestamp`**，
+/// `-shape` 的时间戳是发请求那一刻（晚于真通知，会让 `runs` 多数一轮）。
+/// 当成事件重放的话，抄过来的那份完成通知会被当成一条新通知（正文包装不同，
+/// 指纹去重拦不住），把收尾时刻覆盖成 0 —— 随后对齐那步看到「收尾之后很久还在写」，
+/// 就把早已跑完的子代理判回「执行中」，永远挂着。
+/// 实测 `65c2dfbc-…jsonl`：:1909 真通知 → :1928 blob 里的副本，9 个子代理全部卡住。
+///
+/// 它们不是事件，只是副本，重放时整条跳过。
+fn is_request_copy(v: &Value) -> bool {
+    v.get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.starts_with("api-request"))
+}
+
 /// [`BgTracker::reconciled`] 的可选项。默认值 = 热路径那份口径（带保留窗口、
 /// 不补目录、不知道父会话是否结束），既有调用点与测试都用它。
 #[derive(Default)]
@@ -5100,6 +5121,68 @@ mod replay_state_tests {
         let todos = todos.expect("尾部窗口读不到的 TaskCreate 也必须被重放到");
         assert!(todos.contains("\"id\":\"1\""));
         assert!(todos.contains("甲"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 请求副本（`api-request-blob`）里抄着的旧完成通知不能当成新事件：
+    /// 它没有 timestamp，会把收尾时刻冲成 0，随后被对齐判成「续跑」永远挂在执行中。
+    /// 样本照 `65c2dfbc-…jsonl` 的真实顺序：派活 → 通知 → blob 副本；
+    /// 子会话以 SubagentHandback 的工具结果收尾（尾形态 = 半路），且刚写过。
+    #[test]
+    fn request_copy_does_not_reopen_finished_subagent() {
+        let dir = std::env::temp_dir().join(format!("am-blob-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let subs = dir.join("s").join("subagents");
+        fs::create_dir_all(&subs).unwrap();
+        let path = dir.join("s.jsonl");
+        let notif = "<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>tu1</tool-use-id>\n\
+                     <status>completed</status>\n<summary>Agent \"x\" finished</summary>\n</task-notification>";
+        let mut body = String::new();
+        body += &line(serde_json::json!({
+            "type": "assistant", "timestamp": "2026-11-05T23:50:00.000Z",
+            "message": { "content": [
+                { "type": "tool_use", "id": "tu1", "name": "Agent",
+                  "input": { "description": "Match report page fixes" } }
+            ]}
+        }));
+        body += &line(serde_json::json!({
+            "type": "user", "timestamp": "2026-11-05T23:50:01.000Z",
+            "toolUseResult": { "isAsync": true, "status": "async_launched", "agentId": "a1" },
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "tu1", "content": "launched" }
+            ]}
+        }));
+        body += &line(serde_json::json!({
+            "type": "queue-operation", "operation": "enqueue",
+            "timestamp": "2026-11-05T23:58:44.703Z", "content": notif
+        }));
+        // 副本：正文包装不同（指纹不同），且没有 timestamp
+        body += &line(serde_json::json!({
+            "type": "api-request-blob", "hash": "h",
+            "message": { "role": "user", "content": [
+                { "type": "text", "text": format!("{notif}\n") }
+            ]}
+        }));
+        fs::write(&path, body).unwrap();
+        // 子会话以 Handback 的工具结果收尾，文件 mtime = 此刻
+        fs::write(
+            subs.join("agent-a1.jsonl"),
+            line(serde_json::json!({
+                "type": "user",
+                "message": { "content": [
+                    { "type": "tool_result", "tool_use_id": "h1", "content": "delivered" }
+                ]}
+            })),
+        )
+        .unwrap();
+
+        let mut sc = SessionScanner::new(dir.clone());
+        let (_, bg) = sc.replay_state(&path, false, true).unwrap();
+        let t = bg.iter().find(|t| t.id == "a1").expect("子代理条目");
+        assert_eq!(t.status, "completed");
+        assert_eq!(t.runs, 1, "副本不是新的一轮");
+        assert!(t.ended_ms > 0, "收尾时刻不能被副本冲成 0");
 
         let _ = fs::remove_dir_all(&dir);
     }
