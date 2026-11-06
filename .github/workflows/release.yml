@@ -331,7 +331,8 @@ jobs:
   #
   # 需要的配置（仓库 Settings → Secrets and variables → Actions）：
   #   secrets.DEPLOY_SSH_KEY      部署用私钥（服务器上对应公钥只需能写下载目录）
-  #   secrets.DEPLOY_KNOWN_HOSTS  `ssh-keyscan -t ed25519 <主机>` 的输出，防中间人
+  #   vars.DEPLOY_HOST_FINGERPRINT 服务器 ed25519 主机公钥指纹（`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
+  #                               的 SHA256:… 那段），连接前比对，防中间人
   #   vars.DEPLOY_HOST            如 167.179.111.80
   #   vars.DEPLOY_USER            如 amdeploy
   #   vars.DEPLOY_DIR             可选，默认 /opt/agent-monitor/data/downloads
@@ -351,17 +352,24 @@ jobs:
       - name: 准备 SSH
         env:
           KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          FP: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
           HOST: ${{ vars.DEPLOY_HOST }}
           USER_: ${{ vars.DEPLOY_USER }}
         run: |
-          if [ -z "$KEY" ] || [ -z "$KNOWN" ] || [ -z "$HOST" ] || [ -z "$USER_" ]; then
-            echo "::error::缺少部署配置（DEPLOY_SSH_KEY / DEPLOY_KNOWN_HOSTS / DEPLOY_HOST / DEPLOY_USER），安装包没有传到服务器，客户端收不到更新"
+          if [ -z "$KEY" ] || [ -z "$FP" ] || [ -z "$HOST" ] || [ -z "$USER_" ]; then
+            echo "::error::缺少部署配置（DEPLOY_SSH_KEY / DEPLOY_HOST_FINGERPRINT / DEPLOY_HOST / DEPLOY_USER），安装包没有传到服务器，客户端收不到更新"
             exit 1
           fi
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "$KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          # 现场取主机公钥，但只有指纹对得上才写进 known_hosts —— 对不上就是连错了机器
+          ssh-keyscan -t ed25519 "$HOST" 2>/dev/null > /tmp/hostkey
+          got=$(ssh-keygen -lf /tmp/hostkey | awk '{print $2}')
+          if [ "$got" != "$FP" ]; then
+            echo "::error::服务器主机公钥指纹不符：期望 $FP，实际 ${got:-（没取到）}"
+            exit 1
+          fi
+          mv /tmp/hostkey ~/.ssh/known_hosts
           cat > ~/.ssh/config <<CFG
           Host deploy
             HostName $HOST
