@@ -1562,6 +1562,8 @@ fn download_to(
     for attempt in 1..=4 {
         match download_to_once(url, dest, report, min_bytes) {
             Ok(()) => return Ok(()),
+            // 404 是确定答案（文件不在），重试只会白等 30 秒
+            Err(e) if e.downcast_ref::<NotFound>().is_some() => return Err(e),
             Err(e) => {
                 last = format!("{e}");
                 let wait = attempt * 3;
@@ -1591,6 +1593,9 @@ fn download_to_once(
         let resp = tokio::time::timeout(std::time::Duration::from_secs(60), client.get(url).send())
             .await
             .map_err(|_| anyhow::anyhow!("连接更新服务器超时（60s）"))??;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(anyhow::Error::new(NotFound));
+        }
         if !resp.status().is_success() {
             anyhow::bail!("下载失败 HTTP {}", resp.status());
         }
@@ -1627,6 +1632,74 @@ fn download_to_once(
     }
     std::fs::write(dest, &bytes)?;
     Ok(())
+}
+
+/// 下载地址 404：文件不在服务器上（区别于网络抖动，不重试）。
+#[derive(Debug)]
+struct NotFound;
+
+impl std::fmt::Display for NotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("下载失败 HTTP 404（服务器上没有这个包）")
+    }
+}
+
+impl std::error::Error for NotFound {}
+
+/// 向 hub 现问一次「已就绪的最新桌面版本」（`/monitor/version` 的 `desktop`）。
+/// 问不到返回 None，调用方退回固定名包。
+#[cfg(any(windows, target_os = "macos"))]
+fn hub_desktop_version(hub: &str) -> Option<String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .ok()?;
+        let v: serde_json::Value = client
+            .get(format!("{hub}/monitor/version"))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        v.pointer("/data/desktop")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    })
+}
+
+/// 下载自更新包：**优先下带版本号的那份**，没有才退回固定名。
+///
+/// 只下固定名有个时间差：hub 一看到 `AgentMonitor-<v>-setup.exe` 就对外宣布新版，
+/// 固定名 `agent-monitor-setup.exe` 却要等它下一轮核对才换成新包（mac 的固定名
+/// 甚至要人手动换）。这段时间里点「立即更新」，下到的是旧包，装完版本没变，
+/// 只能提示「请手动下载」—— 0.12.41 发版时 Windows 和 mac 都踩过。
+/// 按版本号下载，宣布的版本和装上的版本就必然是同一个。
+#[cfg(any(windows, target_os = "macos"))]
+fn download_update_package(
+    hub: &str,
+    versioned: impl Fn(&str) -> String,
+    fixed: &str,
+    dest: &std::path::Path,
+) -> anyhow::Result<()> {
+    if let Some(v) = hub_desktop_version(hub) {
+        let name = versioned(&v);
+        ulog(&format!("[update] 目标版本 v{v}，下载 {name}"));
+        match download_to(&cache_busted(hub, &name), dest, true, 1024 * 1024) {
+            Ok(()) => return Ok(()),
+            Err(e) => ulog(&format!(
+                "[update] {name} 下载失败（{e}），改下固定名 {fixed}"
+            )),
+        }
+    } else {
+        ulog(&format!("[update] 取不到目标版本，下载固定名 {fixed}"));
+    }
+    download_to(&cache_busted(hub, fixed), dest, true, 1024 * 1024)
 }
 
 /// 诊断入口：AM_SELF_UPDATE=1 时由 main 调用，前台跑一遍更新流程并打印结果
@@ -1835,11 +1908,11 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
     let zip = tmp.join("update.zip");
-    download_to(
-        &cache_busted(hub, "agent-monitor-mac.zip"),
+    download_update_package(
+        hub,
+        |v| format!("AgentMonitor-{v}-mac.zip"),
+        "agent-monitor-mac.zip",
         &zip,
-        true,
-        1024 * 1024,
     )?;
     ulog("[update] 下载完成");
     set_update_progress("installing", 0, 0);
@@ -1906,11 +1979,11 @@ fn do_self_update(hub: &str) -> anyhow::Result<()> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let tmp = std::env::temp_dir();
     let installer = tmp.join("agent-monitor-setup.exe");
-    download_to(
-        &cache_busted(hub, "agent-monitor-setup.exe"),
+    download_update_package(
+        hub,
+        |v| format!("AgentMonitor-{v}-setup.exe"),
+        "agent-monitor-setup.exe",
         &installer,
-        true,
-        1024 * 1024,
     )?;
     ulog("[update] 安装器下载完成，静默安装");
     set_update_progress("installing", 0, 0);
